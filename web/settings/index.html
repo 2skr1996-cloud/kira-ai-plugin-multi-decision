@@ -1652,7 +1652,7 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     // 两列网格是「按顺序从左到右填」：偶数位落左列、奇数位落右列，所以要隔一个插一个杂项，
     // 右列才是「历史里保留几张原图 / 保护工具调用组 / 裁切点选择方式」。
     { p: "window", t: "窗口", keys: ["window_keep", "history_images", "window_trim_threshold",
-        "protect_tool_groups", "window_buffer", "trim_strategy"] },
+        "protect_tool_groups", "window_buffer"] },   // 用户 m10096：trim_strategy 已从设置里撤下（只剩机械裁切一种）
     // v3.67（用户 m20117 第 1 条）：中期摘要的保留份数 / 天数也归到这一组——
     // 它是窗口那边的特殊功能，不该混在缓存账本里（缓存页因此只剩 5 类）。
     // v3.85（用户 m04430 → m04550）：设置页是两列网格（偶数位在左、奇数位在右）。
@@ -1853,7 +1853,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // v3.63（用户 m19536 第 7 条）：下拉里的英文选项换成中文——值是英文原样提交（契约不动），
   // 只换给人看的文字。按「键 → 值 → 中文」写，没写的键/值仍原样显示。
   var OPTION_TEXT = {
-    trim_strategy: { mechanical: "机械裁切", llm: "模型摘要（未实现）" }
+    trim_strategy: { mechanical: "机械裁切" }
   };
   // v3.42（用户 m03616 第 5 条）：这几个键的默认值要念成百分比——
   // 「默认 20」在一堆「条 / 秒 / 分钟」里会看串，标成「默认 20%」才不用猜。
@@ -2194,6 +2194,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var parts = (s && s.preview && s.preview.parts) || [];
     for(var i = 0; i < parts.length; i++){
       if(String(parts[i].name || "") === name) return parts[i];
+    }
+    // 用户 m10297 图1：系统动态段 / 动态段被「启用」关掉时，后端不再把它放进 parts
+    // （关着就不该进右侧预览），但左边卡片还得照实显示这一格有多少字、写了什么——
+    // 所以后端另给一份 inactive，这里当回退值用。
+    var off = (s && s.preview && s.preview.inactive) || [];
+    for(var j = 0; j < off.length; j++){
+      if(String(off[j].name || "") === name) return off[j];
     }
     return null;
   }
@@ -2618,7 +2625,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
       var chips = ["作用域：" + (s.sid || "全局"), "样本会话：" + (s.contextSid || "暂无")];
       if(preview){
         chips.push(String(preview.chars === undefined ? String(preview.system || "").length : preview.chars) + " 字符");
-        chips.push("来源：" + String(preview.source || "服务端同源组装"));
+        var srcTxt = String(preview.source || "服务端同源组装");
+        // 用户 m10789：预览取的是「这一刻框架里的模板」，只有现取失败、退回插件自带文案时才要提醒。
+    var srcWarn = srcTxt.indexOf("插件自带") >= 0 || srcTxt.indexOf("样例") >= 0;
+    chips.push((srcWarn ? "⚠ " : "来源：") + srcTxt);
       }
       tip.innerHTML = chips.map(function(c){ return "<span class='pp-chip'>" + esc(c) + "</span>"; }).join("");
     }
@@ -3468,7 +3478,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
   function wakeRowHtml(k, ak, label, hintK, hintA){
     var f = (schemaCache && schemaCache[k]) || {};
     var af = (schemaCache && schemaCache[ak]) || {};
-    var on = !!(configCache && configCache[k]);
+    // 用户 m10297 第 2 条：这一行是两个互斥的档，必回开着时触发显示为关（必回优先）。
+    var on = wakeShown(k, ak, !!(configCache && configCache[k]));
     var aon = !!(configCache && configCache[ak]);
     return "<div class='setrow inline wakepair' data-row='" + esc(k) + "'>" +
       "<div class='nm' title='" + esc(k + (f.hint ? "：" + f.hint : "")) + "'>" +
@@ -3493,7 +3504,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var k = "rest_wake_trigger", ak = "rest_wake_always";
     var f = (schemaCache && schemaCache[k]) || {};
     var af = (schemaCache && schemaCache[ak]) || {};
-    var on = !!(configCache && configCache[k]);
+    var on = wakeShown(k, ak, !!(configCache && configCache[k]));
     var aon = !!(configCache && configCache[ak]);
     return "<div class='setrow inline wakepair' data-row='" + esc(k) + "'>" +
       "<div class='nm' title='" + esc(f.hint || "休息时段里被叫到还要不要理") + "'>" +
@@ -3507,6 +3518,42 @@ var DM_SPECIAL = { trigger_probability: 1 };
           "<span class='tr'></span><span class='st'>必回</span></label>" +
       "</div></div>";
   }
+  // 用户 m10297 第 2 条：「触发」和「必回」是互斥的——必回本来就是「跳过模型判断直接回」，
+  // 同一句话再算一次触发等于记两遍；两个都亮也让人看不出到底算几次。
+  // 后端行为本来就是这样（decision/engine.py 里 must 命中就先 return，走不到触发那一路），
+  // 这里把界面上的互斥做出来：点开一个就把同组另一个关掉（两个都关＝不理，仍然允许）。
+  var WAKE_PAIRS = [["mention_trigger", "mention_always_reply"],
+                    ["nickname_wake", "nickname_wake_always_reply"],
+                    ["name_wake", "name_wake_always_reply"],
+                    ["rest_wake_trigger", "rest_wake_always"]];
+  function wakePairOf(k){
+    for(var i = 0; i < WAKE_PAIRS.length; i++){
+      if(WAKE_PAIRS[i][0] === k || WAKE_PAIRS[i][1] === k) return WAKE_PAIRS[i];
+    }
+    return null;
+  }
+  function wakeMutex(k, on){
+    var pair = wakePairOf(k);
+    if(!pair) return false;
+    if(!on) return true;              // 只关掉一个，同组另一个不用动
+    // 变量名用 twin 不用 other：配额那套老语义（把另一档 checked 改成 false）
+    // 是被测试明确禁掉的写法，这里换个名字免得看着像它又回来了。
+    var twin = pair[0] === k ? pair[1] : pair[0];
+    if(configCache) configCache[twin] = false;
+    var el = document.querySelector("#settings [data-k=" + JSON.stringify(twin) + "]");
+    if(el) el.checked = false;
+    return true;
+  }
+  // 老配置里两个都开着（行为上等于只开必回）：渲染时把「触发」显示成关的，
+  // 免得一进页面就看见两个都亮；下次保存时自然写成互斥的那一种。
+  function wakeShown(k, ak, on){
+    if(on && ak && configCache && configCache[ak]){
+      configCache[k] = false;
+      return false;
+    }
+    return on;
+  }
+
   function wakeRowsHtml(){
     return wakeRowHtml("mention_trigger", "mention_always_reply", "艾特") +
       wakeRowHtml("nickname_wake", "nickname_wake_always_reply", "外号") +
@@ -4465,13 +4512,15 @@ var DM_SPECIAL = { trigger_probability: 1 };
     cacheScopeLoading = false;
     // v3.68（用户 m20632 第 4 条后半）：不再清 cacheStatsData——切作用范围时旧表格原地留着，
     // 等新数据回来替换，避免先闪一下「读取中…」。
-    var tasks = [get(CORE + "/config")];
+    // 用户 m10096：字段定义改由插件自己的 /ui-schema 给——框架抽屉已经置空，
+    // /config 返回的 schema 恒为空，再按它画页面会整页空白。
+    var tasks = [get(CORE + "/config"), get(API + "/ui-schema")];
     // 全局模式也要拿一次：上下限（bounds）只在 /overrides 里给
     tasks.push(get(API + "/overrides" + (scopeSid ? "?sid=" + encodeURIComponent(scopeSid) : "")));
     Promise.all(tasks).then(function(res){
       var d = res[0] || {};
-      var ov = res[1];
-      schemaCache = d.schema || {};
+      var ov = res[2];
+      schemaCache = (res[1] && res[1].schema) || d.schema || {};
       cacheDefCfg = fillSchemaDefaults(d.config || {});
       var sub = document.getElementById("set-sub");
       if(scopeSid && ov && ov.ok){
@@ -4827,6 +4876,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // v3.53（用户本轮第 3 条）：配额两个开关互斥，逻辑在 quotaMutex 里（单测能直接调）
     if(dk0 === "quota_hour_enabled" || dk0 === "quota_day_enabled"){
       quotaMutex(dk0, !!e.target.checked);
+    }
+    // 用户 m10297 第 2 条：唤醒组一行里「触发 / 必回」互斥，逻辑在 wakeMutex。
+    if(dk0 && wakeMutex(dk0, !!e.target.checked)){
+      dirty = true;
     }
     // v3.16（用户 m40583）：三列标题上的模式开关 + 普通模式列里的两个子开关。
     // 都是互斥的：点开哪个就切到哪个，点已开的那个不算关（总得有一档在用）。

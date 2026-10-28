@@ -760,16 +760,16 @@ class MultiDecisionPlugin(BasePlugin):
             )
             self.trigger_mode = "count"
         # 默认 5（用户 m03014 第 6 条：计数模式默认别攒到 10 条才回一次）；
-        # schema.json 里 trigger_threshold 的 default 也必须是 5，两处一起改。
+        # ui_schema.json 里 trigger_threshold 的 default 也必须是 5，两处一起改。
         # v3.70（用户 m21533 第 2 条）：私聊只有「触发概率默认 100%」这一个特例，
         # 触发方式仍跟全局走（用户 m13250 第 4 条明确取消了「私聊恒必回」）。
         self.trigger_threshold = max(1, _as_int(cfg.get("trigger_threshold"), 5))
-        # 默认 20（用户 m03616 第 5 条）；schema.json 里 trigger_probability 的
+        # 默认 20（用户 m03616 第 5 条）；ui_schema.json 里 trigger_probability 的
         # default 也必须是 20，两处一起改。
         self.trigger_probability = _as_int(cfg.get("trigger_probability"), 20)
         # v3.68（用户 m20632 第 2 条）：私聊默认必回——概率 100%。
         # 私聊没有独立的触发策略（整组已删），所以走「私聊默认」这一套：eff() 对 dm 的
-        # trigger_probability 回退到这里。没进 schema.json，页面不出现（私聊不用调）；
+        # trigger_probability 回退到这里。没进 ui_schema.json，页面不出现（私聊不用调）；
         # 想改可以手写 config 里的 trigger_probability_dm。
         self.trigger_probability_dm = max(0, min(100, _as_int(cfg.get("trigger_probability_dm"), 100)))
         # v3.81（用户 m02645 图2）：prob_pseudo 从「伪随机兜底」改名成「节奏模式」——
@@ -839,7 +839,7 @@ class MultiDecisionPlugin(BasePlugin):
 
         # v3.44（用户本轮第 1 条）：抖动 = 开关 + 固定秒数。开关默认关（关着就是
         # 触发即动），秒数默认 7，开了之后固定等 7 秒，不再是 0~N 的随机等待。
-        # schema.json 里 jitter_enabled / jitter_seconds 的默认值要和这里一致。
+        # ui_schema.json 里 jitter_enabled / jitter_seconds 的默认值要和这里一致。
         self.jitter_enabled = _as_bool(cfg.get("jitter_enabled"), False)
         self.jitter_seconds = max(0, _as_int(cfg.get("jitter_seconds"), 7))
         # 用户 m05691 第 3 条：抖动最多叠几跳（默认 3 次 = 7+7+7），到顶就不再往后拖。
@@ -871,13 +871,13 @@ class MultiDecisionPlugin(BasePlugin):
         self.quota_day_enabled = _as_bool(cfg.get("quota_day_enabled"), False)
         self.quota_max_per_day = max(1, _as_int(cfg.get("quota_max_per_day"), 100))
         # v3.52（用户 m08226 第 6 条）：进阶模式先只当「退避的前置开关」，
-        # 模型 + 决策词那部分还在做（schema.json 里的 default 也是 false）。
+        # 模型 + 决策词那部分还在做（ui_schema.json 里的 default 也是 false）。
         self.advanced_enabled = _as_bool(cfg.get("advanced_enabled"), False)
 
         self.rest_mode_enabled = _as_bool(cfg.get("rest_mode_enabled"), False)
         self.rest_start = str(cfg.get("rest_start") or "23:00")
         self.rest_end = str(cfg.get("rest_end") or "08:00")
-        # 默认 2（用户 m03616 第 4 条）；schema.json 里 rest_probability 的
+        # 默认 2（用户 m03616 第 4 条）；ui_schema.json 里 rest_probability 的
         # default 也必须是 2，两处一起改。
         self.rest_probability = _as_int(cfg.get("rest_probability"), 2)
         # v3.72（用户 m24260 第 2 条）：曲线模式自己那套休息时段，默认 23:00-09:00。
@@ -896,7 +896,7 @@ class MultiDecisionPlugin(BasePlugin):
         self.retry_max = max(0, _as_int(cfg.get("retry_max"), 2))
         self.retry_delay = max(0, _as_int(cfg.get("retry_delay"), 5))
         # 看门狗超时（用户 2026-10-24 第 4 条：放进「重试」里由用户自己设）。
-        # 30-600 秒，schema.json 里的 default 必须与这里的兜底值一致（都是 180），
+        # 30-600 秒，ui_schema.json 里的 default 必须与这里的兜底值一致（都是 180），
         # 否则前端显示的默认值和实际生效的值会对不上。
         self.watchdog_seconds = max(30, min(600, _as_int(cfg.get("watchdog_seconds"), 180)))
 
@@ -2182,6 +2182,26 @@ class MultiDecisionPlugin(BasePlugin):
             )
         return items
 
+    @_api("GET", "/ui-schema")
+    async def api_ui_schema(self):
+        """设置页用的字段定义（用户 m10096）。
+
+        KiraAI 的「配置插件」抽屉按插件根目录的 schema.json 渲染：只要有键就
+        弹一个表单出来。本插件所有配置都由自己的设置页（/settings）管，那个
+        抽屉纯属重复入口，还能改出设置页看不见的值。所以根 schema.json 置空
+        （抽屉显示「无需配置」），字段定义搬到 ui_schema.json，只给设置页用。
+        """
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui_schema.json")
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as exc:
+            logger.warning(f"[multi-decision] 读取 ui_schema.json 失败：{exc}")
+            return {"ok": False, "schema": {}, "error": str(exc)}
+        if not isinstance(data, dict):
+            return {"ok": False, "schema": {}, "error": "ui_schema.json 不是对象"}
+        return {"ok": True, "schema": data}
+
     @_api("GET", "/config-check")
     async def api_config_check(self, sid: str = ""):
         """配置体检：返回互相冲突的组合，只提示不改值。"""
@@ -2341,9 +2361,15 @@ class MultiDecisionPlugin(BasePlugin):
 
     def _decision_pick_sid(self) -> str:
         """v3.91：没指定会话时（全局配置模式下预览/自检没有 sid），
-        挑一个窗口里消息最多的会话，省得预览出来一片空白。"""
+        挑一个窗口里消息最多的会话，省得预览出来一片空白。
+        m10297：优先挑抓过框架原文的会话——提示词页的「你的身份 / 工具说明 /
+        系统动态段」全靠那份原文，挑到没抓过的会话那些格子永远是 0 字。""" 
         try:
             states = getattr(self.window, "_states", None) or {}
+            layouts = getattr(self, "prompt_layouts", None)
+            sources = getattr(layouts, "_sources", None) or {}
+            picked = [str(k) for k, v in list(sources.items())
+                      if isinstance(v, dict) and (v.get("rows") or v.get("native"))]
             best, best_n = "", -1
             for sid, st in list(states.items()):
                 try:
@@ -2352,6 +2378,11 @@ class MultiDecisionPlugin(BasePlugin):
                     n = 0
                 if n > best_n:
                     best, best_n = str(sid), n
+            if picked:
+                live = [s for s in picked if s in states]
+                if live:
+                    return max(live, key=lambda k: len(getattr(states.get(k), "messages", None) or []))
+                return max(picked, key=lambda k: (sources.get(k) or {}).get("at") or 0)
             return best
         except Exception:
             logger.debug("[multi-decision] 预览挑会话失败", exc_info=True)

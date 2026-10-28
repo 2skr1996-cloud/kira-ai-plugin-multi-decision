@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime
 import hashlib
 import json
 import logging
@@ -19,6 +20,10 @@ TYPES = {"text", "custom", "identity", "framework", "decision_prompt",
          "decision_format", "persona", "tools", "realtime_marker", "dynamic_marker",
          "dynamic", "system_dynamic"}
 DYNAMIC = {"sessions", "chat_env", "memory", "time"}
+#: 用户 m11025：这两段框架的环境信息在真实请求里已被 _drop_noisy_prompts 删掉
+#: （decision/engine.py 的 _NOISY_PROMPT_NAMES），系统动态段再显示出来就是
+#: 「早就删掉的东西又回来了」。预览和真实请求必须是同一份。
+NOISY_NAMES = ("sessions", "chat_env")
 # 用户 m02159 图3：身份段两边本来就是同一个文件，命名规则跟决策那边统一——去掉英文括注。
 LABELS = {"role": "角色设定", "persona": "角色扮演", "chat_rules": "注意事项提示词",
           "attention": "注意事项", "output": "输出要求", "format": "输出格式",
@@ -38,6 +43,12 @@ BODY_TYPES = {"text", "custom", "realtime_marker", "dynamic"}
 # 只标位置、不进 system 的两种占位（用户 m02159 图1）：实时窗口 + 动态段。
 # dynamic_marker 留在 TYPES 里只为兼容旧文档，读到就丢掉（用户 m02993：动态段改成真模板）。
 MARKER_TYPES = {"realtime_marker", "dynamic", "system_dynamic"}
+
+# 用户 m10789：format 模板里有 {{ message_types }} / {{ root_tags }}，真实请求要等框架在 assemble
+# 阶段把标签清单填进去才渲染得出来。预览里先填一份：能用上最近一次真实请求的值就用真的，
+# 没有就先写一句说明，别让整段消失（原来 StrictUndefined 一抛，整段 format 就没了）。
+_TAG_FILL = {"message_types": "", "root_tags": ""}
+_TAG_FILL_NOTE = "（这一段由框架按当前语言与适配器支持的标签自动填写）"
 DYNAMIC_NOTE = ("（这一段不注入固定 system：会话信息、聊天环境、记忆、时间会由框架拼在"
                 "实时窗下方，实时窗本身又接在系统提示词后面。）")
 # 用户 m02993：动态段默认就是这段「强化格式遵守」——拼在本轮聊天记录最后，紧贴模型开口的位置，
@@ -63,6 +74,17 @@ REALTIME_NOTE = (
     "[19:02:11] 群友甲：这枪后坐力也太大了\n"
     "[19:02:19] 群友乙：压枪懂不懂\n"
     "[19:02:25] 群友甲：我这手机新买的，别教我身法\n"
+)
+
+
+# 用户 m10789：记忆正文由记忆插件在请求钩子里追加，决策请求不经过那个钩子，
+# 所以插件自己现读一份补上；这段隐私约束跟记忆插件里的那份逐字一致。
+MEMORY_RULE = (
+    "### 隐私与安全约束"
+    "- 绝对不要在回复中直接暴露原始记忆内容。"
+    "- 不要主动提及用户的敏感个人信息（如QQ号，群号，电话号码、地址、身份证号等），即使记忆中包含这些内容。"
+    "- 引用记忆内容时，使用自然的转述方式，而非逐字复述。"
+    "- 如果用户明确要求查看自己的数据，可以简要概述，但仍应避免暴露系统内部结构。"
 )
 
 
@@ -179,6 +201,8 @@ class PromptLayouts:
         self._applied = {}
         # 同一个 request 反复套动态段（重试链路）时要先还原上一次，别叠成两遍。
         self._applied_user = {}
+        # 用户 m10789：装配用的原段一律「此刻现造」，这一格放本次现取的结果（按 sid）。
+        self._live = {}
         self._official = self._load(Path(__file__).with_name("kira_default_templates.json"), {})
         self.tpl_path = Path(data_dir) / "prompt_templates.json"
         self._tpl = self._load(self.tpl_path, {"version": 1, "items": []})
@@ -311,7 +335,39 @@ class PromptLayouts:
         if isinstance(p, dict):
             return str(p.get("text", p.get("content", "")) or "")
         fn = getattr(p, "to_string", None)
-        return str(fn() if callable(fn) else getattr(p, "content", "") or "")
+        try:
+            return str(fn() if callable(fn) else getattr(p, "content", "") or "")
+        except Exception:
+            if str(getattr(p, "name", "") or "") != "format":
+                raise
+            kw = getattr(p, "kwargs", None)
+            if not isinstance(kw, dict):
+                return str(getattr(p, "content", "") or "")
+            filled = {"message_types": _TAG_FILL.get("message_types") or _TAG_FILL_NOTE,
+                      "root_tags": _TAG_FILL.get("root_tags") or ""}
+            added = {k: v for k, v in filled.items() if k not in kw}
+            kw.update(added)
+            try:
+                return str(fn())
+            finally:
+                for k in added:
+                    kw.pop(k, None)
+
+    @staticmethod
+    def _remember_tag_fill(request):
+        """记下真实请求里框架填给 format 段的标签清单，预览时直接用真的。"""
+        for p in getattr(request, "system_prompt", None) or []:
+            if str(getattr(p, "name", "") or "") != "format":
+                continue
+            kw = getattr(p, "kwargs", None)
+            if isinstance(kw, dict):
+                mt = kw.get("message_types")
+                if isinstance(mt, str) and mt.strip():
+                    _TAG_FILL["message_types"] = mt
+                rt = kw.get("root_tags")
+                if isinstance(rt, str):
+                    _TAG_FILL["root_tags"] = rt
+            return
 
     def capture_native(self, request, sid):
         """抄进入本插件前的模板，不渲染尚待绑定的 format，不写用户消息。"""
@@ -430,8 +486,194 @@ class PromptLayouts:
             row["key"] = name if totals[name] == 1 else "%s#%d" % (name, seen[name])
         return out
 
-    def _base_rows(self, sid):
-        return self._keyed(self._ensure_source(sid).get("rows", []))
+    # 用户 m10624：提示词页不该去「挑一个跑过的会话」才有内容。
+    # 没跑过真实请求的会话，界面用这份出厂样例量尺寸；真实请求永远只取本轮原文，
+    # 绝不把样例当原文拼进 system（kira_default_templates.json 的 notes 明令禁止冒充）。
+    # 用户 m10789：原来这里放「出厂样例」的来源角标，现在预览一律取请求这一刻的框架模板，
+    # 只有现取失败才退回插件自带文案，所以不再需要这个常量。
+
+    def _sample_identity(self, sid):
+        sid = normalize_sid(sid)
+        group = sid.startswith("gm:")
+        plugin = self.plugin
+        def pick(attr):
+            try:
+                return str(getattr(plugin, attr, "") or "").strip()
+            except Exception:
+                return ""
+        def eff(key):
+            try:
+                val = plugin.eff(key, sid)
+            except Exception:
+                return ""
+            if isinstance(val, (list, tuple)):
+                return "、".join(str(x).strip() for x in val if str(x).strip())
+            return str(val or "").strip()
+        qq = pick("bot_qq") or "（未设置）"
+        try:
+            name = str(plugin.bot_name_for(sid) or "").strip()
+        except Exception:
+            name = ""
+        nick = eff("nicknames") or "（未设置）"
+        admin_name = pick("admin_name") or "（未设置）"
+        # admin_list 是 JSON 字符串（[{"name": .., "qq": ..}]），别把这段 JSON 直接写进身份段。
+        admin_id = pick("admin_id")
+        if not admin_id:
+            raw_list = eff("admin_list")
+            items = None
+            if raw_list[:1] == "[":
+                try:
+                    items = json.loads(raw_list)
+                except Exception:
+                    items = None
+            if isinstance(items, list):
+                admin_id = "、".join(str(x.get("qq") or "").strip() for x in items
+                                       if isinstance(x, dict) and str(x.get("qq") or "").strip())
+            else:
+                admin_id = raw_list
+        admin_id = admin_id or "（未设置）"
+        where = "群里" if group else "好友里"
+        lines = ["## 你的身份（Identity）",
+                 "- 当前平台：`QQ`",
+                 "- 当前聊天类型：`%s`" % ("GroupMessage" if group else "FriendMessage"),
+                 "- 你的账号 ID：`%s`" % qq,
+                 "- 你在%s的昵称：%s" % (where, name or "（未设置）"),
+                 "- 你在%s的外号：%s" % (where, nick),
+                 "- 管理员名字：%s" % admin_name,
+                 "- 管理员 QQ 号：%s" % admin_id]
+        return chr(10).join(lines) + chr(10)
+
+    @staticmethod
+    def _now_text():
+        """框架同款时间串（Oct 29 2026 01:53 Thu），时区跟框架配置走。"""
+        tz = None
+        try:
+            cfg = getattr(getattr(self.plugin, "ctx", None), "config", None)
+            tz = cfg.get_timezone() if cfg is not None and hasattr(cfg, "get_timezone") else None
+        except Exception:
+            tz = None
+        try:
+            now = datetime.now(tz) if tz else datetime.now()
+        except Exception:
+            now = datetime.now()
+        return now.strftime("%b %d %Y %H:%M %a")
+
+    def _live_time_text(self):
+        return "## 时间信息（Time）" + chr(10) + "当前时间是：" + self._now_text() + chr(10)
+
+    def _core_memory_text(self):
+        """现读核心记忆（跟记忆插件同一个文件），读不到就当这个会话没有记忆。"""
+        try:
+            from core.utils.path_utils import get_data_path
+            path = Path(get_data_path()) / "memory" / "core.txt"
+            if not path.is_file():
+                return ""
+            lines = [str(ln).rstrip(chr(10)) for ln in path.read_text(encoding="utf-8").splitlines()]
+        except Exception:
+            return ""
+        if not lines:
+            return ""
+        body = "".join("[%d] %s" % (i, ln) + chr(10) for i, ln in enumerate(lines))
+        return body + MEMORY_RULE
+
+    def _fill_memory(self, rows):
+        """框架那份 memory 段只有标题，正文是记忆插件在请求钩子里追加的，这里补上。"""
+        core = self._core_memory_text()
+        if not core:
+            return rows
+        out = []
+        for row in rows:
+            if seg_key(row.get("name")) == "memory" and "### 隐私与安全约束" not in str(row.get("text") or ""):
+                row = dict(row, text=str(row.get("text") or "") + chr(10) + core)
+            out.append(row)
+        return out
+
+    def _live_rows_local(self, sid):
+        """插件自带的现成一份：静态段抄出厂模板，动态段现算（身份 / 时间 / 记忆）。"""
+        rows = []
+        for tpl in (self._official.get("templates") or []):
+            name = str((tpl or {}).get("name") or "")
+            text = (tpl or {}).get("content")
+            if name in ("role", "attention", "output", "format") and isinstance(text, str) and text.strip():
+                rows.append({"name": name, "text": text, "location": "system"})
+        rows.append({"name": "persona", "text": "", "location": "system"})
+        rows.append({"name": "accounts", "text": self._sample_identity(sid), "location": "system"})
+        rows.append({"name": "tools", "text": "## Tools 说明" + chr(10) + chr(10), "location": "system"})
+        rows.append({"name": "memory", "text": "## 核心记忆（Core Memory）" + chr(10) + self._core_memory_text(),
+                     "location": "dynamic"})
+        rows.append({"name": "time", "text": self._live_time_text(), "location": "dynamic"})
+        return rows
+
+    async def _live_chat_env(self, sid):
+        """预览里没有事件可用：会话标题问会话管理器，平台 / 适配器从配置里挑第一个。"""
+        env = {"platform": "QQ", "adapter": "",
+               "chat_type": "GroupMessage" if sid.startswith("gm:") else "DirectMessage",
+               "self_id": "", "session_title": sid, "session_description": ""}
+        ctx = getattr(self.plugin, "ctx", None)
+        try:
+            env["self_id"] = str(getattr(self.plugin, "bot_qq", "") or "")
+        except Exception:
+            pass
+        try:
+            sm = getattr(ctx, "session_mgr", None)
+            if sm is not None:
+                sess = await sm.get_session(sid, ensure_session=False)
+                env["session_title"] = (str(getattr(sess, "session_title", "") or "") or sid)
+                env["session_description"] = str(getattr(sess, "session_description", "") or "")
+        except Exception:
+            logger.debug("[multi-decision] 取会话标题失败，聊天环境按 sid 显示", exc_info=True)
+        try:
+            adapters = (ctx.config.get("adapters", {}) or {}) if ctx is not None else {}
+            for aid, ent in adapters.items():
+                if isinstance(ent, dict):
+                    env["platform"] = str(ent.get("platform") or env["platform"])
+                    env["adapter"] = str(ent.get("name") or aid or "")
+                    break
+        except Exception:
+            pass
+        return env
+
+    async def refresh_live(self, sid):
+        """用户 m10789：请求这一刻现取框架当前那 11 段；拿不到就现场造一份。"""
+        sid = normalize_sid(sid)
+        if not sid:
+            return []
+        ctx = getattr(self.plugin, "ctx", None)
+        pm = getattr(ctx, "prompt_mgr", None) if ctx is not None else None
+        rows, source = None, ""
+        if pm is not None:
+            try:
+                env = await self._live_chat_env(sid)
+                prompts = await pm.get_agent_prompt(env)
+                got = []
+                for p in prompts or []:
+                    name = str(getattr(p, "name", "") or "")
+                    if not name:
+                        continue
+                    try:
+                        text = self._text(p)
+                    except Exception:
+                        continue
+                    got.append({"name": name, "text": text,
+                                "location": "dynamic" if self._dynamic(name) else "system"})
+                if got:
+                    rows, source = got, "框架当前模板 · 请求时现取"
+            except Exception:
+                logger.exception("[multi-decision] 现取框架提示词失败，改用插件自带的一份")
+                rows = None
+        if not rows:
+            rows, source = self._live_rows_local(sid), "插件自带文案 + 实时变量"
+        rows = self._fill_memory(rows)
+        self._live[sid] = {"rows": rows, "at": time.time(), "source": source}
+        return rows
+
+    def _base_rows(self, sid, sample=False):
+        # 用户 m10789：装配只认「此刻现造」这一份——这次的现取结果优先，没有就现场造；
+        # 绝不再拿上一轮请求的原文快照冒充当前（那份只留在记录页看历史）。
+        live = self._live.get(normalize_sid(sid))
+        if live and live.get("rows"):
+            return self._keyed(live["rows"])
+        return self._keyed(self._live_rows_local(sid))
 
     def _reply_overrides(self):
         raw = self._config("reply_seg_overrides", "")
@@ -546,10 +788,15 @@ class PromptLayouts:
         self._data = new  # 失败不修改内存，也不报告假成功。
         return {"ok": True, "revision": self.revision()}
 
-    def identity_text(self, sid):
+    def identity_text(self, sid, sample=False):
         """只取本会话的回复身份；不拼时间/会话数、不向其它会话兜底。"""
-        rows = self._base_rows(sid)
+        rows = self._base_rows(sid, sample)
         raw = next((r["text"] for r in rows if seg_key(r["name"]) == "accounts" and "你的身份" in r["text"]), "")
+        if not raw:
+            # 用户 m10789：框架给的那行「社交账号信息（Accounts）」只有平台和账号 ID，没有昵称 /
+            # 外号 / 管理员，群里模型会认不出人。所以这一份仍按当前配置现拼（左侧卡片显示的就是它），
+            # 请求时也用它——预览和真实请求必须是同一份。
+            raw = self._sample_identity(sid)
         layout, _ = self.layout("reply", sid)
         if layout["mode"] == "text":
             match = re.search(r"(?m)^## 你的身份（Identity）[^\n]*\n[\s\S]*?(?=^## |\Z)", layout["text"])
@@ -609,22 +856,67 @@ class PromptLayouts:
             logger.exception("[multi-decision] 拼工具说明失败")
             return ""
 
-    def _render(self, kind, sid, layout, context, rows=None):
+    def _sysdyn_part(self, kind, m, source_rows):
+        """用户 m10297 图1：系统动态段这一格的正文——开着进 parts，关着进 inactive，算法只有这一份。"""
+        # 用户 m03879：框架自己拼在 system 末尾的动态段（会话信息 / 聊天环境 / 记忆 / 时间）
+        # 单独留一格给他看：正文照抄本轮的动态段，但不再往 system 塞（它会跟框架的重复）。
+        dyn_rows = [r for r in source_rows
+                    if r.get("location") == "dynamic" and str(r.get("text") or "").strip()
+                    and str(r.get("name") or "") not in NOISY_NAMES]
+        # 用户 m06046 图2/图4：回复侧这些内容框架自己会搬到本轮消息末尾
+        # （dynamic_prompt_position / memory_prompt_position 都是 latest_user），插件再抄一遍
+        # 就等于同一段发两遍——真机请求里「## 核心记忆 / ## 时间信息」确实出现了两次。
+        # 所以回复侧只标注「框架已注入」，不重复拼；决策侧是插件自己造的请求，
+        # 没有框架兜底，照旧真注入（那才是决策能看到的现场信息）。
+        framed_rows, inject_rows = [], list(dyn_rows)
+        if kind == "reply":
+            framed_rows = [r for r in dyn_rows if self._framed_dynamic(r)]
+            inject_rows = [r for r in dyn_rows if not self._framed_dynamic(r)]
+        # 用户 m06428 图2：这一格原来显示 0 字、点开空白，可请求里明明有记忆 / 时间——
+        # 正文要照实写出来（框架自己搬走的那几段也是本段的来源），只是 inject_text
+        # 才排除它们，免得同一段真发两遍。
+        text = "\n\n".join(r["text"] for r in framed_rows + inject_rows)
+        inject_text = "\n\n".join(r["text"] for r in inject_rows)
+        # 用户 m05691：这一段默认不开启；勾上就把这些内容拼到本轮消息最下面（跟回复页
+        # 的动态段一个位置），排在格式强化之后——它是这一轮真正该看的现场信息。
+        return {"id": m["id"], "label": m["label"], "name": "system_dynamic", "type": "system_dynamic",
+                "text": text, "chars": len(text), "dynamic": True,
+                "inject": bool(m["enabled"]) and bool(inject_text),
+                "inject_text": inject_text,
+                "framed": [r["name"] for r in framed_rows],
+                "sources": [r["name"] for r in dyn_rows]}
+
+    def _dynamic_part(self, m):
+        """用户 m02993：动态段是能改的模板，正文拼在本轮 user 消息的最后，不进 system。"""
+        text = m["content"] or DYNAMIC_TEMPLATE_DEFAULT
+        # 用户 m10297 图1：关掉启用时 inject 也要跟着假，否则关掉的模板照样拼进 user 末尾。
+        return {"id": m["id"], "label": m["label"], "name": "dynamic", "type": "dynamic",
+                "text": text, "chars": len(text), "dynamic": True,
+                "inject": bool(m["enabled"])}
+
+    def _render(self, kind, sid, layout, context, rows=None, sample=False):
         layout = normalize_layout(layout, kind)
         if layout["mode"] == "text":
             txt = layout["text"]
             parts = [{"id": "full-text", "label": "单段文本", "type": "text", "name": "custom_system", "text": txt, "chars": len(txt)}] if txt else []
             return {"ok": True, "system": txt, "parts": parts, "chars": len(txt), "warnings": [], "source": "同源单段装配"}
-        source_rows = self._base_rows(sid) if rows is None else self._keyed(rows)
+        source_rows = self._keyed(rows) if rows is not None else self._base_rows(sid, sample)
         by_name = {row["key"]: row for row in source_rows}
         for row in source_rows:
             if row["name"] not in by_name:
                 by_name[row["name"]] = dict(row, text="".join(r["text"] for r in source_rows if r["name"] == row["name"]))
-        parts, warnings = [], []
+        parts, warnings, inactive = [], [], []
         for m in layout["modules"]:
             # 用户 m06721 图1：关掉「启用」的段一律不进预览，系统动态段也不例外——
             # 以前为了让卡片能看见内容，这一格关着也照常渲染，结果开关关了右边还留着整段字。
+            # 用户 m10297 图1：可关掉之后左边卡片又变成「0 字 / 空白」——这两格（系统动态段 /
+            # 动态段）本来就是「给你看这一轮会收到什么」的展示位，所以另记一份 inactive：
+            # 不注入、不进右侧预览拼接，但卡片照实显示它的字数与正文。
             if not m["enabled"]:
+                if m["type"] == "system_dynamic":
+                    inactive.append(self._sysdyn_part(kind, m, source_rows))
+                elif m["type"] == "dynamic":
+                    inactive.append(self._dynamic_part(m))
                 continue
             typ, key, text = m["type"], m["key"], ""
             if typ == "text":
@@ -643,7 +935,11 @@ class PromptLayouts:
                 text = DEFAULT_DECISION_FORMAT
             elif typ == "identity":
                 # 用户 m02993 图3：两边的身份段本来就是同一份文件，取同一处正文。
-                text = self.identity_text(sid)
+                # 用户 m10789：优先插件现拼的那份（昵称 / 外号 / 管理员都在），没有才退框架原文。
+                text = self.identity_text(sid, sample)
+                if not text:
+                    text = next((r["text"] for _k, r in by_name.items()
+                                 if seg_key(r["name"]) == "accounts"), "")
             elif typ == "persona":
                 # 用户 m02159 图3：角色扮演段只认「人格文件」。决策不选就留空；回复不选就沿用
                 # 框架给的那一段原身（保持和以前一样，不凭空造人设）。
@@ -675,39 +971,13 @@ class PromptLayouts:
                               "text": m["content"] or REALTIME_NOTE, "chars": 0, "dynamic": True})
                 continue
             elif typ == "system_dynamic":
-                # 用户 m03879：框架自己拼在 system 末尾的动态段（会话信息 / 聊天环境 / 记忆 / 时间）
-                # 单独留一格给他看：正文照抄本轮的动态段，但不再往 system 塞（它会跟框架的重复）。
-                dyn_rows = [r for r in source_rows
-                            if r.get("location") == "dynamic" and str(r.get("text") or "").strip()]
-                # 用户 m06046 图2/图4：回复侧这些内容框架自己会搬到本轮消息末尾
-                # （dynamic_prompt_position / memory_prompt_position 都是 latest_user），插件再抄一遍
-                # 就等于同一段发两遍——真机请求里「## 核心记忆 / ## 时间信息」确实出现了两次。
-                # 所以回复侧只标注「框架已注入」，不重复拼；决策侧是插件自己造的请求，
-                # 没有框架兜底，照旧真注入（那才是决策能看到的现场信息）。
-                framed_rows, inject_rows = [], list(dyn_rows)
-                if kind == "reply":
-                    framed_rows = [r for r in dyn_rows if self._framed_dynamic(r)]
-                    inject_rows = [r for r in dyn_rows if not self._framed_dynamic(r)]
-                # 用户 m06428 图2：这一格原来显示 0 字、点开空白，可请求里明明有记忆 / 时间——
-                # 正文要照实写出来（框架自己搬走的那几段也是本段的来源），只是 inject_text
-                # 才排除它们，免得同一段真发两遍。
-                text = "\n\n".join(r["text"] for r in framed_rows + inject_rows)
-                inject_text = "\n\n".join(r["text"] for r in inject_rows)
-                # 用户 m05691：这一段默认不开启；勾上就把这些内容拼到本轮消息最下面（跟回复页
-                # 的动态段一个位置），排在格式强化之后——它是这一轮真正该看的现场信息。
-                parts.append({"id": m["id"], "label": m["label"], "name": "system_dynamic", "type": typ,
-                              "text": text, "chars": len(text), "dynamic": True,
-                              "inject": bool(m["enabled"]) and bool(inject_text),
-                              "inject_text": inject_text,
-                              "framed": [r["name"] for r in framed_rows],
-                              "sources": [r["name"] for r in dyn_rows]})
+                # 用户 m10297 图1：算法搬进 _sysdyn_part，跟「关掉启用」时给卡片看的那份共用。
+                parts.append(self._sysdyn_part(kind, m, source_rows))
                 continue
 
             elif typ == "dynamic":
                 # 用户 m02993：动态段是能改的模板，正文拼在本轮 user 消息的最后，不进 system。
-                text = m["content"] or DYNAMIC_TEMPLATE_DEFAULT
-                parts.append({"id": m["id"], "label": m["label"], "name": "dynamic", "type": typ,
-                              "text": text, "chars": len(text), "dynamic": True, "inject": True})
+                parts.append(self._dynamic_part(m))
                 continue
             if text == "":
                 # 用户 m02159：人格留空、工具没勾都是正常状态（模块上就写着会跳过），不该刷警告。
@@ -720,15 +990,26 @@ class PromptLayouts:
         # dynamic_marker 只是位置提示，不参与 system 拼接。
         system = ("\n\n" if kind == "decision" else "").join(p["text"] for p in parts if not p.get("dynamic"))
         return {"ok": True, "system": system, "parts": parts, "chars": len(system), "warnings": warnings,
-                "source": self._ensure_source(sid).get("source", "暂无同会话回复素材")}
+                # 用户 m10297 图1：被「启用」关掉的展示段（系统动态段 / 动态段）放在这里，
+                # 只给左边卡片显示字数与正文，不参与 system 拼接、也不进右侧预览。
+                "inactive": inactive,
+                "source": self._source_label(sid, sample)}
+
+    def _source_label(self, sid, sample=False):
+        live = self._live.get(normalize_sid(sid))
+        if live and live.get("rows"):
+            return live.get("source") or "请求时现取"
+        return "插件自带文案 + 实时变量（这个会话还没跑过请求）"
 
     async def assemble_decision(self, sid, opt=None, layout=None):
         doc = self.layout("decision", sid)[0] if layout is None else layout
+        # 用户 m10789：决策请求没有框架现成的 system 可用，也在这一刻现造，不读上一轮快照。
+        await self.refresh_live(sid)
         return self._render("decision", sid, doc, await self._context(sid, opt, doc))
 
     def preview_reply(self, sid="", layout=None):
         doc = self.layout("reply", sid)[0] if layout is None else layout
-        return dict(self._render("reply", sid, doc, {"tools": self._tools_text()}), sid=sid)
+        return dict(self._render("reply", sid, doc, {"tools": self._tools_text()}, sample=True), sid=sid)
 
     def apply_reply(self, request, sid=""):
         if not isinstance(getattr(request, "system_prompt", None), list):
@@ -737,6 +1018,7 @@ class PromptLayouts:
         previous = self._applied.get(sid)
         if previous and previous[0] is request and request.system_prompt is previous[2]:
             request.system_prompt = previous[1]
+        self._remember_tag_fill(request)
         self.capture_reply(request, sid)
         doc, _ = self.layout("reply", sid)
         from .reply_prompt import Prompt
@@ -772,7 +1054,12 @@ class PromptLayouts:
                 # 用户 m02159 图3：人格段自选的文件不在框架原段里，必须按新正文重造一段 Prompt。
                 output.append(Prompt(p["text"], name="persona", source="system", persist=False,
                                      render_template=False, end=""))
-            elif m.get("type") in ("framework", "persona", "tools", "identity"):
+            elif m.get("type") == "identity" and str(p.get("text") or "").strip():
+                # 用户 m10789：身份段用插件现拼的那份，和预览同一处来源。框架那行更短的
+                # 「社交账号信息（Accounts）」顶替掉它的话，预览和真实请求就对不上了。
+                output.append(Prompt(p["text"], name="accounts", source="system", persist=False,
+                                     render_template=False, end=""))
+            elif m.get("type") in ("framework", "persona", "tools"):
                 output.extend(original.get(key, []))  # kwargs/render/end/persist 原样保留。
             else:
                 output.append(Prompt(p["text"], name=p["name"], source="system", persist=False, render_template=False, end=""))
@@ -857,12 +1144,14 @@ class PromptLayouts:
             inherited = False
         if draft is not None:
             doc = normalize_layout(draft, kind)
+        await self.refresh_live(context_sid)
         context = await self._context(context_sid, None, doc)
-        preview = self._render(kind, context_sid, doc, context)
+        preview = self._render(kind, context_sid, doc, context, sample=True)
         reply_rows = {}
-        for row in self._base_rows(context_sid):
+        for row in self._base_rows(context_sid, sample=True):
             reply_rows[row["name"]] = reply_rows.get(row["name"], "") + row["text"]
-        identity = self.identity_text(context_sid) if kind == "decision" else reply_rows.get("accounts", "")
+        # 用户 m10789：两边的身份段都取插件现拼的那一份，和右侧拼进 system 的必须是同一份。
+        identity = self.identity_text(context_sid, sample=True)
         persona_text = context["persona"] if kind == "decision" else reply_rows.get("persona", "")
         tools_text = context["tools"] if kind == "decision" else reply_rows.get("tools", "")
         # 用户 m02159 图3：自己的模板在前、默认模板在中、框架原段一律排在最后。
@@ -890,7 +1179,7 @@ class PromptLayouts:
         else:
             src = self._ensure_source(context_sid)
             native = {x["name"]: x for x in src.get("native", [])}
-            for row in self._base_rows(context_sid):
+            for row in self._base_rows(context_sid, sample=True):
                 name, key = row["name"], row["key"]
                 # 用户 m02159 图1：记忆 / 时间这类动态段不进下拉；身份 / 人格 / 工具已各有专块。
                 if seg_key(name) in DYNAMIC or seg_key(name) in ("accounts", "persona", "tools"):
