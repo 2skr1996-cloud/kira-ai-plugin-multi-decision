@@ -1,0 +1,640 @@
+{
+  "enabled": {
+    "name": "启用插件",
+    "type": "switch",
+    "default": true,
+    "hint": "总开关。关闭后插件完全静默。"
+  },
+  "decision_enabled": {
+    "name": "接管群聊触发判定",
+    "type": "switch",
+    "default": true,
+    "hint": "决定消息要不要回，并停用内置 default-chat。"
+  },
+  "takeover_default_chat": {
+    "name": "接管默认聊天插件",
+    "type": "switch",
+    "default": true,
+    "hint": "已并入上一项，仅为兼容旧配置保留。"
+  },
+  "trigger_mode": {
+    "name": "触发模式",
+    "type": "enum",
+    "options": [
+      "count",
+      "probability",
+      "adaptive"
+    ],
+    "default": "count",
+    "hint": "count 攒够条数；probability 按概率；adaptive 按曲线每段自动调概率。"
+  },
+  "trigger_threshold": {
+    "name": "计数触发",
+    "type": "integer",
+    "default": 5,
+    "hint": "每 N 条回一次"
+  },
+  "trigger_probability": {
+    "name": "触发概率",
+    "type": "integer",
+    "default": 20,
+    "hint": "按概率回"
+  },
+  "prob_pseudo": {
+    "name": "节奏模式",
+    "type": "switch",
+    "default": false,
+    "hint": "开 = 按节奏排队，越等越容易中；关 = 每条单独掷骰。"
+  },
+  "advanced_enabled": {
+    "name": "开启进阶模式",
+    "type": "switch",
+    "default": false,
+    "hint": "打开后先单独判这轮回不回，判要回才走完整回复。"
+  },
+  "decision_persona": {
+    "name": "人格",
+    "type": "string",
+    "default": "",
+    "hint": "旧做法：整段引用一个人格。现在建议到提示词页加一个「角色扮演（Persona）」模块，直接挑人格文件，还能同时放几个。"
+  },
+  "decision_chat_rules": {
+    "name": "聊天规则提示词",
+    "type": "text",
+    "default": "",
+    "hint": "旧字段。「自定义聊天规则」这一段已从提示词页移除；以后改提示词请到提示词页改模块。"
+  },
+  "reply_seg_overrides": {
+    "name": "回复提示词分段改写",
+    "type": "text",
+    "default": "",
+    "hint": "设置页「回复提示词」左栏改过的段，JSON。留空 = 全部用框架原文。"
+  },
+  "decision_prompt": {
+    "name": "决策提示词",
+    "type": "text",
+    "default": "",
+    "hint": "判断这一轮回不回。推荐到「提示词页 → 决策提示词」里拆成几个模块写；这里的文字就是「判断规则」那一段的默认内容。"
+  },
+  "decision_tools": {
+    "name": "决策可用工具",
+    "type": "string",
+    "default": "",
+    "hint": "勾选后写进决策提示词，也作为原生工具一起发。"
+  },
+  "decision_tool_rounds": {
+    "name": "工具最多几轮",
+    "type": "integer",
+    "default": 2,
+    "hint": "决策模型调工具最多来回几次。"
+  },
+  "decision_model": {
+    "name": "决策模型",
+    "type": "string",
+    "default": "",
+    "hint": "留空 = 用框架的快速模型。"
+  },
+  "decision_fallback_model": {
+    "name": "备用模型",
+    "type": "string",
+    "default": "",
+    "hint": "主模型连续失败后切它；留空 = 不切。"
+  },
+  "decision_retry": {
+    "name": "重试次数",
+    "type": "integer",
+    "default": 2,
+    "hint": "主模型失败后原地重试几次。"
+  },
+  "decision_retry_delay": {
+    "name": "重试间隔",
+    "type": "float",
+    "default": 3,
+    "hint": "两次重试之间等几秒。"
+  },
+  "decision_fail_switch": {
+    "name": "连续失败切换",
+    "type": "integer",
+    "default": 2,
+    "hint": "主模型连续失败几次才切备用模型。"
+  },
+  "decision_fallback_cooldown": {
+    "name": "切回主模型等待",
+    "type": "integer",
+    "default": 300,
+    "hint": "切到备用后过多少秒再试主模型。"
+  },
+  "decision_timeout": {
+    "name": "单次超时",
+    "type": "integer",
+    "default": 60,
+    "hint": "一次决策最多等几秒，超时算失败。"
+  },
+  "decision_fail_action": {
+    "name": "决策失败时",
+    "type": "string",
+    "default": "allow",
+    "hint": "allow = 照常回复，block = 这轮不回。"
+  },
+  "adaptive_step": {
+    "name": "每轮最多调几个点",
+    "type": "integer",
+    "default": 2,
+    "hint": "每轮最多挪几个百分点。"
+  },
+  "adaptive_tune_minutes": {
+    "name": "调参间隔",
+    "type": "integer",
+    "default": 10,
+    "hint": "隔多久重新算一次这段该用多少概率。越小跟得越快，也越容易被一天的波动带偏。"
+  },
+  "adaptive_rhythm_sigma": {
+    "name": "节奏松紧",
+    "type": "integer",
+    "default": 65,
+    "hint": "回消息的节奏要多不固定：0 = 每隔固定条数回（像按时刻表），65 = 正常，偶尔早、最晚等 1.5 倍，120 = 很随意，最晚等 2 倍。只改手感，平均多久回一次不变。"
+  },
+  "stats_window_days": {
+    "name": "数据使用",
+    "type": "integer",
+    "default": 7,
+    "hint": "每段平均按最近几天算，最少 7 天。"
+  },
+  "adaptive_weekday_bucket": {
+    "name": "使用星期数据",
+    "type": "switch",
+    "default": false,
+    "hint": "按同一个星期几比；不足 4 周退回最近 7 天。"
+  },
+  "bands_enabled": {
+    "name": "启用时段曲线",
+    "type": "switch",
+    "default": false,
+    "hint": "开着就按当前时段的概率决定回不回，普通模式那列变灰。"
+  },
+  "time_bands": {
+    "name": "时段曲线",
+    "type": "string",
+    "default": "[{\"s\": 0, \"e\": 24, \"v\": 20}, {\"s\": 24, \"e\": 46, \"v\": 8}, {\"s\": 46, \"e\": 48, \"v\": 20}]",
+    "hint": "一天切 48 格（每格半小时），每段一个概率；点段右上角的月亮，那段就是休息时段。"
+  },
+  "wake_words": {
+    "name": "唤醒短语",
+    "type": "multi_select",
+    "allow_custom": true,
+    "options": [],
+    "default": [],
+    "hint": "已下线，判定里不再使用。"
+  },
+  "nicknames": {
+    "name": "机器人外号",
+    "type": "multi_select",
+    "allow_custom": true,
+    "options": [],
+    "default": [],
+    "hint": "群友叫 bot 的其它称呼，可加多条。"
+  },
+  "nickname_wake": {
+    "name": "外号触发唤醒",
+    "type": "switch",
+    "default": true,
+    "hint": "开启后喊外号直接进判断，不看计数。"
+  },
+  "name_wake": {
+    "name": "昵称触发唤醒",
+    "type": "switch",
+    "default": true,
+    "hint": "开启后喊机器人名字直接进判断，不看计数。"
+  },
+  "mention_always_reply": {
+    "name": "艾特必回",
+    "type": "switch",
+    "default": false,
+    "hint": "被 @ 时跳过模型判断直接回（开启进阶模式后与「艾特触发」的区别才看得出来）。"
+  },
+  "mention_trigger": {
+    "name": "艾特触发",
+    "type": "switch",
+    "default": true,
+    "hint": "被 @ 时直接算一次触发，不攒条数。"
+  },
+  "nickname_wake_always_reply": {
+    "name": "外号必回",
+    "type": "switch",
+    "default": false,
+    "hint": "被喊外号时跳过模型判断直接回。"
+  },
+  "name_wake_always_reply": {
+    "name": "昵称必回",
+    "type": "switch",
+    "default": false,
+    "hint": "被喊名字时跳过模型判断直接回。"
+  },
+  "rest_wake_trigger": {
+    "name": "休息时段·触发",
+    "type": "switch",
+    "default": true,
+    "hint": "休息时段里被艾特 / 喊外号 / 喊名字，还算一次触发。关掉＝睡觉时被叫也不理。"
+  },
+  "rest_wake_always": {
+    "name": "休息时段·必回",
+    "type": "switch",
+    "default": false,
+    "hint": "休息时段里被叫到时，上面那几个「必回」照样生效。默认关＝睡觉时必回也不叫醒。"
+  },
+  "jitter_enabled": {
+    "name": "抖动",
+    "type": "switch",
+    "default": false,
+    "hint": "开启后，新消息触发后先等一会儿再动，把这几秒里的话攒到一起看。"
+  },
+  "jitter_seconds": {
+    "name": "抖动等待秒数",
+    "type": "integer",
+    "default": 7,
+    "hint": "固定等这么多秒再动。这期间又攒够一次触发，就再叠一档（7 → 14 → 21），最多叠到下面「防抖上限轮次」那么多档——群里一直有人说话时，这一轮最多等这么久。"
+  },
+  "jitter_max_rounds": {
+    "name": "防抖上限轮次",
+    "type": "integer",
+    "default": 3,
+    "hint": "最多叠几次。设 3 就是最多 7+7+7（秒数按上面那个），到顶就不再往后拖了。"
+  },
+  "burst_merge_enabled": {
+    "name": "连发合并",
+    "type": "switch",
+    "default": false,
+    "hint": "同一个人连着发好几条时只算一条消息。"
+  },
+  "burst_merge_seconds": {
+    "name": "连发合并秒数",
+    "type": "integer",
+    "default": 15,
+    "hint": "这段时间内同一人的连发只算 1 条消息。"
+  },
+  "short_msg_chars": {
+    "name": "短消息字数阈值（已停用）",
+    "type": "integer",
+    "default": 5,
+    "hint": "已由「不触发短语」取代，本项不再生效。"
+  },
+  "phrase_filter_enabled": {
+    "name": "短语黑名单",
+    "type": "switch",
+    "default": true,
+    "hint": "在清单中的短语不会触发判定。"
+  },
+  "phrase_filter_list": {
+    "name": "短语黑名单清单",
+    "type": "string",
+    "default": "[\"哈哈\",\"草\"]",
+    "hint": "一行一条；前后标点和空格会被忽略。"
+  },
+  "silent_trigger_enabled": {
+    "name": "静默兜底",
+    "type": "switch",
+    "default": true,
+    "hint": "聊天安静后，如果还有没处理的消息就补一次；休息时段不生效。"
+  },
+  "silent_trigger_minutes": {
+    "name": "兜底等待分钟",
+    "type": "integer",
+    "default": 3,
+    "hint": "群安静这么多分钟后补处理一次。"
+  },
+  "rest_mode_enabled": {
+    "name": "休息时段",
+    "type": "switch",
+    "default": true,
+    "hint": "普通模式用；这段时间只按下面的概率掷骰。"
+  },
+  "rest_start": {
+    "name": "休息开始",
+    "type": "string",
+    "default": "23:00",
+    "time30": true,
+    "hint": "半小时一档，从下拉里选。"
+  },
+  "rest_end": {
+    "name": "休息结束",
+    "type": "string",
+    "default": "08:00",
+    "time30": true,
+    "hint": "半小时一档，可跨零点。"
+  },
+  "rest_probability": {
+    "name": "休息时段回复概率",
+    "type": "integer",
+    "default": 2,
+    "hint": "休息时只按这个概率掷骰。"
+  },
+  "rest_silent_enabled": {
+    "name": "休息时段兜底",
+    "type": "switch",
+    "default": false,
+    "hint": "休息时段里也允许闲时兜底补一次。"
+  },
+  "rest_silent_minutes": {
+    "name": "休息兜底等待分钟",
+    "type": "integer",
+    "default": 3,
+    "hint": "休息时段里安静这么多分钟后补一次。"
+  },
+  "quota_hour_enabled": {
+    "name": "每小时配额",
+    "type": "switch",
+    "default": false,
+    "hint": "按小时封顶：每小时最多回几次，关掉不限。"
+  },
+  "quota_max_per_hour": {
+    "name": "每小时最多回复",
+    "type": "integer",
+    "default": 10,
+    "hint": "每小时最多回几次；@ 与叫名字直达也算。"
+  },
+  "quota_day_enabled": {
+    "name": "每天配额",
+    "type": "switch",
+    "default": false,
+    "hint": "按天封顶：每天最多回几次，0 点清零。"
+  },
+  "quota_max_per_day": {
+    "name": "每天最多回复",
+    "type": "integer",
+    "default": 100,
+    "hint": "每天最多回几次；@ 与叫名字直达也算。"
+  },
+  "backoff_enabled": {
+    "name": "连续不回后退避",
+    "type": "switch",
+    "default": false,
+    "hint": "连续不回时拉长下一次阈值，避免硬凑。这一项目前还在灰度：界面上是灰的，判定链路已经接好，等验证完再开放。"
+  },
+  "backoff_start_rejects": {
+    "name": "退避起始次数",
+    "type": "integer",
+    "default": 2,
+    "hint": "连续多少次不回后开始退避。"
+  },
+  "backoff_base_seconds": {
+    "name": "退避基准秒数",
+    "type": "integer",
+    "default": 15,
+    "hint": "首次退避秒数，之后指数增长。"
+  },
+  "backoff_max_seconds": {
+    "name": "退避封顶秒数",
+    "type": "integer",
+    "default": 300,
+    "hint": "退避等待上限。"
+  },
+  "backoff_bypass_count": {
+    "name": "积压绕过条数",
+    "type": "integer",
+    "default": 6,
+    "hint": "积压到这么多条时无视退避立即触发。"
+  },
+  "window_enabled": {
+    "name": "启用上下文窗口",
+    "type": "switch",
+    "default": true,
+    "hint": "核心功能，固定开启，不可关闭。"
+  },
+  "window_keep": {
+    "name": "裁切后保留条数",
+    "type": "integer",
+    "default": 30,
+    "hint": "裁切后窗口里只留最近这么多条消息（用户和 bot 一起算）。"
+  },
+  "window_buffer": {
+    "name": "裁切缓冲条数",
+    "type": "integer",
+    "default": 10,
+    "hint": "一直没触发请求时，窗口攒到「保留条数 + 缓冲」条就强制裁一次，别让上下文无限长。"
+  },
+  "history_images": {
+    "name": "历史里保留几张原图",
+    "type": "integer",
+    "default": 128,
+    "hint": "历史只留最近这么多张原图，更早换成 [图片]；0 = 全换。"
+  },
+  "window_trim_threshold": {
+    "name": "裁切触发阈值",
+    "type": "integer",
+    "default": 60,
+    "hint": "用户消息攒够这么多条才裁一次，攒够一倍再动刀更省缓存。"
+  },
+  "protect_tool_groups": {
+    "name": "保护工具调用组",
+    "type": "switch",
+    "default": true,
+    "hint": "裁切点避开工具调用配对，建议保持开启。"
+  },
+  "trim_strategy": {
+    "name": "裁切点选择方式",
+    "type": "enum",
+    "options": [
+      "mechanical"
+    ],
+    "default": "mechanical",
+    "hint": "按条数裁，避开工具调用配对。目前只有这一种方式。"
+  },
+  "summary_enabled": {
+    "name": "启用中期摘要",
+    "type": "switch",
+    "default": false,
+    "hint": "把裁掉的消息压成摘要放窗口顶部，纯机械，默认关。"
+  },
+  "summary_max_chars": {
+    "name": "中期摘要字数上限",
+    "type": "integer",
+    "default": 300,
+    "hint": "摘要总字数上限，超了从最旧丢起。"
+  },
+  "summary_line_chars": {
+    "name": "摘要每条压多少字",
+    "type": "integer",
+    "default": 40,
+    "hint": "每条消息压成摘要行保留多少字。"
+  },
+  "observe_enabled": {
+    "name": "注入群聊观察窗（已停用）",
+    "type": "switch",
+    "default": false,
+    "hint": "已停用，打开也不生效。"
+  },
+  "observe_messages": {
+    "name": "观察窗条数（已停用）",
+    "type": "integer",
+    "default": 30,
+    "hint": "已停用。"
+  },
+  "observe_max_chars": {
+    "name": "观察窗字符上限（已停用）",
+    "type": "integer",
+    "default": 1500,
+    "hint": "已停用。"
+  },
+  "media_cache_limit": {
+    "name": "图片缓存上限（每个群组）",
+    "type": "integer",
+    "default": 2000,
+    "hint": "每个群组各自保留的上限；整个目录最多＝这个值 × 群组数量。超了从最旧的删；2 小时内新收的先不动（用户 m06046 图2：刚决策完的图不该被裁掉）。"
+  },
+  "media_cache_limit_dm": {
+    "name": "图片缓存上限（私聊）",
+    "type": "integer",
+    "default": 200,
+    "hint": "每个私聊最多留多少张图，超了从最旧的删。"
+  },
+  "media_cache_keep_days": {
+    "name": "缓存保留天数",
+    "type": "integer",
+    "default": 56,
+    "hint": "超过这么多天的图片自动删掉，0 = 不限。"
+  },
+  "bot_qq": {
+    "name": "机器人 QQ 号",
+    "type": "string",
+    "default": "",
+    "hint": "已自动从框架读取，无需填写。"
+  },
+  "bot_name": {
+    "name": "机器人昵称",
+    "type": "string",
+    "default": "",
+    "hint": "bot 在历史里的显示名，留空取适配器昵称。"
+  },
+  "admin_name": {
+    "name": "管理员名字",
+    "type": "string",
+    "default": "",
+    "hint": "QQ 里的真实名字，不是群昵称。"
+  },
+  "admin_id": {
+    "name": "管理员 QQ 号",
+    "type": "string",
+    "default": "",
+    "hint": "填 QQ 号即可。"
+  },
+  "admin_list": {
+    "name": "管理员名单",
+    "type": "string",
+    "default": "",
+    "hint": "这一行同时管管理员的名字与 QQ 号：第一行填名字，第二行填 QQ 号，可以加多位。"
+  },
+  "trace_enabled": {
+    "name": "记录 agent 调用轨迹",
+    "type": "switch",
+    "default": true,
+    "hint": "已固定开启：关掉它，窗口页的思考/工具调用块和请求页明细就没数据了，所以设置页不再提供开关。"
+  },
+  "trace_keep": {
+    "name": "回复快照上限（群聊）",
+    "type": "integer",
+    "default": 100,
+    "hint": "每个群最多留多少份回复快照，一份带一次回复的完整轨迹。"
+  },
+  "trace_keep_dm": {
+    "name": "回复快照上限（私聊）",
+    "type": "integer",
+    "default": 50,
+    "hint": "每个私聊最多留多少份回复快照。"
+  },
+  "requests_keep_days": {
+    "name": "快照保留天数",
+    "type": "integer",
+    "default": 56,
+    "hint": "超过这么多天的回复快照和决策快照自动删掉，0 = 不限。"
+  },
+  "decision_keep": {
+    "name": "决策快照上限（群聊）",
+    "type": "integer",
+    "default": 100,
+    "hint": "每个群最多留多少份决策快照，一份是决策模型这一轮读到的全部内容和它的判断。"
+  },
+  "decision_keep_dm": {
+    "name": "决策快照上限（私聊）",
+    "type": "integer",
+    "default": 50,
+    "hint": "每个私聊最多留多少份决策快照。"
+  },
+  "decisions_keep_days": {
+    "name": "消息日志保留天数",
+    "type": "integer",
+    "default": 56,
+    "hint": "最少 56 天，只能调高——自适应要用这段时间的数据。"
+  },
+  "windows_keep_days": {
+    "name": "窗口快照保留天数",
+    "type": "integer",
+    "default": 56,
+    "hint": "超过这么多天的窗口快照自动删掉。"
+  },
+  "windows_keep": {
+    "name": "窗口快照上限（群聊）",
+    "type": "integer",
+    "default": 300,
+    "hint": "每个群最多留多少份窗口快照（回复轮和决策轮各记一份），0 = 不限。"
+  },
+  "windows_keep_dm": {
+    "name": "窗口快照上限（私聊）",
+    "type": "integer",
+    "default": 60,
+    "hint": "每个私聊最多留多少份窗口快照，0 = 不限。"
+  },
+  "summaries_keep": {
+    "name": "中期摘要上限（群聊）",
+    "type": "integer",
+    "default": 0,
+    "hint": "最多留多少个群的摘要，0 = 不限。"
+  },
+  "summaries_keep_dm": {
+    "name": "中期摘要上限（私聊）",
+    "type": "integer",
+    "default": 0,
+    "hint": "最多留多少个私聊的摘要，0 = 不限。"
+  },
+  "summaries_keep_days": {
+    "name": "中期摘要保留天数",
+    "type": "integer",
+    "default": 56,
+    "hint": "摘要留多久自动删，0 = 不限。"
+  },
+  "stats_keep_days": {
+    "name": "会话统计保留天数",
+    "type": "integer",
+    "default": 56,
+    "hint": "最少 56 天，只能调高——自适应要用这段时间的数据。"
+  },
+  "retry_max": {
+    "name": "自动重试次数",
+    "type": "integer",
+    "default": 2,
+    "hint": "出错后自动重试，0 = 不重试。"
+  },
+  "retry_delay": {
+    "name": "重试间隔秒数",
+    "type": "integer",
+    "default": 5,
+    "hint": "每次重试前等几秒。"
+  },
+  "watchdog_seconds": {
+    "name": "看门狗超时",
+    "type": "integer",
+    "default": 180,
+    "hint": "请求多少秒后还没等到回复，就强制停止，并走重试流程。可设 30-600 秒。"
+  },
+  "band_rest_probability": {
+    "name": "休息回复概率",
+    "type": "integer",
+    "default": 2,
+    "hint": "点了月亮的段，按这个概率掷骰。"
+  },
+  "adaptive_weekday_window_weeks": {
+    "name": "用几周",
+    "type": "integer",
+    "default": 8,
+    "hint": "最少 4 周。"
+  }
+}

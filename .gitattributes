@@ -1,0 +1,11 @@
+# 统一换行，避免 Windows 上 diff 整片变红
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.svg text
+*.py text
+*.json text
+*.md text
+*.html text
