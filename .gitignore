@@ -1,0 +1,18 @@
+# 仓库只放插件本体：测试与开发残留留在本地
+tests/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 编辑器/工具留下的临时文件
+*dsh-ops*
+*.lock
+*.tmp
+*.bak
+
+# 运行数据兜底（正常写在 KiraAI 的 plugin_data 下，不该出现在这里）
+requests/
+data/
+stats/
+*.log
+.DS_Store
