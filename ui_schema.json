@@ -228,6 +228,12 @@
     "default": 3,
     "hint": "最多叠几次。设 3 就是最多 7+7+7（秒数按上面那个），到顶就不再往后拖了。"
   },
+  "jitter_skip_must_go": {
+    "name": "必回不等防抖",
+    "type": "switch",
+    "default": true,
+    "hint": "被 @ 或被叫名字时直接开跑，不等防抖那几秒。关掉＝被点名也照样等完防抖再动。"
+  },
   "burst_merge_enabled": {
     "name": "连发合并",
     "type": "switch",

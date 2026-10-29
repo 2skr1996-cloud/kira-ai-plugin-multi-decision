@@ -50,7 +50,15 @@ from .state.sids import normalize_sid
 from .state.state_store import StateStore
 from .state.summaries import Summaries
 from .state.tracer import Tracer
-from .window.manager import WindowManager, view_of, media_list, _assistant_prefix
+from .window.manager import (
+    WindowManager,
+    view_of,
+    media_list,
+    public_media,
+    _media_by_ids,
+    _assistant_prefix,
+    _sniff_image_mime,
+)
 from .window.split import regroup_images, expand_packed_messages
 from .window.trim import count_messages, count_user_messages
 
@@ -60,6 +68,30 @@ PLUGIN_ID = "kira-ai-plugin-multi-decision"
 #: 删会话（purge_session）会拿它拼目录名再 rmtree，所以入口必须挡掉 ".." 与路径分隔符，
 #: 否则一个构造过的 sid 就能删到插件数据目录外面去（审查报告的高危项）。
 _SID_RE = re.compile(r"^[A-Za-z0-9_\-:.]{1,80}$")
+
+
+def _quote_media_by_mid(mid: str, raw_sid: str) -> list:
+    """按 message_id 反查「那条消息的图」，给引用块用（用户 m12256）。
+
+    请求快照里带着 media 时用不上这里；被引用那条早就滑出窗口、当轮快照也没
+    留下图时，只能顺着 message_id 去 session_media / 插件索引 / 归档库里认回来，
+    再过一遍 public_media 把副本落进插件缓存。
+    """
+    out: list = []
+    try:
+        refs = _media_by_ids("[message_id: %s]" % str(mid or ""), raw_sid)
+    except Exception:
+        refs = []
+    for ref in (refs or [])[:6]:
+        if not isinstance(ref, dict):
+            continue
+        try:
+            got = public_media(str(ref.get("path") or ""), str(ref.get("mime") or ""), raw_sid)
+        except Exception:
+            got = {}
+        if got and (got.get("path") or got.get("url")):
+            out.append(got)
+    return out
 
 
 def _sid_ok(sid: str) -> bool:
@@ -281,6 +313,8 @@ PER_SESSION_KEYS = (
     "jitter_seconds",
     # 用户 m05691 第 3 条：抖动最多叠几跳
     "jitter_max_rounds",
+    # 用户 m13212 后：@ / 叫名字（必回）要不要跳过抖动，也做成开关
+    "jitter_skip_must_go",
     "burst_merge_enabled",
     "burst_merge_seconds",
     "short_msg_chars",
@@ -844,6 +878,9 @@ class MultiDecisionPlugin(BasePlugin):
         self.jitter_seconds = max(0, _as_int(cfg.get("jitter_seconds"), 7))
         # 用户 m05691 第 3 条：抖动最多叠几跳（默认 3 次 = 7+7+7），到顶就不再往后拖。
         self.jitter_max_rounds = max(1, _as_int(cfg.get("jitter_max_rounds"), 3))
+        # 用户 m13212 后：必回（@ / 叫名字）默认跳过抖动——都被点名了还干等几秒，
+        # 用户看到的就是「@ 完一秒多才动」。想让它也老实等完，把这个开关关掉。
+        self.jitter_skip_must_go = _as_bool(cfg.get("jitter_skip_must_go"), True)
         # v3.44（用户本轮第 2 条）：连发合并同样加开关，默认关——关着时同一人连发
         # 每条都照常计数；开了才按 burst_merge_seconds 合并。
         self.burst_merge_enabled = _as_bool(cfg.get("burst_merge_enabled"), False)
@@ -1918,6 +1955,7 @@ class MultiDecisionPlugin(BasePlugin):
             "jitter_enabled": self.eff("jitter_enabled", sid),
             "jitter_seconds": self.eff("jitter_seconds", sid),
             "jitter_max_rounds": self.eff("jitter_max_rounds", sid),
+            "jitter_skip_must_go": self.eff("jitter_skip_must_go", sid),
             "burst_merge_enabled": self.eff("burst_merge_enabled", sid),
             "burst_merge_seconds": self.eff("burst_merge_seconds", sid),
             "silent_trigger_enabled": self.eff("silent_trigger_enabled", sid),
@@ -2969,10 +3007,21 @@ class MultiDecisionPlugin(BasePlugin):
             if k and k not in want:
                 want.append(k)
         want = want[:12]
+        try:
+            _rsid = self.window.raw_sid(sid) if self.window is not None else ""
+        except Exception:
+            _rsid = ""
         missing = [k for k in want if (sid, k) not in cache]
         if missing:
             left = set(missing)
-            pat = re.compile(r"\[message_id:\s*([-\d]+)\]")
+            # 两种形态：用户行「[17:46] [message_id: -357681150] [user_nickname: 田野, …] | 正文」
+            # 与 bot 行「[17:37] <msg message_id="1888530223">[昵称] <text>正文</text></msg>」。
+            # 以前只认前者，引用 bot 自己的话就永远查不回来（用户 m11986）。
+            pat = re.compile(r'\[message_id:\s*([-\d]+)\]|<msg\s+message_id="(-?\d+)"', re.I)
+            xml_pat = re.compile(
+                r'<msg\s+message_id="(-?\d+)"[^>]*>\s*\[([^\]]*)\]\s*<text>([\s\S]*?)</text>',
+                re.I,
+            )
             try:
                 rounds = self.request_log.list_rounds(sid, limit=80) or []
             except Exception:
@@ -2992,25 +3041,55 @@ class MultiDecisionPlugin(BasePlugin):
                         txt = str(m.get("text") or m.get("content") or m.get("raw") or "")
                     else:
                         txt = str(getattr(m, "content", "") or "")
-                    if "message_id:" not in txt:
+                    if "message_id" not in txt:
                         continue
                     hit = ""
                     for mm in pat.finditer(txt):
-                        if mm.group(1) in left:
-                            hit = mm.group(1)
+                        mid = mm.group(1) or mm.group(2)
+                        if mid in left:
+                            hit = mid
                             break
                     if not hit:
                         continue
                     nm = re.search(r"\[user_nickname:\s*([^,\]]+)", txt)
                     tm = re.match(r"\s*\[(\d{1,2}:\d{2})\]", txt)
-                    body = txt
-                    sp = re.split(r"\]\s*\|\s*", txt, 1)
-                    if len(sp) > 1:
-                        body = sp[1]
+                    xm = xml_pat.search(txt)
+                    if xm and xm.group(1) == hit:
+                        # bot 自己发的那行进不了上面那套切法：它没有「 | 」，
+                        # 昵称在方括号里、正文包在 <text> 里（用户 m11986）。
+                        who = xm.group(2).strip()
+                        body = xm.group(3).strip()
+                    else:
+                        who = nm.group(1).strip() if nm else ""
+                        body = txt
+                        sp = re.split(r"\]\s*\|\s*", txt, 1)
+                        if len(sp) > 1:
+                            body = sp[1]
+                    # 用户 m12256：被引用那条自己也带图时（大椰果 18:21 发图、哦豁 18:37 引用），
+                    # 引用块里要画出那张图，不能只画一个「图片」占位。请求快照的行里带着 media
+                    # （request_log._decorate_rows 按 message_id 补的），这里顺手过一遍
+                    # public_media：副本落进插件缓存，框架之后清理 session_media 也不丢。
+                    med: list = []
+                    if isinstance(m, dict):
+                        refs = m.get("media") or []
+                        for ref in (refs[:6] if isinstance(refs, list) else []):
+                            if not isinstance(ref, dict):
+                                continue
+                            try:
+                                got = public_media(
+                                    str(ref.get("path") or ""),
+                                    str(ref.get("mime") or ""),
+                                    _rsid,
+                                )
+                            except Exception:
+                                got = {}
+                            if got and (got.get("path") or got.get("url")):
+                                med.append(got)
                     cache[(sid, hit)] = {
-                        "who": nm.group(1).strip() if nm else "",
+                        "who": who,
                         "ts": tm.group(1) if tm else "",
                         "body": body.strip(),
+                        "media": med,
                     }
                     left.discard(hit)
             if len(cache) > 4000:
@@ -3018,6 +3097,13 @@ class MultiDecisionPlugin(BasePlugin):
         for k in want:
             got = cache.get((sid, k))
             if got:
+                # 快照那行没带图（图片是更早一轮发的，或者框架没补上），
+                # 再按 message_id 去 session_media / 插件索引 / 归档库认一次。
+                if not got.get("media"):
+                    refound = _quote_media_by_mid(k, _rsid)
+                    if refound:
+                        got = dict(got)
+                        got["media"] = refound
                 out[k] = got
         return {"ok": True, "items": out}
 
@@ -4464,10 +4550,27 @@ class MultiDecisionPlugin(BasePlugin):
             # 拆解，前端悬停能看到「防抖等了 X 秒 · 模型 Y 秒」。老轨迹没有就是 None。
             et = (trace or {}).get("elapsed_trigger")
             it["elapsed_trigger"] = et if isinstance(et, (int, float)) else None
-            # 用户 m06046 图4：回复这一行不再带防抖。进阶模式下抖动是「决策之前」的
-            # 等待，已经记在决策那一行；这里按 starts - 触发时刻算出来的数把决策耗时
-            # 也裹进去了，是错的。字段留着给老记录兼容，值一律 None。
-            it["elapsed_debounce"] = None
+            # 用户 m06046 图4：这里以前写的是 elapsed_trigger，把「决策那几秒」也裹进
+            # 防抖里，数是错的。用户 m13212 又要把防抖单独显示出来，所以只给纯抖动那段：
+            # 优先用引擎量到的 debounce_fixed（触发 → 真正放行），没有就退回
+            # debounce - decision_elapsed（轨迹里的 debounce = 请求开始 - 触发时刻）。
+            # 两个都取不到、或者算出来接近 0，就仍然是 None（前端画「—」）。
+            try:
+                _fix = float((trace or {}).get("debounce_fixed") or 0.0)
+                _raw = float((trace or {}).get("debounce") or 0.0)
+                _dcv = float((trace or {}).get("decision_elapsed") or 0.0)
+                # 用户 m13212：链路是「防抖 → 决策 → 回复」，走过决策的那一轮，
+                # 防抖只记在决策行，回复行一律留空（显示「—」）；普通模式（没走决策）
+                # 才把「触发 → 请求开始」这段等待记在回复行。
+                if _dcv > 0:
+                    _dbo = 0.0
+                elif _fix > 0:
+                    _dbo = _fix
+                else:
+                    _dbo = _raw
+                it["elapsed_debounce"] = round(_dbo, 2) if _dbo >= 0.05 else None
+            except (TypeError, ValueError):
+                it["elapsed_debounce"] = None
             # 用户 m05453：这一轮决策花了多久（判要回才有值，必回那一路是 0）。
             dec = (trace or {}).get("decision_elapsed")
             it["elapsed_decision"] = dec if isinstance(dec, (int, float)) else None
@@ -4951,7 +5054,12 @@ class MultiDecisionPlugin(BasePlugin):
             rec["retry_outcome"] = self._retry_outcome_of(rec, _rows)
             raw_sid = self.window.raw_sid(sid) if self.window is not None else ""
             who = self.window._bot_name(sid) if self.window is not None else ""
-            history_source = copy.deepcopy(data.get("messages") or [])
+            # 用户本轮第 3 条：② 历史消息只画历史那段。老写法取完整 messages，
+            # 本轮那条（stage 已切进 incoming_messages）会在这里再画一遍，
+            # 于是 ② 和 ③ 看着像同一条 @ 出现两次。有 history_messages 就优先用它。
+            history_source = copy.deepcopy(
+                data.get("history_messages") or data.get("messages") or []
+            )
             try:
                 history_source = regroup_images(history_source)
             except Exception as exc:
@@ -5145,6 +5253,164 @@ class MultiDecisionPlugin(BasePlugin):
             return trace
         return None
 
+    # 用户 m12833 第 2 条：群里发来的 x.com / twitter.com 推文链接，在正文里只是
+    # 一行纯文本——点不了、也看不出里面说了什么。浏览器直连 x.com 取不到内容
+    # （要登录、还有 CORS），改由插件后端去只读镜像要一份 JSON，前端画成卡片。
+    # 只认「status/<纯数字 id>」这种长相，其余链接一概不代理——否则这里就成了
+    # 一个任意 URL 的抓取口子。
+    _TWEET_URL_RE = re.compile(
+        r"^https?://(?:www\.|mobile\.)?(?:x|twitter)\.com"
+        r"/(?:[A-Za-z0-9_]{1,20}/)?status(?:es)?/(\d{6,25})",
+        re.I,
+    )
+
+    def _tweet_img(self, url: str) -> str:
+        """把推文里的图（头像、视频封面）抓一份存进插件自己的 media_cache。
+
+        浏览器直连 pbs.twimg.com 会卡到超时（用户 m12833 实测：curl 通、页面
+        20 秒后报 net::ERR_TIMED_OUT），所以这些图只能由后端代取，前端统一走
+        /media 那条同源路。取不到就返回空串，卡片上干脆不画这张图，绝不留裂图。
+        """
+        u = str(url or "").strip()
+        if not u.startswith("https://pbs.twimg.com/"):
+            return ""
+        import hashlib
+        import urllib.request as _ur
+
+        from core.utils.path_utils import get_data_path
+
+        folder = Path(str(get_data_path())) / "plugin_data" / PLUGIN_ID / "media_cache"
+        key = "tw_" + hashlib.sha1(u.encode("utf-8")).hexdigest()[:24]
+        for ext in (".jpg", ".png", ".webp", ".gif"):
+            if (folder / (key + ext)).is_file():
+                return "plugin_data/%s/media_cache/%s%s" % (PLUGIN_ID, key, ext)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            req = _ur.Request(
+                u,
+                headers={
+                    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                   "Chrome/124.0 Safari/537.36"),
+                    "Referer": "https://x.com/",
+                },
+            )
+            with _ur.urlopen(req, timeout=8) as resp:
+                blob = resp.read(4 * 1024 * 1024 + 1)
+                ctype = str(resp.headers.get("Content-Type") or "").lower()
+            if not blob or len(blob) > 4 * 1024 * 1024:
+                return ""
+            ext = ".jpg"
+            if "png" in ctype:
+                ext = ".png"
+            elif "webp" in ctype:
+                ext = ".webp"
+            elif "gif" in ctype:
+                ext = ".gif"
+            (folder / (key + ext)).write_bytes(blob)
+            return "plugin_data/%s/media_cache/%s%s" % (PLUGIN_ID, key, ext)
+        except Exception as exc:
+            logger.debug("[multi-decision] 推文配图没取到 %s：%s", u[:80], type(exc).__name__)
+            return ""
+
+    @_api("GET", "/tweet")
+    async def api_tweet(self, u: str = ""):
+        """一条推文的展示数据：作者、正文、图片、互动数。
+
+        前端把正文里的推文链接换成带 data-tw 的骨架卡，渲染完再回来问一次，
+        把卡片填满。取不到就返回 ok=False，前端留着「打不开」的样子，不猜内容。
+        """
+        import asyncio
+        import json as _json
+        import urllib.request as _ur
+
+        m = self._TWEET_URL_RE.match(str(u or "").strip())
+        if not m:
+            return {"ok": False, "detail": "不是推文链接"}
+        tw_id = m.group(1)
+        cache = getattr(self, "_tweet_cache", None)
+        if cache is None:
+            cache = self._tweet_cache = {}
+        prev = cache.get(tw_id)
+        now = time.time()
+        # 成功的一小时够用（同一条推文整页重绘时别再打一次外网）；
+        # 失败的只记 90 秒，免得网络一抖就把「取不到」钉死
+        if prev and now - prev[0] < (1800 if (prev[1] or {}).get("ok") else 90):
+            return prev[1]
+
+        def _work():
+            req = _ur.Request(
+                "https://api.fxtwitter.com/status/%s" % tw_id,
+                headers={
+                    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                   "Chrome/124.0 Safari/537.36"),
+                    "Accept": "application/json",
+                },
+            )
+            with _ur.urlopen(req, timeout=8) as resp:
+                data = _json.loads(resp.read(1500000).decode("utf-8", "replace"))
+            t = (data or {}).get("tweet") or {}
+            au = t.get("author") or {}
+            if not t.get("id"):
+                return {"ok": False, "detail": "推文数据不完整"}
+            media = []
+            for one in ((t.get("media") or {}).get("all") or [])[:4]:
+                kind = str(one.get("type") or "")
+                if kind == "photo":
+                    media.append({"kind": "photo",
+                                  "thumb": str(one.get("url") or ""),
+                                  "url": str(one.get("url") or ""), "dur": 0})
+                elif kind in ("video", "gif"):
+                    media.append({"kind": "video",
+                                  "thumb": str(one.get("thumbnail_url") or ""),
+                                  "url": str(one.get("url") or ""),
+                                  "dur": int(float(one.get("duration") or 0))})
+            when = ""
+            try:
+                from email.utils import parsedate_to_datetime
+
+                dt = parsedate_to_datetime(str(t.get("created_at") or ""))
+                when = dt.astimezone().strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                when = str(t.get("created_at") or "")[:16]
+            out = {
+                "ok": True,
+                "id": str(t.get("id") or ""),
+                "url": str(t.get("url") or ""),
+                "name": str(au.get("name") or ""),
+                "handle": str(au.get("screen_name") or ""),
+                "avatar": str(au.get("avatar_url") or ""),
+                "text": str(t.get("text") or ""),
+                "when": when,
+                "likes": int(t.get("likes") or 0),
+                "retweets": int(t.get("retweets") or 0),
+                "replies": int(t.get("replies") or 0),
+                "views": int(t.get("views") or 0),
+                "media": media,
+                "sensitive": bool(t.get("possibly_sensitive")),
+            }
+            # 图一律由后端代取：浏览器直连 pbs.twimg.com 会卡到超时（用户 m12833
+            # 实测 curl 通、页面 20 秒后 ERR_TIMED_OUT），取不到的干脆不给 src。
+            out["avatar"] = self._tweet_img(out.get("avatar") or "")
+            kept = []
+            for one in out.get("media") or []:
+                one["thumb"] = self._tweet_img(one.get("thumb") or "")
+                if one["thumb"]:
+                    kept.append(one)
+            out["media"] = kept
+            return out
+
+        try:
+            loop = asyncio.get_running_loop()
+            out = await loop.run_in_executor(None, _work)
+        except Exception as exc:
+            out = {"ok": False, "detail": "取不到推文（%s）" % type(exc).__name__}
+        if len(cache) > 300:
+            cache.clear()
+        cache[tw_id] = (now, out)
+        return out
+
     @_api("GET", "/media")
     async def api_media(self, path: str = ""):
         """把 session_media 里的图片原样吐出去，页面才能显示别人发的表情和图片。
@@ -5199,7 +5465,11 @@ class MultiDecisionPlugin(BasePlugin):
             logger.warning(f"[multi-decision] 读取图片失败 {target.name}：{type(exc).__name__}: {exc}")
             logger.debug("[multi-decision] 读取图片失败", exc_info=True)
             return {"ok": False, "detail": "图片读取失败（%s）" % type(exc).__name__}
-        mime = mimetypes.guess_type(target.name)[0] or "image/jpeg"
+        mime = mimetypes.guess_type(target.name)[0]
+        if not mime:
+            # 归档图（session_media/archive/<内容哈希>）没有后缀，缓存副本也可能是
+            # 老版本留下的 .img 名字，只能看文件头才知道是 png 还是 gif（用户 m11618）。
+            mime = _sniff_image_mime(target) or "image/jpeg"
         return Response(
             content=blob,
             media_type=mime,

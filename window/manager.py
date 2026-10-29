@@ -398,6 +398,10 @@ def _media_by_ids(content, raw_sid: str = "") -> list:
                 # 或整个删掉，而插件在收消息那一刻就留过副本（用户本轮图2：23:22
                 # 刚收的图，23:47 就显示「图片已清理」，其实缓存里好好的）。
                 found = _media_by_mid_index(mid)
+            if not found:
+                # 用户 m11618：框架入库时就把图归档成 session_media/archive/<内容哈希>，
+                # 形状跟上面两种都不一样（扁平、与消息 id 无关），只能查库认回来。
+                found = _media_from_db(mid)
             # 媒体可能稍后才下载完成，不缓存空结果。
             if found:
                 if len(_MEDIA_ID_CACHE) >= 2048:
@@ -448,6 +452,109 @@ def _media_by_mid_index(mid: str) -> list:
         # 命中的副本刚被页面用到，把写入时间推一下，别让裁剪把它当最老的删掉。
         for item in out:
             _touch_cache_file(cache / Path(item["path"]).name)
+    return out
+
+
+# 用户 m11618（2026-10-29）：群里的图显示「图片已清理」，查下来一张都没丢——
+# 框架在消息入库时把图片复制成 session_media/archive/<内容哈希>，并把这条消息
+# chain 里的 element.file 换成那个归档路径（core/chat/message_history.py:33
+# _archive_media、:89 写进 chain，file_type = "archive"）。archive 是扁平文件、
+# 名字与 message_id 无关，所以上面两种「按会话目录」「按消息哈希」的反查永远
+# 碰不到它。这里直接读框架的消息库，把归档过的图认回来。
+_MEDIA_DB_CACHE = {}
+_MEDIA_DB_LIMIT = 1024
+
+
+_EXT_BY_MIME = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+}
+
+
+def _sniff_image_mime(path) -> str:
+    """archive 里的文件名是内容哈希、没有后缀，靠前 16 字节猜一下类型。"""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        return ""
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head.startswith(b"BM"):
+        return "image/bmp"
+    return ""
+
+
+def _media_from_db(mid: str) -> list:
+    """按 message_id 查框架消息库，返回它归档过的图片路径（相对 data）。
+
+    只读打开 data.db（mode=ro），查一条就关，不长期持有连接——框架自己开着 WAL，
+    读不受影响；库被锁、老版本没这张表，一律当「没有」，不影响原有反查链。
+    """
+    mid = str(mid or "").strip()
+    if not mid:
+        return []
+    hit = _MEDIA_DB_CACHE.get(mid)
+    if hit and _media_paths_alive(hit):
+        return hit
+    root = _data_root()
+    if root is None:
+        return []
+    db = root / "data.db"
+    try:
+        if not db.is_file():
+            return []
+        import sqlite3
+
+        con = sqlite3.connect("file:%s?mode=ro" % db.as_posix(), uri=True, timeout=1.0)
+        try:
+            row = con.execute(
+                "SELECT chain FROM messages WHERE platform_message_id=? LIMIT 1", (mid,)
+            ).fetchone()
+        finally:
+            con.close()
+    except Exception:
+        logger.debug("[multi-decision] 读消息库认图失败（已忽略）", exc_info=True)
+        return []
+    chain = row[0] if row else None
+    if not chain:
+        return []
+    try:
+        items = json.loads(chain) if isinstance(chain, (str, bytes, bytearray)) else chain
+    except Exception:
+        return []
+    out, seen = [], set()
+    for el in items or []:
+        if not isinstance(el, dict):
+            continue
+        if str(el.get("type") or "") not in ("image", "sticker", "emoji"):
+            continue
+        if str(el.get("file_type") or "") != "archive":
+            continue
+        rel = str(el.get("file") or "").strip().replace("\\", "/")
+        if not rel or rel in seen:
+            continue
+        target = root / rel
+        try:
+            if not target.is_file() or target.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
+        seen.add(rel)
+        out.append({"path": rel, "mime": str(el.get("mime") or "") or _sniff_image_mime(target)})
+    if out:
+        if len(_MEDIA_DB_CACHE) >= _MEDIA_DB_LIMIT:
+            _MEDIA_DB_CACHE.clear()
+        _MEDIA_DB_CACHE[mid] = out
     return out
 
 
@@ -1135,7 +1242,9 @@ def _cache_media_file(source: Path, rel_key: str, sid: str = "") -> str:
                     return f.relative_to(root).as_posix()
             except OSError:
                 continue
-        suffix = source.suffix or ".img"
+        # 归档图的文件名是内容哈希、没有后缀，靠文件头补一个：前端按后缀取
+        # Content-Type，缺后缀会被当成 image/jpeg（png/gif 就成了裂图或静止图）。
+        suffix = source.suffix or _EXT_BY_MIME.get(_sniff_image_mime(source), "") or ".img"
         name = digest + suffix
         target = cache / name
         if target.is_file() and target.stat().st_size == size:
@@ -1278,11 +1387,26 @@ def media_list(content, raw_sid: str = "") -> list:
         found = _media_by_ids(content, raw_sid)
         if found:
             # 用户 m02993 图11：这条分支以前只报路径、不碰缓存，于是「窗口里正显示着
-            # 的图」和「缓存里最旧的图」是两回事；这里统一刷 mtime，让正在显示的不被裁。
+            # 的图」和「缓存里最旧的图」是两回事。
+            # 用户 m11618：更糟的是框架归档过的图（session_media/archive/<内容哈希>）
+            # 也只是原样报路径——页面当下能显示，插件却一份副本都没留，框架回收归档
+            # 之后这张图就真没了。这里统一过一遍 public_media：顺手复制进插件缓存、
+            # 并把缓存路径报给前端（快照里存的就是这一刻的字符串，回看也还在）。
+            public, seen = [], set()
             for it in found:
-                if isinstance(it, dict):
-                    _touch_media_ref(it.get("path") or "")
-            return found
+                if not isinstance(it, dict):
+                    continue
+                ref = public_media(it.get("path") or "", str(it.get("mime") or ""), raw_sid)
+                if not ref:
+                    continue
+                key = ref.get("path") or ref.get("url") or ""
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                public.append(ref)
+            if public:
+                return public
         # 用户 m02993 图11：反查不到、正文又只剩「| [图片]」时给个缺失占位，
         # 否则前端什么也不画，那条消息看上去就像图被吞了。
         if _bare_media_placeholder(content):
@@ -1455,6 +1579,8 @@ def _tool_name(msg) -> str:
 # v4.01（用户 m11166 图1/图2）：决策注记在快照里也要按注记的长相出现，
 # 不能顶着 bot 的名字、正文还带头里的「[决策记录] HH:MM」。
 _DEC_NOTE_NAME = "对当前聊天消息的决策建议"
+#: 注记正文开头的时间戳（v4.39）：真正的请求原文就是「[HH:MM] 判定要回（…）」。
+_DEC_NOTE_TS_HEAD = re.compile(r"^\s*\[(\d{1,2}:\d{2})\]\s*")
 # 用户 m04617 图1：这个名字改过（旧的是「对以上聊天记录的决策建议」），
 # 老快照里还留着旧名，认注记时两个都得认，不能把历史记录当成 bot 说过的话。
 _DEC_NOTE_NAME_OLD = "对以上聊天记录的决策建议"
@@ -1513,6 +1639,14 @@ def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list
                 item["raw"] = text
                 if _m.group(1):
                     item["at"] = _m.group(1)
+            elif _DEC_NOTE_TS_HEAD.match(text):
+                # v4.39（用户 m20312）：注记正文开头也带「[HH:MM] 」了（真正的请求原文）。
+                # 时间拎成 at 给左侧那一列，正文剥掉前缀；raw 保留整行，原文档照原样显示。
+                _m2 = _DEC_NOTE_TS_HEAD.match(text)
+                _body = text[_m2.end():]
+                item["text"] = _body
+                item["chars"] = visible_chars(_body)
+                item["at"] = _m2.group(1)
             else:
                 item["raw"] = text
                 # v4.05（用户 m12604）：正文不再带「[决策记录] HH:MM」，
@@ -1899,22 +2033,35 @@ def stamp_assistant_time(messages) -> List[Any]:
             continue
         # v4.03（用户 m11947）：注记自带「[决策记录] HH:MM」，再补一个时间就成了
         # 「[21:34] [决策记录] 21:34 …」，而且按前后 user 推出来的时间每轮可能不同。
-        if is_decision_note(msg) or _TIME_HEAD_RE.match(text):
-            out.append(msg)
-            continue
+        # v4.39（用户 m20312）：「[XX:XX] 时间戳还是要加」——注记也照 bot 消息一样带时间，
+        # 但用它自己的 ts（判定那一刻），不按前后 user 推；同一个 ts 每轮算出来一样，前缀不抖。
         stamp = ""
-        for j in range(i - 1, -1, -1):
-            if times[j]:
-                stamp = times[j]
-                break
-        if not stamp:
-            for j in range(i + 1, len(times)):
+        if is_decision_note(msg):
+            try:
+                _nts = _get(msg, "ts")
+                if _nts:
+                    stamp = time.strftime("%H:%M", time.localtime(float(_nts)))
+            except Exception:
+                stamp = ""
+            if not stamp or _TIME_HEAD_RE.match(text):
+                out.append(msg)
+                continue
+        else:
+            if _TIME_HEAD_RE.match(text):
+                out.append(msg)
+                continue
+            for j in range(i - 1, -1, -1):
                 if times[j]:
                     stamp = times[j]
                     break
-        if not stamp:
-            out.append(msg)
-            continue
+            if not stamp:
+                for j in range(i + 1, len(times)):
+                    if times[j]:
+                        stamp = times[j]
+                        break
+            if not stamp:
+                out.append(msg)
+                continue
         # 时间戳放最前面，和 user 的「[23:52] [message_id: …]」一个位置（用户 m30252）
         newtext = "[" + stamp + "] " + text
         newc = newtext
@@ -2725,6 +2872,7 @@ class WindowManager:
         added = merge_framework_messages(
             st, clean, seed_limit=0, anchor_msg=anchor,
             require_anchor=sid.startswith("gm:"), trusted_messages=extra,
+            mention_names=self.mention_names(sid),
         )
         # 框架 assemble 会把整批图片都挂到最后一条 user 上（用户 m26465），
         # 入窗后按 path 里的 message_id 哈希把图挪回原主。只修被改到的消息。
@@ -3064,6 +3212,31 @@ class WindowManager:
             except Exception:
                 name = ""
         return name
+
+    def mention_names(self, sid: str = "") -> List[str]:
+        """这个会话里「叫到机器人」的所有写法：主名 + 设置页填的外号。
+
+        跟 decision/engine.py 的 _mark_mentions 取同一份，否则窗口页标了、
+        请求快照没标，两边对不上（用户 m12833）。
+        """
+        names: List[str] = []
+        own = self._bot_name(sid)
+        if own:
+            names.append(own)
+        try:
+            extra = self.plugin.eff("nicknames", sid) or []
+        except Exception:
+            extra = []
+        if isinstance(extra, str):
+            extra = [extra]
+        try:
+            for one in extra:
+                one = str(one or "").strip()
+                if one and one not in names:
+                    names.append(one)
+        except Exception:
+            pass
+        return names
 
     def _prefix_assistant(self, messages: List[Any], sid: str = "") -> List[Any]:
         """给机器人自己的历史消息前面加上「【名字】」。

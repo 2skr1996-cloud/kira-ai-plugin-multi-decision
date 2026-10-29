@@ -641,6 +641,35 @@ html[data-theme="dark"] .mc-bd .at{background:rgba(59,130,246,.26);color:#93c5fd
     html[data-theme="dark"] .mc-bd .qcard.live{border-color:rgba(244,63,94,.46);}
     html[data-theme="dark"] .mc-bd .qcard .qc-logo.live{background:#f43f5e;border-color:#e11d48;}
     html[data-theme="dark"] .mc-bd .qcard .qc-live{background:#f43f5e;color:#fff;}
+    /* 用户 m12833 第 2 条：推文卡（x.com / twitter.com 的 status 链接）。正文渲染是同步的，
+       数据要等后端回来，所以先画一张骨架卡，fillTweets() 拿到数据再按 .tw-* 重画：
+       头像 + 昵称/@handle + 正文 + 图 + 互动数。 */
+    .mc-bd .qcard.tw{max-width:460px;}
+    .mc-bd .qcard .qc-logo.tw{background:#111;border-color:#111;color:#fff;padding:8px;}
+    .mc-bd .qcard .qc-logo.tw svg{width:100%;height:100%;}
+    html[data-theme="dark"] .mc-bd .qcard .qc-logo.tw{background:#000;border-color:#3a3a3a;color:#fff;}
+    .mc-bd .qcard.tw .tw-hd{display:flex;align-items:center;gap:8px;padding:10px 11px 0;}
+    .mc-bd .qcard.tw .tw-av{width:34px;height:34px;border-radius:50%;object-fit:cover;flex:none;background:var(--soft);}
+    .mc-bd .qcard.tw .tw-av.ph{display:inline-flex;align-items:center;justify-content:center;
+      font-weight:700;font-size:15px;color:var(--muted);}
+    .mc-bd .qcard.tw .tw-who{display:flex;flex-direction:column;min-width:0;line-height:1.32;}
+    .mc-bd .qcard.tw .tw-nm{font-size:13px;font-weight:600;color:var(--text);
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .mc-bd .qcard.tw .tw-hd2{font-size:11.5px;color:var(--muted);
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .mc-bd .qcard.tw .tw-tx{padding:6px 11px 0;font-size:13px;line-height:1.62;color:var(--text);
+      white-space:pre-wrap;word-break:break-word;
+      display:-webkit-box;-webkit-line-clamp:8;-webkit-box-orient:vertical;overflow:hidden;}
+    .mc-bd .qcard.tw .tw-med{display:grid;gap:3px;margin:8px 0 0;grid-template-columns:1fr;}
+    .mc-bd .qcard.tw .tw-med.n2,.mc-bd .qcard.tw .tw-med.n3,.mc-bd .qcard.tw .tw-med.n4{grid-template-columns:1fr 1fr;}
+    .mc-bd .qcard.tw .tw-mi{position:relative;display:block;overflow:hidden;background:var(--soft);}
+    .mc-bd .qcard.tw .tw-mi img{display:block;width:100%;height:auto;max-height:250px;object-fit:cover;}
+    .mc-bd .qcard.tw .tw-mi.bad{display:none;}
+    .mc-bd .qcard.tw .tw-play{position:absolute;left:8px;bottom:8px;padding:1px 7px;border-radius:8px;
+      background:rgba(0,0,0,.62);color:#fff;font-size:11px;font-weight:500;}
+    .mc-bd .qcard.tw .qc-src{display:flex;align-items:center;gap:5px;}
+    .mc-bd .qcard.tw .qc-src svg{flex:none;opacity:.75;}
+    .mc-bd .qcard.tw.tw-bad{border-style:dashed;}
     .source-note{display:flex;align-items:flex-start;gap:9px;margin:8px 12px;padding:9px 11px;background:var(--soft);border:1px solid var(--line);border-radius:9px;color:var(--muted);font-size:12px;line-height:1.65;}
     .source-note .source-mark{flex:none;color:var(--accent);font-weight:600;}
     .source-note strong{font-weight:500;color:var(--text);}
@@ -778,6 +807,10 @@ html[data-theme="dark"] .mc-bd .at{background:rgba(59,130,246,.26);color:#93c5fd
     .mc-bd .chip-line{display:flex;align-items:flex-start;gap:8px;}
     .mc-bd .chip-line > .chb{margin-top:6px;}
     .mc-bd .chip-line .qcard{flex:1;min-width:0;}
+  /* 正文里抽出来的分享卡（用户 m13750）：正文左、卡片右，别再整条压在文字下面 */
+  .mc-bd .chip-line.tc > .mono{flex:1;min-width:0;}
+  .mc-bd .chip-line.tc > .qcard{flex:0 1 320px;min-width:200px;}
+  .mc-bd .chip-line.tc > .chb{align-self:flex-end;}
 .mc-bd .mono{font-family:inherit;font-size:13px;line-height:1.75;}
 /* v3.59（用户 m17212 图1）：调用记录不要小卡、不要徽章，回到朴素的一行一条文本——
    工具名淡色、动词灰色、参数照旧，只靠排版分清，不再套容器。 */
@@ -2420,6 +2453,9 @@ var ctxSnapRequest = 0;
     // 这里画成和分享卡同一套的小卡，整块可点（raw 档走 esc，不受影响）
     var bili = biliHtml(t, richText);
     if(bili !== null) return bili;
+    // 用户 m12833 第 2 条：推文链接画成卡片（骨架先出，数据到了再填）
+    var tw = tweetHtml(t, richText);
+    if(tw !== null) return tw;
     var s = esc(t).replace(/\[Emoji\s+([^\]]*?)\(ID:\s*(\d+)\)\]/g, function(_, nm, id){
       return emojiHtml(id, nm);
     });
@@ -2984,6 +3020,38 @@ var ctxSnapRequest = 0;
     return -1;
   }
 
+  // 引用的原话里分享卡会丢壳：框架把它写进 Reply 时变成
+  //   [Reply ID: x content: [时间] 某人: {"app":…,"title":…,"jumpUrl":…}]
+  // [Json card 前缀和结尾那个 ] 都被吃掉，剩一坨裸 JSON 铺在正文里，
+  // richText 又从 JSON 里的 b23.tv 认出站点、就地插一张卡把 JSON 劈成两半
+  // （用户 m13768：卡片内的东西飞外面了，卡片里没内容）。
+  // 从开头配平一对花括号，字符串里的 { } 与转义不算深度。
+  function bareJsonEnd(s){
+    if(s.charAt(0) !== "{") return -1;
+    var d = 0, inStr = false, esc0 = false;
+    for(var i = 0; i < s.length; i++){
+      var ch = s.charAt(i);
+      if(inStr){
+        if(esc0){ esc0 = false; continue; }
+        if(ch === "\\"){ esc0 = true; continue; }
+        if(ch === '"') inStr = false;
+        continue;
+      }
+      if(ch === '"'){ inStr = true; continue; }
+      if(ch === "{") d++;
+      else if(ch === "}"){ d--; if(d === 0) return i; }
+    }
+    return -1;
+  }
+  // 裸 JSON 值不值得当分享卡：卡片类字段至少有一个；纯小对象别乱认
+  function looksLikeCard(o){
+    if(!o || typeof o !== "object") return false;
+    if(Object.prototype.toString.call(o) === "[object Array]") return false;
+    var keys = ["jumpUrl", "qqdocurl", "url", "app", "title", "prompt", "desc"];
+    for(var i = 0; i < keys.length; i++){ if(o[keys[i]]) return true; }
+    return false;
+  }
+
   function splitMeta(t){
     var rest = String(t || ""), m = { ts: "", mid: "", name: "", uid: "", at: [] };
     // 括号里可能还套一层括号（Reply ID 的 content 自己带 [时间]），
@@ -3008,6 +3076,16 @@ var ctxSnapRequest = 0;
       if(rest.indexOf("[Forward") === 0){
         var ef = bracketEnd(rest, 0);
         if(ef > 0){ m.fwd = rest.slice(0, ef + 1); rest = rest.slice(ef + 1); continue; }
+      }
+      // 引用原话里的分享卡只剩裸 JSON（见 bareJsonEnd 注释）：配平出一整块，
+      // 解析成功、又像张卡，就收进 meta.card 当卡片画，别让 JSON 铺在正文里
+      if(rest.charAt(0) === "{"){
+        var bj = bareJsonEnd(rest);
+        if(bj > 0){
+          var obj = null;
+          try { obj = JSON.parse(rest.slice(0, bj + 1)); } catch(e0){ obj = null; }
+          if(looksLikeCard(obj)){ m.card = obj; rest = rest.slice(bj + 1).replace(/^\s+/, ""); continue; }
+        }
       }
       var x = rest.match(re);
       if(!x) break;
@@ -3539,8 +3617,12 @@ var ctxSnapRequest = 0;
   // 用户 m02993 图10：窗口里查不到时，再由后端翻历史记录补一遍；补到的放这儿，
   // 重画时不用再问一次。QUOTE_SID 跟着当前会话走。
   var QUOTE_FAR = {};
+  // 用户 m12256：占位块问过一次还是没图就记下来，别每次重画都再问一遍后端。
+  var QUOTE_PIC_TRIED = Object.create(null);
   var QUOTE_SID = "";
   var quoteFarBusy = false;
+  // 节点被重画丢弃时补一次的上限，防止和轮询互相追着跑。
+  var QUOTE_RETRY = 0;
   function fillQuoteMiss(){
     // 用户 m02993 图10：引用块不只长在实时窗（#ctx-window）里——回复记录、快照详情
     // 里的 .quote[data-qmiss] 同样是「引用了更早的一条消息」。以前只扫实时窗，别的
@@ -3548,11 +3630,18 @@ var ctxSnapRequest = 0;
     var box = document.getElementById("ctx-window") || document.body;
     if(!box || !QUOTE_SID || quoteFarBusy) return;
     var nodes = [].slice.call(box.querySelectorAll(".quote[data-qmiss]"));
-    if(!nodes.length) return;
+    // 用户 m12256：只有「图片」占位块的引用同样要补真图——跨窗口时被引用那条早
+    // 滑出窗口，QUOTE_IDX 里没有它的 media，只能等这里回查回来再把占位换掉。
+    var pics = [].slice.call(box.querySelectorAll(".quote[data-qpic]"));
+    if(!nodes.length && !pics.length) return;
     var ids = [], seen = Object.create(null);
     nodes.forEach(function(n){
       var k = String(n.getAttribute("data-qmiss") || "");
       if(k && !seen[k]){ seen[k] = 1; ids.push(k); }
+    });
+    pics.forEach(function(n){
+      var k = String(n.getAttribute("data-qpic") || "");
+      if(k && !seen[k] && !QUOTE_PIC_TRIED[k]){ seen[k] = 1; ids.push(k); }
     });
     if(!ids.length) return;
     quoteFarBusy = true;
@@ -3562,27 +3651,99 @@ var ctxSnapRequest = 0;
       .then(function(j){
         quoteFarBusy = false;
         var items = (j && j.items) || {};
+        // 用户 m14555：这一趟 fetch 只要几百毫秒，期间窗口可能被整块重画（5 秒轮询 /
+        // 强制刷新），手里这批节点就成了被丢弃的旧树——往里插图页面上看不见，看上去
+        // 就是「图明明回查到了却没显示」。认一下节点还在不在文档里，不在就交给下一轮。
+        var stale = 0;
         nodes.forEach(function(n){
+          if(!document.contains(n)){ stale++; return; }
           var k = String(n.getAttribute("data-qmiss") || "");
           var hit = items[k];
           if(!hit || !n.parentNode) return;
           QUOTE_FAR[k] = hit;
           var who = String(hit.who || "").trim(), ts = String(hit.ts || "").trim();
           var body = String(hit.body || "");
-          var q2 = { id: k, text: body || "（这条没有正文，可能只发了图片）", who: who, ts: ts };
+            // 用户 m12256：回查命中的那条自己也带图时，同样要把图交给引用块
+          var hasMed = !!(hit.media && hit.media.length);
+          var q2 = { id: k, text: hasMed ? "" : (body || "（这条没有正文，可能只发了图片）"),
+                     who: who, ts: ts, media: hasMed ? hit.media : null };
           var html = "";
           try { html = quoteHtml(q2, []); } catch(e){ html = ""; }
           if(!html) return;
           n.insertAdjacentHTML("beforebegin", html);
           n.parentNode.removeChild(n);
         });
+        // 用户 m12256：只有「图片」占位的引用块——回查到图就把占位换成真缩略图，
+        // 没查到就先记一笔，等下一轮（图可能稍后才下载完）也不再追问。
+        pics.forEach(function(n){
+          if(!document.contains(n)){ stale++; return; }
+          var k = String(n.getAttribute("data-qpic") || "");
+          n.removeAttribute("data-qpic");
+          var hit = items[k];
+          if(!hit || !hit.media || !hit.media.length){ QUOTE_PIC_TRIED[k] = 1; return; }
+          // 用户 m14505：一条纯图消息里连发好几张（[Image] [Image] [Image]）会摆出好几个
+          // 占位块，以前只换掉第一个、剩下的「图片」字样还留在块里。整排一起换掉。
+          var phs = [].slice.call(n.querySelectorAll(".qpic-ph"));
+          if(phs.length){
+            try { phs[0].insertAdjacentHTML("beforebegin", thumbsHtml(hit.media)); } catch(e){ return; }
+            phs.forEach(function(p){ if(p.parentNode) p.parentNode.removeChild(p); });
+            return;
+          }
+          // 用户 m13766：引用里原话已经在了、只是图没补上（没有「图片」占位块可换）。
+          // 缩略图插在原话前面，跟 QQ 引用「上面图、下面是话」一个样。
+          var qtx = n.querySelector(".qtx");
+          try {
+            if(qtx) qtx.insertAdjacentHTML("beforebegin", thumbsHtml(hit.media));
+            else n.insertAdjacentHTML("beforeend", thumbsHtml(hit.media));
+          } catch(e){}
+        });
+        if(stale && QUOTE_RETRY < 4){ QUOTE_RETRY++; setTimeout(fillQuoteMiss, 150); }
       })
       .catch(function(){ quoteFarBusy = false; });
+  }
+  // 排查入口：控制台 / 自动化里手动补一次引用块（正常流程由 swapWinBody 调用）
+  window.__mdpQuoteRepair = fillQuoteMiss;
+  // 一条 user 里可能拼了好几条群消息（parts 多段），图属于「那一条」自己的正文占位。
+  // 被引用时要画的是「被引用那条」的图（用户 m12256），所以这里按占位顺序把媒体切回各段。
+  function segMediaOf(parts, media){
+    var pool = media || [], n = (parts || []).length;
+    if(!n) return [];
+    if(!pool.length) return parts.map(function(){ return null; });
+    if(n === 1) return [pool];
+    var claims = claimMediaBySegs(parts, pool);
+    if(claims) return claims.map(function(c){ return (c && c.own && c.own.length) ? c.own : null; });
+    // 占位总数和图数对不上就认不准是哪张：全算给第一段，至少别丢图
+    return parts.map(function(_, i){ return i === 0 ? pool : null; });
   }
   function buildQuoteIdx(msgs, pend){
     var idx = {};
     function take(m){
-      if(!m || m.role !== "user") return;
+      if(!m) return;
+      if(m.role !== "user"){
+        // bot 自己发的话在窗口里是 XML，一条一行：<msg message_id="X">[昵称] <text>正文</text></msg>。
+        // 用户 m11986：被引用的正是 bot 上一条（「那我大概已经超越完了」），这条以前根本不进
+        // 索引（这里只收 user），于是页面只能画成「引用了更早的一条消息」。
+        // 一轮可能连着发好几条，所以一段内容里要全部收进来。
+        var src = "";
+        try { src = String(rawOf(m) || ""); } catch(e){ src = ""; }
+        if(!src) src = String(m.text || "");
+        var re = /<msg\s+message_id="(-?\d+)"[^>]*>\s*\[([^\]]*)\]\s*<text>([\s\S]*?)<\/text>/gi, mm;
+        // bot 自己也可能发图（图片回复），被引用时同样要把那张图带出来
+        var amed = (m.media && m.media.length) ? m.media : null;
+        while((mm = re.exec(src))){
+          var xid = String(mm[1] || "").trim();
+          if(!xid || idx[xid]) continue;
+          // 时间就是这条 <msg> 前面那个「[17:37]」
+          var tm2 = /\[([^\]]{2,20})\]\s*$/.exec(src.slice(0, mm.index));
+          idx[xid] = {
+            name: String(mm[2] || "").replace(/\s+/g, " ").trim(),
+            ts: tm2 ? String(tm2[1]).trim() : "",
+            body: String(mm[3] || "").replace(/\s+$/, ""),
+            media: amed
+          };
+        }
+        return;
+      }
       // 用户 m02993 图10：多模态消息的 raw 是数组，rawOf → rawContent 会把它
       // JSON.stringify 成一整段 JSON；splitMeta 抢到的第一个 "[" 会把后面全吃掉，
       // [message_id: …] 也就取不到 —— 这条消息进不了索引，别处引用它时只能退化成
@@ -3594,14 +3755,17 @@ var ctxSnapRequest = 0;
         var alt = String(m.text || "");
         if(alt && alt !== rawOf(m)) parts = splitMetaAll(tidyBody(alt));
       }
-      parts.forEach(function(p){
+      var segMed = segMediaOf(parts, m.media);
+      parts.forEach(function(p, pi){
         var meta = p.meta || {};
         var mid = String(meta.mid || "").trim();
         if(!mid || idx[mid]) return;   // 同一条被重复收进时，保留第一份
         idx[mid] = {
           name: String(meta.name || "").replace(/\s+/g, " ").trim(),
           ts: String(meta.ts || "").trim(),
-          body: String(p.body || "").replace(/\s+$/, "")
+          body: String(p.body || "").replace(/\s+$/, ""),
+          // 用户 m12256：被引用那条自己带的图，引用块里要画出来
+          media: segMed[pi] || null
         };
       });
     }
@@ -3618,10 +3782,21 @@ var ctxSnapRequest = 0;
       // 用户 m02993 图10：先按 id 回查本窗口，查到了就把原话补上。
       var hit = QUOTE_IDX[String(q.id)] || QUOTE_FAR[String(q.id)];
       if(hit && (hit.body || hit.name)){
-        q = { id: q.id, text: hit.body || "", who: hit.name, ts: hit.ts };
+        // 用户 m12256：回查到的原话同样带着它自己的图，别在这一步丢掉
+        q = { id: q.id, text: hit.body || "", who: hit.name, ts: hit.ts,
+              media: (hit.media && hit.media.length) ? hit.media : (q.media || null) };
       } else {
         return "<div class='quote' data-qmiss='" + esc(String(q.id)) + "'><span class='qwho'>引用了更早的一条消息</span>" +
           "<div class='qmiss'>#" + esc(String(q.id)) + "</div></div>";
+      }
+    }
+    // 用户 m12256：Reply 里自带原话时（[Reply ID: X content: … 大椰果: [Image]]）以前
+    // 根本不查索引，被引用那条自己的图也就拿不到，只能画一个「图片」占位——文本有了，
+    // 图还得照索引补一次。
+    if(!(q.media && q.media.length) && q.id){
+      var hitM = QUOTE_IDX[String(q.id)] || QUOTE_FAR[String(q.id)];
+      if(hitM && hitM.media && hitM.media.length){
+        q = { id: q.id, text: q.text, who: q.who, ts: q.ts, media: hitM.media };
       }
     }
     var t = String(q.text);
@@ -3633,7 +3808,11 @@ var ctxSnapRequest = 0;
     var body = m ? m[3] : t;
     // 用户 m01522 图1/图5：被引用的是图片消息时，那张图属于引用块；以前画在引用块上面，
     // 看着像「引用里没内容、卡片外凭空多一张图」。media 由调用方判断归属后传进来。
-    var qm = (media && media.length) ? thumbsHtml(media) : "";
+    // 用户 m12256：那张图本来就不属于「本条消息」，而是被引用那条自己的——大椰果 18:21
+    // 发了一张图，哦豁 18:37 引用它，本条 media 是空的，光凭上面那条老规则只能画一个
+    // 「图片」占位。索引里已经存了被引用那条的媒体，优先用它。
+    var qsrc = (q.media && q.media.length) ? q.media : ((media && media.length) ? media : null);
+    var qm = qsrc ? thumbsHtml(qsrc) : "";
     // 被引用的是合并转发时不能走下面的「洗占位」：那段会把所有空白（含换行）压成一个空格，
     // 转发里的逐条换行被压平后 forwardHtml 只能解出 1 条、条目文本还粘在一起（用户 m03014 图1）。
     // 转发里的 [图片] 占位由 forwardHtml 自己洗，图片由它塞进卡片，这里原样交给它。
@@ -3647,16 +3826,31 @@ var ctxSnapRequest = 0;
              (when ? "<span class='dim'> · " + esc(when) + "</span>" : "") + "</span>";
     // 用户 m03014 第 1 条：被引用的是合并转发时，图片属于转发内容——塞进转发卡里
     // 跟着一起折叠，不再画在引用块里（用户说的「引用转发时图片外漏」就是这一处）。
-    var fw = forwardHtml(body, (media && media.length) ? media : null);
+    var fw = forwardHtml(body, qsrc);
     if(fw) return "<div class='quote'>" + qh + fw + "</div>";
     // v3.76（用户本轮图4/图5）：被引用的是一条纯图片消息、而这一轮没留下图时
     //（窗口快照根本不存媒体），以前会把 [Image attached] 洗成一行「[图片]」正文，
     // 看着像他引用了一句叫「图片」的话。画个占位块，一眼能看出这里原本是张图。
-    if(!qm && /^\s*\[(?:Image attached|图片|表情|image)\]\s*$/i.test(String(body).trim()))
-      return "<div class='quote'>" + qh + "<div class='qpic-ph'>图片</div></div>";
+    // 用户 m14505：一条消息连发几张图时，框架给的是「[Image] [Image] [Image]」，
+    // 旧正则只认「整段正好一个占位」，三个连写直接掉到下面按正文铺开，块里就剩一行
+    // 英文方括号。这里放宽成「整段全由占位组成」（一个或多个），并按个数摆占位块。
+    var phOnly = String(body).trim();
+    var phN = (phOnly.match(/\[(?:Image attached|图片|表情|image)\]/gi) || []).length;
+    if(!qm && phN && new RegExp("^(?:\\s*\\[(?:Image attached|图片|表情|image)\\])+\\s*$", "i").test(phOnly)){
+      // 用户 m12256：占位块留个 id 记号，跨窗口回查到图后由 fillQuoteMiss 换成真图
+      var qidTxt = q.id ? String(q.id) : "";
+      var phRow = "";
+      for(var pi = 0; pi < Math.min(phN, 9); pi++) phRow += "<div class='qpic-ph'>图片</div>";
+      return "<div class='quote'" + (qidTxt ? " data-qpic='" + esc(qidTxt) + "'" : "") +
+             ">" + qh + phRow + "</div>";
+    }
     // 纯图片的引用：只有图没有字，别再走 quoteBodyHtml 的「原话原样铺出来」兜底
     if(!body && qm) return "<div class='quote'>" + qh + qm + "</div>";
-    return "<div class='quote'>" + qh + qm + quoteBodyHtml(body, !!who) + "</div>";
+    // 用户 m13766 图：被引用的是一条「文字 + 图」的消息时，原话有了、图还在被引用那条自己身上
+    //（跨窗口时 QUOTE_IDX 里没有它），以前这个分支画出来就只有文字。
+    // 跟纯图片那条一样留个 id 记号，fillQuoteMiss 回查到了再把缩略图插进引用块。
+    var picMark = (q.id && !qm) ? " data-qpic='" + esc(String(q.id)) + "'" : "";
+    return "<div class='quote'" + picMark + ">" + qh + qm + quoteBodyHtml(body, !!who) + "</div>";
   }
   // 引用原话的正文：按「一条消息」的规则渲染，跟正文同一个长相（用户第 2 条）。
   // 单独拆出来是因为原话可能自带多条（换行）、自带 [Json card …] / [File name: …] /
@@ -4164,6 +4358,29 @@ var ctxSnapRequest = 0;
     if(mode === "mixed" || mode === "raw") return "";
     return thumbsHtml(m && m.media);
   }
+  // 用户本轮图1/图2：美化后的元素顺序要跟原文一致。
+  // 以前图片统一堆在正文前面（引用 → @ → 图 → 文字），现在按正文里 [图片]
+  // 占位出现的先后逐张插回去；占位数和图片数对不上就返回 null，调用方退回老排法
+  // （认不准时宁可不动，别把别人的图挪错位置）。
+  function planInlineMedia(text, media, mode){
+    try{
+      if(mode === "mixed" || mode === "raw") return null;
+      if(!media || !media.length) return null;
+      var re = /\[(?:Image attached|图片|表情|image)\]/gi;
+      var hits = String(text || "").match(re);
+      if(!hits || hits.length !== media.length) return null;
+      return { parts: String(text || "").split(re), media: media.slice(0, media.length) };
+    }catch(e){ return null; }
+  }
+  function renderInlineMedia(plan){
+    var html = "", parts = (plan && plan.parts) || [], media = (plan && plan.media) || [];
+    for(var i = 0; i < parts.length; i++){
+      var seg = String(parts[i] || "").replace(/^\s+|\s+$/g, "");
+      if(seg) html += bodyHtml(seg, null);
+      if(i < media.length) html += thumbsHtml([media[i]]);
+    }
+    return html;
+  }
   // 数一条文本里还剩几个图片占位。引用块里的和本段正文里的要分开数，
   // 才知道哪张图该进引用块、哪张该留在卡外（用户 m01680）。
   var IMG_TAG_N = /\[(?:Image attached|图片|表情|image)\]/gi;
@@ -4277,6 +4494,146 @@ var ctxSnapRequest = 0;
     }
     return end ? out + renderText(src.slice(end)) : null;
   }
+  // 正文里夹着的 B 站分享链接：richText → biliHtml 会就地画卡，卡片被塞进 .mono 里，
+  // 变成块级兄弟掉在文字下面，还跟着一行「33 字」（用户 m13750 图：卡片在下面、
+  // 不在右侧；那条「Mcp_management service」就是这么来的）。这里先把链接抽成卡，
+  // 交给外面排版，正文只剩文字，才能跟纯 Json card 那条（喝水喜欢留杯底）长一个样。
+  // 返回 null 表示这条正文里没有可抽的卡，调用方一切照旧。
+  function pullTextCards(txt){
+    var src = String(txt || ""), re = biliPattern(), html = "", rest = "", end = 0, m, hit = false;
+    while((m = re.exec(src))){
+      var raw = m[1], url = raw, tail = "";
+      var cutP = url.match(/[，。、；：）】」』！？,.;:!?]+$/);
+      if(cutP){ tail = cutP[0]; url = url.slice(0, url.length - tail.length); }
+      var href = safeWebUrl(url);
+      if(!href) continue;
+      var hh = "", live = liveInfo(href);
+      try { hh = new URL(href).hostname.replace(/^www\./, "").toLowerCase(); } catch(e3){ hh = ""; }
+      // 只有 B 站自己（以及认得出的直播间）才抽成卡，别的平台留给 richText 原样画
+      if(!/(^|\.)(bilibili\.com|b23\.tv)$/.test(hh) && !live) continue;
+      var cut = biliTitle(src.slice(end, m.index));
+      var kind = live ? "直播" : biliKind(href);
+      var defTitle = live ? ("直播间" + (live.room ? " " + live.room : ""))
+                          : (kind ? ("哔哩哔哩" + kind) : "哔哩哔哩链接");
+      rest += cut.pre;
+      html += cardHtml({ app: live ? (live.site || "直播") : "哔哩哔哩",
+                         title: cut.title || defTitle, kind: kind, url: href });
+      end = m.index + raw.length - tail.length;
+      hit = true;
+    }
+    if(!hit) return null;
+    rest += src.slice(end);
+    rest = rest.replace(/[ \t]+$/gm, "").replace(/\n{2,}/g, "\n").replace(/^\s+|\s+$/g, "");
+    return { html: html, rest: rest };
+  }
+  // 用户 m12833 第 2 条：推文链接（x.com / twitter.com 的 status）在正文里只是纯文本，
+  // 看不出里面说了什么。正文渲染是同步的、浏览器又直连不了 x.com，所以先画一张骨架卡
+  // （带 data-tw），整段渲染完由 fillTweets() 向后端要数据再重画成完整卡片。
+  var TW_RE = /https?:\/\/(?:www\.|mobile\.)?(?:x|twitter)\.com\/(?:([A-Za-z0-9_]{1,20})\/)?status(?:es)?\/(\d{6,25})/gi;
+  var TW_LOGO = "<svg viewBox='0 0 24 24' width='15' height='15' aria-hidden='true'><path fill='currentColor' d='M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z'/></svg>";
+  var TW_CACHE = Object.create(null);
+  function twNum(n){
+    n = Number(n) || 0;
+    if(n >= 100000000) return (n / 100000000).toFixed(1).replace(/\.0$/, "") + "亿";
+    if(n >= 10000) return (n / 10000).toFixed(1).replace(/\.0$/, "") + "万";
+    return String(n);
+  }
+  function twDur(s){
+    s = Math.round(Number(s) || 0);
+    if(s <= 0) return "";
+    var m = Math.floor(s / 60), r = s % 60;
+    return m + ":" + (r < 10 ? "0" + r : r);
+  }
+  function tweetSkeleton(id, handle){
+    return "<a class='qcard tw' data-tw='" + esc(id) + "' href='https://x.com/i/status/" + esc(id) +
+           "' target='_blank' rel='noopener noreferrer'>" +
+           "<span class='qc-row'><span class='qc-logo tw'>" + TW_LOGO + "</span>" +
+           "<span class='qc-main'><span class='qc-t'>" + (handle ? "@" + esc(handle) : "推文") + "</span>" +
+           "<span class='qc-d'>X（推特）</span></span><span class='qc-go'>↗</span></span></a>";
+  }
+  function tweetHtml(text, renderText){
+    // 必须每调用一次新建一个正则对象：renderText 就是 richText，它会递归回到这里，
+    // 共用一个全局正则的话 lastIndex 被内层重置，外层 while 永远走不完（死循环到
+    // 「Invalid string length」）。用户 m12833 第 2 条落地时的第一个 bug。
+    var src = String(text || ""), out = "", end = 0, m;
+    var re = new RegExp(TW_RE.source, "gi");
+    while((m = re.exec(src))){
+      out += renderText(src.slice(end, m.index)) + tweetSkeleton(m[2], m[1] || "");
+      end = re.lastIndex;
+    }
+    return end ? out + renderText(src.slice(end)) : null;
+  }
+  function tweetCardHtml(d){
+    var name = String(d.name || d.handle || "推文");
+    // 头像和配图都由后端代取后存进插件自己的 media_cache（浏览器直连 pbs.twimg.com
+    // 会卡到超时），这里一律换成同源的 /media；万一后端给的是外链才原样用。
+    function twSrc(v){
+      var s = String(v || "");
+      if(!s) return "";
+      return s.indexOf("http") === 0 ? s : (API + "/media?path=" + encodeURIComponent(s));
+    }
+    var av = twSrc(d.avatar);
+    var med = (d.media || []).slice(0, 4);
+    var medHtml = "";
+    if(med.length){
+      medHtml = "<span class='tw-med n" + med.length + "'>" + med.map(function(x){
+        var th = twSrc(x.thumb || x.url);
+        if(!th) return "";
+        return "<span class='tw-mi'><img loading='lazy' decoding='async' referrerpolicy='no-referrer' src='" +
+               esc(th) + "' alt='' onerror=\"this.parentNode.classList.add('bad');this.remove()\">" +
+               (x.kind === "video" ? "<span class='tw-play'>▶" + (x.dur ? " " + twDur(x.dur) : "") + "</span>" : "") +
+               "</span>";
+      }).join("") + "</span>";
+    }
+    var stats = [];
+    if(d.replies) stats.push("💬 " + twNum(d.replies));
+    if(d.retweets) stats.push("🔁 " + twNum(d.retweets));
+    if(d.likes) stats.push("♥ " + twNum(d.likes));
+    if(d.views) stats.push("👁 " + twNum(d.views));
+    var foot = TW_LOGO + " X（推特）" + (d.when ? " · " + esc(d.when) : "") +
+               (stats.length ? " · " + esc(stats.join(" ")) : "");
+    return "<a class='qcard tw' href='" + esc(d.url || ("https://x.com/i/status/" + d.id)) + "'" +
+           " target='_blank' rel='noopener noreferrer' title='" + esc(name + " · X") + "'>" +
+           "<span class='tw-hd'>" +
+           (av ? "<img class='tw-av' loading='lazy' referrerpolicy='no-referrer' src='" + esc(av) +
+                 "' alt='' onerror=\"this.remove()\">"
+               : "<span class='tw-av ph'>" + esc(String(name).slice(0, 1)) + "</span>") +
+           "<span class='tw-who'><span class='tw-nm'>" + esc(name) + "</span>" +
+           (d.handle ? "<span class='tw-hd2'>@" + esc(d.handle) + "</span>" : "") +
+           "</span></span>" +
+           (d.text ? "<span class='tw-tx'>" + esc(d.text) + "</span>" : "") +
+           medHtml +
+           "<span class='qc-ft'><span class='qc-src'>" + foot + "</span>" +
+           "<span class='qc-open'>打开</span></span></a>";
+  }
+  function twPaint(id){
+    var d = TW_CACHE[id];
+    if(!d) return;
+    var cards = [].slice.call(document.querySelectorAll(".qcard[data-tw='" + id + "']"));
+    cards.forEach(function(a){
+      if(d.ok) a.outerHTML = tweetCardHtml(d);
+      else a.classList.add("tw-bad");
+    });
+  }
+  function fillTweets(){
+    var nodes = [].slice.call(document.querySelectorAll(".qcard[data-tw]"));
+    if(!nodes.length) return;
+    var seen = Object.create(null);
+    nodes.forEach(function(a){
+      var id = a.getAttribute("data-tw") || "";
+      if(!id || seen[id]) return;
+      seen[id] = 1;
+      var got = TW_CACHE[id];
+      if(got === null) return;            // 已经在请求里了
+      if(got){ twPaint(id); return; }
+      TW_CACHE[id] = null;
+      fetch(API + "/tweet?u=" + encodeURIComponent("https://x.com/i/status/" + id))
+        .then(function(r){ return r.json(); })
+        .then(function(d){ TW_CACHE[id] = (d && d.ok) ? d : { ok: false }; })
+        .catch(function(){ TW_CACHE[id] = { ok: false }; })
+        .then(function(){ TW_CACHE[id] && twPaint(id); });
+    });
+  }
   // 卡片/转发/文件已经单独画出来了，正文里残留的分享模板要剥掉，
   // 否则卡片下面还挂一行「点击链接直接打开」（用户 m51324 图5）
   function stripShareText(t){
@@ -4371,7 +4728,10 @@ var ctxSnapRequest = 0;
     }
     // mixed（对照档）要看到的就是原文，不能拿被转换过的展示文本充数
     var raw = (mode === "mixed") ? rawOf(m) : (m.text || "");
-    if(mode === "mixed" && role === "assistant") raw = botRawHead(raw, m.who || m.name || "", ts);
+    // v4.37（用户 m20164）：后端给每条 assistant 补 who = bot 显示名（樱井桃华），注记那几条
+    // 也被补上了，而 name 才是「对当前聊天消息的决策建议」。对照档补名字时走 noteNameOf，
+    // 不然原文头上会多一个 [樱井桃华]，跟原文模式对不上。
+    if(mode === "mixed" && role === "assistant") raw = botRawHead(raw, noteNameOf(m) || m.who || m.name || "", ts);
     // v3.63（用户 m18492 图2）：对照档只渲染正文，工具调用那一整段（[tool_calls] … JSON）根本不在原文里，
     // 「原文 ↔ 美化」就核对不了工具参数。这里按请求页的原文格式补在正文末尾。
     if(mode === "mixed" && role === "assistant"){
@@ -4458,10 +4818,15 @@ var ctxSnapRequest = 0;
         var hasPart = !!(p.meta.card || p.meta.fwd || p.meta.file ||
                          (m.files && m.files.length) || (m.media && m.media.length));
         var bodyTxt = tidyBody2(p.body, m.media && m.media.length);
+        // 用户本轮图1/图2：图片原来统一堆在正文前面，看着像「引用 → @ → 图 → 文字」。
+        // 占位数和图片数正好对得上时，改成按占位在原文里的位置逐张插回去，
+        // 于是美化后的顺序跟用户当初打的顺序一致。
+        var inlPlan = (fwdIn || inQuote) ? null : planInlineMedia(bodyTxt, m.media, mode);
         // v3.62（用户 m18059 第 2 条）：这段的媒体块已经画出来了（缩略图或「已清理」占位），
         // 正文里的 [图片]/[表情] 占位按画出的张数吃掉，不再多一行纯文本。
+        // 已经决定内联的那份不动占位，交给 renderInlineMedia 原位换图。
         bodyTxt = stripMediaTags(bodyTxt,
-          (!(fwdIn || inQuote) && m.media) ? m.media.length : 0);
+          (!(fwdIn || inQuote) && m.media && !inlPlan) ? m.media.length : 0);
         // v4.22（用户 m21783）：文件卡已经画出来了，正文里那行 [文件] 不再重复
         if(m.files && m.files.length) bodyTxt = bodyTxt.replace(/\[(?:文件|File attached)\]/gi, " ");
         // 卡片已经画出来了，正文里那段分享模板（【闲鱼】链接…标题…点击链接直接打开）
@@ -4469,10 +4834,31 @@ var ctxSnapRequest = 0;
         if(p.meta.card || p.meta.fwd || p.meta.file) bodyTxt = stripShareText(bodyTxt);
         // v3.69（用户 m21003 第 4 条）：正文画成抖音分享卡时，卡下面不再挂「N 字」。
         var dyBody = !!douyinCard(bodyTxt);
+        // 正文里夹着 B 站分享链接时先抽成卡：留在 .mono 里它会掉到文字下面，
+        // 还多挂一行「33 字」（用户 m13750 图：卡片在下面、不在右侧）。
+        // 抽完正文没字了就只剩卡，跟纯分享卡那条长一个样；还有别的字就正文左、卡片右。
+        var pulled = pullTextCards(bodyTxt);
+        var canSide = !!(pulled && pulled.rest && !partHtml &&
+                         !(m.files && m.files.length) && !(m.media && m.media.length));
+        if(canSide){
+          bd2 = "<div class='chip-line tc'>" + bodyHtml(pulled.rest, null) + pulled.html +
+                (grp ? (tailExtra || "") : "") + "</div>";
+        } else {
+        if(pulled){
+          partHtml = pulled.html + partHtml;
+          bodyTxt = pulled.rest;
+          if(!bodyTxt) hasPart = true;
+          // 抽走分享卡之后正文已经变了，内联计划里的分段对不上，退回老排法。
+          if(inlPlan) inlPlan = null;
+        }
         var chipU = grp ? ((bodyTxt && m.chars && !dyBody ? "<span class='chb count'>" + m.chars + " 字</span>" : "") + (tailExtra || "")) : "";
         // 正文真空、又没有任何卡片/图片时，别只写「(空)」——说清楚是框架只给了元数据
-        bd2 = chipInto(((fwdIn || inQuote) ? "" : mediaHtml(m, mode)) + partHtml,
-                       bodyHtml(bodyTxt, hasPart ? null : "(这条只有元数据，正文是空的)"), chipU);
+        var bodyPart = inlPlan
+          ? renderInlineMedia(inlPlan)
+          : bodyHtml(bodyTxt, hasPart ? null : "(这条只有元数据，正文是空的)");
+        bd2 = chipInto(((fwdIn || inQuote) || inlPlan ? "" : mediaHtml(m, mode)) + partHtml,
+                       bodyPart, chipU);
+        }
       } else {
         // 多条拼在一起时，每条各自带一行「时间 昵称」，中间用虚线隔开。
         // 图默认仍统一排在卡外最前：一段里可能既有转发又有普通消息，
@@ -4494,9 +4880,12 @@ var ctxSnapRequest = 0;
           var segFwd = isFwdBody(q.meta.fwd);
           var segOut = segFwd ? null : segOwn;
           var segHasImg = !!(segOut && segOut.length);
+          // 用户本轮图1/图2：这一段自己的图也按段内 [图片] 占位的位置插回去。
+          var segRaw = tidyBody2(q.body, claims ? segHasImg : (m.media && m.media.length));
+          var segInl = planInlineMedia(segRaw, segOut, mode);
           var segBody = stripMediaTags(
-            tidyBody2(q.body, claims ? segHasImg : (m.media && m.media.length)),
-            segHasImg ? segOut.length : 0);
+            segRaw,
+            (segHasImg && !segInl) ? segOut.length : 0);
           // 一条 user 里拼了十几条群消息时，字数要按「这一条」算，不能整条复用一个数
           // —— 三条 OK / 打游戏去 / 关闭所有浏览器 全显示 79 字（用户 m33994 图3）
           var segN = visLen(segBody);
@@ -4507,12 +4896,12 @@ var ctxSnapRequest = 0;
                               segHasImg || (!claims && m.media && m.media.length) ||
                               (qi === 0 && m.files && m.files.length));
           bd2 += "<div class='seg'>" + (lab ? "<div class='segh'>" + lab + "</div>" : "") +
-                 chipInto(mediaHtml({ media: segOut }, mode) +
+                 chipInto((segInl ? "" : mediaHtml({ media: segOut }, mode)) +
                           quoteHtml(q.meta.reply, segMedia[qi].quote) +
                           fwdHtml(q.meta.fwd, segFwd ? segOwn : null) + cardHtml(q.meta.card) +
                            fileHtml(q.meta.file) + (qi === 0 ? filesHtml(m.files) : ""),
-                          bodyHtml(segBody,
-                          segHasPart ? null : "(这条只有元数据，正文是空的)"),
+                          (segInl ? renderInlineMedia(segInl)
+                                  : bodyHtml(segBody, segHasPart ? null : "(这条只有元数据，正文是空的)")),
                           segChip) + "</div>";
         });
       }
@@ -4990,7 +5379,7 @@ var ctxSnapRequest = 0;
   function windowMsgHtml(m, idx, ts, tail){
     if(VIEW === "raw"){
       var rt = rawOf(m) || "";
-      if(m.role === "assistant") rt = botRawHead(rt, m.who || m.name || "", ts);
+      if(m.role === "assistant") rt = botRawHead(rt, noteNameOf(m) || m.who || m.name || "", ts);
       // v3.63（用户 m18492 图2）：原文档同样补工具调用原文
       var tcl2 = (m.role === "assistant") ? tcRawLine(m) : "";
       if(tcl2) rt = String(rt).replace(/\s+$/, "") + "\n" + tcl2;
@@ -5107,6 +5496,7 @@ var ctxSnapRequest = 0;
       box.innerHTML = SECHD_HTML + (rest || "");
       revealTrendSel(box.querySelector(".trend"));
       fillQuoteMiss();
+      fillTweets();
       return box;
     }
     var node = hd.nextSibling;
@@ -5114,6 +5504,7 @@ var ctxSnapRequest = 0;
     if(rest) box.insertAdjacentHTML("beforeend", rest);
     revealTrendSel(box.querySelector(".trend"));
     fillQuoteMiss();
+    fillTweets();
     return box;
   }
 
@@ -5248,7 +5639,13 @@ var ctxSnapRequest = 0;
     var bodyUnchanged = !force && sig === lastWinSig;
     // 用户 m02993 图10：引用只有 id 时要回查窗口，索引跟着这批消息一起换。
     QUOTE_IDX = buildQuoteIdx(msgs, pend);
-    QUOTE_SID = String(d.sid || "");
+    var _newSid = String(d.sid || "");
+    if(_newSid !== QUOTE_SID){
+      // 换了会话：上一会话回查到的原话、以及「问过但没图」的记录都不能再用
+      QUOTE_FAR = {};
+      QUOTE_PIC_TRIED = Object.create(null);
+    }
+    QUOTE_SID = _newSid;
     lastWinSig = sig;
     lastTrendSig = trendSig;
     var oldScroll = box.querySelector(".scroll");
@@ -5367,9 +5764,14 @@ var ctxSnapRequest = 0;
       // 再按 msgs.length + j 算就会出现跳号。
       // 决策注记的原文一行：「[00:53][对当前聊天消息的决策建议] 判定不回（…）」
       var decRawBody = function(m){
-        var t0 = String(m.ts || "");
-        var nm0 = String(m.name || m.who || "");
         var b0 = String(m.raw || m.text || "").replace(/^\[决策记录\]\s*(\d{1,2}:\d{2}\s*)?/, "");
+        // v4.39（用户 m20312）：注记正文现在以「[HH:MM] 」开头（跟请求原文一致）。
+        // 时间拎到最前面，别变成「[对当前聊天消息的决策建议] [01:07] 判定要回」。
+        var tm0 = "";
+        var mt0 = b0.match(/^\[(\d{1,2}:\d{2})\]\s*/);
+        if(mt0){ tm0 = mt0[1]; b0 = b0.slice(mt0[0].length); }
+        var t0 = String(m.ts || "") || tm0;
+        var nm0 = String(m.name || m.who || "");
         return (t0 ? "[" + t0 + "]" : "") + (nm0 ? "[" + nm0 + "]" : "") + " " + b0;
       };
       var rawLine = function(role, body, pend){
@@ -5898,7 +6300,8 @@ var ctxSnapRequest = 0;
     dTitle += "<span class='grow'></span>" + dPager + "</div>";
     var html = dTitle +
       "<div class='tbl'><table><thead><tr><th>时间</th><th>结论</th><th class='lft'>理由</th>" +
-      "<th class='lft'>模型</th><th class='lft'>用时</th><th class='lft'>窗口条数</th>" +
+      "<th class='lft'>模型</th>" + "<th class='lft' title='触发 → 真正开始这一轮之间等的那段（防抖 / 抖动），必回（@ / 叫名字）这一路不等'>防抖用时</th>" +
+      "<th class='lft'>用时</th><th class='lft'>窗口条数</th>" +
       "<th class='lft' title='这一次决策调用的入 / 出 token'>token（入 / 出）</th>" +
       "<th class='lft' title='决策提示词 + 聊天记录 + 本轮输入的 UTF-8 字节数'>体积估算</th>" +
       "<th class='lft'>命中预估</th><th class='lft'>缓存命中</th>" +
@@ -5923,12 +6326,11 @@ var ctxSnapRequest = 0;
       html += "<td class='lft' title='" + esc(tip) + "'>" + esc(body) + "</td>";
       html += "<td class='lft' title='" + esc(String(r.decision_model || "")) + "'>" + esc(mlab) +
               (r.decision_via === "fallback" ? " <span class='tag pend'>备用</span>" : "") + "</td>";
-      html += "<td class='num'" + ((del || el) ? " title='" + esc((del ? "防抖 " + fmtDur(del) + " + " : "") +
-              "判定 " + fmtDur(el)) + "'" : "") + ">" +
-              ((del || el)
-                ? (del ? "<span class='dim'>防抖 </span>" + fmtDur(del) + " <span class='dim'>+</span> " + fmtDur(el)
-                       : fmtDur(el))
-                : "—") + "</td>";
+      // 用户 m13212：防抖单独占一列，用时列只写判定本身，读起来就是「防抖 7s + 3s」。
+      html += "<td class='num'" + (del ? " title='" + esc("触发 → 真正开始判定之间等了 " + fmtDur(del)) + "'" : "") + ">" +
+              (del ? "<span class='dim'>防抖 </span>" + fmtDur(del) : "<span class='dim'>—</span>") + "</td>";
+      html += "<td class='num'" + (el ? " title='" + esc("判定本身用了 " + fmtDur(el)) + "'" : "") + ">" +
+              (el ? fmtDur(el) : "<span class='dim'>—</span>") + "</td>";
       html += "<td class='num'>" + (Number(r.window_total) || 0) + " 条</td>";
       html += "<td class='num tokc'>" + (tk.input
         ? "<span class='tokw'>" + tokText(tk.input) + " / " + tokText(tk.output) + "</span>"
@@ -6058,7 +6460,9 @@ var ctxSnapRequest = 0;
               "</span>";
     }
     html += "<span class='grow'></span>" + pager + "</div>";
-    html += "<div class='tbl'><table><thead><tr><th>时间</th><th>结果</th><th class='lft' title='流水线总耗时：请求开始到请求结束，不含防抖等待与回复吐字'>用时</th><th class='lft'>窗口条数</th>" +
+    html += "<div class='tbl'><table><thead><tr><th>时间</th><th>结果</th>" +
+            "<th class='lft' title='触发 → 真正开始请求之间等的那段（防抖 / 抖动）；必回（@ / 叫名字）这一路不等'>防抖用时</th>" +
+            "<th class='lft' title='流水线总耗时：请求开始到请求结束，不含防抖等待与回复吐字'>用时</th><th class='lft'>窗口条数</th>" +
             "<th class='lft' title='这一轮所有步骤的合计；多步（有工具调用）时会把上下文重复计一次'>token（入 / 出）</th>" +
             "<th class='lft' title='文本JSON + 请求图片base64投影预测；不是实际wire抓包字节'>体积估算</th>" +
             "<th class='lft'>命中预估</th>" +
@@ -6104,6 +6508,14 @@ var ctxSnapRequest = 0;
       } else {
         durCell = (dur != null) ? fmtDur(dur) : fmtDur(r.elapsed_trigger);
       }
+      // 用户 m13212：防抖不再并进「流水线」，单独一列——读起来是「防抖 7s + 11s」。
+      // 用户 m06046 当年嫌算错的是「把决策耗时也算进回复行」，所以这里只取纯抖动那段：
+      // 引擎量到的 debounce_fixed 优先，没有再退回 debounce - 决策耗时。
+      var dbo = Number(r.elapsed_debounce) || 0;
+      html += "<td class='num'" + (dbo > 0
+        ? " title='" + esc("触发 → 真正开始请求之间等了 " + fmtDur(dbo)) + "'"
+        : " title='这一轮没有独立的防抖：要么开关关着 / 必回直接开跑，要么走的是决策模式——那几秒算在决策记录那一行'") + ">" +
+        (dbo > 0 ? "<span class='dim'>防抖 </span>" + fmtDur(dbo) : "<span class='dim'>—</span>") + "</td>";
       html += "<td class='num' title='" + esc(durTip) + "'>" + durCell + "</td>";
       // v3.22（用户 m42531）：这一列跟走势柱同口径，只数窗口里的用户消息——窗口里还躺着
       // bot 的回复，混在一起会让人以为「明明才 50 多条，怎么记成 68」。含 bot 的总数放 title。
@@ -6495,6 +6907,50 @@ var ctxSnapRequest = 0;
     });
   }
 
+  // v4.35（用户 m19642）：同一条消息在 messages 里是「[00:22] [message_id: X] …」，
+  // 到了 user_prompt 里会换成「[Oct 30 2026 00:22 Fri] [message_id: X] …」——逐字比对
+  // 永远不相等，③ 于是把本轮那几条画了两遍（图4/图5 的红框重复）。这里统一先按
+  // message_id 认人，认不出来再去掉开头的时间戳/日期戳比正文，只比、不动。
+  function midOfText(t){
+    var m = String(t == null ? "" : t).match(/message_id:\s*(-?\d+)/);
+    return m ? m[1] : "";
+  }
+  function headlessText(t){
+    var s = String(t == null ? "" : t);
+    for(var i = 0; i < 3; i++){
+      var m = s.match(/^\s*\[(?:\d{1,2}:\d{2}|\d{4}-\d{2}-\d{2}[^\]]*|[A-Z][a-z]{2} \d{1,2} \d{4}[^\]]*)\]\s*/);
+      if(!m) break;
+      s = s.slice(m[0].length);
+    }
+    return s.trim();
+  }
+  function sameMsgText(a, b){
+    var x = String(a == null ? "" : a), y = String(b == null ? "" : b);
+    if(x === y) return true;
+    var ix = midOfText(x), iy = midOfText(y);
+    if(ix || iy) return !!ix && !!iy && ix === iy;
+    return headlessText(x) === headlessText(y);
+  }
+  // v4.36（用户 m19945 图3）：同一轮里 messages 的消息头是「[01:07] [message_id: …]」，
+  // 从 incoming / user_prompt 过来的是框架原样的「[Oct 30 2026 01:07 Fri] …」，一条一个样。
+  // 这里把长日期头压成 [HH:MM]，别的字一个不动；决策快照不经过它。
+  function tsShortOf(t){
+    var s0 = String(t == null ? "" : t);
+    return s0.replace(/^\s*\[[A-Z][a-z]{2}\s+\d{1,2}\s+\d{4}\s+(\d{1,2}:\d{2})(?:\s+[A-Z][a-z]{2})?\]/,
+                      function(_w, hm){ return "[" + hm + "]"; });
+  }
+  // v4.36（用户 m19945）：原文档在美化档的 isDecNoteRow 赋值之前就要认注记，抽到外面来。
+  function isDecNoteLike(m){
+    if(!m) return false;
+    if(m.decnote === true) return true;
+    if(String(m.name || m.who || "") === DEC_NOTE_NAME) return true;
+    var dec9 = String(rawContent(m.content) || "");
+    if(dec9.indexOf("[决策记录]") === 0) return true;
+    if(String(m.role || "") !== "assistant") return false;
+    var hd9 = dec9.replace(/^\s+/, "");
+    return hd9.indexOf("判定要回") === 0 || hd9.indexOf("判定不回") === 0;
+  }
+
   function toggleRequestRow(name){
     var rows = document.querySelectorAll("#ctx-rounds tr");
     var target = null, head = null;
@@ -6579,6 +7035,48 @@ var ctxSnapRequest = 0;
         ? r.incoming_messages : null;
       var histRows = (incRows && Array.isArray(r.history_messages)) ? r.history_messages : null;
       var hasSplit = (typeof r.system_static === "string");
+      // v4.33（用户 m19120 / m19154）：三档共用同一个边界——「这一轮新来的那批」从哪里开始。
+      // 只认两条依据：显式 history_messages 确是 messages 的逐项前缀，或者「最后一条真 assistant 回复之后」。
+      // 缓存 flags 的 f 位不是分区依据（它从上一条普通回复起就全标 f）。
+      var noteRowX = function(m){
+        if(!m) return false;
+        if(m.decnote === true) return true;
+        if(String(m.name || m.who || "") === DEC_NOTE_NAME) return true;
+        var t9 = String(rawContent(m.content) || "");
+        if(t9.indexOf("[决策记录]") === 0) return true;
+        if(String(m.role || "") !== "assistant") return false;
+        var hd9 = t9.replace(/^\s+/, "");
+        return hd9.indexOf("判定要回") === 0 || hd9.indexOf("判定不回") === 0;
+      };
+      var allMsgsX = (Array.isArray(r.messages) ? r.messages : []);
+      var boundX = -1;
+      if(histRows && histRows.length <= allMsgsX.length){
+        var prefixOkX = true;
+        for(var piX = 0; piX < histRows.length; piX++){
+          var aX = allMsgsX[piX] || {}, bX = histRows[piX] || {};
+          if(String(aX.role || "") !== String(bX.role || "")){ prefixOkX = false; break; }
+          if(rawContent(aX.content) !== rawContent(bX.content)){ prefixOkX = false; break; }
+        }
+        if(prefixOkX) boundX = histRows.length;
+      }
+      if(boundX < 0 && histRows && histRows.length === 0) boundX = 0;
+      if(boundX < 0){
+        for(var biX = allMsgsX.length - 1; biX >= 0; biX--){
+          var bmX = allMsgsX[biX] || {};
+          if(String(bmX.role || "") === "assistant" && !noteRowX(bmX)){ boundX = biX + 1; break; }
+        }
+        if(boundX < 0) boundX = allMsgsX.length;
+      }
+      var isDecX = (String(r.outcome || "") === "decision" || String(r.trigger_reason || "") === "decision" || r.decision_only === true);
+      // v4.35（用户 m19642）：回复快照的 ②③ 边界改跟「会话前缀」走。cache_prefix_len 是
+      // 跟上一份回复请求逐条比出来的公共前缀，它之后才是这一轮新进来的消息；history_messages
+      // 是请求内部自己的切分（只把最后两条算 incoming），拿它当边界会把十几条新消息留在 ② 里
+      // （图1 的 32~50 全堆在历史，③ 只剩两条注记）。决策快照的 ②③ 早就对了，这里不碰它。
+      if(!isDecX && typeof r.cache_prefix_len === "number" && r.cache_prefix_len > 0
+         && r.cache_prefix_len < allMsgsX.length){
+        boundX = r.cache_prefix_len;
+      }
+
       var stat = "", reloc = "", pos = {};
       var statNames = hasSplit ? (r.system_static_names || []) : (r.system_prompt_names || []);
       var relocNames = hasSplit ? (r.system_relocated_names || []) : [];
@@ -6595,7 +7093,7 @@ var ctxSnapRequest = 0;
         // 标题；编号跨段连续，和美化档的 ①②③④ 一一对得上。
         // 注意这里必须用 += ：占比条是上面拼好的，用 = 会把它整个吞掉。
         var allMsgs = r.messages || [];
-        var rh = histRows || allMsgs;
+        var rh = allMsgs.slice(0, boundX);
         var up = r.user_prompt || "";
         var lastTxt = "";
         allMsgs.forEach(function(m, i){
@@ -6619,12 +7117,15 @@ var ctxSnapRequest = 0;
           ? Math.max(0, Math.min(r.cache_prefix_len, rh.length)) : -1;
         // v4.14（用户 m19095）：前缀之后分「冷」和「本轮输入」，口径见美化档同段注释。
         var flagsR = (typeof r.cache_tail_flags === "string") ? r.cache_tail_flags : "";
-        if(flagsR && flagsR.length !== rh.length) flagsR = "";
-        var coldRaw = (flagsR && typeof r.cache_cold_len === "number") ? r.cache_cold_len
+        // v4.30（用户 m14924）：同上——比 rh 长就截成前缀，短了才整串丢掉
+        if(flagsR && flagsR.length < rh.length) flagsR = "";
+        else if(flagsR && flagsR.length > rh.length) flagsR = flagsR.slice(0, rh.length);
+        // v4.34（用户 m19401）：未命中一律 = 总条数 − 命中条数，别再吃 cache_cold_len；
+        // 那个字段是别处算的，和这里的行数对不上（同一份记录两个档能差 3 条）。
+        var hitsRaw = flagsR ? (flagsR.split("h").length - 1) : preLenRaw;
+        var coldRaw = flagsR ? Math.max(0, rh.length - hitsRaw)
                     : (preLenRaw >= 0 ? (rh.length - preLenRaw) : 0);
         var inRaw = (flagsR && typeof r.cache_input_len === "number") ? r.cache_input_len : 0;
-        // v4.26（用户 m22251 / m22281）：命中数按 h 的个数，文案里的「冷」改「未命中」。
-        var hitsRaw = flagsR ? (flagsR.split("h").length - 1) : preLenRaw;
         var trimBetweenR = (r.cache_trim_between === true);
         // v3.88（用户 m05012 第 5 条）：这里原来漏了调用括号——把函数本身当默认值
         // 传进去，没有 sections 的快照（裁切快照就是）直接把这串函数源码打进标题里。
@@ -6635,15 +7136,42 @@ var ctxSnapRequest = 0;
         // v4.16（用户 m19499）：本轮输入不属于 ②。窗口里那些「上一次请求之后才
         // 进来」的消息虽然占着 messages 的位置，但它们属于本轮输入，
         // 归到 ③ 去画；② 只留真正命中或冷掉的历史。
-        var rhMoved = [];
+        // v4.33：② 之后剩下的就是 ③，不再按 f 位挑；决策快照的 ③ 另有 incoming，不吃这一段。
+        var rhMoved = isDecX ? [] : allMsgs.slice(boundX);
         var movedCharsR = 0;
+        rhMoved.forEach(function(m9){ movedCharsR += String(rawContent(m9.content) || "").length; });
+        // v4.36（用户 m19945 图1/图2）：本轮那条判定注记常常已经先落进窗口（messages 末尾），
+        // 被它判的那条消息却还挂在 user_prompt / incoming 里——照原序画就成了「注记 → 被 @ 的消息」，
+        // 看着像决策发生在被 @ 之前。这里把末尾这几条本轮注记先摘出来，等本轮消息画完再补上去。
+        var rhTailNotes = [];
+        var tailNoteRaws = [];
+        if(!isDecX && rhMoved.length){
+          var poolIncR = [];
+          (Array.isArray(r.incoming_messages) ? r.incoming_messages : []).forEach(function(m9){
+            poolIncR.push(String(rawContent(m9.content) || ""));
+          });
+          (Array.isArray(r.user_prompt_parts) ? r.user_prompt_parts : []).forEach(function(x){
+            var t9 = String((x && x.text) || "");
+            if(t9.trim()) poolIncR.push(t9);
+          });
+          for(var tnR = rhMoved.length - 1; tnR >= 0; tnR--){
+            var mnR = rhMoved[tnR];
+            if(!isDecNoteLike(mnR)) break;
+            var rwR = String(rawContent(mnR.content) || "");
+            var dupR0 = false;
+            for(var piR = 0; piR < poolIncR.length; piR++){
+              if(poolIncR[piR] && sameMsgText(poolIncR[piR], rwR)){ dupR0 = true; break; }
+            }
+            if(!dupR0) break;
+            rhTailNotes.unshift(mnR);
+            tailNoteRaws.push(rwR);
+            rhMoved = rhMoved.slice(0, tnR);
+          }
+        }
+        var dropCharsR = 0;
         rh.forEach(function(m, i){
           var fkR = flagsR ? flagsR.charAt(i) : "";
-          if(fkR === "f"){
-            rhMoved.push(m);
-            movedCharsR += String(rawContent(m.content) || "").length;
-            return;
-          }
+          // v4.33：原来这里按 f 位把消息搬去 ③，② 会被搬空；现在一条都不搬。
           n += 1;
           // v4.27（用户 m22596）：原文模式只放原文，不再插「-- 下面 N 条不命中缓存 --」
           // 这种说明行；命中/未命中看 ② 的标题就够。
@@ -6668,7 +7196,7 @@ var ctxSnapRequest = 0;
         });
         // v3.93（用户 m07570 图7）：决策快照的 ② 改叫「聊天历史」，③ 才是本轮输入。
         h += rawBlock("② 历史消息",
-                      "· " + (rh.length - rhMoved.length) + " 条 · " + (histChars - movedCharsR) + " 字符" +
+                      "· " + rh.length + " 条 · " + histChars + " 字符" +
                       (preLenRaw >= 0
                         ? (" · 命中 " + hitsRaw + " 条 · 未命中 " + coldRaw + " 条")
                         : ""),
@@ -6687,6 +7215,7 @@ var ctxSnapRequest = 0;
           var movedRaw = "";
           if(rhMoved.length){
             rhMoved.forEach(function(m9){
+              if(!m9) return;
               var rb9 = rawContent(m9.content);
               if(m9.role === "assistant") rb9 = botRawHead(rb9, noteNameOf(m9), "");
               n += 1;
@@ -6698,17 +7227,35 @@ var ctxSnapRequest = 0;
           // 别再写「本轮真正发出去的那几条」。
           var curHint3 = "本轮新增，这段不命中";
           var roundInc = incRows;
+          // v4.35（用户 m19642）：动态段在原文档里也要单独画一条，记一下画没画过。
+          var relocDrawn = false;
           if(roundInc){
             // v4.06：本轮那几条 + 紧随其后的决策注记，按真消息逐条写
             curN = roundInc.length;
+            // v4.35（用户 m19642）：本轮那两条常常已经落在 ② 之后那段真消息里（messages 尾部
+            // 就是它们，只是缓存前缀之后的部分），再写一遍 ③ 同一条就出现两次。逐字比一次，
+            // 已经画过的跳过，③ 的条数也只数真正画出来的。
+            var incDrawn = 0;
             roundInc.forEach(function(m9){
               var rb9 = rawContent(m9.content);
+              for(var sI = 0; sI < rhMoved.length; sI++){
+                if(!rhMoved[sI]) continue;
+                if(sameMsgText(String(rawContent(rhMoved[sI].content) || ""), rb9)) return;
+              }
+              // v4.36：这条注记已经摘到 ③ 末尾去画了，这里别再画一遍。
+              for(var tI = 0; tI < tailNoteRaws.length; tI++){
+                if(sameMsgText(tailNoteRaws[tI], rb9)) return;
+              }
               if(m9.role === "assistant"){
                 rb9 = botRawHead(rb9, noteNameOf(m9) || DEC_NOTE_NAME, "");
+              } else {
+                rb9 = tsShortOf(rb9);
               }
               n += 1;
+              incDrawn += 1;
               curRaw += "[" + n + "] " + String(m9.role || "user") + "\n" + rb9 + "\n\n";
             });
+            curN = incDrawn;
           } else if(isDecSnap){
             // v3.97（用户 m09615 图9）：③ 只放这一轮真正新来的（决策时还挂在待发里的），
             // 以前塞整段 transcript，等于把 ② 又铺了一遍。
@@ -6732,29 +7279,59 @@ var ctxSnapRequest = 0;
               });
             }
           } else if(ups.length && !dup){
+            // v4.35（用户 m19642）：同一条消息在 messages 里是「[00:22] [message_id: X] …」，
+            // 到 user_prompt 里换成「[Oct 30 2026 00:22 Fri] [message_id: X] …」，逐字比不出来，
+            // ③ 就把本轮那几条画了两遍（图4/图5 的红框重复）。这里按 message_id 认人，
+            // 认不出再比去掉时间戳后的正文；只跳过重复的那一遍，② 后面那几条照原序全留着。
+            var upDrawn = 0;
             ups.forEach(function(one, idx){
-              var body = one;
-              var isLast = (idx === ups.length - 1);
-              if(isLast && pos.actual === "tail" && reloc){
-                body += "\n\n<system_reminder>\n" + reloc + "\n</system_reminder>";
-              } else if(idx === 0 && pos.actual !== "tail" && reloc){
-                body = "<system_reminder>\n" + reloc + "\n</system_reminder>\n\n" + body;
+              var rawOneR = String(one == null ? "" : one);
+              for(var sR = 0; sR < rhMoved.length; sR++){
+                if(!rhMoved[sR]) continue;
+                if(sameMsgText(String(rawContent(rhMoved[sR].content) || ""), rawOneR)) return;
               }
+              // 动态段不再塞进这条消息的正文里（那样三档条数对不上，也看不出
+              // 「最后一条是动态段」），统一放到 ③ 的末尾单独一条，见下面的 relocDrawn。
               n += 1;
-              curRaw += "[" + n + "] user\n" + body + "\n\n";
+              upDrawn += 1;
+              curRaw += "[" + n + "] user\n" + one + "\n\n";
             });
-          } else if(!up && reloc && pos.actual !== "tail"){
-            n += 1;
-            curRaw += "[" + n + "] user\n<system_reminder>\n" + reloc + "\n</system_reminder>\n\n";
-            curN = 1;
+            curN = upDrawn;
           } else if(dup){
             curHint3 = "已并入 ② 末条（老记录）";
           }
+          // v4.36（用户 m19945 图1/图2）：本轮注记排在「被它判的那条消息」后面——
+          // 先被 @ 才触发决策，画成「注记 → 被 @ 的消息」就像决策发生在触发之前。
+          if(rhTailNotes.length){
+            rhTailNotes.forEach(function(mN){
+              var rbN = botRawHead(rawContent(mN.content), noteNameOf(mN) || DEC_NOTE_NAME, "");
+              n += 1;
+              curRaw += "[" + n + "] " + String(mN.role || "assistant") + "\n" + rbN + "\n\n";
+            });
+            curN += rhTailNotes.length;
+          }
+          // v4.35（用户 m19642）：动态段（时间 / 会话 / 记忆 / 强化格式遵守）在原文档里也画出来，
+          // 位置跟真正发出去时一致：pos.actual 是 tail 就压在本轮最下面，否则贴在最前面。
+          // 老记录把这段拼在 user 正文里过——已经含在同一段里就不再补一条。
+          // 动态段在原文档里也算 ③ 的一条，标题条数才跟行号对得上。
+          var relocInUp = false;
+          ups.forEach(function(t){ if(t && reloc && t.indexOf(reloc) >= 0) relocInUp = true; });
+          if(reloc && !relocDrawn && !relocInUp && isDecSnap === false){
+            var relocBodyR = "<system_reminder>\n" + reloc + "\n</system_reminder>";
+            relocDrawn = true;
+            if(pos.actual === "tail"){
+              n += 1;
+              curRaw += "[" + n + "] user\n" + relocBodyR + "\n\n";
+            } else {
+              curRaw = relocBodyR + "\n\n" + curRaw;
+            }
+          }
+          if(relocDrawn) curN += 1;
           // v4.16（用户 m19499）：② 里搬过来的本轮输入，接在 ③ 开头逐条画。
           if(movedRaw){
             // v4.17（用户 m19717 第 1 条）：位置已经放对，不再挂一行说明。
             curRaw = movedRaw + curRaw;
-            curN += rhMoved.length;
+            curN += rhMoved.filter(function(x){ return !!x; }).length;
           }
           var curChars2 = secNum("incoming", (function(){
             var inc = 0;
@@ -6762,7 +7339,7 @@ var ctxSnapRequest = 0;
             return inc;
           })());
           // v4.16：secNum 会优先取 sections 里的 incoming，搬过来的条不在里面，补回去。
-          if(rhMoved.length) curChars2 += movedCharsR;
+          if(rhMoved.length) curChars2 += (movedCharsR - dropCharsR);
           h += rawBlock("③ 本轮消息", "· " + curN + " 条 · " + curChars2 +
                         " 字符 · " + curHint3,
                         curRaw || "（这一轮没有单独的本轮消息）", "");
@@ -6838,7 +7415,11 @@ var ctxSnapRequest = 0;
       // 用户 m08158：flags 是按整份 messages 打的（含已被切进 ③ 的那几条尾部行），
       // hist 只是它的前缀，索引天然对得上。以前要求「长度完全相等」，只要这一轮切出了
       // 本轮消息就永远不等，整串 flags 被丢掉，② 一条都搬不过去——刚发的图两边都没画上。
+      // v4.30（用户 m14924）：② hist 已经是 messages 的前缀（本轮那几条被切进 ③），
+      // flags 却是按整份 messages 打的——长出来那几位直接截掉，别拿尾部 f 位去套
+      // 已经是历史的位置（回复记录会因此少画 8 条、又在 ③ 多搬 8 条）。
       if(flagsN && flagsN.length < hist.length) flagsN = "";
+      else if(flagsN && flagsN.length > hist.length) flagsN = flagsN.slice(0, hist.length);
       var coldN = (flagsN && typeof r.cache_cold_len === "number") ? r.cache_cold_len
                 : (preLen >= 0 ? (hist.length - preLen) : 0);
       var inN = (flagsN && typeof r.cache_input_len === "number") ? r.cache_input_len : 0;
@@ -6854,18 +7435,8 @@ var ctxSnapRequest = 0;
       // 连 bot 自己上一轮发的回复也一起搬，于是「我就发了一条」被写成「3 条」
       // （1 条原文 + 上一轮回复 + 判定注记）。③ 只装这一轮真正新进来的东西：
       // 群友这轮发的消息（user 行）+ 插件写的判定注记；bot 自己的旧回复留在 ② 里。
-      var isDecNoteRow = function(m){
-        if(!m) return false;
-        if(m.decnote === true) return true;
-        if(String(m.name || m.who || "") === DEC_NOTE_NAME) return true;
-        var dec9 = String(rawContent(m.content) || "");
-        if(dec9.indexOf("[决策记录]") === 0) return true;
-        // 用户 m08158：注记正文早就不带 [决策记录] 前缀了（v4.05 改成「判定要回（…）」），
-        // 老快照又没有 decnote 标记，于是这次决策的注记认不出来、进不了 ③。
-        if(String(m.role || "") !== "assistant") return false;
-        var hd9 = dec9.replace(/^\s+/, "");
-        return hd9.indexOf("判定要回") === 0 || hd9.indexOf("判定不回") === 0;
-      };
+      // v4.36（用户 m19945）：判定抽到模块级的 isDecNoteLike（原文档比这里先跑，认不出就画乱）。
+      var isDecNoteRow = function(m){ return isDecNoteLike(m); };
       // 用户 m07562 图1：注记只有「这一轮刚写下、就挂在窗口最末一条」那份才算本轮输入。
       // 上一轮的注记也带 [决策记录] 前缀，以前一律当本轮搬去 ③，于是 ② 里
       // 「群友发言 → 判定要回 → bot 回复」这三条的顺序被打乱：判定被抽走，
@@ -6932,13 +7503,37 @@ var ctxSnapRequest = 0;
         hits2 = Math.min(preLen, shownN2);
       }
       var miss2 = Math.max(0, shownN2 - hits2);
+      // v4.35（用户 m19642）：美化/对照的 ②③ 边界直接沿用原文那一份（boundX）——
+      // 三档同一处切分，不再各算一套。以前这里按 history_messages 的逐项前缀自己重算，
+      // 原文把 32~50 放进 ③、美化却把同一批留在 ②，同一份记录两种顺序（图1 图2）。
+      var bound2 = (boundX >= 0) ? boundX : histAll2.length;
+      if(bound2 > histAll2.length) bound2 = histAll2.length;
+      hist = histAll2.slice(0, bound2);
+      skipN2 = histAll2.length - bound2;
+      skipChars2 = 0;
+      for(var si2b = bound2; si2b < histAll2.length; si2b++){
+        skipChars2 += String(rawContent((histAll2[si2b] || {}).content) || "").length;
+      }
+      shownN2 = bound2;
+      hits2 = 0;
+      if(flagsN){
+        for(var hi2b = 0; hi2b < Math.min(bound2, flagsN.length); hi2b++){
+          if(flagsN.charAt(hi2b) === "h") hits2++;
+        }
+      } else if(preLen >= 0){
+        hits2 = Math.min(preLen, shownN2);
+      }
+      miss2 = Math.max(0, shownN2 - hits2);
       h += "<div class='seqh'>② 历史消息" +
-             " <span class='dim'>· " + (((histRows || r.messages || []).length) - skipN2) + " 条 · " + (histChars - skipChars2) +
+             " <span class='dim' data-histhead='1'>· " + (((histRows || r.messages || []).length) - skipN2) + " 条 · " + (histChars - skipChars2) +
            " 字符" + (preLen >= 0 ? (" · 命中 " + hits2 + " 条 · 未命中 " + miss2 + " 条") : "") + "</span>" +
            "<span class='grow'></span><span class='mini' data-fold='hist'>展开</span></div>";
       h += "<div class='scroll' data-foldbody='hist' style='display:none'>";
       if(!hist.length) h += "<div class='empty'>这一轮没有历史</div>";
       var lastTs2 = "";
+      // v4.30（用户 m14924）：② 的条数/字符改用「真正画出来的那几条」——f 位的本轮
+      // 输入已经搬去 ③，标题还按 messages 全长写就会多算（96 条却只画 95 张）。
+      var drawnChars2 = 0;
       var grpKey2 = null, grpRole2 = null, grpBuf2 = "", grpHead2 = "", grpNote2 = "", grpTools2 = 0;
       var flushGrp2 = function(){
         if(!grpBuf2) return;
@@ -6955,8 +7550,12 @@ var ctxSnapRequest = 0;
         // 用户 m08439 图1/图2：② 不再把本轮输入抽走。抽走的结果是「上一次决策的注记」
         // 单独留在 ② 末尾（图2），或者被搬到 ③ 的最后（图1），两种都把时间顺序弄反了。
         // ③ 的起点改由下面「最后一条 assistant 之后」重新算，② 照原样画全。
-        if(fk === "f" && isCurF(m, i)) histMoved.push(m);
-        if(lastA2 >= 0 && i > lastA2) return;   // 这一段归 ③ 画（用户 m08439）
+        // v4.30（用户 m14924）：本轮输入一律不在 ② 画。以前只有「定位得到本轮那条」
+        // （lastA2 >= 0）才跳过；决策快照的 user_prompt 是整段 transcript、里面没有
+        // message_id，定位不到就让这批留在 ② 末尾——原文档（raw 档）把它们搬进 ③，
+        // 美化/对照不搬，三档对不上，正是「红框两条跑到 ② 后面」。
+        // v4.33（用户 m19120）：② 一条都不跳过。f 是缓存口径（从上一轮最后一条普通回复起就全标 f），
+        // 不是「本轮输入」的意思；以前照它把历史搬走，数组明明非空却画成空白。
         // v4.28（用户 m22895）：这里以前会插一行「下面 N 条不命中缓存」，插在标记
         // 从 f 切回 c 的位置，看着像凭空多出一行；② 的标题里已经写了
         // 「命中 X 条 · 未命中 Y 条」，中间再插一条只是噪音，整段删掉。
@@ -6984,12 +7583,14 @@ var ctxSnapRequest = 0;
             ? grpHeadHtml(m.role, multi2 ? "" : whoOf(mm), multi2 ? "" : uidOf(mm), multi2 ? false : youOf(mm), grpNote2, "\u0001") : "";
         }
         if(mm.tools) grpTools2 += Number(mm.tools) || 0;
+        drawnChars2 += (c || "").length;
         grpBuf2 += msgCards(mm, (++kKeep), VIEW, lastTs2, true);
         // v3.58（用户 m16875 图2）：调用记录已经在 msgCards 的正文末尾画过了，
         // 这里原来又补一份，同一条消息出现两套；卡片外那份删掉。
       });
       flushGrp2();
       h += "</div>";
+      // v4.33（用户 m19120）：② 的标题直接用真实条数，不再重写一遍去凑数字。
       if(!isTrimSnap){
       // v3.90（用户 m05623 第 2 条）：裁切快照没有本轮消息，③ 整段不画。
         // v3.93（用户 m07570 图7）：决策快照也画 ③，标题叫「③ 本轮输入」。
@@ -7062,39 +7663,70 @@ var ctxSnapRequest = 0;
             if(String((msgsAll9[li9] || {}).role || "") === "assistant"){ lastA9 = li9; break; }
           }
         }
-        var pushMsg9 = function(m9){
-          var raw9 = String(rawContent(m9.content) || "");
-          var hit9 = raw9.match(/message_id:\s*(-?\d+)/);
-          if(hit9 && upIds[hit9[1]]) return;
-          var txt4 = contentText(m9.content);
-          movedRows.push({role: "user", who: m9.who || m9.name || "", name: m9.name || "",
-                          text: txt4, raw: rawContent(m9.content), media: m9.media || [],
-                          chars: txt4.length, tools: (m9.tool_calls || []).length,
-                          tool_call_id: m9.tool_call_id || "", tc: tcOf(m9)});
+        // v4.30（用户 m14924）：③ 搬哪几条，跟 ② 共用同一个来源——cache_tail_flags 里
+        // 标 f 的那几条（histMoved），不再用「按 message_id 在 msgs 里定位」那一套。
+        // 决策快照的 user_prompt 是整段 transcript、没有 message_id，定位永远失败，
+        // 以前只能靠 f 位兜底，而兜底只收 user 行、还要被 upIds 挡一道；回复快照里
+        // 本轮那几条 id 认不出来时又会在 ③ 再画一遍（图4/图5 的红框重复）。
+        // 现在统一按内容去重：跟 ③ 正文里已有的真消息（incRows）同一条只出现一次。
+        // v4.33（用户 m19120）：不再按正文指纹去重——两条内容相同的消息在请求里出现几次就画几张，
+        // 前 300 字相同、后文不同的两条也不会再被吞成一条。
+        var pushRow9 = function(mm9, asNote){
+          var isA9 = String(mm9.role || "") === "assistant";
+          // v4.36（用户 m19945 图3）：③ 里那些来自 incoming / user_prompt 的条目带着框架原样的
+          // 长日期头（[Oct 30 2026 01:07 Fri] …），跟别的条目一条一个样；统一压成 [01:07] 再画。
+          var txt9 = tsShortOf(contentText(mm9.content));
+          var body9 = isA9 ? tidyBody(txt9) : txt9;
+          var row9 = {role: isA9 ? "assistant" : "user",
+                      who: mm9.who || mm9.name || "", name: mm9.name || "",
+                      text: body9, raw: tsShortOf(rawContent(mm9.content)), media: mm9.media || [],
+                      chars: body9.length, tools: (mm9.tool_calls || []).length,
+                      tool_call_id: mm9.tool_call_id || "", tc: tcOf(mm9)};
+          if(asNote) movedNotes.push(row9); else movedRows.push(row9);
+          return row9;
         };
-        if(idx9 >= 0){
-          for(var qi9 = lastA9 + 1; qi9 < msgsAll9.length; qi9++){
-            var mq9 = msgsAll9[qi9];
-            if(!mq9) continue;
-            if(String(mq9.role || "") !== "user") continue;
-            pushMsg9(mq9);
+        // v4.33（用户 m19120 / m19154）：③ 就是 ② 之后剩下的那几条——原序、一条不落、不搬不排。
+        // v4.36（用户 m19945 图1/图2）：末尾那条本轮注记要排在它判的那条消息之后。
+        // 注记先落进窗口（messages 末尾），被它判的那条还在 user_prompt / incoming 里，
+        // 按原序画就成了「决策 → 被 @ 的消息」——先被 @ 才触发决策，顺序反了。
+        var suffixRows9 = [];
+        if(isDecSnap === false){
+          for(var qi9 = bound2; qi9 < msgsAll9.length; qi9++){
+            if(msgsAll9[qi9]) suffixRows9.push(msgsAll9[qi9]);
           }
-        } else if(histMoved.length){
-          // 老快照定位不到本轮那条消息：退回用 ② 尾部标 f 的那几条兜底
-          histMoved.forEach(function(m9){
-            if(String(m9.role || "") !== "user") return;
-            pushMsg9(m9);
+        }
+        var tailNotes9 = [];
+        if(isDecSnap === false && suffixRows9.length){
+          var poolUp9 = (Array.isArray(r.incoming_messages) ? r.incoming_messages : [])
+                          .map(function(m9){ return String(rawContent(m9.content) || ""); });
+          (Array.isArray(r.user_prompt_parts) ? r.user_prompt_parts : []).forEach(function(x){
+            var t9 = String((x && x.text) || "");
+            if(t9.trim()) poolUp9.push(t9);
           });
+          for(var sn9 = suffixRows9.length - 1; sn9 >= 0; sn9--){
+            var snRow9 = suffixRows9[sn9];
+            if(!isDecNoteLike(snRow9)) break;
+            var snRaw9 = String(rawContent(snRow9.content) || ""), snDup9 = false;
+            for(var sp9 = 0; sp9 < poolUp9.length; sp9++){
+              if(poolUp9[sp9] && sameMsgText(poolUp9[sp9], snRaw9)){ snDup9 = true; break; }
+            }
+            if(!snDup9) break;
+            tailNotes9.unshift(snRow9);
+            suffixRows9 = suffixRows9.slice(0, sn9);
+          }
         }
-        if(note9 >= 0){
-          var mn9 = msgsAll9[note9];
-          var mt9 = tidyBody(contentText(mn9.content));
-          movedNotes.push({role: "assistant", who: mn9.who || mn9.name || DEC_NOTE_NAME,
-                           name: mn9.name || DEC_NOTE_NAME, text: mt9,
-                           raw: String(rawContent(mn9.content) || ""),
-                           media: mn9.media || [], chars: mt9.length, tools: 0,
-                           tool_call_id: "", tc: tcOf(mn9)});
-        }
+        var suffixRaw9 = [];
+        suffixRows9.forEach(function(mq9){
+          suffixRaw9.push(String(rawContent(mq9.content) || ""));
+          pushRow9(mq9, false);
+        });
+        // v4.36（用户 m19945）：摘出来的本轮注记照旧排在 ③ 的最后（先本轮消息、再判定注记）。
+        var tailRowObjs9 = [];
+        var tailNoteRaw9 = [];
+        tailNotes9.forEach(function(m9){
+          tailRowObjs9.push(pushRow9(m9, true));
+          tailNoteRaw9.push(String(rawContent(m9.content) || ""));
+        });
         var incomingDisplay = VIEW === "pretty" && Array.isArray(r.incoming_display_messages) ? r.incoming_display_messages : null;
         if(incomingDisplay) upList = incomingDisplay.map(function(vm){ return typeof vm.text === "string" ? vm.text : contentText(vm.raw); });
         // v3.94（用户 m08398 图4/图5/图6）：决策快照的 ③ 是它读到的那段聊天记录，一行一条；
@@ -7110,11 +7742,13 @@ var ctxSnapRequest = 0;
                          ? r.incoming_display_messages : null;
         var decLines3 = (isDecSnap && !decInc) ? decTranscriptLines(r) : null;
         if(decInc){
+          // v4.36（用户 m19945 图3）：incoming 里的条目带框架原样的长日期头，
+          // 跟 ③ 里别的行一条一个样；统一压成 [HH:MM] 再画。
           upList = decInc.map(function(m9){
-            var t9 = contentText(m9.content);
+            var t9 = tsShortOf(contentText(m9.content));
             return (m9.role || "user") === "user" ? t9 : tidyBody(t9);
           });
-          sourceUpList = decInc.map(function(m9){ return String(contentText(m9.content) || ""); });
+          sourceUpList = decInc.map(function(m9){ return tsShortOf(String(contentText(m9.content) || "")); });
           incomingDisplay = null;
         } else if(decLines3){
           upList = decLines3.map(function(o){ return o.text; });
@@ -7141,7 +7775,26 @@ var ctxSnapRequest = 0;
           }
           grpBuf3 += msgCards(mm4, k + 1, VIEW, "", true);
         });
+        var skipUp9 = 0, skipUpChars9 = 0;
         upList.forEach(function(one, idx){
+          // v4.35（用户 m19642）：本轮实际发出去的 user 段，后面那串真消息里已经有同一条就不再画。
+          // 以前是逐字比，可 messages 里的时间戳只到分钟、user_prompt 里带完整日期，永远比不上，
+          // 同一条就成了两张卡（红框重复）。现在按 message_id 认，认不出再比去掉时间戳的正文。
+          if(isDecSnap === false){
+            var rawOne9 = String(one == null ? "" : one);
+            var hitS9 = false;
+            for(var s9 = 0; s9 < suffixRaw9.length; s9++){
+              if(sameMsgText(suffixRaw9[s9], rawOne9)){ suffixRaw9[s9] = "@@used"; hitS9 = true; break; }
+            }
+            if(!hitS9){
+              // v4.36：这条注记已经排到 ③ 末尾去了，别在中间再画一张。
+              for(var s9b = 0; s9b < tailNoteRaw9.length; s9b++){
+                if(sameMsgText(tailNoteRaw9[s9b], rawOne9)){ hitS9 = true; break; }
+              }
+            }
+            if(hitS9){ skipUp9 += 1; skipUpChars9 += rawOne9.length; return; }
+          }
+          one = tsShortOf(one);
           var displayPart = (incomingDisplay || r.display_user_prompt_parts || [])[idx] || {};
           var dm3 = decInc ? decInc[idx] : null;
           var d3 = decLines3 ? decLines3[idx] : null;
@@ -7151,7 +7804,7 @@ var ctxSnapRequest = 0;
             // 真消息：角色、昵称、工具调用照原样，渲染跟 ② 一模一样
             var dm3d = (decIncDisp && decIncDisp[idx]) || null;
             mm3 = {role: r3, who: dm3.who || dm3.name || "", name: dm3.name || "",
-                   text: one, raw: rawContent(dm3.content),
+                   text: one, raw: tsShortOf(rawContent(dm3.content)),
                    media: (dm3d && dm3d.media && dm3d.media.length) ? dm3d.media : (dm3.media || []),
                    chars: one.length, tools: (dm3.tool_calls || []).length,
                    tool_call_id: dm3.tool_call_id || "", tc: tcOf(dm3)};
@@ -7194,7 +7847,7 @@ var ctxSnapRequest = 0;
           var c = 0;
           sourceUpList.forEach(function(one){ c += one.length; });
           return c;
-        })());
+        })()) - skipUpChars9;
         // 用户 m08158：以前只要 histMoved 非空就把 movedChars2 整块加进来，可搬过来的
         // 那几条里有的已经在 ③ 画过（被 message_id 认领掉），字数就重复算了一遍。
         // 现在只补真搬进 ③ 的那几条。
@@ -7204,9 +7857,13 @@ var ctxSnapRequest = 0;
         curChars += movedRowChars3 + movedNoteChars3;
         // 用户 m07111 图1/图2：判定注记不是群友发的消息，标题不该把它算进「条」。
         // 标题只数这一轮真正收到的几条，注记在末尾单独说一句。
-        var noteRows3 = movedNotes.length;
-        var realRows3 = sourceUpList.length + movedRows.length;
-        var realChars3 = curChars - movedNoteChars3;
+        // v4.36（用户 m19945）：摘出来的本轮注记不是「另附」，它就是这一轮的一条消息，
+        // 算回「N 条」里（原文档那边一直这么数），不然三档条数对不上。
+        var tailNoteChars9 = 0;
+        tailRowObjs9.forEach(function(o9){ tailNoteChars9 += o9.chars; });
+        var noteRows3 = movedNotes.length - tailRowObjs9.length;
+        var realRows3 = sourceUpList.length - skipUp9 + movedRows.length + tailRowObjs9.length + (reloc.length ? 1 : 0);
+        var realChars3 = curChars - (movedNoteChars3 - tailNoteChars9);
         h = h.replace("<span class='dim' data-curhead='1'>· " + curHint + "</span>",
                       "<span class='dim'>· " + realRows3 + " 条 · " + realChars3 +
                       " 字符 · " + curHint +

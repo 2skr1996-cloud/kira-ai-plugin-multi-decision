@@ -1401,11 +1401,19 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
   .pm-newcard-row{display:flex;gap:6px;align-items:center;}
   .pm-newcard-row select{height:26px;font-size:12px;min-width:0;}
   .pm-newcard-row [data-pm-add]{flex:1 1 auto;min-width:0;}
-  .pm-newcard-row [data-pm-zone]{flex:0 0 118px;}
   .pm-newcard-row .dmini{flex:none;height:26px;margin:0;}
+  /* 用户 m13212 图1：右边那格不再用下拉，换成跟模块卡同一套配色的「系统段 / 动态段」标签，
+     点哪个就加到哪；左边只留一个来源下拉，整行跟上面的模块卡左边缘对齐。 */
+  .pm-newcard-row .pm-zone{flex:none;display:inline-flex;gap:3px;}
+  .pm-zone-b{height:22px;font-family:inherit;font-size:10px;line-height:19px;padding:0 9px;
+    border-radius:999px;cursor:pointer;border:1px solid var(--line);background:transparent;
+    color:var(--muted);transition:background .12s,color .12s,border-color .12s;}
+  .pm-zone-b:hover{color:var(--text);}
+  .pm-zone-b.on[data-pm-zone-pick='system']{color:#7fd6bd;background:rgba(56,178,140,.14);border-color:rgba(56,178,140,.32);}
+  .pm-zone-b.on[data-pm-zone-pick='dynamic']{color:#c8a6ff;background:rgba(160,107,255,.16);border-color:rgba(160,107,255,.36);}
+  .pm-newcard-row .pm-zone-src{display:none;}
   @media (max-width:640px){
     .pm-newcard-row{flex-wrap:wrap;}
-    .pm-newcard-row [data-pm-zone]{flex:1 1 100%;}
   }
   /* 用户 m05124 图1：模块头做成固定三列——标题区（弹性）｜来源下拉（定宽、左对齐）｜
      右侧标签列（位置标签 + N 字 + ↑↓ + 锁/✕，整列靠右对齐）。 */
@@ -1580,6 +1588,7 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
       // v3.71（用户第 8 条末）：伪随机三项搬回普通模式列，这一列只剩抖动与短语清单。
       // 用户 m05691 第 3 条：抖动最多叠几跳也是设置项，默认 3 次（7+7+7）。
       keys: ["jitter_enabled", "jitter_seconds", "jitter_max_rounds",
+        "jitter_skip_must_go",
         "phrase_filter_enabled", "phrase_filter_list"] },
     // v3.39：兜底两项合成一小节——普通静默兜底与休息时段兜底都是「安静多久补一次」，
     // 曲线开着也照用（engine.py 2024-2058：曲线只接管回复概率，不接管兜底窗口）。
@@ -2361,8 +2370,12 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var rendered = isSystemDyn ? ppRenderedPart(s, "system_dynamic")
       : (isPersona ? ppRenderedPart(s, "persona")
         : (isDynamic ? ppRenderedPart(s, "dynamic") : null));
-    var body = rendered ? String(rendered.text || "")
-      : ((typ === "text" || isDynamic) ? String(module.content || "") : ppReferenceText(s, module));
+    // 用户 m14457 图1：停用的模块以前照样把整段正文铺在卡上（只是变淡），
+    // 看着像「关了右边预览还留着」——那其实是左边卡片。停用就明说，不再铺全文。
+    var off = !!(module.enabled === false);
+    var body = (rendered && off) ? ("（未启用 · 这一段不进预览：" + String(rendered.chars || 0) + " 字）")
+      : (rendered ? String(rendered.text || "")
+        : ((typ === "text" || isDynamic) ? String(module.content || "") : ppReferenceText(s, module)));
     // 用户 m04343 第 4 条：默认模板改过正文就自动算「自定义」，标题后面挂个小标，
     // 不用再点「编辑（存成我的模板）」转一次。
     var defTpl = null;
@@ -2505,6 +2518,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
         ppButton(s,"reload","重新读取",undefined,!!s.loading);
     }
     var layout = s.layout, textMode = layout.mode === "text";
+    // 用户 m13212 图1：新增模块加进哪一段，用两个标签记着（重渲染后不回弹）。
+    var zonePick = s.zonePick === "dynamic" ? "dynamic" : "system";
     return "<div class='pm-toolbar'><label>编辑方式<select class='dipt' data-pm-field='mode'>" +
       "<option value='modules'" + (!textMode ? " selected" : "") + ">模块编排</option>" +
       "<option value='text'" + (textMode ? " selected" : "") + ">单段文本</option></select></label>" +
@@ -2518,13 +2533,20 @@ var DM_SPECIAL = { trigger_probability: 1 };
       // 后面多一个下拉：这段是加进系统段，还是加进动态段。
       "<div class='pm-newcard'>" +
         "<div class='pm-newcard-head'><span class='pm-newcard-t'>新增模块</span>" +
-          "<span class='pm-newcard-d'>挑一个模板，选好拼到哪，点「＋ 新增」加进上面</span></div>" +
+          "<span class='pm-newcard-d' title='挑一个模板，选好拼到哪，点「＋ 新增」加进上面'>挑模板 → 选拼到哪 → 加进上面</span></div>" +
         "<div class='pm-newcard-row'>" +
           "<select class='dipt' data-pm-add aria-label='新增模块来源'>" +
             ppTypeOptions(s,{type:"text",key:""},true) + "</select>" +
-          "<select class='dipt' data-pm-zone aria-label='加到哪一段'>" +
-            "<option value='system'>加到系统段</option>" +
-            "<option value='dynamic'>加到动态段</option></select>" +
+          // 用户 m13212 图1：右边用标签代替下拉——系统段 / 动态段各一个，点一下就是加到那里。
+          "<span class='pm-zone' role='group' aria-label='加到哪一段'>" +
+            "<button type='button' class='pm-zone-b" + (zonePick === "dynamic" ? "" : " on") +
+              "' data-pm-zone-pick='system' title='新模块拼进系统段'>系统段</button>" +
+            "<button type='button' class='pm-zone-b" + (zonePick === "dynamic" ? " on" : "") +
+              "' data-pm-zone-pick='dynamic' title='新模块拼进动态段'>动态段</button></span>" +
+          // 真正读值的还是这个 select（藏起来），点标签只是改它的值，免得动到新增逻辑。
+          "<select class='dipt pm-zone-src' data-pm-zone aria-label='加到哪一段' tabindex='-1' aria-hidden='true'>" +
+            "<option value='system'" + (zonePick === "dynamic" ? "" : " selected") + ">加到系统段</option>" +
+            "<option value='dynamic'" + (zonePick === "dynamic" ? " selected" : "") + ">加到动态段</option></select>" +
           ppButton(s,"add","＋ 新增") + "</div></div>" +
         "<div class='pm-foot'>" +
         "<div class='pm-quick'>" + ppButton(s,"defaults","载入默认") +
@@ -2721,6 +2743,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
         s.layout = ppClone(d.layout); s.revision = d.revision; s.inherited = !!d.inherited;
         s.dirty = false; s.preview = d.preview || null; s.notice = "";
       }else if(d.revision !== s.revision){
+        // 用户 m14457 图1：决策/回复两个 tab 各持一份 revision，另一边保存过之后，
+        // 这边每勾一次「启用」都拿旧 revision 去存 → 409，磁盘没变，看着像「勾了没生效」。
+        // revision 是整份 _data 的哈希，但保存只写自己这个 kind，所以跟进版本号不会覆盖别人。
+        s.revision = d.revision;
         s.notice = "服务端版本已有变化；草稿未被覆盖，保存时将检查版本。";
       }
       s.loaded = true; s.loading = null; ppRenderEditor(s); ppPaintPreview(s);
@@ -3188,7 +3214,12 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(root && t.getAttribute){
         var field = t.getAttribute("data-pm-field");
         if(field === "mode" || field === "type" || field === "enabled"){
-          ppUpdateField(ppState(root.getAttribute("data-pp-editor")),field,Number(t.getAttribute("data-pm-index")),field === "enabled" ? t.checked : t.value);
+          var stPM = ppState(root.getAttribute("data-pp-editor"));
+          ppUpdateField(stPM,field,Number(t.getAttribute("data-pm-index")),field === "enabled" ? t.checked : t.value);
+          // v4.34（用户 m13976 第 1/3 条）：勾「启用」以前只改草稿，不点右下角保存
+          // 就等于没开 —— 决策页那个「系统动态段」正是这么勾了却没生效的：开关一眼
+          // 就能看出变化，勾完直接存。
+          if(field === "enabled") ppSave(stPM,false);
         }
         return; // Module fields have no data-k and never enter generic auto-save.
       }
@@ -3247,6 +3278,20 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(t.id === "dec-test"){
         var ds = ppState("decision");
         if(ds.loaded && !ds.dirty && !ds.saving) dcTest();
+        e.preventDefault(); return;
+      }
+      // 用户 m13212 图1：「系统段 / 动态段」两个标签，点哪个就把藏着那个 select 的值换过去。
+      var zoneBtn = t.closest ? t.closest("[data-pm-zone-pick]") : null;
+      if(zoneBtn && !zoneBtn.disabled){
+        var zRoot = editorFor(zoneBtn), zVal = zoneBtn.getAttribute("data-pm-zone-pick") === "dynamic" ? "dynamic" : "system";
+        if(zRoot){
+          var zBtns = zRoot.querySelectorAll("[data-pm-zone-pick]");
+          Array.prototype.forEach.call(zBtns,function(b){ b.classList.toggle("on", b === zoneBtn); });
+          var zSel = zRoot.querySelector("select[data-pm-zone]");
+          if(zSel) zSel.value = zVal;
+          var zState = ppState(zRoot.getAttribute("data-pp-editor"));
+          if(zState) zState.zonePick = zVal;
+        }
         e.preventDefault(); return;
       }
       var button = t.closest ? t.closest("[data-pm-action]") : null;

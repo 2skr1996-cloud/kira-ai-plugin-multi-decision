@@ -205,9 +205,18 @@ def _clean_user(text) -> str:
         return raw
     nick = m.group("nick").strip()
     body = m.group("body").strip()
+    # 插件会在 meta 和「|」之间插一个唤醒标记 [@你]。这里不把它当正文，改成
+    # 「（叫你）」挂在名字后面——决策模型要一眼看出这条是在叫它（用户 m12833）。
+    you = False
+    if body.startswith("[@你]"):
+        you = True
+        body = body[len("[@你]"):].lstrip()
+    if body.startswith("|"):
+        body = body[1:].lstrip()
     if not body:
-        return raw
-    return "[%s] %s：%s" % (m.group("time").strip(), nick, body)
+        return raw if not you else "[%s] %s（叫你）" % (m.group("time").strip(), nick)
+    return "[%s] %s%s：%s" % (
+        m.group("time").strip(), nick, "（叫你）" if you else "", body)
 
 
 def _text_of(value) -> str:

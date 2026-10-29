@@ -17,6 +17,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, List, Set
 
+from core.logging_manager import get_logger
+
+logger = get_logger("multi_decision", "orange")
+
 #: 窗口里一条 user 可能装着好几条群消息，每条都带 [message_id: ...]
 _ID_RE = re.compile(r"\[message_id:\s*([^\]]{1,200})\]")
 
@@ -73,6 +77,10 @@ def ids_of(messages) -> Set[str]:
     return out
 
 
+#: 唤醒标记（window/split.py 的 MARK）：只影响渲染，不参与指纹比对
+_MENTION_RE = re.compile(r"\s*\[@你\]")
+
+
 def fingerprint(msg: Any) -> str:
     """OpenAIMessage 没有稳定 id，只能靠 (role, content) 认人。
 
@@ -82,6 +90,10 @@ def fingerprint(msg: Any) -> str:
     """
     role = _get(msg, "role") or ""
     raw = _content_key(_get(msg, "content"))
+    # 唤醒标记不参与认人：窗口里带、框架历史里不带，带不带都得算同一条，
+    # 否则每轮 collect 都把同一条当成新消息再并一遍（用户 m12833）。
+    if "[@你]" in raw:
+        raw = _MENTION_RE.sub("", raw)
     tc = _get(msg, "tool_calls")
     if tc:
         raw += "|tc:" + _content_key(tc)
@@ -171,6 +183,54 @@ def echo_key(msg: Any) -> str:
         return ""
     digest = hashlib.md5(body.encode("utf-8", "replace")).hexdigest()
     return f"{role}|{digest}"
+
+
+#: 用户 m13676：模型这一轮选择「不回复」时，框架照样会写一条 assistant 记忆。
+#: 这种条目只有时间、名字和一串空标签（渲染出来就是「[19:45] [樱井桃华]」），
+#: 没有正文也没有图——留在窗口里白占 token，还会被当成「bot 刚说过话」拼进下一轮。
+_BOT_PIC_HINT_RE = re.compile(
+    r"\[(?:图片|Image attached|表情|Json card)\]|<image\b|<img\b", re.I)
+
+
+def empty_bot_reply(msg: Any) -> bool:
+    """这条助手消息是不是「什么都没说」（用户 m13676）。"""
+    if (_get(msg, "role") or "") != "assistant":
+        return False
+    # 决策注记是插件自己写进去的结论，不是 bot 说的话，永远保留
+    if _get(msg, "decnote"):
+        return False
+    for key in ("media", "media_refs", "media_path", "images"):
+        if _get(msg, key):
+            return False
+    text = _flat_text(_get(msg, "content"))
+    if not text:
+        return True
+    # 带图 / 带卡片的不算空
+    if _BOT_PIC_HINT_RE.search(text):
+        return False
+    # 只发表情也是回复，别当空消息删掉
+    if re.search(r"<emoji>|\[Emoji\b", text, re.I):
+        return False
+    segs = _TEXT_SEG_RE.findall(text)
+    body = " ".join(segs) if segs else text
+    body = _EMOJI_TAG_RE.sub("", body)
+    body = _HIST_LITERAL_RE.sub("", body)
+    body = re.sub(r"<[^<>\n]{0,200}>", "", body)      # <msg …> / </msg> / <text> / <time>
+    body = re.sub(r"\[[^\[\]\n]{0,40}\]", "", body)  # 时间前缀、[名字]、[图片] 之类
+    body = _ID_RE.sub("", body)
+    return not re.search(r"[\w\u4e00-\u9fff]", body)
+
+
+def drop_empty_bot_replies(messages):
+    """丢掉「什么都没说」的助手消息，返回 (留下的列表, 丢掉的条数)。"""
+    out = []
+    gone = 0
+    for m in messages or []:
+        if empty_bot_reply(m):
+            gone += 1
+            continue
+        out.append(m)
+    return out, gone
 
 
 def clone_message(msg: Any) -> Any:
@@ -360,9 +420,44 @@ def dedupe_same_reply(messages) -> List[Any]:
     return out if dropped else msgs
 
 
+def patch_forward_shells(messages) -> List[Any]:
+    """把正文里的空壳转发换成真内容。
+
+    框架只给了 {"type":"forward"} 时，历史里就是这个样子：
+      [18:40] [message_id: -326662202] [user_nickname: 千夜丶修, …] | [Forward]
+    插件收到消息时会自己问 NapCat 把内容取回来（decision/forward_fetch.py），
+    这里按 message_id 把那份内容换进去；没补到过的那几条原样留着，不编内容。
+    """
+    try:
+        from ..decision.forward_fetch import patch_text
+    except Exception:
+        return list(messages or [])
+    out = []
+    for msg in messages or []:
+        content = _get(msg, "content")
+        if not isinstance(content, str) or "[Forward" not in content:
+            out.append(msg)
+            continue
+        new = patch_text(content)
+        if new == content:
+            out.append(msg)
+            continue
+        copy = clone_message(msg)
+        try:
+            setattr(copy, "content", new)
+        except Exception:
+            if isinstance(copy, dict):
+                copy["content"] = new
+            else:
+                out.append(msg)
+                continue
+        out.append(copy)
+    return out
+
+
 def merge_framework_messages(state: WindowState, framework_messages, seed_limit: int = 0,
                              anchor_msg=None, require_anchor: bool = False,
-                             trusted_messages=None) -> int:
+                             trusted_messages=None, mention_names=None) -> int:
     """把框架这次给的历史增量并进窗口缓冲，返回新增条数。
 
     - 先拆包：框架常把一批群消息拼成一条 user，窗口里一条一条存
@@ -374,8 +469,12 @@ def merge_framework_messages(state: WindowState, framework_messages, seed_limit:
     anchor_msg：拿哪一条当锚点。默认是窗口最后一条；但决策注记（v4.03）是插件
     自己写进窗口的，框架历史里没有它，拿它当锚点必然对不上，于是每轮都退化成
     「只补最后一条」，中间新增的消息全丢。调用方要把最后一条非注记消息传进来。
+
+    mention_names：唤醒标记用的名字（主名 + 外号）。给了就把窗口里所有用户消息
+    重扫一遍：标记落在窗口本体上，页面、决策记录、回复请求三处看到的是同一份，
+    不会出现「刚收到那条有、被框架历史覆盖之后就没了」（用户 m12833）。
     """
-    from .split import expand_packed_messages
+    from .split import expand_packed_messages, mark_copies, mark_messages
 
     # 老窗口里还留着「一条 assistant 塞好几段 <msg>」的形态（v2.57 之前只拆 user）。
     # 每次 collect 顺手迁移一次，条数和页面当场就对了，不用等窗口重来。
@@ -395,12 +494,35 @@ def merge_framework_messages(state: WindowState, framework_messages, seed_limit:
         deduped = dedupe_same_reply(state.messages)
         if len(deduped) != len(state.messages):
             state.messages = deduped
+        # 用户 m13676（图1「[19:45] [樱井桃华]」）：模型选择不回复的那一轮，框架
+        # 也会写一条空 assistant。存量顺手清一次，别让它一直躺在窗口里被当成
+        # 「bot 刚说过话」拼进下一轮。
+        kept, empty_gone = drop_empty_bot_replies(state.messages)
+        if empty_gone:
+            state.messages = kept
+            logger.debug("[multi-decision] 窗口清掉空回复 %d 条", empty_gone)
+        # 存量补标记：老窗口里那些行本来没标，也不会自己长出来，每轮顺手扫一次
+        # （幂等，已经带标记的行原样跳过）。用户 m12833：@你 只在刚收到那一阵显示，
+        # 被框架历史覆盖之后就没了。
+        if mention_names:
+            marked = mark_messages(state.messages, mention_names)
+            if marked:
+                logger.debug("[multi-decision] 窗口补唤醒标记 %d 条", marked)
 
     incoming = expand_packed_messages([
         m for m in (framework_messages or [])
         if (_get(m, "role") or "") != "system"
     ])
+    incoming = patch_forward_shells(incoming)
     trusted = expand_packed_messages(list(trusted_messages or []))
+    # 用户 m13676：框架回传的历史里也可能夹着「什么都没说」的助手条目，
+    # 进来之前先丢掉，别让它在窗口里长住。
+    incoming, _gone_in = drop_empty_bot_replies(incoming)
+    trusted, _gone_tr = drop_empty_bot_replies(trusted)
+    # 打标走副本：框架给的消息对象是它自己的记忆条目，就地改会把 [@你] 写回框架那边
+    if mention_names:
+        incoming = mark_copies(incoming, mention_names)
+        trusted = mark_copies(trusted, mention_names)
     seen_before = set(state.framework_seen_ids)
     # 记录框架确实回传过的身份，而不是仅记当前保留的窗口。去重表有界、无正文。
     seen_order = dict.fromkeys(state.framework_seen_ids)

@@ -1114,9 +1114,7 @@ class PromptLayouts:
         try:
             piece = _Prompt(body, name="dynamic_tail", source="system", persist=False, render_template=False, end="")
             out, placed = [], False
-            # 用户 m06428 图1：设置页里「强化格式遵守」排在「系统动态段」上面，注入顺序也必须是
-            # 这个——先强化格式，再由框架的 <system_reminder>（记忆 / 时间）收尾，最后一条才是
-            # 系统动态段。以前插在关闭标记之后，强化格式反而成了整条 user 的尾巴。
+            # 用户 m06428 图1：动态段模板要落在 <system_reminder> 块里、开始标记之前。
             for p in ups:
                 if not placed and (getattr(p, "name", "") or "") == "dynamic_context_start":
                     out.append(piece)
