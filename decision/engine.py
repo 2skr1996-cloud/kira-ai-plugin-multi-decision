@@ -25,11 +25,12 @@ try:
 except Exception:  # 测试桩 / 老版本框架没有这个模块
     Prompt = None
 
+from .forward_fetch import fetch_forward_items, remember_by_mid
 from ..state.session_state import SessionState
 from ..state.sids import normalize_sid
 from ..state.retry_history import RETRY_META
 from ..window.buffer import ids_of
-from ..window.split import mark_mention, mark_messages, split_user_content
+from ..window.split import _looks_image, mark_mention, mark_messages, split_user_content
 
 # 「不触发短语」比对前先剥掉这些：句尾标点、空白、常见装饰符。
 # 只比「整条消息 == 短语」，不做包含匹配——否则清单里加个「好」字，
@@ -96,6 +97,7 @@ def _norm_phrase(text: str) -> str:
 from ..window.manager import (
     clean_content,
     sanitize_native_refs,
+    _media_from_db,
     shrink_content,
     shrink_timestamp,
     strip_group_tags,
@@ -492,6 +494,34 @@ def _forward_text(element, depth: int = 0) -> str:
     return ""
 
 
+def _fill_forward_shell(message, raw: str) -> str:
+    """把 raw 里的空壳转发标记换成真内容。
+
+    框架的 message_str 在拿到 chains 之前就写成了 "[Forward message]"，而
+    raw_line_of 又优先用 message_str —— 补到内容之后不换掉，窗口里永远是
+    「合并转发 · 内容未获取」（用户 m12494 的截图）。
+    """
+    if "[Forward message]" not in raw and "[Forward]" not in raw:
+        return raw
+    try:
+        chain = getattr(message, "chain", None) or []
+    except Exception:
+        chain = []
+    for el in chain:
+        try:
+            if not _looks_forward(el):
+                continue
+            txt = _forward_text(el)
+        except Exception:
+            continue
+        if not txt:
+            continue
+        if "[Forward message]" in raw:
+            return raw.replace("[Forward message]", txt)
+        return raw.replace("[Forward]", txt)
+    return raw
+
+
 
 # ---------------------------------------------------------------------------
 # Json 卡片（位置分享 com.tencent.map / 小程序 / 分享卡）：ON_MESSAGE 收到的是
@@ -692,6 +722,12 @@ def file_refs_of(message) -> list:
 _REPLY_ID_RE = re.compile(r"-?\d{3,}")
 _REPLY_STAMP_RE = re.compile(r"^\[([^\]]+)\]")
 _REPLY_NICK_RE = re.compile(r"\[user_nickname:\s*([^,\]]+)")
+# bot 自己发的那条在窗口里是 XML 一行：<msg message_id="X">[昵称] <text>正文</text></msg>。
+# 它既没有「[message_id: X]」也没有「 | 」，引用回查和正文提取都得单独认它（用户 m11986）。
+_MSG_XML_RE = re.compile(
+    r'<msg\s+message_id="(-?\d+)"[^>]*>\s*\[([^\]]*)\]\s*<text>([\s\S]*?)</text>',
+    re.I,
+)
 _REPLY_SEEN = []
 _REPLY_MISS = []
 
@@ -771,6 +807,33 @@ def _reply_parts(el, raw: str):
             if isinstance(v, str) and v.strip():
                 txt = v.strip()
                 break
+    if not txt:
+        # 框架的 Reply 元素把被引用那条的原文放在 chain 里（QQ 通道 message_content
+        # 恒为 None，实测 chain = [Text("[2026-10-29 17:37:43] 樱井桃华: 那我大概已经超越完了")]）。
+        # 以前只看属性，引用 bot 自己的消息就只剩一个 id，前端只能画「引用了更早的一条消息」。
+        try:
+            sub = list(getattr(el, "chain", None) or [])
+        except Exception:
+            sub = []
+        bits = []
+        for it in sub:
+            v = ""
+            for attr in ("text", "content", "repr"):
+                try:
+                    cand = getattr(it, attr, None)
+                except Exception:
+                    cand = None
+                if isinstance(cand, str) and cand.strip():
+                    v = cand.strip()
+                    break
+            if not v:
+                try:
+                    v = str(it).strip()
+                except Exception:
+                    v = ""
+            if v:
+                bits.append(v)
+        txt = re.sub(r"\s+", " ", " ".join(bits)).strip()
     return rid, txt
 
 
@@ -778,14 +841,24 @@ def _quote_body_of(raw: str) -> str:
     """把一条 raw 行压成引用里那行「2026-10-27 19:10:00 昵称: 正文」。"""
     s = str(raw or "").strip()
     stamp, who, body = "", "", ""
-    m = _REPLY_STAMP_RE.search(s)
-    if m:
-        stamp = m.group(1).strip()
-    m = _REPLY_NICK_RE.search(s)
-    if m:
-        who = m.group(1).strip()
-    if " | " in s:
-        body = s.split(" | ", 1)[1]
+    xm = _MSG_XML_RE.search(s)
+    if xm:
+        # bot 自己发的那条是 <msg message_id="X">[昵称] <text>正文</text></msg>，
+        # 没有「 | 」可切；不单独认它就取不到正文（用户 m11986 图2：引用的正是 bot 上一条）。
+        who = str(xm.group(2) or "").strip()
+        body = str(xm.group(3) or "").strip()
+        tm = _REPLY_STAMP_RE.search(s)
+        if tm:
+            stamp = tm.group(1).strip()
+    else:
+        m = _REPLY_STAMP_RE.search(s)
+        if m:
+            stamp = m.group(1).strip()
+        m = _REPLY_NICK_RE.search(s)
+        if m:
+            who = m.group(1).strip()
+        if " | " in s:
+            body = s.split(" | ", 1)[1]
     # v4.31：只剥正文开头的完整引用壳；时间戳/卡片等内部也有 []，
     # 不能删到第一个 ] 就停，否则旧原话和残余 ] 会串进下一条引用。
     body = body.strip()
@@ -833,6 +906,8 @@ def _quoted_text(window, sid: str, mid: str) -> str:
     if window is None or not mid:
         return ""
     key = "[message_id: %s]" % mid
+    # bot 自己发的消息在窗口里是 <msg message_id="X">，不带方括号那层（用户 m11986）
+    key_xml = 'message_id="%s"' % mid
     try:
         st = window.state(sid)
     except Exception:
@@ -847,7 +922,7 @@ def _quoted_text(window, sid: str, mid: str) -> str:
         for item in items:
             raw = item.get("raw", "") if isinstance(item, dict) else getattr(item, "raw", "")
             raw = str(raw or "")
-            if key in raw:
+            if key in raw or key_xml in raw:
                 got = _quote_body_of(raw)
                 if got:
                     return got
@@ -902,6 +977,7 @@ def raw_line_of(message, text: str, sender: str, name: str, ts: float = 0.0, loo
     """
     raw = str(getattr(message, "message_str", "") or "").strip()
     if raw:
+        raw = _fill_forward_shell(message, raw)
         # v4.11（用户 m17596 第 4 条）：框架给的 message_str **不含引用那一段**
         # （实测 QQ 通道原文只到 "… | @冇似 派头林立是这样的"，[Reply ID …] 整节
         # 缺失），v4.02 拼的引用只挂在下面「自拼」分支里，所以真机上引用块从来没
@@ -2007,6 +2083,12 @@ class DecisionEngine:
             mid = str(getattr(message, "message_id", "") or "")
             if mid and mid in incoming:
                 refs = await self._cache_media(message, sid)
+                if not refs:
+                    # 兜底：元素上没带出来也不要紧，消息库里存着归档路径
+                    try:
+                        refs = _media_from_db(mid)
+                    except Exception:
+                        refs = []
                 if refs:
                     media[mid] = refs
         request._mdp_incoming_media = media
@@ -2037,6 +2119,78 @@ class DecisionEngine:
                     await self._receive_message(event)
         finally:
             self._input_tasks.discard(task)
+
+    def _qq_bot(self):
+        """拿 QQ 适配器底下的 NapCat 客户端。
+
+        ctx 上这个管理器叫 adapter_mgr（不是 adapter_manager）；get_adapters() 的
+        key 是显示名（"樱井桃华"），按 "qq" 取不到，只能按类名认。
+        """
+        mgr = getattr(self.ctx, "adapter_mgr", None)
+        if mgr is None:
+            return None
+        try:
+            ads = mgr.get_adapters()
+        except Exception:
+            return None
+        items = list(ads.values()) if isinstance(ads, dict) else list(ads or [])
+        for one in items:
+            if type(one).__name__ != "QQAdapter":
+                continue
+            bot = getattr(one, "bot", None)
+            if bot is not None and hasattr(bot, "send_action"):
+                return bot
+        return None
+
+    async def _hydrate_forwards(self, message) -> int:
+        """把空壳转发补成真内容（框架 im.py 把 message_id 当成 res_id 传给 get_forward_msg，
+        取不到就 Forward(chains=[])）。必须在 _admit_message 取正文之前做。"""
+        try:
+            chain = list(getattr(message, "chain", None) or [])
+        except Exception:
+            return 0
+        need = []
+        for el in chain:
+            try:
+                if _looks_forward(el) and not _fw_items(el):
+                    need.append(el)
+            except Exception:
+                continue
+        if not need:
+            return 0
+        mid = ""
+        for attr in ("message_id", "msg_id", "id"):
+            try:
+                mid = str(getattr(message, attr, "") or "").strip()
+            except Exception:
+                mid = ""
+            if mid:
+                break
+        if not mid:
+            return 0
+        bot = self._qq_bot()
+        if bot is None:
+            logger.info("[multi-decision] 空转发补取跳过：没找到 QQ 适配器（mid=%s）" % mid)
+            return 0
+        try:
+            items = await fetch_forward_items(bot, mid)
+        except Exception as exc:
+            logger.info("[multi-decision] 空转发补取异常 mid=%s：%s: %s" % (mid, type(exc).__name__, exc))
+            return 0
+        if not items:
+            logger.info("[multi-decision] 空转发补取无内容 mid=%s" % mid)
+            return 0
+        for el in need:
+            try:
+                setattr(el, "chains", list(items))
+            except Exception:
+                continue
+        try:
+            remember_by_mid(mid, [i["message_str"] for i in items])
+        except Exception:
+            pass
+        logger.info("[multi-decision] 空转发补取成功 mid=%s，%d 条" % (mid, len(items)))
+        return len(items)
 
     async def _receive_message(self, event) -> None:
         plugin = self.plugin
@@ -2100,6 +2254,13 @@ class DecisionEngine:
         message = getattr(event, "message", None)
         if message is None:
             return
+
+        # 空壳合并转发：框架只留了 {"type":"forward"}，这里自己问 NapCat 要回内容
+        # （用户 m12494）。失败就保持原样，前端照旧画「内容未获取」，不编内容。
+        try:
+            await self._hydrate_forwards(message)
+        except Exception:
+            logger.exception("[multi-decision] 转发补取失败（已忽略）")
 
         # 机器人自己的名字：优先用适配器里的真实昵称（QQ 里别人看到的名字），
         # 而不是人格文件名。@ 消息里是 `[At 1429260473(nickname: 桃华)]`，
@@ -2200,6 +2361,18 @@ class DecisionEngine:
         if self.window is not None:
             try:
                 media_refs = await self._cache_media(message, sid)
+                if not media_refs:
+                    # v4.38（用户 m20312）：框架把图归档进 session_media/archive/ 之后，
+                    # 消息链上拿不到可直接用的路径，按 message_id 回消息库捞一次。
+                    for _attr in ("message_id", "msg_id", "id"):
+                        try:
+                            _mid = str(getattr(message, _attr, "") or "").strip()
+                        except Exception:
+                            _mid = ""
+                        if _mid:
+                            break
+                    if _mid:
+                        media_refs = _media_from_db(_mid) or []
             except Exception:
                 logger.debug("[multi-decision] 缓存待发图片失败（已忽略）", exc_info=True)
         if self._closed or flow.epoch != epoch:
@@ -2413,9 +2586,26 @@ class DecisionEngine:
                 ref = await store_session_media(el, self._raw_sids.get(sid) or sid, mid)
             except Exception:
                 logger.debug("[multi-decision] 图片落盘失败（已忽略）", exc_info=True)
-                continue
+                ref = None
+            if not (isinstance(ref, dict) and ref.get("path")):
+                # v4.38（用户 m20312）：框架可能在入库那一刻就把图归档了
+                # （session_media/archive/<哈希>），这时元素自带的 file 就是
+                # data 下的相对路径，直接拿来用，别再让它去重新下载一次。
+                for _attr in ("file", "path", "url"):
+                    try:
+                        _own = str(getattr(el, _attr, "") or "")
+                    except Exception:
+                        _own = ""
+                    if _own.startswith("session_media/"):
+                        ref = {"path": _own, "mime_type": str(getattr(el, "mime", "") or "")}
+                        break
             if isinstance(ref, dict) and ref.get("path"):
-                out.append(dict(ref, mime=str(ref.get("mime_type") or "")))
+                # v4.38（用户 m20312）：框架改按内容哈希归档，ref 里没有 mime_type，
+                # 这里补一次（归档文件名没后缀，只能读文件头认）。
+                _mime = str(ref.get("mime_type") or ref.get("mime") or "").strip()
+                if not _mime.startswith("image/"):
+                    _mime = _looks_image(str(ref.get("path") or ""))
+                out.append(dict(ref, mime=_mime))
         return out
 
     def _mark(self, sid: str, item, mark: str) -> None:
@@ -3545,14 +3735,36 @@ class DecisionEngine:
 
     async def _buffer_loop(self) -> None:
         try:
+            ticks = 0
             while not self._closed:
                 await asyncio.sleep(30.0)
                 try:
                     self._check_buffer_trim()
                 except Exception:
                     logger.exception("[multi-decision] 缓冲裁切巡检异常")
+                # 用户 m14457 第 3 条：图片缓存以前只在「写一张新图」那一刻顺手裁
+                # （window/manager.py 里只有 _store_cache / _cache_media_file 两个调用点），
+                # 所以停机、没新消息的时候一张都不会清，天数线也就永远等不到执行——
+                # 表现就是「停止工作期间图片清理没触发」。这里每 10 分钟自己巡检一次，
+                # 规则跟写图时完全同一份（_prune_media_cache，按群组各自算）。
+                ticks += 1
+                if ticks % 20 == 0:
+                    try:
+                        await asyncio.to_thread(self._prune_media_cache_now)
+                    except Exception:
+                        logger.exception("[multi-decision] 图片缓存巡检异常")
         except asyncio.CancelledError:
             raise
+
+    def _prune_media_cache_now(self) -> None:
+        """按规则裁一次图片缓存（跟写图时同一个函数，不额外定标准）。"""
+        try:
+            from ..window import manager as _wm
+            root = _wm._media_cache_root()
+            if root:
+                _wm._prune_media_cache(root)
+        except Exception:
+            logger.debug("[multi-decision] 图片缓存巡检失败", exc_info=True)
 
     def _check_buffer_trim(self) -> None:
         plugin = self.plugin
@@ -3591,10 +3803,13 @@ class DecisionEngine:
         # v3.44（用户本轮第 1 条）：抖动改成「开关 + 固定秒数」。
         # 开关默认关着——关着就立刻动，不再等；开了就固定等 jitter_seconds 秒
         # （以前是 random.uniform(0, N) 的随机等待，用户明确要固定秒数）。
-        # 用户 m05124 第 5 条：必回（@ / 叫名字）这一路不等抖动——都被点名了还干等几秒，
+        # 用户 m05124 第 5 条：必回（@ / 叫名字）这一路默认不等抖动——都被点名了还干等几秒，
         # 用户看到的就是「@ 完一秒多才动」。抖动只服务计数 / 概率那一路「攒一会儿再决定」。
+        # 用户 m13212 后：这条改成设置项「必回不等防抖」，默认开；关掉就一起等。
         must_go = str(reason or "") in ("mention", "nickname")
-        jitter_on = bool(self._c("jitter_enabled", sid)) and not must_go
+        _skip_raw = self._c("jitter_skip_must_go", sid)
+        skip_must = True if _skip_raw is None else bool(_skip_raw)
+        jitter_on = bool(self._c("jitter_enabled", sid)) and not (must_go and skip_must)
         jitter = max(0, self._c("jitter_seconds", sid)) if jitter_on else 0
         # 用户 m05427 / m05583：抖动是「固定 S 秒；这 S 秒里又攒够一次触发，就再叠 S 秒」（7 → 14 → 21 …）。
         # 以前每来一次触发都把 deadline 推回「现在 + S」，看起来永远只等 S 秒，用户要的是叠加。
@@ -4190,9 +4405,9 @@ class DecisionEngine:
         # 由 _execute 转存到 _round_trigger_at）到真正开始判，中间干等了多久。
         # 用户 m05453：防抖 / 决策 / 回复是三段。这一格只写「抖动真的等了几秒」，
         # 不再用 started - 触发时刻——那里面还含着决策前的准备，看着像防抖变长了。
-        # 用户 m05691 第 4 条：进阶模式下抖动的这几秒是「决策之前」的等待，记在决策这一行就够了。
-        # 以前取完不消费，回复轮又把同一个数记成自己的防抖，同一次等待在记录页出现两遍
-        # （决策 7s、回复 7s），看着像回复也在等。这里取走即清空：回复轮从 0 开始算。
+        # 用户 m05691 第 4 条 / 用户 m13212 再确认：链路是「防抖 → 决策 → 回复」，
+        # 进阶模式下抖动的这几秒属于**决策之前**的等待，只记在决策那一行。
+        # 决策一旦要回就马上进回复流程，回复那一段不再叠加防抖，所以这里取走即清空。
         _jit = float(self._round_jitter.pop(sid, 0.0) or 0.0)
         rec = {
             "ts": started,

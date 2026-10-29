@@ -163,6 +163,8 @@ def _decorate_rows(rows: Any, media_by_id: Any) -> None:
         if str(row.get("role") or "") == "assistant" and not row.get("decnote"):
             # 老注记带「[决策记录] 12:00」前缀（v4.05 之后才去掉），两种都认。
             head = re.sub(r"^\[决策记录\]\s*(?:\d{1,2}:\d{2})?\s*", "", text.lstrip())
+            # v4.39（用户 m20312）：注记正文现在也带「[HH:MM] 」，认之前先剥掉
+            head = re.sub(r"^\[\d{1,2}:\d{2}\]\s*", "", head)
             if head.startswith(_DEC_NOTE_HEAD):
                 row["decnote"] = True
                 row.setdefault("name", "对当前聊天消息的决策建议")
@@ -931,6 +933,18 @@ class RequestLog:
                     break
             if cut is not None:
                 hist_messages = messages[:cut]
+        # 用户 m14877：窗口尾部常常是「[本轮 user…] + [决策注记]」或者「[决策注记] + [本轮 user…]」，
+        # 注记是给这一轮看的，不该画在 ②（历史）的最后一条 —— 那是上一轮的位置。
+        # 从历史尾部把连续的注记摘出来，等组装时插到 ③（本轮）开头，跟原文一致。
+        tail_notes = []
+        while hist_messages:
+            _last = hist_messages[-1]
+            _ln = str((_last.get("name") if isinstance(_last, dict) else "") or "")
+            if _ln in ("对当前聊天消息的决策建议", "对以上聊天记录的决策建议"):
+                tail_notes.insert(0, hist_messages[-1])
+                hist_messages = hist_messages[:-1]
+                continue
+            break
         tail_split = hist_messages is not messages
         names = []
         static_names: list[str] = []
@@ -1086,9 +1100,29 @@ class RequestLog:
             {"key": "incoming", "label": "本轮消息", "chars": incoming_chars},
             {"key": "relocated", "label": "动态段（时间/会话/记忆）", "chars": len(relocated_text)},
         ]
+        # 用户本轮第 3 条（回复记录里同一条 @ 画两遍）：assembled 只该画历史那段。
+        # 原来传的是完整 messages，而 hist_messages 已经从尾部切掉了本轮那条，
+        # 于是同一 message_id 在 assembled 里出现两次（history + incoming）。
+        # 缓存口径全在 _prefix_of(完整 messages) 里另算，这里换掉不影响命中。
         assembled = self._assemble(
-            static_text, messages, relocated_text, up_parts, tail_dynamic, up_seq
+            static_text, hist_messages, relocated_text, up_parts, tail_dynamic, up_seq
         )
+        # 决策注记插到「本轮那条」前面（用户 m14812 图3：原文里它就在 ③ 开头）。
+        for _n in tail_notes:
+            try:
+                _d = dict(_n)
+            except Exception:
+                continue
+            _d["tag"] = "incoming"
+            _at = None
+            for _i in range(len(assembled) - 1, -1, -1):
+                if isinstance(assembled[_i], dict) and assembled[_i].get("tag") == "incoming":
+                    _at = _i
+                    break
+            if _at is None:
+                assembled.append(_d)
+            else:
+                assembled.insert(_at, _d)
         # 这一轮真正发出去的东西有多大（文本 JSON 的 UTF-8 字节数）。
         # 页面原来只有 token 和字符数，用户想直接看到体积（用户 m32956 图7）。
         # 注意：图片在发送前才被框架换成 base64，这里算的是文本部分。

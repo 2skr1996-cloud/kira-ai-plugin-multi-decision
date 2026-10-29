@@ -125,8 +125,11 @@ MARK = " [@你]"
 #: 一条消息的行首 meta。群名/群号段可能已经被洗掉，所以做成可选的。
 #: 昵称里可能自带中括号（QQ 头衔编码坏掉后落成「[%ĀĀ␇Ö] [@你]我在未来，等你」，用户 m04917 图1），
 #: 所以先按「, user_id:」这个结尾锚定整段昵称；认不到才退回不允许中括号的旧写法。
+#: 时间前缀两种写法都要认：短格式「[17:46]」和框架偶尔给的长格式
+#: 「[Oct 29 2026 17:46 Thu]」。以前只认纯数字，长格式那几个会话的标记一直
+#: 打不上（用户 m12833：@你 时有时无）。
 _META_RE = re.compile(
-    r"^(?P<meta>\[\d{1,2}:\d{2}\]\s*\[message_id:[^\]]{1,200}\]\s*"
+    r"^(?P<meta>\[[^\]\n]{1,32}\]\s*\[message_id:[^\]]{1,200}\]\s*"
     r"(?:\[group_name:[^\]]*\]\s*)?(?:\[group_id:[^\]]*\]\s*)?"
     r"(?:\[user_nickname:[\s\S]*?,\s*user_id:[^\]]*\]"
     r"|\[user_nickname:[^\]]*\]))"
@@ -158,6 +161,26 @@ def mark_mention(chunk: str, names) -> str:
     return chunk
 
 
+def mark_block(text: str, names) -> str:
+    """一条 content 里可能挤着好几条群消息（一行一条），逐行判、逐行标。
+
+    以前整段直接交给 mark_mention，正则的 ^ 只认第一行，同一条 user 里
+    第二条起永远拿不到标记——窗口里就表现为「@你 时有时无」（用户 m12833）。
+    """
+    if not isinstance(text, str) or not text or not names:
+        return text
+    if "\n" not in text:
+        return mark_mention(text, names)
+    lines = text.split("\n")
+    changed = False
+    for i, line in enumerate(lines):
+        new = mark_mention(line, names)
+        if new != line:
+            lines[i] = new
+            changed = True
+    return "\n".join(lines) if changed else text
+
+
 def _set_content(msg, content) -> None:
     if isinstance(msg, dict):
         msg["content"] = content
@@ -178,7 +201,7 @@ def mark_messages(messages, names) -> int:
             continue
         content = _get(msg, "content")
         if isinstance(content, str):
-            new = mark_mention(content, names)
+            new = mark_block(content, names)
             if new != content:
                 _set_content(msg, new)
                 changed += 1
@@ -190,7 +213,7 @@ def mark_messages(messages, names) -> int:
                 if not isinstance(item, dict) or item.get("type") != "text":
                     continue
                 text = str(item.get("text") or "")
-                new = mark_mention(text, names)
+                new = mark_block(text, names)
                 if new != text:
                     parts[i] = dict(item, text=new)
                     hit = True
@@ -198,6 +221,51 @@ def mark_messages(messages, names) -> int:
                 _set_content(msg, parts)
                 changed += 1
     return changed
+
+
+def mark_copies(messages, names):
+    """给一批消息打唤醒标记，返回新列表：改过的复制一份，不动调用方手里的对象。
+
+    框架给过来的消息对象是它自己的记忆条目，就地改会把标记写回框架那边，
+    别的插件跟着看到一串 [@你]。所以这里只在副本上改。
+    """
+    out = []
+    for msg in messages or []:
+        if (_get(msg, "role") or "") != "user":
+            out.append(msg)
+            continue
+        content = _get(msg, "content")
+        if isinstance(content, str):
+            new = mark_block(content, names)
+        elif isinstance(content, (list, tuple)):
+            parts = list(content)
+            hit = False
+            for i, item in enumerate(parts):
+                if not isinstance(item, dict) or item.get("type") != "text":
+                    continue
+                text = str(item.get("text") or "")
+                one = mark_block(text, names)
+                if one != text:
+                    parts[i] = dict(item, text=one)
+                    hit = True
+            new = parts if hit else content
+        else:
+            out.append(msg)
+            continue
+        if new == content:
+            out.append(msg)
+            continue
+        copy = clone_message(msg)
+        try:
+            setattr(copy, "content", new)
+        except Exception:
+            if isinstance(copy, dict):
+                copy["content"] = new
+            else:
+                out.append(msg)
+                continue
+        out.append(copy)
+    return out
 
 
 #: 图片 part 的类型（与 manager.IMAGE_TYPES 保持一致，避免循环导入）
@@ -243,18 +311,57 @@ def with_owned_images(content, refs, raw_sid: str):
         if not isinstance(ref, dict):
             continue
         path = str(ref.get("path") or "")
-        segs = path.split("/")
-        if (len(segs) != 4 or segs[:3] != ["session_media", session, owner]
-                or not segs[3] or segs[3] in (".", "..") or "\\" in path or path in have):
+        if "\\" in path or path in have or not path.startswith(_MEDIA_PREFIX):
             continue
-        mime = str(ref.get("mime_type") or ref.get("mime") or "image/jpeg")
-        if not mime.startswith("image/"):
+        segs = path.split("/")
+        if any(s in ("", ".", "..") for s in segs):
+            continue
+        # v4.38（用户 m20312）：框架现在按内容哈希归档图片，形态是
+        # session_media/archive/<sha256>（三段、跟 message_id 无关）；老的四段
+        # session_media/<会话哈希>/<消息哈希>/<文件> 也还在用。以前只认四段，
+        # 新到的图在组装请求时被整段丢掉，模型那边就只剩一个 [图片] 空壳。
+        owner_ok = len(segs) == 4 and segs[1] == session and segs[2] == owner
+        archive_ok = len(segs) == 3 and segs[1] == "archive"
+        if not (owner_ok or archive_ok):
+            continue
+        mime = str(ref.get("mime_type") or ref.get("mime") or "").strip()
+        if mime and not mime.startswith("image/"):
+            continue
+        if not mime:
+            mime = _looks_image(path)
+        if not mime:
             continue
         parts.append({"type": "kira_image_ref", "path": path, "mime_type": mime,
                       "detail": str(ref.get("detail") or "high")})
         have.add(path)
         changed = True
     return parts if (changed or want_list) else content
+
+
+def _looks_image(rel: str) -> str:
+    """归档文件没有后缀、也没有 mime，读前 16 字节认类型；实在读不了就当 jpeg。"""
+    head = b""
+    try:
+        from pathlib import Path
+
+        from core.utils.path_utils import get_data_path
+
+        target = Path(get_data_path()) / str(rel).replace("\\", "/")
+        with open(target, "rb") as fh:
+            head = fh.read(16)
+    except Exception:
+        return "image/jpeg"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head.startswith(b"BM"):
+        return "image/bmp"
+    return "image/jpeg"
 
 
 def _images_of(content) -> list:
