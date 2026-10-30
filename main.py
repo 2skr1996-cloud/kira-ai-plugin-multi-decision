@@ -94,6 +94,35 @@ def _quote_media_by_mid(mid: str, raw_sid: str) -> list:
     return out
 
 
+def _forward_media_attach(messages, raw_sid: str = "") -> list:
+    """老消息里的转发图（用户 m25038 第 4 项）：窗口里存的是当时的文本快照，
+    media 早就定死了，这里按正文里的 [message_id: X] 现查一次插件缓存再挂上。
+    """
+    try:
+        from .decision.forward_fetch import media_for_text as _fwd_media_of
+    except Exception:
+        return messages
+    out = []
+    for m in messages or []:
+        try:
+            if isinstance(m, dict) and not (m.get("media") or []) and "[Forward" in str(m.get("text") or ""):
+                med = []
+                for ref in (_fwd_media_of(str(m.get("text") or "")) or [])[:6]:
+                    try:
+                        got = public_media(str(ref.get("path") or ""), str(ref.get("mime") or ""), raw_sid)
+                    except Exception:
+                        got = {}
+                    if got and (got.get("path") or got.get("url")):
+                        med.append(got)
+                if med:
+                    m = dict(m)
+                    m["media"] = med
+        except Exception:
+            pass
+        out.append(m)
+    return out
+
+
 def _sid_ok(sid: str) -> bool:
     """sid 能不能安全地拿去拼路径。空串、含路径分隔符、含 ".."、超长一律否。"""
     s = str(sid or "").strip()
@@ -3155,12 +3184,13 @@ class MultiDecisionPlugin(BasePlugin):
                 out[k] = got
         return {"ok": True, "items": out}
 
+
     @_api("GET", "/window")
     async def api_window(self, sid: str = ""):
         """某个会话当前的上下文窗口（观察窗，只读）。"""
         if not sid or self.window is None:
             return {"ok": False, "detail": "没有这个会话的窗口"}
-        messages = self.window.messages_of(sid)
+        messages = _forward_media_attach(self.window.messages_of(sid), self.window.raw_sid(sid))
         source = "live"
         last_ts = 0.0
         counted = self.window.counted(sid)
@@ -5522,4 +5552,83 @@ class MultiDecisionPlugin(BasePlugin):
             content=blob,
             media_type=mime,
             headers={"Cache-Control": "private, max-age=86400"},
+        )
+
+    # v4.49（用户 m25038 第 5 项）：新版 QQ 表情库（gitee 那套）在浏览器里直连会被
+    # 防盗链挡成 403，页面上永远退回老版 qzone 小黄脸——用户嫌「这个老的难看」。
+    # 只能由插件后端去取一份再吐给页面；取到的图缓存在 media_cache/emoji/ 下，只下过一次。
+    _EMOJI_BASE = "https://gitee.com/yxkfw/emoji-emotions/raw/master/QQ/gif/"
+    _EMOJI_MAX = 2 * 1024 * 1024
+
+    @_api("GET", "/emoji")
+    async def api_emoji(self, id: str = ""):
+        """按表情编号取新版表情图；取不到返回 404，页面自己退回老版。"""
+        try:
+            n = int(str(id or "").strip())
+        except Exception:
+            n = -1
+        if n < 0 or n > 999:
+            return {"ok": False, "detail": "表情编号不对"}
+        try:
+            from pathlib import Path
+
+            from fastapi import Response
+            from core.utils.path_utils import get_data_path
+        except Exception:
+            return {"ok": False, "detail": "框架没有提供路径工具"}
+        target = Path(get_data_path()) / "plugin_data" / PLUGIN_ID / "media_cache" / "emoji" / ("e%d.gif" % n)
+        blob = None
+        try:
+            if target.is_file() and target.stat().st_size > 0:
+                import asyncio
+
+                blob = await asyncio.to_thread(target.read_bytes)
+        except Exception:
+            blob = None
+        if not blob:
+            url = self._EMOJI_BASE + "%d@2x.gif" % n
+            cap = self._EMOJI_MAX
+
+            def _grab():
+                import urllib.request
+
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"),
+                        "Referer": "https://gitee.com/",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = resp.read(cap + 1)
+                    kind = str(resp.headers.get("Content-Type") or "")
+                if len(data) > cap or not data.startswith(b"GIF8"):
+                    return b""
+                if "gif" not in kind:
+                    return b""
+                return data
+
+            try:
+                import asyncio
+
+                blob = await asyncio.to_thread(_grab)
+            except Exception as exc:
+                logger.debug(f"[multi-decision] 取表情 {n} 失败：{type(exc).__name__}: {exc}")
+                blob = b""
+            if blob:
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(blob)
+                except Exception:
+                    pass
+        if not blob:
+            try:
+                return Response(status_code=404, content=b"")
+            except Exception:
+                return {"ok": False, "detail": "没有这个表情"}
+        return Response(
+            content=blob,
+            media_type="image/gif",
+            headers={"Cache-Control": "private, max-age=604800"},
         )

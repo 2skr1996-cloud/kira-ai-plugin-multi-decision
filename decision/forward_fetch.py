@@ -115,6 +115,175 @@ def _line_of(msg) -> str:
     return (head + (" " if (head and body) else "") + body).strip()
 
 
+#: 转发里面的图（v4.47，用户 m24522 第 3 项）：框架只把转发压成文字，图一律变成
+#: 「[图片]」四个字，卡片上就只剩占位。这里在补内容的时候顺手把图也存进插件缓存，
+#: 前端按占位顺序认领（web 的 forwardHtml 早就会分图，只差一份 media）。
+_PLUGIN_ID = "kira-ai-plugin-multi-decision"
+_IMG_MAX = 8 * 1024 * 1024
+_MID_MEDIA: dict = {}
+_MID_MEDIA_ORDER: list = []
+_MID_MEDIA_MAX = 64
+# 进程重启就丢，这一份落盘（用户 m25038 第 4 项：老消息/老快照里的转发图还要能认回来）
+_MEDIA_DB: dict = {}
+_MEDIA_DB_LOADED = False
+_MEDIA_DB_MAX = 300
+
+
+def _media_cache_dir():
+    try:
+        from core.utils.path_utils import get_data_path
+    except Exception:
+        return None
+    from pathlib import Path
+    try:
+        return Path(str(get_data_path())) / "plugin_data" / _PLUGIN_ID / "media_cache"
+    except Exception:
+        return None
+
+
+def _media_db_path():
+    folder = _media_cache_dir()
+    if folder is None:
+        return None
+    try:
+        return folder.parent / "forward_media.json"
+    except Exception:
+        return None
+
+
+def _media_db() -> dict:
+    global _MEDIA_DB, _MEDIA_DB_LOADED
+    if _MEDIA_DB_LOADED:
+        return _MEDIA_DB
+    _MEDIA_DB_LOADED = True
+    path = _media_db_path()
+    try:
+        if path is not None and path.is_file():
+            import json
+            blob = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(blob, dict):
+                _MEDIA_DB = {str(k): [x for x in v if isinstance(x, dict)]
+                             for k, v in blob.items() if isinstance(v, list)}
+    except Exception:
+        _MEDIA_DB = {}
+    return _MEDIA_DB
+
+
+def _media_db_save() -> None:
+    path = _media_db_path()
+    if path is None:
+        return
+    try:
+        import json
+        path.parent.mkdir(parents=True, exist_ok=True)
+        while len(_MEDIA_DB) > _MEDIA_DB_MAX:
+            _MEDIA_DB.pop(next(iter(_MEDIA_DB)))
+        path.write_text(json.dumps(_MEDIA_DB, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.info("[multi-decision] 转发配图索引没写成 %s: %s", type(exc).__name__, exc)
+
+
+def _mime_of(ext: str) -> str:
+    return {".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "image/jpeg")
+
+
+def _save_image(url: str) -> dict:
+    """把转发里的一张图存进插件缓存，返回 {path, mime}；取不到就返回 {}。"""
+    u = str(url or "").strip()
+    if not (u.startswith("http://") or u.startswith("https://")):
+        return {}
+    folder = _media_cache_dir()
+    if folder is None:
+        return {}
+    import hashlib
+    import urllib.request as _ur
+
+    key = "fw_" + hashlib.sha1(u.encode("utf-8")).hexdigest()[:24]
+    for ext in (".jpg", ".png", ".gif", ".webp"):
+        hit = folder / (key + ext)
+        if hit.is_file():
+            return {"path": "plugin_data/%s/media_cache/%s%s" % (_PLUGIN_ID, key, ext),
+                    "mime": _mime_of(ext)}
+    try:
+        req = _ur.Request(u, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+            "Referer": "https://q.qq.com/",
+        })
+        with _ur.urlopen(req, timeout=6) as resp:
+            blob = resp.read(_IMG_MAX + 1)
+            ctype = str(resp.headers.get("Content-Type") or "").lower()
+        if not blob or len(blob) > _IMG_MAX:
+            return {}
+        ext = ".jpg"
+        if "png" in ctype:
+            ext = ".png"
+        elif "gif" in ctype:
+            ext = ".gif"
+        elif "webp" in ctype:
+            ext = ".webp"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / (key + ext)).write_bytes(blob)
+        return {"path": "plugin_data/%s/media_cache/%s%s" % (_PLUGIN_ID, key, ext),
+                "mime": ctype.split(";")[0].strip() or _mime_of(ext)}
+    except Exception as exc:
+        logger.info("[multi-decision] 转发配图没取到 %s：%s: %s", u[:80], type(exc).__name__, exc)
+        return {}
+
+
+def media_of(messages) -> list:
+    """按转发条目的先后把图存下来，顺序与文本里的 [图片] 占位一一对应。"""
+    out = []
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        segs = msg.get("message")
+        if not isinstance(segs, list):
+            continue
+        for seg in segs:
+            if not isinstance(seg, dict) or str(seg.get("type") or "") != "image":
+                continue
+            data = seg.get("data")
+            if not isinstance(data, dict):
+                data = {}
+            got = _save_image(str(data.get("url") or data.get("file") or ""))
+            if got:
+                out.append(got)
+    return out
+
+
+def remember_media_by_mid(mid: str, refs: list) -> None:
+    key = str(mid or "").strip()
+    if not key or not refs:
+        return
+    _MID_MEDIA[key] = list(refs)
+    _MID_MEDIA_ORDER.append(key)
+    while len(_MID_MEDIA_ORDER) > _MID_MEDIA_MAX:
+        old = _MID_MEDIA_ORDER.pop(0)
+        if old != key:
+            _MID_MEDIA.pop(old, None)
+    db = _media_db()
+    db[key] = list(refs)
+    _media_db_save()
+
+
+def media_for_mid(mid: str) -> list:
+    key = str(mid or "").strip()
+    got = _MID_MEDIA.get(key)
+    if got:
+        return list(got)
+    return list(_media_db().get(key) or [])
+
+
+def media_for_text(text: str) -> list:
+    """一条历史消息正文里的转发配图：按 [message_id: X] 反查。"""
+    t = str(text or "")
+    if "[Forward" not in t:
+        return []
+    hit = _LINE_ID_RE.search(t)
+    return media_for_mid(hit.group(1)) if hit else []
+
+
 def _remember(res_id: str, lines: list) -> None:
     if not res_id or not lines:
         return
@@ -221,6 +390,17 @@ def items_of(messages) -> list:
     return out
 
 
+async def _forward_raw(bot, res_id: str, timeout: float):
+    """取转发的原始条目（图就在这里面）。NapCat 认 {`message_id`: res_id}，
+    标准 OneBot 写的是 {"id": …}，两个都试。"""
+    fwd = await _call(bot, "get_forward_msg", {"message_id": res_id}, timeout)
+    if not isinstance(fwd, dict):
+        fwd = await _call(bot, "get_forward_msg", {"id": res_id}, timeout)
+    if not isinstance(fwd, dict):
+        return None
+    return fwd.get("messages") or fwd.get("message") or []
+
+
 async def fetch_forward_items(bot, message_id: str, timeout: float = 5.0) -> list:
     """按外层消息 id 反查转发内容；拿不到就返回 []（调用方保持原样）。"""
     mid = str(message_id or "").strip()
@@ -234,13 +414,25 @@ async def fetch_forward_items(bot, message_id: str, timeout: float = 5.0) -> lis
     if not res_id:
         return []
     if res_id in _CACHE:
+        # 文字命中了缓存，图却可能还没存过（早先只有取文字的那版代码）——补存一次。
+        if not media_for_mid(mid):
+            raw_again = await _forward_raw(bot, res_id, timeout)
+            try:
+                refs_again = await asyncio.to_thread(media_of, raw_again or [])
+            except Exception:
+                refs_again = []
+            if refs_again:
+                remember_media_by_mid(mid, refs_again)
         return list(_CACHE[res_id])
-    # NapCat 上实测认 {`message_id`: res_id}；标准 OneBot 写的是 {"id": …}，两个都试。
-    fwd = await _call(bot, "get_forward_msg", {"message_id": res_id}, timeout)
-    if not isinstance(fwd, dict):
-        fwd = await _call(bot, "get_forward_msg", {"id": res_id}, timeout)
-    if not isinstance(fwd, dict):
+    raw_msgs = await _forward_raw(bot, res_id, timeout)
+    if raw_msgs is None:
         return []
-    lines = items_of(fwd.get("messages") or fwd.get("message") or [])
+    lines = items_of(raw_msgs)
     _remember(res_id, lines)
+    try:
+        refs = await asyncio.to_thread(media_of, raw_msgs)
+    except Exception:
+        refs = []
+    if refs:
+        remember_media_by_mid(mid, refs)
     return lines
