@@ -4358,9 +4358,9 @@ class DecisionEngine:
         只接管模式判定（计数 / 概率 / 曲线 / 动态调整）与两套兜底（静默兜底、
         休息时段兜底）通过之后的那一步——兜底本身也是「这轮要不要开口」的判断，
         开了决策就一并交给它（v4.09，用户 m17145 第 2 条）；
-        @、叫到名字（reason = mention / nickname，也就是「必回」那一路）、私聊、
-        休息到点主动冒泡这些已经明摆着要回的，不重复花钱——只有 reason="wake"
-        的「触发」这一路会进来判；重试轮也不重判（上一轮已经判过了）。
+        @、叫到名字（reason = mention / nickname，也就是「必回」那一路）这些已经
+        明摆着要回的，不重复花钱；「触发」（wake）与「休息时段掷中」（rest）这两路
+        会进来判；重试轮也不重判（上一轮已经判过了）。
 
         返回 True = 这一轮就此结束（不 flush、不跑 agent、不挂看门狗）。
         """
@@ -4370,7 +4370,10 @@ class DecisionEngine:
         # 判不回时 counter 早在 _trigger 里清零，不会再连着冒泡。
         # 用户 m00347：「触发」那一路算一次普通触发，也该先交给模型判（reason="wake"）；
         # 「必回」那一路的 reason 是 mention / nickname，故意不在这里——必回就是必回。
-        if reason not in ("count", "probability", "curve", "adaptive", "silent", "wake"):
+        # 用户 m24162：休息时段掷中的那一路（reason="rest"）以前是直接开口，
+        # 到了夜里照样会「偷偷说话」。休息时段本来就按「不该说话」算，掷中了
+        # 也只算拿到一次开口的机会，还得让模型判一遍才真回。
+        if reason not in ("count", "probability", "curve", "adaptive", "silent", "wake", "rest"):
             return False
         phase = getattr(self.plugin, "decision_phase", None)
         if phase is None:
