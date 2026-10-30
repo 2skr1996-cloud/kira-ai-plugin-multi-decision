@@ -7260,6 +7260,14 @@ var ctxSnapRequest = 0;
         }
       }
       if(incTailX >= 0) boundX = incTailX;
+      // 用户 m26142 第 2 条：决策快照用决策自己的标准——② 到「上一次决策的注记」为止
+      // （含这条注记：它算历史，是 ② 里唯一一条未命中），③ 从这之后开始算本轮。
+      // 回复快照那套（上一条 bot 回复之后算本轮）不动，两条链路各用各的。
+      if(isDecX){
+        for(var dnxX = allMsgsX.length - 1; dnxX >= 0; dnxX--){
+          if(noteRowX(allMsgsX[dnxX])){ boundX = dnxX + 1; break; }
+        }
+      }
 
       var stat = "", reloc = "", pos = {};
       var statNames = hasSplit ? (r.system_static_names || []) : (r.system_prompt_names || []);

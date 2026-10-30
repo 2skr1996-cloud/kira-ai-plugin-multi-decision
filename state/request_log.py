@@ -795,6 +795,15 @@ class RequestLog:
         prev_ser = [self._msg_sig(m) for m in prev_msgs]
         cur_sigs = [self._msg_sig(m) for m in cur_msgs]
         pre = self._common_prefix(prev_ser, cur_sigs)
+        trim_btw = False
+        try:
+            trim_btw = self._trim_between(sid, prev_pair[0])
+        except Exception:
+            trim_btw = False
+        # 用户 m26142 第 4 条：这一份之前刚裁过窗口，前缀对不上就是裁切造成的——
+        # 全算未命中，别再拿裁切前那截公共前缀说「这几条命中」。
+        if trim_btw and pre:
+            pre = 0
         cold, fresh, flags = self._tail_split(prev_ser, cur_msgs, pre)
         return {
             "cache_prefix_len": pre,
@@ -802,7 +811,7 @@ class RequestLog:
             "cache_input_len": fresh,
             "cache_tail_flags": flags,
             "cache_prefix_of": prev_pair[0],
-            "cache_trim_between": self._trim_between(sid, prev_pair[0]),
+            "cache_trim_between": trim_btw,
         }
 
     @staticmethod
@@ -849,6 +858,16 @@ class RequestLog:
             info["cache_trim_between"] = self._trim_between(sid, prev_name)
         except Exception:
             info["cache_trim_between"] = False
+        # 用户 m26142 第 4 条：中间裁过窗口的，整份都算未命中（裁切本来就把前缀打断了）。
+        if info.get("cache_trim_between") and info.get("cache_prefix_len"):
+            info["cache_prefix_len"] = 0
+            try:
+                cold, fresh, flags = self._tail_split(prev_series, list(messages or []), 0)
+                info["cache_cold_len"] = cold
+                info["cache_input_len"] = fresh
+                info["cache_tail_flags"] = flags
+            except Exception:
+                pass
         # v4.14（用户 m19095）：前缀之后那段还要再分一次——上一次请求之后新进来
         # 的群消息与决策注记，是这一轮要送进去的输入，不能算冷。
         # v4.15（用户 m19439）：决策轮也走这一套。上一轮请求过、这轮却对不上前缀

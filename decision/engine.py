@@ -111,6 +111,9 @@ logger = get_logger("multi_decision", "orange")
 BUSY_TIMEOUT = 300.0
 # 投递后多久还没结算就强制解锁。正常一轮 5 步以内几十秒，180s 足够宽裕。
 BUSY_WATCHDOG = 180.0
+# 用户 m26142 第 1 条：「判要回后等回复跑完再裁」的兜底时限。超过这个秒数还没等到
+# 收束（异常 / 看门狗没兜住），就当那一轮已经结束，裁切照常走，免得把裁切永久锁死。
+_TRIM_AFTER_TTL = 180.0
 # 看门狗放掉的那一轮如果没重试成功，后面同一会话的一条成功回复就算「接续补上」，
 # 但只认这段时间之内的：隔了一夜再回，跟那一轮已经没关系了。
 WATCHDOG_RECOVER_SECONDS = 3600.0
@@ -1093,6 +1096,11 @@ class DecisionEngine:
         # 用户 m05453：这一轮「抖动真的等了几秒」与「决策花了多久」，记录页要分三段写。
         self._round_jitter: dict[str, float] = {}
         self._round_decision: dict[str, float] = {}
+        # 用户 m26142 第 1 条：决策判了要回、但回复还没跑完的会话。这一轮别裁窗口，
+        # 等回复结束再裁（以前是判要回立刻裁，回复读到的是裁完的窗口）。
+        # 存的是「记下这一笔的时刻」：万一一轮没走到收束（异常、看门狗没兜住），
+        # 超过 _TRIM_AFTER_TTL 秒就自动失效，不会把某个群的裁切永久锁死。
+        self._trim_after: dict[str, float] = {}
         self._round_errors: dict[tuple[str, str], str] = {}
         self._settled_rounds: dict[tuple[str, str], float] = {}
         self._retry_events: dict[str, list] = {}
@@ -1327,10 +1335,16 @@ class DecisionEngine:
             # 取快照，所以请求里带的就是保留条数（keep=30 就是 30 条），不会再出现
             # 「刚裁到 36 条、这轮请求也带 36 条」。round_end 那一处仍保留，兜
             # 「之后没人再发消息，所以一直没裁」的场景。
-            try:
-                self.window.maybe_trim(sid, trigger="before_request", event_id=eid)
-            except Exception:
-                logger.exception(f"[multi-decision] {sid} 请求前裁切异常（已吞掉）")
+            # 用户 m26142 第 1 条：决策刚判要回的这一轮不裁——这次回复请求要拿到完整
+            # 窗口（以前判要回立刻裁，22:33 那次 91 条被裁到 20 条，回复只读 20 条）。
+            # 缺的那一刀交给回复结束后的 _settle_input_locked 补。
+            if self._trim_deferred(sid):
+                logger.debug(f"[multi-decision] {sid} 这一轮判要回，请求前不裁（回复结束后补裁）")
+            else:
+                try:
+                    self.window.maybe_trim(sid, trigger="before_request", event_id=eid)
+                except Exception:
+                    logger.exception(f"[multi-decision] {sid} 请求前裁切异常（已吞掉）")
             snap = self.window.snapshot(sid)
             if snap:
                 request.messages = snap
@@ -3790,6 +3804,9 @@ class DecisionEngine:
             # 忙的时候别动窗口：这一轮请求可能正拿着它
             if not st.is_idle():
                 continue
+            # 用户 m26142 第 1 条：判了要回、回复还没跑完的这一轮也别动。
+            if self._trim_deferred(sid):
+                continue
             try:
                 plugin.window.maybe_trim(sid, trigger="buffer")
             except Exception:
@@ -3901,6 +3918,23 @@ class DecisionEngine:
             raise
         except Exception:
             logger.exception(f"[multi-decision] 抖动任务异常 sid={sid}")
+
+    def _trim_deferred(self, sid: str) -> bool:
+        """这一轮是不是「判了要回、回复还没跑完」，那就先别裁窗口。
+
+        用户 m26142 第 1 条。超过 _TRIM_AFTER_TTL 秒没等到收束，就当作没收束，
+        裁切照常走（宁可早裁一次，也别把某个群的裁切永久关掉）。
+        """
+        try:
+            at = float(self._trim_after.get(sid, 0.0) or 0.0)
+        except Exception:
+            return False
+        if not at:
+            return False
+        if time.time() - at < _TRIM_AFTER_TTL:
+            return True
+        self._trim_after.pop(sid, None)
+        return False
 
     def round_trigger_at(self, sid: str) -> float:
         """取走这一轮的触发墙钟（没有就返回 0）。
@@ -4196,9 +4230,12 @@ class DecisionEngine:
                 self.window.fold_pending(sid)
             except Exception:
                 logger.exception("[multi-decision] 收束输出入窗失败（继续释放隔离）")
+            # 不管这次收束裁不裁，这一轮欠的「判要回后再裁」都得先取走，免得漏到下一轮。
+            _deferred_trim = bool(self._trim_after.pop(sid, 0.0))
             if trim:
+                _trig = "decision" if _deferred_trim else trigger
                 try:
-                    self.window.maybe_trim(sid, trigger=trigger)
+                    self.window.maybe_trim(sid, trigger=_trig)
                 except Exception:
                     logger.exception("[multi-decision] 收束裁切失败（继续释放隔离）")
         if discard:
@@ -4536,13 +4573,10 @@ class DecisionEngine:
             self._write_log(sid, "decision_reply")
             # v4.11（用户 m17596 第 6 条）：这一轮是决策判出来的，触发列要写「决策触发」。
             st.decision_passed = True
-            # v4.11（用户 m17596 第 1 条）：判要回、真去跑 agent 之前按阈值（60 条 user）
-            # 先裁一次——决策读的是完整窗口，但发出去的请求只需要保留条数。裁完单独落
-            # 一份裁切快照，趋势图上那根柱子就是橙色的。
-            try:
-                self.window.maybe_trim(sid, trigger="decision")
-            except Exception:
-                logger.exception("[multi-decision] 决策后裁切异常（已吞掉）")
+            # v4.11（用户 m17596 第 1 条）原本是「判要回立刻按阈值裁一次」，用户 m26142
+            # 第 1 条指出这就是问题所在：裁切卡在决策和回复中间，回复请求读到的是裁完的
+            # 窗口。现在只记一笔，等这轮回复结束（_settle_input_locked）再裁。
+            self._trim_after[sid] = time.time()
             logger.info(
                 "[multi-decision] %s 进阶决策判定要回：%s（%.1fs）",
                 sid, rec["reason"][:60], rec["elapsed"],
