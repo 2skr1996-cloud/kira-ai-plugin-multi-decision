@@ -1393,7 +1393,14 @@ class DecisionEngine:
 
         # v4.33：装配后再落快照，页面与真实请求不再看到两份 system。
         reply_prompt = getattr(plugin, "reply_prompt", None)
-        if getattr(plugin, "prompt_layouts", None) is not None and reply_prompt is not None:
+        layouts = getattr(plugin, "prompt_layouts", None)
+        if layouts is not None and reply_prompt is not None:
+            # 用户 m23323 图2：人格正文必须先 await 取到，同步装配那一步才拿得到——
+            # 以前没预热就直接同步取，框架方法是协程，取不到就整段丢掉，请求里没人设。
+            try:
+                await layouts.prefetch_personas(sid)
+            except Exception:
+                logger.exception("[multi-decision] 预取人格失败（本轮按没有这段继续）")
             reply_prompt.apply(request, sid)
 
         if self.request_log is not None:
@@ -4351,9 +4358,9 @@ class DecisionEngine:
         只接管模式判定（计数 / 概率 / 曲线 / 动态调整）与两套兜底（静默兜底、
         休息时段兜底）通过之后的那一步——兜底本身也是「这轮要不要开口」的判断，
         开了决策就一并交给它（v4.09，用户 m17145 第 2 条）；
-        @、叫到名字（reason = mention / nickname，也就是「必回」那一路）、私聊、
-        休息到点主动冒泡这些已经明摆着要回的，不重复花钱——只有 reason="wake"
-        的「触发」这一路会进来判；重试轮也不重判（上一轮已经判过了）。
+        @、叫到名字（reason = mention / nickname，也就是「必回」那一路）这些已经
+        明摆着要回的，不重复花钱；「触发」（wake）与「休息时段掷中」（rest）这两路
+        会进来判；重试轮也不重判（上一轮已经判过了）。
 
         返回 True = 这一轮就此结束（不 flush、不跑 agent、不挂看门狗）。
         """
@@ -4363,7 +4370,10 @@ class DecisionEngine:
         # 判不回时 counter 早在 _trigger 里清零，不会再连着冒泡。
         # 用户 m00347：「触发」那一路算一次普通触发，也该先交给模型判（reason="wake"）；
         # 「必回」那一路的 reason 是 mention / nickname，故意不在这里——必回就是必回。
-        if reason not in ("count", "probability", "curve", "adaptive", "silent", "wake"):
+        # 用户 m24162：休息时段掷中的那一路（reason="rest"）以前是直接开口，
+        # 到了夜里照样会「偷偷说话」。休息时段本来就按「不该说话」算，掷中了
+        # 也只算拿到一次开口的机会，还得让模型判一遍才真回。
+        if reason not in ("count", "probability", "curve", "adaptive", "silent", "wake", "rest"):
             return False
         phase = getattr(self.plugin, "decision_phase", None)
         if phase is None:
@@ -4397,7 +4407,17 @@ class DecisionEngine:
         flow = self._input_flows.get(sid)
         epoch = flow.epoch if flow is not None and flow.phase == "active" else None
         started = time.time()
-        got = await phase.decide(sid, msgs, opt)
+        # v4.39（用户 m20816）：决策也要能看图。v4.40（用户 m21305）：不再自己
+        # 定张数——跟回复那条同一个口径，窗口里留几张原图（history_images，
+        # 默认 128）就带几张；开关关掉才退回纯文字。
+        dec_imgs = []
+        try:
+            if self._c("decision_see_images", sid) is not False:
+                dec_imgs = self.window.decision_images(sid)
+        except Exception:
+            logger.exception("[multi-decision] 决策取图失败（这一轮按纯文字判）")
+            dec_imgs = []
+        got = await phase.decide(sid, msgs, opt, images=dec_imgs)
         if self._closed or (epoch is not None and
                 (flow.epoch != epoch or flow.phase != "active")):
             return True  # A timed-out/cancelled decision may not mutate a later window.
@@ -4429,6 +4449,10 @@ class DecisionEngine:
             "user_prompt": str(got.get("user_prompt") or ""),
             "dynamic_text": str(got.get("dynamic_text") or ""),
             "dynamic_parts": list(got.get("dynamic_parts") or []),
+            # v4.39（用户 m20816）：这一轮决策到底带了几张图、是不是退回纯文字了。
+            "images": list(got.get("images") or []),
+            "image_count": int(got.get("image_count") or 0),
+            "images_fallback": bool(got.get("images_fallback")),
             "input_tokens": int(got.get("input_tokens") or 0),
             "output_tokens": int(got.get("output_tokens") or 0),
             "cached_tokens": int(got.get("cached_tokens") or 0),

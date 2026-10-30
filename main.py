@@ -350,6 +350,10 @@ PER_SESSION_KEYS = (
     "window_enabled",
     "window_keep",
     "history_images",
+    # v4.45（用户 m22611）：历史里的动图怎么发（九帧 / 原图 / 只读首帧），三个都关＝跳过。
+    "history_gif_grid",
+    "history_gif_original",
+    "history_gif_first",
     "window_trim_threshold",
     "protect_tool_groups",
     "summary_enabled",
@@ -881,6 +885,10 @@ class MultiDecisionPlugin(BasePlugin):
         # 用户 m13212 后：必回（@ / 叫名字）默认跳过抖动——都被点名了还干等几秒，
         # 用户看到的就是「@ 完一秒多才动」。想让它也老实等完，把这个开关关掉。
         self.jitter_skip_must_go = _as_bool(cfg.get("jitter_skip_must_go"), True)
+        # v4.39（用户 m20816）：决策也要能看图——以前决策的 user 消息是纯文字，图片
+        # 只剩「[图片]」四个字，模型看不到。开关默认开。v4.40（用户 m21305）：张数
+        # 不再单独设，跟回复同一个口径吃 history_images（默认 128）。
+        self.decision_see_images = _as_bool(cfg.get("decision_see_images"), True)
         # v3.44（用户本轮第 2 条）：连发合并同样加开关，默认关——关着时同一人连发
         # 每条都照常计数；开了才按 burst_merge_seconds 合并。
         self.burst_merge_enabled = _as_bool(cfg.get("burst_merge_enabled"), False)
@@ -957,6 +965,12 @@ class MultiDecisionPlugin(BasePlugin):
         # 所以正常群聊几乎不会摸到上限；设 128 张和 MaiBot 的 max_image_num 一致，
         # 好处是历史内容几乎不变，前缀缓存不会因为「图被换掉」而断。
         self.history_images = max(0, _as_int(cfg.get("history_images"), 128))
+        # v4.45（用户 m22611）：历史里的动图怎么发给模型，三档互斥——
+        # 九帧拼图（默认）/ 原图发送 / 只读首帧；三个都不开＝跳过，图不发。
+        # 判定顺序在 window/manager.py 的 _gif_mode 里（grid > original > first > skip）。
+        self.history_gif_grid = _as_bool(cfg.get("history_gif_grid"), True)
+        self.history_gif_original = _as_bool(cfg.get("history_gif_original"), False)
+        self.history_gif_first = _as_bool(cfg.get("history_gif_first"), False)
         self.window_trim_threshold = max(1, _as_int(cfg.get("window_trim_threshold"), 60))
         # v3.85（用户 m04418 第 2 条）：撤掉「重启后回填条数」这条设置——群聊窗口
         # 热重载由寄存处接回、私聊另有 window_dm.json 存档，都不需要从框架记忆里回填。
@@ -2474,6 +2488,34 @@ class MultiDecisionPlugin(BasePlugin):
         except (ValueError, TypeError) as exc:
             return {"ok": False, "code": "INVALID_LAYOUT", "error": str(exc)}
 
+    @_api("GET", "/prompt-defaults")
+    async def api_prompt_defaults(self):
+        """用户 m23323：本地默认提示词的现状（存在哪、什么时候抄的、还缺哪几段）。"""
+        try:
+            return self.prompt_layouts.defaults_info()
+        except Exception as exc:
+            return {"ok": False, "code": "DEFAULTS_FAILED", "error": str(exc)}
+
+    @_api("POST", "/prompt-defaults")
+    async def api_sync_prompt_defaults(self, body: dict):
+        """用户 m23323：把框架这一刻的默认提示词重新抄一份到本地（覆盖），装配就只读这份。"""
+        try:
+            sid = str((body or {}).get("sid") or "")
+            if not sid:
+                sid = self._decision_pick_sid()
+            # 现取一次框架当前模板，再抄进本地副本——不写死出厂文案，跟框架升级同步。
+            rows = await self.prompt_layouts.refresh_live(sid)
+            info = self.prompt_layouts.capture_defaults(rows, source="框架当前模板 · 手动同步")
+            if not info.get("ok"):
+                return {"ok": False, "code": "SYNC_FAILED",
+                        "error": str(info.get("error") or "同步失败：框架这次没给到可保存的段")}
+            out = self.prompt_layouts.defaults_info()
+            out.update({"ok": True, "synced": True})
+            return out
+        except Exception as exc:
+            logger.exception("[multi-decision] 同步框架默认提示词失败")
+            return {"ok": False, "code": "SYNC_FAILED", "error": str(exc)}
+
     @_api("POST", "/prompt-preview")
     async def api_prompt_preview(self, body: dict):
         try:
@@ -2599,8 +2641,14 @@ class MultiDecisionPlugin(BasePlugin):
         sid = str(sid or "").strip()
         # 测试按钮不该把异常甩成 500（页面只会显示 Internal Server Error，看不出是哪一步挂的）。
         try:
+            _imgs = []
+            try:
+                if getattr(self, "decision_see_images", True) is not False:
+                    _imgs = self.window.decision_images(sid)
+            except Exception:
+                _imgs = []
             got = await self.decision_phase.decide(
-                sid, self._decision_messages(sid), self.decision_options())
+                sid, self._decision_messages(sid), self.decision_options(), images=_imgs)
         except Exception as exc:
             logger.exception("[multi-decision] 决策测试失败")
             return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc), "result": {}}

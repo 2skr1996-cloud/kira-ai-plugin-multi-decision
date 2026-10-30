@@ -307,7 +307,10 @@ def _msg_to_json(msg: Any) -> dict:
     """把一条消息压成能 json.dump 的 dict（多模态 content 原样保留）。"""
     if isinstance(msg, dict):
         out = {}
-        for k in ("role", "content", "tool_calls", "tool_call_id", "name"):
+        # v4.40（用户 m22856）：以前只留 role/content/name，注记自己的 ts（判定那一刻）
+        # 一热重载就没了，原文/对照里那几条注记于是没有 [HH:MM]。ts/dec/files 一并留住。
+        for k in ("role", "content", "tool_calls", "tool_call_id", "name",
+                  "ts", "dec", "files"):
             if k in msg:
                 out[k] = msg[k]
         return out
@@ -321,6 +324,15 @@ def _msg_to_json(msg: Any) -> dict:
     nm = _get(msg, "name")
     if nm:
         out["name"] = nm
+    # 注记的时间/身份标记也跟着走（v4.40，用户 m22856）
+    ts = _get(msg, "ts")
+    if ts:
+        out["ts"] = ts
+    if _get(msg, "dec"):
+        out["dec"] = True
+    files = _get(msg, "files")
+    if files:
+        out["files"] = files
     return out
 
 

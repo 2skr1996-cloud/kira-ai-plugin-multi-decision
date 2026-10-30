@@ -279,6 +279,24 @@ _PAYLOAD_FIELDS = (
 )
 
 
+def media_file_size(path: str, data_root) -> Optional[int]:
+    """记录里的相对路径 × 数据目录 → 源图字节数；取不到（远端/已清理）返回 None。
+
+    v4.41（用户 m21541）：决策图片的路径形如
+    plugin_data/<插件>/media_cache/<sha>.jpg，落在数据目录里而不是 session_media，
+    所以这里只要求它解析后仍在数据目录内（不接受绝对路径跑到外面去）。
+    """
+    if not path or data_root is None:
+        return None
+    try:
+        root = Path(data_root).resolve()
+        target = (root / str(path)).resolve()
+        target.relative_to(root)
+        return target.stat().st_size if target.is_file() else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def payload_metrics(record: dict, data_root=None) -> dict:
     """Estimate JSON/base64 size from explicit request parts, never display lookups.
 
@@ -354,6 +372,20 @@ def payload_metrics(record: dict, data_root=None) -> dict:
         for m in assembled if isinstance(m, dict)
     ]
     text_bytes = len(json.dumps(baseline, ensure_ascii=False).encode("utf-8"))
+    # v4.41（用户 m21541）：v4.41 之前的决策记录只存了图片路径、没写体积。
+    # 这里按路径补算一次（源图大小 + base64 估算），老记录的「体积估算」
+    # 也能写成「文 X · 图 Y」，不用等下一轮决策才有数。
+    if not image_count and record.get("decision_only"):
+        for it in (record.get("decision_images") or []):
+            if not isinstance(it, dict):
+                continue
+            size = media_file_size(str(it.get("path") or ""), data_root)
+            if size is None:
+                unknown += 1
+                continue
+            image_count += 1
+            image_bytes += size
+            encoded_bytes += 4 * ((size + 2) // 3)
     return {
         "text_payload_bytes": text_bytes,
         "image_count": image_count,
@@ -1150,6 +1182,8 @@ class RequestLog:
         native_projection = []
         incoming_with_native = []
         refs = []
+        # v4.41（用户 m21746）：按正文配对，谁发的图挂回谁身上。
+        native_by_text = {}
         for nm, text in up_parts:
             if nm != "message":
                 continue
@@ -1158,16 +1192,23 @@ class RequestLog:
             content = with_owned_images(text, owned, media_sid)
             incoming_with_native.append({"role": "user", "content": content, "name": nm})
             if isinstance(content, list):
+                native_by_text[str(text)] = content
                 typed = [p for p in content if isinstance(p, dict) and p.get("type") == "kira_image_ref"]
                 if typed:
                     native_projection.append({"text": text, "refs": typed})
                     refs.extend(typed)
         assembled_with_native = [dict(item) for item in assembled]
-        if refs:
-            refs = list({r["path"]: r for r in refs}.values())
+        # v4.41（用户 m21746）：refs 原来是「这一轮所有图」的无差别并集，贴给每一条
+        # tag=incoming 的行——决策注记那一行也被贴了一张，记录里就成了「图2」，其实
+        # 真实只发了 1 张，体积还多算半张。现在按正文认领：只有正文跟真正发出去的
+        # 那条一模一样的行才换成带图版本，注记保持纯文本。
+        if native_by_text:
             for item in assembled_with_native:
-                if item.get("tag") == "incoming":
-                    item["content"] = [{"type": "text", "text": item["content"]}] + refs
+                if item.get("tag") != "incoming":
+                    continue
+                body = native_by_text.get(str(item.get("content") or ""))
+                if body is not None:
+                    item["content"] = body
         has_native_context = hasattr(request, "_mdp_incoming_media")
         metrics = payload_metrics({"assembled_with_native": assembled_with_native} if has_native_context
                                   else {"assembled": assembled})
@@ -1504,6 +1545,14 @@ class RequestLog:
             "tools": list(data.get("tools_used") or []),
             "elapsed": (round(elapsed, 3) if elapsed else 0),
         }
+        # v4.41（用户 m21541）：决策的体积估算以前只算 system + 本轮文字，图上花的
+        # 体积完全没进账。这里跟回复记录用同一套键（payload_metrics 认这 8 个），
+        # 页面的「体积估算」立刻能写成「文 X · 图 Y」，本页合计也把图算上。
+        _dimg = [it for it in (data.get("images") or []) if isinstance(it, dict)]
+        _dtext = len((system_text + "\n\n" + user_text).encode("utf-8"))
+        _db64 = sum(int(it.get("b64") or 0) for it in _dimg)
+        _dsrc = sum(int(it.get("bytes") or 0) for it in _dimg)
+        _dunk = sum(1 for it in _dimg if not int(it.get("b64") or 0))
         record = {
             "ts": now,
             "sid": sid,
@@ -1561,7 +1610,16 @@ class RequestLog:
             # v3.94（用户 m08398 图6）：概览条按 total_chars 算各段占比，
             # 这里必须等于 sections 四段之和（以前只给了聊天历史的字符数，条会溢出）。
             "total_chars": len(system_text) + _chars_of(hist_msgs) + _chars_of(inc) + len(dyn_text),
-            "payload_bytes": len((system_text + "\n\n" + user_text).encode("utf-8")),
+            "payload_bytes": _dtext,
+            "text_payload_bytes": _dtext,
+            "image_count": len(_dimg),
+            "image_bytes": _dsrc,
+            "image_base64_estimated_bytes": _db64,
+            "total_estimated_bytes": _dtext + _db64,
+            "image_unknown_count": _dunk,
+            "payload_estimate_complete": (_dunk == 0),
+            "payload_measurement": "estimated_json_and_explicit_images_not_wire_bytes",
+            "payload_estimate_source": "decision_images_data_url",
             "replied": False,
             "reply_bubbles": 0,
             "failed": bool(data.get("failed")),
@@ -1581,6 +1639,11 @@ class RequestLog:
             "decision_model": str(data.get("model") or ""),
             "decision_via": str(data.get("via") or ""),
             "decision_attempts": int(data.get("attempts") or 0),
+            # v4.39（用户 m20816）：这一轮决策带了几张图。0 张 = 那会儿没图、或者
+            # 开关关着、或者带图那次失败退回了纯文字（fallback 为真）。
+            "decision_images": [it for it in (data.get("images") or []) if isinstance(it, dict)],
+            "decision_image_count": int(data.get("image_count") or 0),
+            "decision_images_fallback": bool(data.get("images_fallback")),
             "decision_elapsed": float(data.get("elapsed") or 0.0),
             # 用户 m05124 第 8 条：决策轮也把「触发 → 真正开始判」的防抖等待存下来，
             # 记录页的「用时」列才能写成「防抖 7s + 2s」。
@@ -2154,6 +2217,11 @@ class RequestLog:
                 # 用户 m05124 第 8 条：决策轮的防抖等待（触发 → 真正开始判）。
                 "decision_debounce": float(data.get("decision_debounce") or 0.0),
                 "decision_tools": list(data.get("decision_tools") or []),
+                # v4.39（用户 m20816）：决策行带上「看图几张」，页面明细里能直接看到
+                # 这一轮模型到底有没有把图收到。
+                "decision_images": list(data.get("decision_images") or []),
+                "decision_image_count": int(data.get("decision_image_count") or 0),
+                "decision_images_fallback": bool(data.get("decision_images_fallback")),
                 # v3.94（用户 m08398 图7/图8）：决策行也要跟回复记录一样给出
                 # token（入/出）与缓存命中，决策表才能照抄回复表的列。
                 "input_tokens": int(data.get("input_tokens") or 0),
