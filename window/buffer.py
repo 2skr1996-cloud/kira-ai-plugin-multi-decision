@@ -199,6 +199,12 @@ def empty_bot_reply(msg: Any) -> bool:
     # 决策注记是插件自己写进去的结论，不是 bot 说的话，永远保留
     if _get(msg, "decnote"):
         return False
+    # 用户 m26791（审查）：带工具调用的 assistant 正文本来就是空的——它的内容是
+    # tool_calls，真正的结果在紧随其后的 tool 消息里。以前只看正文，这类消息一进
+    # 窗口就被当「空回复」删掉，工具往返整段从上下文里消失（孤儿 tool 结果再被
+    # _fix_tool_pairs 清掉）。带调用的一律不算空。
+    if _get(msg, "tool_calls"):
+        return False
     for key in ("media", "media_refs", "media_path", "images"):
         if _get(msg, key):
             return False

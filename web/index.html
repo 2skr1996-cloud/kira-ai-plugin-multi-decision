@@ -1170,9 +1170,12 @@ a.tag.ret .go{margin-left:5px;font-weight:700;font-size:13px;line-height:1;}
           out.push({t: "阈值 " + (c.threshold || "-"), sec:"top"});
         }
       }
+    // v4.52（用户 m28586 第 6 项）：这句话原来跟实现不符——keep 数的是「窗口里
+    // 一共留几条」（bot 回复也占名额），trim 数的是「用户消息（窗口内 + 待发）」。
     out.push(c.window
       ? {t: "窗口 " + c.keep + "/" + c.trim, sec:"top",
-         tip: "裁切后保留 " + c.keep + " 条用户消息，攒到 " + c.trim + " 条用户消息就裁切（bot 消息不计数）"}
+         tip: "裁切后窗口里一共留 " + c.keep + " 条消息（你发的和 bot 回的都算，工具往返不算）；" +
+              "攒到 " + c.trim + " 条用户消息（窗口里的 + 还没发出去的待发）就裁一次"}
       : {t: "窗口关", sec:"top", on:false});
     // 用户 m13250 第 4 条：私聊也走同一条触发链了，后面那些开关（兜底/合并/防抖/休息/静默/休兜）
     // 对私聊同样有效，不再提前 return。
@@ -2329,14 +2332,33 @@ var ctxSnapRequest = 0;
       // 免得被当成「窗口里一共多少条」；含 bot 的总数在窗口标题那边。
       var tip = fmtTime(r.ts) + " · " + v + " 条 [不包含bot消息]" + (errorTip ? " · " + errorTip : "");
       if(isTrim){
-        // v3.88（用户 m05012 第 2/3 条）：柱子高度按这份快照自己的 user 条数（= 裁后），
-        // 换句人话说就是「裁完剩 v 条」；原来那句括号里的补充太长，删掉。
-        // v3.89（用户 m05321 第 1 条）：快照现在含待发，悬停要写清其中几条是待发
+        // v3.88（用户 m05012 第 2/3 条）：柱子高度按这份快照自己的 user 条数（= 裁后）。
+        // v3.89（用户 m05321 第 1 条）：快照现在含待发，悬停要写清其中几条是待发。
+        // v4.52（用户 m28586 第 6 项）：悬停和柱子改说同一套数字。柱高 v 是「这份
+        // 快照里有几条用户消息（含待发）」；裁前裁后各给「计入」与「用户合计」两组，
+        // 再点明这次是谁触发的裁切——以前柱高 70、悬停写 67 → 4，一次裁切三个数。
         var tpN = Number(r.trim_pending_count) || 0;
-        tip = fmtTime(r.ts) + " · 窗口裁切 " + (Number(r.trim_before) || 0) + " → " +
-              (Number(r.trim_after) || 0) + " 条 · 这份快照 " + v + " 条 [不包含bot消息]" +
-              (tpN ? " · 其中待发 " + tpN + " 条" : "") +
-              " · 触发了裁切缓冲";
+        var cbT = Number(r.trim_counted_before) || 0;
+        var caT = Number(r.trim_counted_after) || 0;
+        var ubT = Number(r.trim_user_total_before) || 0;
+        var uaT = Number(r.trim_user_total_after) || 0;
+        var tgT = String(r.trim_trigger || "");
+        var whyT = tgT === "before_request" ? "发请求前裁的"
+                 : tgT === "decision" ? "决策判完裁的"
+                 : tgT === "idle_check" ? "确认没人再说话才裁的"
+                 : tgT === "buffer" ? "攒到缓冲线强制的"
+                 : "窗口攒超上限了";
+        if(cbT || caT || ubT || uaT){
+          tip = fmtTime(r.ts) + " · 窗口裁切：" +
+                (cbT || caT ? "计入 " + cbT + " → " + caT + " 条" : "") +
+                (ubT || uaT ? (cbT || caT ? " · " : "") + "用户 " + ubT + " → " + uaT + " 条" : "") +
+                " · 这份快照 " + v + " 条" +
+                (tpN ? "（其中待发 " + tpN + " 条）" : "") + " · " + whyT;
+        }else{
+          tip = fmtTime(r.ts) + " · 窗口裁切 " + (Number(r.trim_before) || 0) + " → " +
+                (Number(r.trim_after) || 0) + " 条 · 这份快照 " + v + " 条 [不包含bot消息]" +
+                (tpN ? " · 其中待发 " + tpN + " 条" : "") + " · " + whyT;
+        }
       }
       if(cut){
         var pct = cut.before_chars ? Math.round((1 - (cut.after_chars || 0) / cut.before_chars) * 100) : null;
@@ -2452,6 +2474,21 @@ var ctxSnapRequest = 0;
     if(AT_POOL.indexOf(nm) < 0) AT_POOL.push(nm);
   }
 
+  // 用户 m27528 图1：转发卡片里的 [Emoji 344] / [Emoji 笑哭(ID: 182)] 以前只走 esc，
+  // 群里好好的表情到了卡片里就是一行方括号。抽成一个函数，正文与转发条目共用。
+  function emojiFaces(s){
+    var out = String(s == null ? "" : s)
+      .replace(/\[Emoji\s+([^\]]*?)\(ID:\s*(\d+)\)\]/g, function(_, nm, id){ return emojiHtml(id, nm); });
+    // 框架的 Emoji.repr 有两种：有名字是 [Emoji 叉腰(ID: 21)]，没名字只剩 [Emoji 21]。
+    out = out.replace(/\[Emoji\s+(\d+)\]/g, function(_, id){ return emojiHtml(id, ""); });
+    // 只有名字、没有 (ID: n) 的那种（[Emoji 微笑]）取不到图，退成灰字，别把方括号露出来
+    out = out.replace(/\[Emoji\s+([^\]()]*?)\s*\]/g, function(_, nm){
+      nm = String(nm || "").trim();
+      return "<span class='emoji miss'><span class='em-txt'>[" + (nm ? "表情·" + nm : "表情") + "]</span></span>";
+    });
+    // 后端 emoji_repr 拿不到 id/名字时只写个 [Emoji]，别让它以字面量露在正文里
+    return out.replace(/\[Emoji\]/g, "<span class='emoji'>[表情]</span>");
+  }
   function richText(t){
     // 用户第 12 条：正文这条路不经过 tidyBody，QQ markdown mention / 冗余 "@昵称"
     // 前缀得自己先规整一遍，否则群里一个 @ 到窗口里变成两个（图7）
@@ -2465,14 +2502,7 @@ var ctxSnapRequest = 0;
     // 用户 m12833 第 2 条：推文链接画成卡片（骨架先出，数据到了再填）
     var tw = tweetHtml(t, richText);
     if(tw !== null) return tw;
-    var s = esc(t).replace(/\[Emoji\s+([^\]]*?)\(ID:\s*(\d+)\)\]/g, function(_, nm, id){
-      return emojiHtml(id, nm);
-    });
-    // 框架的 Emoji.repr 有两种：有名字是 [Emoji 叉腰(ID: 21)]，没名字只剩 [Emoji 21]。
-    // 只认前一种的话群里好好的表情到了页面就是一行字（用户 m33778 图6）
-    s = s.replace(/\[Emoji\s+(\d+)\]/g, function(_, id){ return emojiHtml(id, ""); });
-    // 后端 emoji_repr 拿不到 id/名字时只写个 [Emoji]，别让它以字面量露在正文里
-    s = s.replace(/\[Emoji\]/g, "<span class='emoji'>[表情]</span>");
+    var s = emojiFaces(esc(t));
     // v4.18（用户 m20749 图2）：小程序分享的文本前缀（引用体里最常见）别让方括号露在外面
     s = s.replace(/\[(QQ小程序|小程序|QQ音乐|QQ频道)\]/g, "<span class='qmini-tag'>$1</span>");
     // v3.61（用户 m17581 第 1 条）：框架只给了「这里有一条合并转发」的空壳（正文为空、连 [Forward]
@@ -3238,6 +3268,10 @@ var ctxSnapRequest = 0;
     return mentionNorm(String(t == null ? "" : t))
       .replace(/\\n/g, "\n")
       .replace(/\[Image attached\]/gi, "[图片]")
+      // 用户 m27528 图2/图3：框架在 Reply 原话、转发条目里写的是短占位 [Image]（没有 attached），
+      // 上面那几行都认不出来，引用块里就只剩一行英文方括号。
+      .replace(/\[Image\]/g, "[图片]")
+      .replace(/\[Sticker\]/g, "[表情]")
       .replace(/\[Sticker attached\]/gi, "[表情]")
       .replace(/\[Voice attached\]/gi, "[语音]")
       .replace(/\[Video attached\]/gi, "[视频]")
@@ -3695,7 +3729,10 @@ var ctxSnapRequest = 0;
     // 用户 m02993 图10：引用块不只长在实时窗（#ctx-window）里——回复记录、快照详情
     // 里的 .quote[data-qmiss] 同样是「引用了更早的一条消息」。以前只扫实时窗，别的
     // 位置永远补不上，看上去就像引用被按时间排到了更早的地方。整篇扫一遍。
-    var box = document.getElementById("ctx-window") || document.body;
+    // 用户 m28299 图3：以前只扫 #ctx-window。回复记录 / 决策记录的详情是另一块 DOM，
+    // 那里的「引用了更早的一条消息」和「图片」占位永远补不上，看着就是引用错位、图不显示。
+    // 三块（实时窗、记录详情、快照）长得一样，整页扫一遍最省事。
+    var box = document.body;
     if(!box || !QUOTE_SID || quoteFarBusy) return;
     var nodes = [].slice.call(box.querySelectorAll(".quote[data-qmiss]"));
     // 用户 m12256：只有「图片」占位块的引用同样要补真图——跨窗口时被引用那条早
@@ -3763,6 +3800,15 @@ var ctxSnapRequest = 0;
           try {
             if(qtx) qtx.insertAdjacentHTML("beforebegin", thumbsHtml(hit.media));
             else n.insertAdjacentHTML("beforeend", thumbsHtml(hit.media));
+            // 用户 m28299 图2：图已经摆在引用块里了，原话那句「[图片]」占位别再留一行。
+            // 只在纯文本节点上改写（里面有表情图/徽章时不动，免得把它们洗掉）。
+            if(qtx && !qtx.children.length){
+              var keep = String(qtx.textContent || "")
+                .replace(/\[(?:Image attached|图片|表情|image)\]/gi, " ")
+                .replace(/[\s ]+/g, " ").trim();
+              if(!keep){ if(qtx.parentNode) qtx.parentNode.removeChild(qtx); }
+              else if(keep !== String(qtx.textContent || "")) qtx.textContent = keep;
+            }
           } catch(e){}
         });
         if(stale && QUOTE_RETRY < 4){ QUOTE_RETRY++; setTimeout(fillQuoteMiss, 150); }
@@ -3785,9 +3831,16 @@ var ctxSnapRequest = 0;
   }
   function buildQuoteIdx(msgs, pend){
     var idx = {};
-    function take(m){
+    // 用户 m27528 图3：待发条目没有 role 字段，以前一律当成 assistant 走 <msg> 分支，
+    // 待发里的消息因此根本没进索引——引用它们只能画「引用了更早的一条消息 #id」。
+    function take(m, isPend){
       if(!m) return;
-      if(m.role !== "user"){
+      var role = String(m.role || "").toLowerCase();
+      if(!role) role = isPend ? "user" : "assistant";
+      // 待发的图在 media_refs 里（media 只是 "image"/"sticker" 这种类型名），历史条目在 media 里。
+      var pool = Array.isArray(m.media) ? m.media
+               : (Array.isArray(m.media_refs) ? m.media_refs : null);
+      if(role !== "user"){
         // bot 自己发的话在窗口里是 XML，一条一行：<msg message_id="X">[昵称] <text>正文</text></msg>。
         // 用户 m11986：被引用的正是 bot 上一条（「那我大概已经超越完了」），这条以前根本不进
         // 索引（这里只收 user），于是页面只能画成「引用了更早的一条消息」。
@@ -3797,7 +3850,7 @@ var ctxSnapRequest = 0;
         if(!src) src = String(m.text || "");
         var re = /<msg\s+message_id="(-?\d+)"[^>]*>\s*\[([^\]]*)\]\s*<text>([\s\S]*?)<\/text>/gi, mm;
         // bot 自己也可能发图（图片回复），被引用时同样要把那张图带出来
-        var amed = (m.media && m.media.length) ? m.media : null;
+        var amed = (pool && pool.length) ? pool : null;
         while((mm = re.exec(src))){
           var xid = String(mm[1] || "").trim();
           if(!xid || idx[xid]) continue;
@@ -3823,14 +3876,17 @@ var ctxSnapRequest = 0;
         var alt = String(m.text || "");
         if(alt && alt !== rawOf(m)) parts = splitMetaAll(tidyBody(alt));
       }
-      var segMed = segMediaOf(parts, m.media);
+      var segMed = segMediaOf(parts, pool);
       parts.forEach(function(p, pi){
         var meta = p.meta || {};
         var mid = String(meta.mid || "").trim();
         if(!mid || idx[mid]) return;   // 同一条被重复收进时，保留第一份
+        // 待发的 raw 是长格式 [Oct 31 2026 01:12 Sat]，splitMeta 认不出时间，退回行上的 ts
+        var mts = String(meta.ts || "").trim();
+        if(!mts && m.ts) mts = fmtTime(m.ts).slice(6, 11);
         idx[mid] = {
           name: String(meta.name || "").replace(/\s+/g, " ").trim(),
-          ts: String(meta.ts || "").trim(),
+          ts: mts,
           body: String(p.body || "").replace(/\s+$/, ""),
           // 用户 m12256：被引用那条自己带的图，引用块里要画出来
           media: segMed[pi] || null
@@ -3838,7 +3894,7 @@ var ctxSnapRequest = 0;
       });
     }
     (msgs || []).forEach(take);
-    (pend || []).forEach(take);
+    (pend || []).forEach(function(m){ take(m, true); });
     return idx;
   }
 
@@ -4094,7 +4150,8 @@ var ctxSnapRequest = 0;
     // m24522 ④⑥：占位不再当字面文字铺出来，统一换成小图标（卡片预览与弹层共用）
     function fwdPicChip(t){
       var ico = { "图片": "🖼", "表情": "🙂", "语音": "🎙", "视频": "🎬" };
-      return esc(t).replace(/\[(图片|表情|语音|视频)\](?:\s*×\s*(\d+))?/g, function(all, k, n){
+      // 用户 m27528 图1：转发条目的表情也要转，跟正文同一套（以前这里只 esc）
+      return emojiFaces(esc(t)).replace(/\[(图片|表情|语音|视频)\](?:\s*×\s*(\d+))?/g, function(all, k, n){
         return "<span class='fw-pic' title='" + k + (n ? " ×" + n : "") + "'>" +
                (ico[k] || k) + (n ? "×" + n : "") + "</span>";
       });
@@ -4114,8 +4171,10 @@ var ctxSnapRequest = 0;
         var total = (fwdPicN(r.text || "") + fwdEmoN(r.text || "")) * (r.n || 1);
         var left = total - got.length;
         // 有剩余的图（被清理/没下发）就不再写死字面 [图片]，同样交给 chip
+        // 用户 m28299 图1（转发的 emoji 没显示）：图都认领完了的那一支原来只 esc，
+        // 弹层里 [Emoji 344] 就成了一行方括号。表情与正文同一套，一律过 emojiFaces。
         var txt = left > 0 ? fwdPicChip((r.text || "") + (r.n > 1 ? " ×" + r.n : ""))
-                           : esc(stripFwdPics(r.text || ""));
+                           : emojiFaces(esc(stripFwdPics(r.text || "")));
         body = (txt ? "<div class='fp-tx'>" + txt + "</div>" : "") + thumbsHtml(got);
       }
       return "<div class='fp-it'><div class='fp-meta'><span class='fw-w'>" + esc(r.who || "某人") + "</span>" +
@@ -7564,6 +7623,8 @@ var ctxSnapRequest = 0;
         target.setAttribute("data-loaded", "1");
         // v4.02（用户 m11629 图2）：详情里的转发卡要跟窗口一样只露三行
         fitForwardCards(target);
+        // 用户 m28299 图3：详情里的引用也要补（以前这块 DOM 不在扫描范围里）
+        fillQuoteMiss();
         restoreRowFolds(target, name);
         return;
       }
@@ -8097,6 +8158,8 @@ var ctxSnapRequest = 0;
       target.setAttribute("data-loaded", "1");
       // v4.02（用户 m11629 图2）：同上，别让转发卡在详情里铺开
       fitForwardCards(target);
+      // 用户 m28299 图3：详情里的引用同样要补图 / 补原话
+      fillQuoteMiss();
       restoreRowFolds(target, name);
     };
     var ckey = String(ctxSid) + "|" + name;

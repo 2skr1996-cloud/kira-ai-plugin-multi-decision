@@ -435,7 +435,9 @@ _BOUNDS = {
     "rest_probability": (0, 100),
     "band_rest_probability": (0, 100),
     # v3.72（用户 m24260 第 9 条）：回看改成「周」，最少 4 周
-    "adaptive_weekday_window_weeks": (4, 52),
+    # A3（用户 m26791）：上限从 52 周收到 12 周——分桶统计最多只扫 120 天（约 17 周），
+    # 再往上填也不会多看到一天数据，干脆锁在 12 周，界面上的数和实际用到的数据对得上。
+    "adaptive_weekday_window_weeks": (4, 12),
     "quota_max_per_hour": (1, None),
     "quota_max_per_day": (1, None),
     "backoff_start_rejects": (1, None),
@@ -865,7 +867,7 @@ class MultiDecisionPlugin(BasePlugin):
         # 数据，有数据就调。第 9 条：分桶回看改成「周」，最少 4 周、默认 8 周。
         self.adaptive_weekday_bucket = _as_bool(cfg.get("adaptive_weekday_bucket"), False)
         self.adaptive_weekday_window_weeks = max(
-            4, min(52, _as_int(cfg.get("adaptive_weekday_window_weeks"), 8))
+            4, min(12, _as_int(cfg.get("adaptive_weekday_window_weeks"), 8))
         )
         # v3.28（用户 m47321）：时段曲线。24 小时切 48 格，每段一个触发概率。
         # 空串 = 没设置（界面按「未覆盖的时间用触发概率」显示）。目前只存不用，
@@ -1823,9 +1825,11 @@ class MultiDecisionPlugin(BasePlugin):
             else 0,
         )
         _quiet("retry", lambda: self.retry_history.purge(sid) if self.retry_history is not None else None)
+        # Aliases.set 返回的是整份映射（不是计数），直接拿来当 counts 会让
+        # api_session_delete 的 sum(counts.values()) 炸成 int + dict。这里显式记 1。
         _step(
             "aliases",
-            lambda: (self.aliases.set(sid, "") or 1)
+            lambda: (self.aliases.set(sid, ""), 1)[1]
             if (self.aliases is not None and self.aliases.get(sid))
             else 0,
         )
@@ -2300,35 +2304,59 @@ class MultiDecisionPlugin(BasePlugin):
     # 这一层的定位：普通模式先用便宜的规则（计数/概率/曲线/节奏）决定「要不要开口」，
     # 进阶模式把这一步换成「让模型读一遍实时窗口再判」。判「回」才走完整的带系统提示词
     # 那一轮；判「不回」就到此为止，不烧一轮完整上下文的钱。
-    def _decision_get(self, key, default=None):
+    def _decision_get(self, key, default=None, sid=""):
         """读进阶决策的配置项。
 
         先读运行中的 ctx.config（框架里存完就生效，不用热重载插件），拿不到再退回
-        初始化时的 cfg 快照。这些键都是全局键、不按群覆盖——决策提示词讲的是整套
-        流程的规则，按群各存一份没人维护得过来。
+        初始化时的 cfg 快照。默认读的是全局值；给了 sid 就再看这个会话有没有单群
+        覆盖（设置页「聊天决策」里逐群存的那份），有就以覆盖值为准。
+
+        A1（用户 m26791）：以前这里只读全局，白名单里的那十三个 decision_* 键虽然
+        在「按群配置」里存得下，读的时候却永远读不到——页面上填了不生效。
         """
+        base = default
+        hit = False
         try:
             cfg = getattr(self.ctx, "config", None)
             if isinstance(cfg, dict) and key in cfg:
-                return cfg[key]
+                base = cfg[key]
+                hit = True
         except Exception:
             pass
+        if not hit:
+            try:
+                snap = getattr(self, "_cfg_snapshot", None) or {}
+                if key in snap:
+                    base = snap[key]
+            except Exception:
+                pass
+        if not sid:
+            return base
+        ov = getattr(self, "overrides", None)
+        if ov is None:
+            return base
         try:
-            snap = getattr(self, "_cfg_snapshot", None) or {}
-            if key in snap:
-                return snap[key]
+            value = ov.value(sid, key, None)
         except Exception:
-            pass
-        return default
+            logger.exception(f"[multi-decision] 读取 {sid} 的决策覆盖配置失败（已忽略）")
+            return base
+        if value is None:
+            return base
+        try:
+            return _coerce(key, value, base if base is not None else default)
+        except Exception:
+            return base
 
-    def decision_options(self):
+    def decision_options(self, sid: str = ""):
         """把当前配置摊成 DecisionOptions（每轮现读，改完立即生效）。
 
         用户 m02159 图3：提示词页「工具说明」段里勾的工具才是真正注入、也允许模型调用的
         那份；勾过就以它为准，从没勾过（None）才沿用设置页里那份。
+
+        sid 给了就按这个会话的单群覆盖取值（A1，用户 m26791）。
         """
         try:
-            opt = options_from_config(lambda k, d=None: self._decision_get(k, d))
+            opt = options_from_config(lambda k, d=None: self._decision_get(k, d, sid))
         except Exception:
             logger.exception("[multi-decision] 读决策配置失败，按默认值继续")
             opt = options_from_config(lambda k, d=None: d)
@@ -2474,7 +2502,7 @@ class MultiDecisionPlugin(BasePlugin):
         dp = self.decision_phase
         if not sid:
             sid = self._decision_pick_sid()
-        opt = self.decision_options()
+        opt = self.decision_options(sid)
         layouts = getattr(self, "prompt_layouts", None)
         if layouts is not None:
             compiled = await layouts.assemble_decision(sid, opt)
@@ -2629,7 +2657,7 @@ class MultiDecisionPlugin(BasePlugin):
             personas = await dp.persona_options()
         except Exception:
             logger.exception("[multi-decision] 取人格列表失败（页面按空列表渲染）")
-        opt = self.decision_options()
+        opt = self.decision_options(sid)
         return {
             "ok": True,
             "sid": sid,
@@ -2677,7 +2705,7 @@ class MultiDecisionPlugin(BasePlugin):
             except Exception:
                 _imgs = []
             got = await self.decision_phase.decide(
-                sid, self._decision_messages(sid), self.decision_options(), images=_imgs)
+                sid, self._decision_messages(sid), self.decision_options(sid), images=_imgs)
         except Exception as exc:
             logger.exception("[multi-decision] 决策测试失败")
             return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc), "result": {}}
