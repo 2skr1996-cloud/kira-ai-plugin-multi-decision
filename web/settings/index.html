@@ -1435,6 +1435,23 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     .pm-module-head{flex-wrap:wrap;}
     .pm-module-head .pm-pick{flex:1 1 100%;width:auto;}
   }
+  /* 用户 m23323 图4：卡片被拖窄以后，标题、来源下拉、右侧「位置 + N 字 + ↑↓ + 锁」
+     三列还是硬挤在一行（96 + 168 + 160 已经超过卡片宽度），字就压在箭头上。
+     这里按「卡片自己的宽度」换行：容器窄了就让下拉、右侧那一列各自占一整行，
+     宁可多占两行，也不让字叠在一起。 */
+  .pm-module{container-type:inline-size;}
+  .pm-module-head{flex-wrap:wrap;row-gap:3px;}
+  .pm-module-head .pm-head-main,
+  .pm-module-head .pm-pick,
+  .pm-module-head .pm-end{min-width:0;}
+  @container (max-width:430px){
+    .pm-module-head .pm-head-main{flex:1 1 110px;order:1;}
+    .pm-module-head .pm-pick{flex:1 1 100%;width:auto;order:2;}
+    .pm-module-head .pm-end{flex:1 1 100%;order:3;justify-content:flex-end;flex-wrap:wrap;}
+    .pm-module-head .pm-desc{max-width:none;}
+    .pm-module-head .pm-end .pm-pos{width:auto;min-width:40px;padding:0 6px;}
+    .pm-module-head .pm-chars{width:auto;min-width:34px;}
+  }
   /* 用户 m05124 图2：底部那两行（按钮 + 说明）并成一段，左边缘跟「新增模块」卡对齐。 */
   .pm-foot{padding:0;margin-top:8px;border-top:1px solid var(--line);padding-top:7px;
     display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-start;}
@@ -2211,7 +2228,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
   function ppRenderedPart(s, name){
     var parts = (s && s.preview && s.preview.parts) || [];
     for(var i = 0; i < parts.length; i++){
-      if(String(parts[i].name || "") === name) return parts[i];
+      // 用户 m23323 图2：人格段的 part.name 是人格文件名（不是 persona），只按 name 找会漏，
+      // 卡片就退回目录里那份 60 字预览——看着像「选了人设反而没注入」。type 也一起认。
+      if(String(parts[i].name || "") === name || String(parts[i].type || "") === name) return parts[i];
     }
     // 用户 m10297 图1：系统动态段 / 动态段被「启用」关掉时，后端不再把它放进 parts
     // （关着就不该进右侧预览），但左边卡片还得照实显示这一格有多少字、写了什么——
@@ -2382,9 +2401,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 用户 m14457 图1：停用的模块以前照样把整段正文铺在卡上（只是变淡），
     // 看着像「关了右边预览还留着」——那其实是左边卡片。停用就明说，不再铺全文。
     var off = !!(module.enabled === false);
-    var body = (rendered && off) ? ("（未启用 · 这一段不进预览：" + String(rendered.chars || 0) + " 字）")
-      : (rendered ? String(rendered.text || "")
-        : ((typ === "text" || isDynamic) ? String(module.content || "") : ppReferenceText(s, module)));
+    // 用户 m23323 图1：停用也照实显示正文与字数——卡片是「这一段会收到什么」的展示位，
+    // 换成一串「未启用…」的说明字反而看不出内容（系统动态段就是这么被读成空白的）。
+    var body = rendered ? String(rendered.text || "")
+      : ((typ === "text" || isDynamic) ? String(module.content || "") : ppReferenceText(s, module));
     // 用户 m04343 第 4 条：默认模板改过正文就自动算「自定义」，标题后面挂个小标，
     // 不用再点「编辑（存成我的模板）」转一次。
     var defTpl = null;
@@ -2431,6 +2451,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
           : (ref ? String(ref.source || "引用当前原文") : "目录中没有此引用"));
     }
     var chars = String(body ? body.length : 0);
+    // 用户 m23323 图3：系统段「不允许往下」——排在实时窗口上面那一条的下移键直接禁掉。
+    var nextType = (index + 1 < s.layout.modules.length) ? String((s.layout.modules[index + 1] || {}).type || "") : "";
+    var nextIsRt = nextType === "realtime_marker";
     var open = !!(s.open && s.open[index]);
     var tip = source + (note ? " · " + note : "");
     var foot = "";
@@ -2485,7 +2508,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         "<div class='pm-move'>" + ppIcon(s,"up","\u2191","上移",index,
           fixedPos || index === 0 ||
           (isDynamic && index > 0 && String((s.layout.modules[index - 1] || {}).type || "") === "realtime_marker")) +
-        ppIcon(s,"down","\u2193","下移",index,fixedPos || index === s.layout.modules.length - 1) + (locked
+        ppIcon(s,"down","\u2193","下移",index,fixedPos || nextIsRt || index === s.layout.modules.length - 1) + (locked
           ? (lockText ? "<span class='pm-lock' title='" + esc(lockTip) + "'>" + lockText + "</span>" : "")
           : ppIcon(s,"remove","\u2715","删除",index)) + "</div></div></div>" +
       metaHtml +
@@ -2496,13 +2519,15 @@ var DM_SPECIAL = { trigger_probability: 1 };
           : (isRealtime ? "（可编辑）· 只标位置，不注入 system"
             : (custom ? "（可编辑）" : (ro ? "（框架自动填写，只能看不能改）" : "（引用原文，只读）")))) + "</summary>" +
         "<div class='pm-body-row'>" +
+        // 用户 m23323 图3：<textarea> 后面紧跟的第一个换行会被 HTML 解析吃掉，
+        // 正文以空行开头时回填一次就少一行、越编辑越少。这里先自己补一个换行。
         "<textarea class='darea pm-content' rows='5' aria-label='" +
         (custom ? "模块文本"
           : (isIdentity ? "你的身份（只读）"
             : (isSystemDyn ? "系统动态段（只读）"
               : (isRealtime ? "实时窗口说明" : "改这里会自动存成你自己的模板")))) +
         "' data-pm-field='content' data-pm-index='" + index + "'" +
-        (custom || isRealtime || isDynamic ? "" : (ro ? " readonly" : " data-pm-promote='1'")) + ">" + esc(body) + "</textarea>" +
+        (custom || isRealtime || isDynamic ? "" : (ro ? " readonly" : " data-pm-promote='1'")) + ">\n" + esc(body) + "</textarea>" +
         // 用户 m05124 图1：这句「只标位置」挪到上面第二行（正文摘要）去了，正文行里不再重复。
         "</div>" +
         (isRealtime ? "<div class='pm-hint'>这段只是给模型标出「聊天记录长这样、放在这里」，不会当成指令执行；想更像真记录就往下多写两行。</div>" : "") +
@@ -2513,7 +2538,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       (!custom && !isPersona && !isTools && ref && ref.available === false && !body && ref.template ?
         "<details class='pseg pm-reference'><summary><span class='psn'>未渲染的引用模板（只读参考）</span></summary>" +
         "<div class='pm-note'>尚未绑定本轮变量，不是当前生效词；不会自动转为正文。可复制到新建自写模块后自行处理。</div>" +
-        "<textarea class='darea pm-reference-text' rows='6' readonly aria-label='未渲染的引用模板（只读）'>" +
+        "<textarea class='darea pm-reference-text' rows='6' readonly aria-label='未渲染的引用模板（只读）'>\n" +
         esc(ppReferenceValue(ref.template)) + "</textarea></details>" : "") +
       "</section>";
   }
@@ -2559,6 +2584,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
           ppButton(s,"add","＋ 新增") + "</div></div>" +
         "<div class='pm-foot'>" +
         "<div class='pm-quick'>" + ppButton(s,"defaults","载入默认") +
+          // 用户 m23323：默认提示词改成本地存一份，这个按钮就是把「框架此刻的模板」重新抄进
+          // 本地那份（prompt_defaults.json）。只换默认值，不动已保存的布局和正在编的草稿。
+          ppButton(s,"sync_defaults","同步框架默认",undefined,s.saving || !!s.loading) +
           ppButton(s,"reload","重新读取",undefined,s.saving || !!s.loading) +
           ppButton(s,"inherit",s.sid ? "恢复跟随全局" : "恢复自动默认",undefined,s.saving) + "</div>" +
         // 用户 m05124 图2：说明跟按钮并成一段，左边缘跟「新增模块」卡对齐；全文放 title。
@@ -2692,7 +2720,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
   }
   function ppScheduleStatePreview(s){
     clearTimeout(s.timer);
-    s.timer = setTimeout(function(){ s.timer = 0; ppPreview(s); },300);
+    // 用户 m23323：提示词页有点卡——每敲一个字就 300ms 后打一次预览，服务端要重排整份 system。
+    // 拉到 600ms，输入时少一半往返。
+    s.timer = setTimeout(function(){ s.timer = 0; ppPreview(s); },600);
   }
   // 用户 m04343 第 4 条：自写块/默认模板改正文后不重绘整个编辑器（会把光标弄丢、输入变卡），
   // 只就地打补丁：标题右边冒「自定义」小标、字数跟着变、来源下拉的括注也一起改。
@@ -2908,14 +2938,25 @@ var DM_SPECIAL = { trigger_probability: 1 };
       // 用户 m01209 图2：小模块骨架点进来就把正文带上，不用自己从头写。
       if(ref && pair[0] === "text" && ref.skeleton && typeof ref.text === "string") module.content = ref.text;
       if(ref) module.label = String(ref.label || module.type);
-      list.push(module);
+      // 用户 m23323 图3：选「系统段」新增的模块落在「实时窗口」上面——系统段永远排在
+      // 聊天记录之前，不能因为后加就跑到最底下去。动态段仍按原来的路径追加到最后。
+      var at = list.length;
+      for(var zi = 0; zi < list.length; zi++){
+        var zt = String((list[zi] || {}).type || "");
+        if(zt === "realtime_marker" || zt === "dynamic" || zt === "system_dynamic"){ at = zi; break; }
+      }
+      list.splice(at, 0, module);
     }else if(action === "remove" && module){
       // 用户 m02159 图3：人格 / 身份 / 实时窗口是固定段，只能放空或换人格，不能整段删掉。
       if(module.type === "persona" || module.type === "identity" || module.type === "realtime_marker") return;
       list.splice(index,1);
     }
     else if(action === "up" && module && index > 0){ list.splice(index,1); list.splice(index-1,0,module); }
-    else if(action === "down" && module && index < list.length-1){ list.splice(index,1); list.splice(index+1,0,module); }
+    else if(action === "down" && module && index < list.length-1){
+      // 用户 m23323 图3：任何一段都不能越过「实时窗口」往下——越过就跑到聊天记录后面去了。
+      if(String((list[index+1] || {}).type || "") === "realtime_marker") return;
+      list.splice(index,1); list.splice(index+1,0,module);
+    }
     else if(action === "promote" && module){ ppPromote(s, index); return; }
     else if(action === "edit_tpl" && module && module.type === "custom"){
       var hit = ppRef(s, module) || {};
@@ -3311,6 +3352,23 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(action === "reload"){
         if(s.dirty && !(await mdConfirm("重新读取会放弃这份未保存草稿。请先复制需要保留的改动，确定继续？",{danger:true,ok:"放弃草稿并读取"}))) return;
         ppLoad(s,true); return;
+      }
+      if(action === "sync_defaults"){
+        // 用户 m23323：把「框架当前模板」重新抄一份到本地默认（prompt_defaults.json）。
+        if(s.syncing) return;
+        if(!(await mdConfirm("把框架此刻的默认提示词重新抄一份到本地缓存？\n只换默认值：已保存的布局和正在编辑的草稿都不动。",{ok:"开始同步"}))) return;
+        var stEl = document.getElementById("pp-state-" + s.kind);
+        var setSt = function(txt){ if(stEl) stEl.textContent = txt; };
+        s.syncing = true; button.disabled = true;
+        setSt("正在同步框架默认提示词…");
+        ppRequest("/prompt-defaults", {kind:s.kind, sid:s.sid}).then(function(d){
+          s.syncing = false; button.disabled = false;
+          setSt("已同步 " + Number(d.count || 0) + " 段到本地" + (d.path ? "：" + String(d.path) : ""));
+        }).catch(function(err){
+          s.syncing = false; button.disabled = false;
+          setSt("同步失败：" + String((err && err.message) || err));
+        });
+        return;
       }
       if(action === "defaults"){
         if(!s.loaded || s.saving || !s.defaultLayout) return;

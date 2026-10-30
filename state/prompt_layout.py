@@ -66,6 +66,20 @@ DYNAMIC_TEMPLATE_DEFAULT = (
     "   <msg></msg>，一个字都别多写——空壳代表「这条不发」，群里不会出现任何东西。\n"
 )
 DYNAMIC_TEMPLATE_NAME = "强化格式遵守"
+
+
+def _tidy_blanks(text) -> str:
+    """用户 m23323：动态段几行拼起来会出现三四连换行（空记忆 / 空时间），压成最多一个空行。"""
+    return re.sub(r"\n{3,}", "\n\n", str(text or ""))
+
+
+def _pad_seg(text) -> str:
+    """用户 m23323 图3：段与段之间统一留一个空行。
+
+    真实请求这一路不是拼一个长字符串，而是一段一个 Prompt（各自带 end）；插件自己造的
+    这几段 end 是空的，上一段末尾又没有换行，两段就会黏成一行。这里统一补成「正文 + 空行」。
+    """
+    return str(text or "").rstrip() + "\n\n"
 # 用户 m02159 图1：实时窗口这一段要看得见「聊天记录会被拼在这里」，所以给一段假示例。
 REALTIME_NOTE = (
     "这一段是模型看到的现场聊天记录：真实请求里由框架自动拼在这里，不是我们发出去的。\n"
@@ -203,7 +217,15 @@ class PromptLayouts:
         self._applied_user = {}
         # 用户 m10789：装配用的原段一律「此刻现造」，这一格放本次现取的结果（按 sid）。
         self._live = {}
+        # 用户 m23323：人格正文在这一轮装配前 await 预取的那一份（同步装配时兜底用）。
+        self._personas_pre = {}
         self._official = self._load(Path(__file__).with_name("kira_default_templates.json"), {})
+        # 用户 m23323：默认提示词本地存一份，装配只读这一份，不再「请求时才现取」。
+        # 框架以后换了默认词，用设置页工具栏的「同步框架默认」重新抓一次写回这里；
+        # 玩家自己改过的正文存在 prompt_layouts.json，跟这份默认互不影响。
+        self.defaults_path = Path(data_dir) / "prompt_defaults.json"
+        self._defaults = self._load(self.defaults_path,
+                                   {"version": 1, "captured_at": 0, "order": [], "segments": {}, "meta": {}})
         self.tpl_path = Path(data_dir) / "prompt_templates.json"
         self._tpl = self._load(self.tpl_path, {"version": 1, "items": []})
         # 用户 m02159 图3：「工具说明」段里的勾选单独存一份，勾了才注入、才允许模型调用。
@@ -591,10 +613,19 @@ class PromptLayouts:
     def _live_rows_local(self, sid):
         """插件自带的现成一份：静态段抄出厂模板，动态段现算（身份 / 时间 / 记忆）。"""
         rows = []
+        # 用户 m23323：静态段先读自己家那份本地默认副本，缺哪个再用出厂参考副本补。
+        segs = self._defaults_segments()
+        if segs:
+            order = [str(x) for x in ((self._defaults or {}).get("order") or [])] or list(segs.keys())
+            for k in order:
+                txt = str(segs.get(k) or "")
+                if k in self.STATIC_SEGS and txt.strip():
+                    rows.append({"name": k, "text": txt, "location": "system"})
+        had = {seg_key(r["name"]) for r in rows}
         for tpl in (self._official.get("templates") or []):
             name = str((tpl or {}).get("name") or "")
             text = (tpl or {}).get("content")
-            if name in ("role", "attention", "output", "format") and isinstance(text, str) and text.strip():
+            if name in self.STATIC_SEGS and name not in had and isinstance(text, str) and text.strip():
                 rows.append({"name": name, "text": text, "location": "system"})
         rows.append({"name": "persona", "text": "", "location": "system"})
         rows.append({"name": "accounts", "text": self._sample_identity(sid), "location": "system"})
@@ -603,6 +634,104 @@ class PromptLayouts:
                      "location": "dynamic"})
         rows.append({"name": "time", "text": self._live_time_text(), "location": "dynamic"})
         return rows
+
+    # ------------------------------------------------------------------
+    # 本地默认提示词（用户 m23323）
+    # 默认词在自己家存一份，装配只读这一份，不再依赖请求时现取框架当前模板。
+    # 框架以后换了默认词，用设置页工具栏的「同步框架默认」重新抓一次覆盖。
+    # ------------------------------------------------------------------
+    STATIC_SEGS = ("role", "attention", "output", "format")
+
+    def _defaults_segments(self):
+        d = self._defaults if isinstance(self._defaults, dict) else {}
+        segs = d.get("segments")
+        return segs if isinstance(segs, dict) else {}
+
+    def defaults_info(self):
+        d = self._defaults if isinstance(self._defaults, dict) else {}
+        segs = self._defaults_segments()
+        return {"ok": True, "path": str(self.defaults_path),
+                "captured_at": int(d.get("captured_at") or 0),
+                "source": str(d.get("source") or ""),
+                "count": len([k for k, v in segs.items() if str(v or "").strip()]),
+                "order": [str(x) for x in (d.get("order") or [])],
+                "missing": [k for k in self.STATIC_SEGS if not str(segs.get(k) or "").strip()]}
+
+    def _defaults_text(self, key):
+        """本地默认副本里这一段的正文字；没有就回空串（由调用方再退其它来源）。"""
+        return str(self._defaults_segments().get(str(key or "")) or "")
+
+    def save_defaults(self, segments, order=None, source=""):
+        clean = {}
+        for k, v in (segments or {}).items():
+            txt = str(v or "")
+            if str(k or "").strip() and txt.strip():
+                clean[str(k)] = txt
+        if not clean:
+            return {"ok": False, "error": "没有可保存的默认段"}
+        data = {"version": 1, "captured_at": int(time.time()), "source": str(source or ""),
+                "order": [str(x) for x in (order or list(clean.keys()))], "segments": clean}
+        try:
+            self.defaults_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.defaults_path.with_name(self.defaults_path.name + ".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self.defaults_path)
+        except Exception:
+            logger.exception("[multi-decision] 写本地默认提示词失败")
+            return {"ok": False, "error": "写文件失败，详见日志"}
+        self._defaults = data
+        return {"ok": True, "count": len(clean), "captured_at": data["captured_at"]}
+
+    def capture_defaults(self, rows, source="", force=True):
+        """把框架这一刻给的 system 段抄进本地副本；动态段（记忆 / 时间）不存，请求时现算。"""
+        segments, order = {}, []
+        for row in rows or []:
+            name = str((row or {}).get("name") or "")
+            if not name or self._dynamic(name) or str((row or {}).get("location") or "") == "dynamic":
+                continue
+            txt = str((row or {}).get("text") or "")
+            if not txt.strip():
+                continue
+            k = seg_key(name)
+            if k == "accounts":
+                continue  # 身份每群不一样，现拼，不存成默认
+            segments[k] = txt
+            order.append(k)
+        if not segments:
+            return {"ok": False, "error": "框架这一次没给到可保存的段"}
+        return self.save_defaults(segments, order, source)
+
+    TOKEN_NAMES = ("persona", "identity", "tools", "realtime", "memory", "time",
+                   "sessions", "chat_env", "accounts", "tools_note")
+
+    def _token_value(self, key, kind, sid, context, by_name):
+        k = str(key or "").strip().lower()
+        ctx = context or {}
+        if k in ("persona",):
+            key_pick = str(ctx.get("persona_key") or "")
+            if key_pick:
+                return str((ctx.get("personas") or {}).get(key_pick) or "")
+            return str(ctx.get("persona") or next(
+                (r["text"] for r in by_name.values() if seg_key(r["name"]) == "persona"), ""))
+        if k in ("identity", "accounts"):
+            return str(ctx.get("identity") or self.identity_text(sid))
+        if k in ("tools", "tools_note"):
+            return str(ctx.get("tools") or next(
+                (r["text"] for r in by_name.values() if seg_key(r["name"]) == "tools"), ""))
+        if k == "realtime":
+            return REALTIME_NOTE
+        if k in ("memory", "time", "sessions", "chat_env", "session"):
+            return str(next((r["text"] for r in by_name.values() if seg_key(r["name"]) == k), ""))
+        return ""
+
+    def fill_tokens(self, text, kind, sid, context, by_name):
+        """把 {{persona}} {{identity}} {{tools}} {{memory}} {{time}} 这类框换成这一轮的真实内容。"""
+        body = str(text or "")
+        if "{{" not in body:
+            return body
+        return re.sub(r"\{\{\s*([a-zA-Z_][a-zA-Z_0-9]*)\s*\}\}",
+                      lambda mo: (self._token_value(mo.group(1), kind, sid, context, by_name)
+                                  or mo.group(0)), body)
 
     async def _live_chat_env(self, sid):
         """预览里没有事件可用：会话标题问会话管理器，平台 / 适配器从配置里挑第一个。"""
@@ -664,6 +793,13 @@ class PromptLayouts:
         if not rows:
             rows, source = self._live_rows_local(sid), "插件自带文案 + 实时变量"
         rows = self._fill_memory(rows)
+        if not self._defaults_segments():
+            try:
+                info = self.capture_defaults(rows, source=source)
+                if info.get("ok"):
+                    logger.info("[multi-decision] 框架默认提示词已抄到本地：%d 段", info.get("count"))
+            except Exception:
+                logger.exception("[multi-decision] 抄本地默认提示词失败，继续用现取的那份")
         self._live[sid] = {"rows": rows, "at": time.time(), "source": source}
         return rows
 
@@ -875,8 +1011,8 @@ class PromptLayouts:
         # 用户 m06428 图2：这一格原来显示 0 字、点开空白，可请求里明明有记忆 / 时间——
         # 正文要照实写出来（框架自己搬走的那几段也是本段的来源），只是 inject_text
         # 才排除它们，免得同一段真发两遍。
-        text = "\n\n".join(r["text"] for r in framed_rows + inject_rows)
-        inject_text = "\n\n".join(r["text"] for r in inject_rows)
+        text = _tidy_blanks("\n\n".join(r["text"] for r in framed_rows + inject_rows))
+        inject_text = _tidy_blanks("\n\n".join(r["text"] for r in inject_rows))
         # 用户 m05691：这一段默认不开启；勾上就把这些内容拼到本轮消息最下面（跟回复页
         # 的动态段一个位置），排在格式强化之后——它是这一轮真正该看的现场信息。
         return {"id": m["id"], "label": m["label"], "name": "system_dynamic", "type": "system_dynamic",
@@ -961,7 +1097,8 @@ class PromptLayouts:
                 # 勾过就按勾的写，没勾过才沿用框架原段（回复轮框架自己会给一段）。
                 text = context.get("tools") or next((r["text"] for _k, r in by_name.items() if seg_key(r["name"]) == "tools"), "")
             elif typ == "framework":
-                text = by_name.get(key, {}).get("text", "")
+                # 用户 m23323：本地默认副本里有就用它，装配不再被「这一刻框架给没给」牵着走。
+                text = self._defaults_text(key) or by_name.get(key, {}).get("text", "")
                 if by_name.get(key, {}).get("location") == "dynamic":
                     warnings.append(m["label"] + "保持在动态尾段，不进入固定 system")
                     continue
@@ -979,6 +1116,10 @@ class PromptLayouts:
                 # 用户 m02993：动态段是能改的模板，正文拼在本轮 user 消息的最后，不进 system。
                 parts.append(self._dynamic_part(m))
                 continue
+            if typ in ("text", "custom") and text:
+                # 用户 m23323：自写文本里可以写 {{persona}} / {{identity}} / {{tools}} /
+                # {{memory}} / {{time}} 这类框，请求时按这一轮的真实内容替换。
+                text = self.fill_tokens(text, kind, sid, context, by_name)
             if text == "":
                 # 用户 m02159：人格留空、工具没勾都是正常状态（模块上就写着会跳过），不该刷警告。
                 if typ not in BODY_TYPES and typ not in ("persona", "tools"):
@@ -988,7 +1129,11 @@ class PromptLayouts:
             parts.append({"id": m["id"], "label": m["label"], "name": name, "type": typ, "text": text, "chars": len(text)})
         # 回复引用已含 Prompt.end；用户自写文本也是精确字串，不在第二处另造分隔符。
         # dynamic_marker 只是位置提示，不参与 system 拼接。
-        system = ("\n\n" if kind == "decision" else "").join(p["text"] for p in parts if not p.get("dynamic"))
+        # 用户 m23323 图3：段与段之间统一留一个空行——以前回复侧是直接首尾相接，
+        # 自写文本末尾没带换行时，下一段会黏在上一段最后一行后面。
+        chunks = [str(p.get("text") or "").rstrip() for p in parts
+                  if not p.get("dynamic") and str(p.get("text") or "").strip()]
+        system = "\n\n".join(chunks)
         return {"ok": True, "system": system, "parts": parts, "chars": len(system), "warnings": warnings,
                 # 用户 m10297 图1：被「启用」关掉的展示段（系统动态段 / 动态段）放在这里，
                 # 只给左边卡片显示字数与正文，不参与 system 拼接、也不进右侧预览。
@@ -1010,6 +1155,33 @@ class PromptLayouts:
     def preview_reply(self, sid="", layout=None):
         doc = self.layout("reply", sid)[0] if layout is None else layout
         return dict(self._render("reply", sid, doc, {"tools": self._tools_text()}, sample=True), sid=sid)
+
+    async def prefetch_personas(self, sid="", layout=None):
+        """用户 m23323 图2：真实回复这一路是同步装配，人格正文没预热就整段丢弃。
+        所以装配之前先 await 一遍，把正文塞进缓存，装配时 persona_text_now 才读得到。"""
+        doc = self.layout("reply", sid)[0] if layout is None else layout
+        phase = getattr(self.plugin, "decision_phase", None)
+        if phase is None:
+            return {}
+        keys = [str(m.get("key") or "") for m in (doc.get("modules") or [])
+                if m.get("type") == "persona" and str(m.get("key") or "")]
+        got = {}
+        cached = getattr(phase, "_persona_cache", None) or {}
+        for k in keys:
+            if cached.get(k):
+                got[k] = cached[k]
+                continue
+            body = ""
+            try:
+                body = await phase.persona_text(k)
+            except Exception:
+                logger.exception("[multi-decision] 预取人格失败：%s", k)
+            if body:
+                got[k] = body
+        self._personas_pre.setdefault(normalize_sid(sid), {}).update(got)
+        if len(self._personas_pre) > 64:
+            self._personas_pre.pop(next(iter(self._personas_pre)))
+        return got
 
     def apply_reply(self, request, sid=""):
         if not isinstance(getattr(request, "system_prompt", None), list):
@@ -1035,10 +1207,16 @@ class PromptLayouts:
         for m in doc["modules"]:
             pname = str(m.get("key") or "") if m.get("type") == "persona" else ""
             if pname:
-                personas[pname] = self.plugin.decision_phase.persona_text_now(pname)
+                personas[pname] = (self.plugin.decision_phase.persona_text_now(pname)
+                                   or (self._personas_pre.get(sid) or {}).get(pname, ""))
+                if not personas[pname]:
+                    # 用户 m23323 图2：真实请求里人设整段丢了，得能在日志里一眼看见是哪一段。
+                    logger.warning("[multi-decision] 回复提示词：人格「%s」正文读不到，这一段没有注入", pname)
         tools_text = self._tools_text()
         rendered, output = self._render("reply", sid, doc, {"personas": personas, "tools": tools_text},
                                         rows=self._rows(request)), []
+        for _w in rendered.get("warnings") or []:
+            logger.warning("[multi-decision] 回复提示词：%s", _w)
         mods = {m["id"]: m for m in doc["modules"]}
         for p in rendered["parts"]:
             if p.get("dynamic"):
@@ -1048,21 +1226,21 @@ class PromptLayouts:
             key = m.get("key", "") or {"persona": "persona", "tools": "tools", "identity": "accounts"}.get(m.get("type"), "")
             if m.get("type") == "tools" and tools_text:
                 # 用户 m02159 图3：勾过工具就按勾的那份重写「工具说明」这一段。
-                output.append(Prompt(p["text"], name="tools", source="system", persist=False,
+                output.append(Prompt(_pad_seg(p["text"]), name="tools", source="system", persist=False,
                                      render_template=False, end=""))
             elif m.get("type") == "persona" and m.get("key"):
                 # 用户 m02159 图3：人格段自选的文件不在框架原段里，必须按新正文重造一段 Prompt。
-                output.append(Prompt(p["text"], name="persona", source="system", persist=False,
+                output.append(Prompt(_pad_seg(p["text"]), name="persona", source="system", persist=False,
                                      render_template=False, end=""))
             elif m.get("type") == "identity" and str(p.get("text") or "").strip():
                 # 用户 m10789：身份段用插件现拼的那份，和预览同一处来源。框架那行更短的
                 # 「社交账号信息（Accounts）」顶替掉它的话，预览和真实请求就对不上了。
-                output.append(Prompt(p["text"], name="accounts", source="system", persist=False,
+                output.append(Prompt(_pad_seg(p["text"]), name="accounts", source="system", persist=False,
                                      render_template=False, end=""))
             elif m.get("type") in ("framework", "persona", "tools"):
                 output.extend(original.get(key, []))  # kwargs/render/end/persist 原样保留。
             else:
-                output.append(Prompt(p["text"], name=p["name"], source="system", persist=False, render_template=False, end=""))
+                output.append(Prompt(_pad_seg(p["text"]), name=p["name"], source="system", persist=False, render_template=False, end=""))
         selected = {p["name"] for p in rendered["parts"]}
         overrides = self._reply_overrides()
         for p in base:
@@ -1097,6 +1275,8 @@ class PromptLayouts:
         body = (text or "").strip()
         if not body:
             return False
+        # 用户 m23323 图3：动态段紧贴在本轮消息最后一行后面会黏成一行，前后各留一个空行。
+        body = "\n" + body + "\n\n"
         from .reply_prompt import Prompt as _Prompt
         if _Prompt is None:
             return False

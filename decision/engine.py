@@ -1393,7 +1393,14 @@ class DecisionEngine:
 
         # v4.33：装配后再落快照，页面与真实请求不再看到两份 system。
         reply_prompt = getattr(plugin, "reply_prompt", None)
-        if getattr(plugin, "prompt_layouts", None) is not None and reply_prompt is not None:
+        layouts = getattr(plugin, "prompt_layouts", None)
+        if layouts is not None and reply_prompt is not None:
+            # 用户 m23323 图2：人格正文必须先 await 取到，同步装配那一步才拿得到——
+            # 以前没预热就直接同步取，框架方法是协程，取不到就整段丢掉，请求里没人设。
+            try:
+                await layouts.prefetch_personas(sid)
+            except Exception:
+                logger.exception("[multi-decision] 预取人格失败（本轮按没有这段继续）")
             reply_prompt.apply(request, sid)
 
         if self.request_log is not None:

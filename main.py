@@ -2488,6 +2488,34 @@ class MultiDecisionPlugin(BasePlugin):
         except (ValueError, TypeError) as exc:
             return {"ok": False, "code": "INVALID_LAYOUT", "error": str(exc)}
 
+    @_api("GET", "/prompt-defaults")
+    async def api_prompt_defaults(self):
+        """用户 m23323：本地默认提示词的现状（存在哪、什么时候抄的、还缺哪几段）。"""
+        try:
+            return self.prompt_layouts.defaults_info()
+        except Exception as exc:
+            return {"ok": False, "code": "DEFAULTS_FAILED", "error": str(exc)}
+
+    @_api("POST", "/prompt-defaults")
+    async def api_sync_prompt_defaults(self, body: dict):
+        """用户 m23323：把框架这一刻的默认提示词重新抄一份到本地（覆盖），装配就只读这份。"""
+        try:
+            sid = str((body or {}).get("sid") or "")
+            if not sid:
+                sid = self._decision_pick_sid()
+            # 现取一次框架当前模板，再抄进本地副本——不写死出厂文案，跟框架升级同步。
+            rows = await self.prompt_layouts.refresh_live(sid)
+            info = self.prompt_layouts.capture_defaults(rows, source="框架当前模板 · 手动同步")
+            if not info.get("ok"):
+                return {"ok": False, "code": "SYNC_FAILED",
+                        "error": str(info.get("error") or "同步失败：框架这次没给到可保存的段")}
+            out = self.prompt_layouts.defaults_info()
+            out.update({"ok": True, "synced": True})
+            return out
+        except Exception as exc:
+            logger.exception("[multi-decision] 同步框架默认提示词失败")
+            return {"ok": False, "code": "SYNC_FAILED", "error": str(exc)}
+
     @_api("POST", "/prompt-preview")
     async def api_prompt_preview(self, body: dict):
         try:
