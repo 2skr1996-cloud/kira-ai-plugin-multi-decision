@@ -7264,9 +7264,23 @@ var ctxSnapRequest = 0;
       // （含这条注记：它算历史，是 ② 里唯一一条未命中），③ 从这之后开始算本轮。
       // 回复快照那套（上一条 bot 回复之后算本轮）不动，两条链路各用各的。
       if(isDecX){
+        var dnoteX = -1;
         for(var dnxX = allMsgsX.length - 1; dnxX >= 0; dnxX--){
-          if(noteRowX(allMsgsX[dnxX])){ boundX = dnxX + 1; break; }
+          if(noteRowX(allMsgsX[dnxX])){ dnoteX = dnxX; break; }
         }
+        // 用户 m26455：窗口裁过以后，上一次决策的注记可能整条被裁走，② 就找不到判定点了。
+        // 这时候整份都算本轮（② 空着，③ 装全部），不再退回去用别的锚点凑一个边界。
+        boundX = (dnoteX >= 0) ? (dnoteX + 1) : 0;
+      } else {
+        // 用户 m26455 图1：回复快照的判定点是「上一条 bot 的回复」。裁切把更早的消息全切走
+        // 之后，窗口里根本没有这条回复——那就没有判定点了，这一份全算本轮（② 空着）。
+        // 以前这里会退到 history_messages 的长度，把 19 条新消息糊进 ②（23:21:34 那条）。
+        var botX = -1;
+        for(var bxX = allMsgsX.length - 1; bxX >= 0; bxX--){
+          var bmxX = allMsgsX[bxX] || {};
+          if(String(bmxX.role || "") === "assistant" && !noteRowX(bmxX)){ botX = bxX; break; }
+        }
+        if(botX < 0) boundX = 0;
       }
 
       var stat = "", reloc = "", pos = {};
@@ -7391,7 +7405,7 @@ var ctxSnapRequest = 0;
         });
         // v3.93（用户 m07570 图7）：决策快照的 ② 改叫「聊天历史」，③ 才是本轮输入。
         h += rawBlock("② 历史消息",
-                      "· " + rh.length + " 条 · " + histChars + " 字符" +
+                      "· " + rh.length + " 条 · " + (rh.length ? histChars : 0) + " 字符" +
                       (preLenRaw >= 0
                         ? (" · 命中 " + hitsRaw + " 条 · 未命中 " + coldRaw + " 条")
                         : ""),
@@ -7719,8 +7733,11 @@ var ctxSnapRequest = 0;
         hits2 = Math.min(preLen, shownN2);
       }
       miss2 = Math.max(0, shownN2 - hits2);
+      // 用户 m26443：窗口裁过、② 空着的时候这里会写出负数（3452 - 4092 = -640），
+      // 标题跟正文（「这一轮没有历史」）自相矛盾，一律按真正画出来的条数/字符数报。
+      var chars2 = hist.length ? Math.max(0, histChars - skipChars2) : 0;
       h += "<div class='seqh'>② 历史消息" +
-             " <span class='dim' data-histhead='1'>· " + (((histRows || r.messages || []).length) - skipN2) + " 条 · " + (histChars - skipChars2) +
+             " <span class='dim' data-histhead='1'>· " + hist.length + " 条 · " + chars2 +
            " 字符" + (preLen >= 0 ? (" · 命中 " + hits2 + " 条 · 未命中 " + miss2 + " 条") : "") + "</span>" +
            "<span class='grow'></span><span class='mini' data-fold='hist'>展开</span></div>";
       h += "<div class='scroll' data-foldbody='hist' style='display:none'>";
