@@ -1883,6 +1883,15 @@ def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list
         media = media_list(content, raw_sid)
         if media:
             text = _drop_media_tags(text)
+        elif "[Forward" in str(text or ""):
+            # v4.47（用户 m24522 第 3 项）：合并转发里的图，框架只给了 [图片] 占位。
+            # 补内容的时候（decision/forward_fetch）已经顺手把图存进插件缓存，
+            # 这里按 message_id 取回来挂上，卡片里就能真看到图，不再是四个字。
+            try:
+                from ..decision.forward_fetch import media_for_text as _fwd_media_of
+                media = _fwd_media_of(text) or []
+            except Exception:
+                media = []
         item = {
             "role": role,
             "text": text,

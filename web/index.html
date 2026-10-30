@@ -579,12 +579,21 @@ html[data-theme="dark"] .mc-bd .qmini-tag{background:rgba(59,130,246,.22);color:
 .mc-bd .fcard .fsub{font-size:11px;color:var(--muted);}
 html[data-theme="dark"] .mc-bd .fcard .fico{background:rgba(59,130,246,.22);}
 .mc-bd .fwd{margin-top:5px;border:1px solid var(--line);border-radius:8px;background:var(--card);overflow:hidden;}
-.mc-bd .fwd-hd{padding:4px 9px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--line);background:var(--soft);}
+.mc-bd .fwd-hd{padding:4px 9px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--line);background:var(--soft);display:flex;align-items:center;gap:6px;}
 .mc-bd .fwd-b{padding:4px 9px 5px;display:flex;flex-direction:column;gap:2px;}
 .mc-bd .fwd-it{display:flex;gap:6px;align-items:baseline;min-width:0;font-size:11.5px;line-height:17px;}
 .mc-bd .fwd-it .fw-w{color:var(--muted);flex:none;}
 .mc-bd .fwd-it .fw-t{color:var(--muted);opacity:.7;font-size:10px;flex:none;}
+/* m24522 ④⑥：转发条目里的 [图片]/[表情] 以前原样留一段灰字，卡片里又没图可看，
+   看着就是多出来的占位。改成一颗小图标 chip，不占行宽也不再重复写「[图片]」。 */
+.fw-pic{display:inline-block;font-size:10.5px;line-height:15px;padding:0 5px;border-radius:6px;
+  background:rgba(127,127,127,.16);color:var(--muted);margin:0 2px;vertical-align:1px;}
 .mc-bd .fwd-it .fw-c{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* v4.48（用户 m25038 第 4 项）：预览行末尾露几张真图，尺寸压到 22px，行高不变 */
+.fw-ims{display:inline-flex;gap:2px;margin-left:4px;vertical-align:-7px;}
+.mc-bd .fwd-hd .fw-ims{margin-left:auto;vertical-align:middle;}
+.fw-ims .fw-im{width:22px;height:22px;object-fit:cover;border-radius:4px;cursor:zoom-in;
+  background:rgba(127,127,127,.18);flex:none;}
   /* 嵌套转发小卡（用户 m14708 图2）：框架格式化时把内层 Forward 从链里剔掉
      （message_formatter.py:198），那条只剩「时间 昵称:」空尾巴。以前按 QQ 的样子
      给它补 [图片]，结果占掉下一张图的槽位——猪头贴纸跑到第一条下面去了。
@@ -2486,6 +2495,9 @@ var ctxSnapRequest = 0;
         }
       });
     }
+    // v4.49（用户 m25038 第 3 项）：还有一种「昵称在前、号在括号里」的写法
+    // [At 大椰果(3503680592)]——嵌套引用的原话里就是这种，以前原样漏成方括号不做徽章。
+    s = s.replace(/\[At\s+([^\s\[\]()]{1,40})\(\s*-?\d+\s*\)\s*\]/g, function(_, nm){ return keepAt(esc(nm)); });
     // 昵称自己带括号时（[At 1(nickname: 白色(^0^)/季节)]）不能用 [^)]，会在第一个 ) 处截断
     s = s.replace(/\[At\s+(\d+)\(\s*nickname:\s*([\s\S]{1,80}?)\)\s*\]/g, function(_, id, nm){ return keepAt(nm); })
          .replace(/\[At\s+(\d+)\]/g, function(_, id){ return keepAt(id); })
@@ -2586,7 +2598,39 @@ var ctxSnapRequest = 0;
   // 会掉到下一行并贴左（用户 m31931 红框：气泡该在正文那一行的右边）。
   // 正文为空（只剩文件卡 / 图片 / 分享卡）时，气泡要挂进前面最后一个块元素里，
   // 否则它自己占一行贴在左边（用户 m32094 图1 下面那几条 155 字 / 84 字）
+  // 正文本身就是一张分享卡（抖音口令卡、从正文里抽出来的 B 站卡）时，卡片自己就是
+  // 一整块，气泡塞进 <a> 里会被拉成卡片底部的一整行、掉到卡片外面去（用户 m24651 图1：
+  // 「待发」「计入」两个标签掉在抖音卡下面，B 站卡没有）。这里判出「整段只有一张卡」，
+  // 交给 .chip-line 让卡片在左、气泡贴卡片右侧外面，跟 B 站卡同一个长相。
+  function cardOnlyHtml(h){
+    var s = String(h == null ? "" : h).trim();
+    if(!s) return "";
+    if(/^<a class='qcard/i.test(s)){
+      var j = s.indexOf("</a>");
+      if(j < 0) return "";
+      return s.slice(j + 4).trim() ? "" : s;
+    }
+    if(s.indexOf("<div class='qcard") === 0){
+      // 数 div 配对，确认这一整段就是一张卡（后面没有别的块）
+      var depth = 0, pos = 0, o, c;
+      while(pos < s.length){
+        o = s.indexOf("<div", pos);
+        c = s.indexOf("</div>", pos);
+        if(c < 0) return "";
+        if(o >= 0 && o < c){ depth++; pos = o + 4; continue; }
+        depth--;
+        pos = c + 6;
+        if(depth <= 0) return s.slice(pos).trim() ? "" : s;
+      }
+      return "";
+    }
+    return "";
+  }
+
   function chipInto(pre, body, chip){
+    // 整段只有一张卡：气泡挂卡片右边，别落进卡片内部/下面
+    var sole = chip ? cardOnlyHtml(body) : "";
+    if(sole) return "<div class='chip-line'>" + sole + chip + "</div>";
     if(body) return (pre || "") + tailChip(body, chip);
     pre = pre || "";
     // 分享卡（.qcard）是 flex 列容器，气泡塞进去会被拉成整行灰条 —— 卡片在左、气泡贴右下角
@@ -2660,13 +2704,18 @@ var ctxSnapRequest = 0;
   // 展开后不再限高，重画一次又回到折叠态。
   // v4.02（用户 m11629 图2）：快照详情里的转发卡也要折叠。以前这里只认窗口面板，
   // 详情（#ctx-rounds 里那一行）没人量高度，卡就整段铺开——一张 18 条的转发吃掉半页。
-  function fitForwardCards(root){
-    var box = root || document.getElementById("ctx-window");
-    if(!box) return;
-    Array.prototype.forEach.call(box.querySelectorAll(".fwd[data-fwd]"), function(card){
-      var body = card.querySelector(".fwd-b");
-      if(!body) return;
-      var its = body.querySelectorAll(".fwd-it");
+  // v4.42（用户 m24522 图5/图6）：以前只在这里量一次高度。记录详情是「先画进隐藏的 <tr>、
+  // 展开后才看得见」的，量的时候 offsetTop 全是 0 → h=0 → 根本没设 maxHeight，一展开就是
+  // 10 条全铺开；而 #ctx-rounds 又没接 [data-fwd] 的点击，于是「不折叠 + 点不开」一起出现。
+  // 现在：量不出来就先记一笔，等它真的进视口（IntersectionObserver）再量，量准了才取消观察。
+  var FWD_IO = (typeof IntersectionObserver === "function") ? new IntersectionObserver(function(es){
+    es.forEach(function(en){ if(en.isIntersecting) fitOneForwardCard(en.target); });
+  }, {rootMargin:"120px"}) : null;
+  function fitOneForwardCard(card){
+    if(!card || !card.querySelector) return;
+    var body = card.querySelector(".fwd-b");
+    if(!body) return;
+    var its = body.querySelectorAll(".fwd-it");
       // 用户 m03014 第 1 条：转发一律可点开（图片只有展开后才显示），不再走以前
       // 「3 条以内就撤掉折叠标记」那条路。3 条以内文字本来就全露，只挂 short
       // 让底部渐变别盖住最后一行，上限放开。
@@ -2678,8 +2727,18 @@ var ctxSnapRequest = 0;
       card.classList.remove("short");
       var third = its[FWD_HEAD_ROWS - 1];
       var h = (third.offsetTop - its[0].offsetTop) + Math.round(third.offsetHeight / 2);
-      if(h > 0) body.style.maxHeight = h + "px";
-    });
+      if(h > 0){
+        body.style.maxHeight = h + "px";
+        if(FWD_IO) FWD_IO.unobserve(card);
+        return;
+      }
+      // 还在隐藏容器里：等它进视口再量（这里千万别写 maxHeight=0，否则会一直铺开）
+      if(FWD_IO) FWD_IO.observe(card);
+  }
+  function fitForwardCards(root){
+    var box = root || document.getElementById("ctx-window");
+    if(!box) return;
+    Array.prototype.forEach.call(box.querySelectorAll(".fwd[data-fwd]"), fitOneForwardCard);
   }
 
   // 转发卡的「点击查看内容」＝弹出大框（用户 m03273）。卡里只有前 3 条预览，
@@ -3299,17 +3358,26 @@ var ctxSnapRequest = 0;
     if(c === null || c === undefined) return "";
     if(typeof c === "string") return c;
     if(Array.isArray(c)){
-      var out = [];
+      var out = [], seenImg = 0, flat = "";
+      // v4.48（用户 m25438）：原文里本来就带着 [图片]/[表情] 占位时，别再给图片 part 补一个。
+      // 以前每张图都无条件补一个「[图片]」，于是「[表情] + [图片]」两行占位只对应一张图；
+      // 美化档按「占位数 == 图片数」认领，认不上就把 [图片] 原样留在气泡里（图下面多一行字）。
+      var phRe = /\[(?:Image attached|图片|表情|image)\]/gi;
       c.forEach(function(it){
-        if(!it || typeof it !== "object"){ out.push(String(it)); return; }
+        if(!it || typeof it !== "object"){ flat += "\n" + String(it); out.push(String(it)); return; }
         var tp = it.type || "";
-        if(tp === "text") out.push(it.text || "");
-        else if(tp === "image_url" || tp === "image" || tp === "kira_image_ref") out.push("[图片]");
-        else if(tp === "input_audio" || tp === "audio") out.push("[语音]");
-        else out.push("[" + (tp || "附件") + "]");
+        if(tp === "text"){ flat += "\n" + (it.text || ""); out.push(it.text || ""); }
+        else if(tp === "image_url" || tp === "image" || tp === "kira_image_ref"){
+          seenImg += 1;
+          var phN = (flat.match(phRe) || []).length;
+          if(phN < seenImg){ flat += "\n[图片]"; out.push("[图片]"); }
+        }
+        else if(tp === "input_audio" || tp === "audio"){ flat += "\n[语音]"; out.push("[语音]"); }
+        else { flat += "\n[" + (tp || "附件") + "]"; out.push("[" + (tp || "附件") + "]"); }
       });
       return out.join("\n");
     }
+
     if(typeof c === "object") return c.text ? String(c.text) : JSON.stringify(c);
     return String(c);
   }
@@ -3956,7 +4024,10 @@ var ctxSnapRequest = 0;
       // 用户第 2 条：转发条目里的 [Image attached] 以前原样露英文标记，
       // 现在跟正文一样洗成 [图片]，连续多张压成「[图片] ×8」免得一行糊满
       tx = tidyBody(tx);
-      tx = tx.replace(/(\[(?:图片|表情|语音|视频)\])(?:\1)+/g, function(all, one){
+      // 转发条目里带的 [Reply 672919715] / [Reply ID: …] 是框架的内部引用标记，
+      // 卡片里既画不出引用块，留着就是一串数字噪声（m24522 ④ 一类）。
+      tx = tx.replace(/\[Reply(?:\s+ID)?[:：]?\s*\d+[^\]]*\]/g, "").replace(/\s{2,}/g, " ").trim();
+      tx = tx.replace(/(\[(?:图片|表情|语音|视频)\])(?:\1)+/g, function(one, all){
         return one + " ×" + (all.length / one.length);
       });
       // 空正文不是「只有图」，而是框架把嵌套 Forward 从链里剔掉了（见上面 CSS 注释）：
@@ -3981,12 +4052,6 @@ var ctxSnapRequest = 0;
       }
       merged.push(r);
     });
-    var lis = merged.map(function(r){
-      var body = r.sub ? fwdSubChip(r.sub) : esc(r.text || "") + (r.n > 1 ? " ×" + r.n : "");
-      return "<div class='fwd-it'><span class='fw-w'>" + esc(r.who || "某人") + "</span>" +
-             (r.when ? "<span class='fw-t'>" + esc(r.when) + "</span>" : "") +
-             "<span class='fw-c'>" + body + "</span></div>";
-    });
     // 用户 m03273：点「点击查看内容」弹大框看完整内容，别再在卡里往下摊开——
     // 以前是把 thumbs 整块追加在条目后面，展开时两张图堆在最底下，和原来 QQ
     // 接龙的顺序对不上。现在按条目认领图片：文本里有几个 [图片] 占位（含「×N」）
@@ -4005,10 +4070,42 @@ var ctxSnapRequest = 0;
       var want = fwdEmoN(r.text || "") * (r.n || 1);
       while(want > 0 && cursor < pool.length){ claims[idx].push(pool[cursor++]); want--; }
     });
+    // v4.48（用户 m25038 第 4 项）：卡里三行预览也把真图露出来——只写小图标的话，
+    // 图明明取到了，卡片上还是一个「🖼」，看着就像没获取。
+    function fwdMini(list){
+      if(!list || !list.length) return "";
+      var out = "";
+      list.slice(0, 4).forEach(function(it){
+        var obj = (typeof it === "string") ? { path: it } : (it || {});
+        if(obj.missing) return;
+        var p = obj.path || "", direct = obj.url || "";
+        if(!p && !direct) return;
+        var url = direct || (API + "/media?path=" + encodeURIComponent(p));
+        out += "<img class='fw-im' loading='lazy' decoding='async' src='" + esc(url) + "'" +
+               " data-img='" + esc(url) + "' data-imgt='" + esc(p || direct) + "' alt='图片'" +
+               " onerror=\"this.style.display='none'\">";
+      });
+      return out ? "<span class='fw-ims'>" + out + "</span>" : "";
+    }
     // 图都贴上了就不重复写「[图片]」字样；还缺图的条目留着占位，说明图被清理了
     function stripFwdPics(t){
       return String(t || "").replace(/\[(?:图片|表情)\](?:\s*×\s*\d+)?/g, "").replace(/[ \t]{2,}/g, " ").trim();
     }
+    // m24522 ④⑥：占位不再当字面文字铺出来，统一换成小图标（卡片预览与弹层共用）
+    function fwdPicChip(t){
+      var ico = { "图片": "🖼", "表情": "🙂", "语音": "🎙", "视频": "🎬" };
+      return esc(t).replace(/\[(图片|表情|语音|视频)\](?:\s*×\s*(\d+))?/g, function(all, k, n){
+        return "<span class='fw-pic' title='" + k + (n ? " ×" + n : "") + "'>" +
+               (ico[k] || k) + (n ? "×" + n : "") + "</span>";
+      });
+    }
+    var lis = merged.map(function(r, idx){
+      var got = claims[idx] || [];
+      var body = r.sub ? fwdSubChip(r.sub) : fwdPicChip(r.text || "") + (r.n > 1 ? " ×" + r.n : "");
+      return "<div class='fwd-it'><span class='fw-w'>" + esc(r.who || "某人") + "</span>" +
+             (r.when ? "<span class='fw-t'>" + esc(r.when) + "</span>" : "") +
+             "<span class='fw-c'>" + body + fwdMini(got) + "</span></div>";
+    });
     var full = merged.map(function(r, idx){
       var got = claims[idx] || [], body = "";
       if(r.sub){
@@ -4016,8 +4113,10 @@ var ctxSnapRequest = 0;
       } else {
         var total = (fwdPicN(r.text || "") + fwdEmoN(r.text || "")) * (r.n || 1);
         var left = total - got.length;
-        var txt = left > 0 ? (r.text || "") + (r.n > 1 ? " ×" + r.n : "") : stripFwdPics(r.text || "");
-        body = (txt ? "<div class='fp-tx'>" + esc(txt) + "</div>" : "") + thumbsHtml(got);
+        // 有剩余的图（被清理/没下发）就不再写死字面 [图片]，同样交给 chip
+        var txt = left > 0 ? fwdPicChip((r.text || "") + (r.n > 1 ? " ×" + r.n : ""))
+                           : esc(stripFwdPics(r.text || ""));
+        body = (txt ? "<div class='fp-tx'>" + txt + "</div>" : "") + thumbsHtml(got);
       }
       return "<div class='fp-it'><div class='fp-meta'><span class='fw-w'>" + esc(r.who || "某人") + "</span>" +
              (r.when ? "<span class='fw-t'>" + esc(r.when) + "</span>" : "") + "</div>" + body + "</div>";
@@ -4029,8 +4128,12 @@ var ctxSnapRequest = 0;
     // 卡里只留前 3 条预览（.fwd-b）；完整条目与图片藏在 <template class="fwd-full"> 里，
     // 点开时才搬进弹层——template 里的图片不会提前加载，也不用在卡内留一条可见的图行。
     // 用户 2026-10-24 图6：卡下面不再写「点击查看内容」，整张卡就是入口，悬停标题变蓝并带提示
+    // v4.48：标题行右侧也挂最多 4 张真图——卡默认只露前 3 行，图常在第 4、5 条上，
+    // 不挂这儿的话折起来完全看不出「里面到底有图没图」。
+    var allGot = [];
+    claims.forEach(function(g){ allGot = allGot.concat(g || []); });
     return "<div class='fwd' data-fwd='1'>" +
-           "<div class='fwd-hd' title='点击查看完整内容'>合并转发 · " + rows.length + " 条</div>" +
+           "<div class='fwd-hd' title='点击查看完整内容'>合并转发 · " + rows.length + " 条" + fwdMini(allGot) + "</div>" +
            "<div class='fwd-b'>" + lis.join("") + "</div>" +
            "<template class='fwd-full'>" + full.join("") + "</template></div>";
   }
@@ -4197,12 +4300,27 @@ var ctxSnapRequest = 0;
     }
     return null;
   }
+  // 卡片文字去噪：剥掉开头连续的方括号标签（[QQ小程序] / [分享] / [链接] …）。
+  // 用户 m24651 图1：B 站卡的 desc 是「[分享]【15周年纪念】…」，标题已经写着同一句，
+  // 以前只认「[QQ小程序]」这一个前缀，剥不掉就当成另一段文字又画一行，看着像标题重复。
+  function cardCleanText(v){
+    return String(v == null ? "" : v).replace(/^(?:\s*\[[^\[\]]{1,12}\])+\s*/, "").trim();
+  }
+  // 两张文字是不是同一句：去标签、去空白、去末尾省略号后比；一边是另一边的前缀也算
+  // （QQ 常把 desc 截断成标题的短版，差一个「…」就永远不相等）。
+  function cardSameText(a, b){
+    var x = cardCleanText(a).replace(/\s+/g, "").replace(/[…⋯]+$|\.{3,}$/, "").toLowerCase();
+    var y = cardCleanText(b).replace(/\s+/g, "").replace(/[…⋯]+$|\.{3,}$/, "").toLowerCase();
+    if(!x || !y) return false;
+    if(x === y) return true;
+    return x.length >= 12 && y.indexOf(x) === 0 || y.length >= 12 && x.indexOf(y) === 0;
+  }
   function cardHtml(c){
     if(!c) return "";
     // 位置卡走自己的画法：app 名不是给人看的标题，地址才是（用户 m11820 图1）
     if(isLocCard(c)) return locCardHtml(c);
     var rawT = String(c.title || c.app || "分享卡片").trim();
-    var rawD = String(c.desc || c.prompt || "").replace(/^\s*\[QQ小程序\]\s*/, "").trim();
+    var rawD = cardCleanText(c.desc || c.prompt || "");
     var rawU = safeWebUrl(c.qqdocurl) || safeWebUrl(c.jumpUrl) || safeWebUrl(c.url);
     var host = "";
     if(rawU){ try { host = new URL(rawU).hostname.replace(/^www\./, ""); } catch(e1){ host = ""; } }
@@ -4218,7 +4336,7 @@ var ctxSnapRequest = 0;
     // 站名脚下已经有一份了，标题位换成内容名，desc 不再重复一遍。
     var siteName = CARD_SITE[brand] || "";
     if(siteName && rawT.replace(/\s+/g, "") === siteName){
-      var contentName = String(c.desc || c.prompt || "").replace(/^\s*\[QQ小程序\]\s*/, "").trim();
+      var contentName = cardCleanText(c.desc || c.prompt || "");
       if(contentName && contentName !== rawT){ rawT = contentName; rawD = ""; }
     }
     // 只展示来源给出的图标；品牌站点用内置图标，缺图时用标题首字，不伪造商品图、价格或卖家。
@@ -4261,7 +4379,7 @@ var ctxSnapRequest = 0;
     var tHtml = esc(rawT) + (live ? "<span class='qc-live'>直播</span>" : "");
     var inner = "<span class='qc-row'>" + logo + "<span class='qc-main'>" +
       "<span class='qc-t'>" + tHtml + "</span>" +
-      (rawD && rawD !== rawT ? "<span class='qc-d'>" + esc(rawD) + "</span>" : "") + "</span>" +
+      (rawD && !cardSameText(rawD, rawT) ? "<span class='qc-d'>" + esc(rawD) + "</span>" : "") + "</span>" +
       (rawU ? "<span class='qc-go'>↗</span>" : "") + "</span>" +
       (rawU ? "<span class='qc-ft'><span class='qc-src'>" + esc(srcText) + "</span>" +
               "<span class='qc-open'>" + (live ? "进入直播间" : "打开") + "</span></span>" : "");
@@ -4946,7 +5064,8 @@ var ctxSnapRequest = 0;
         // 表情要贴在正文那一行的末尾：bodyHtml 给的是 <div class='mono'>，
         // 直接拼在后面会掉到下一行独占一行（用户 m33778 图8）。tailChip 正好插在 </div> 前。
         bd += "<div class='seg'>" +
-              tailChip(tailChip(bodyHtml(s.text, "(空)", 0, "", true), em),
+              // 整段只有一个表情、没有文字时别补「(空)」，否则渲染成「(空) 😘」（用户 m24522 图4）
+              tailChip(tailChip(bodyHtml(s.text, (s.emojis && s.emojis.length) ? null : "(空)", 0, "", true), em),
                        si === segs.length - 1 ? chipA : "") + "</div>";
       });
       // v3.58（用户 m16875 图2）：这条消息的工具调用原来画在卡片里一遍、卡片外又补一遍，
@@ -5058,11 +5177,19 @@ var ctxSnapRequest = 0;
     if(!isFinite(n) || n < 0 || n > 999){
       return "<span class='emoji'>[" + label + "]</span>";
     }
+    // v4.41（用户 m24522 图4）：老版 qzone 小黄脸太旧，先取新版表情库
+    // （gitee 上的新版 QQ 小黄脸，文件名就是表情 id：id 4 @2x.gif 就是「得意」，
+    // 和 qzone 的 e104.gif 是同一张脸的新画法，实测对得上）。
+    // 新版取不到就退回老版两档（e{id+100} 才是真正的编号，e{id} 兜底），再失败才显示 [表情]。
+    // v4.49（用户 m25038 第 5 项）：直连 gitee 会被防盗链挡成 403（实测），页面永远掉到
+    // 老版 qzone 小黄脸。改走插件自己的 /emoji 代理：后端取一次、缓存到 media_cache/emoji/。
+    var NEW_SRC = API + "/emoji?id=" + n;
     return "<span class='emoji'><img class='em-img' loading='lazy' alt='" + label + "' title='QQ 表情 " + n +
            (name ? " · " + esc(name) : "") +
-           "' src='https://qzonestyle.gtimg.cn/qzone/em/e" + n + ".gif' data-fb='" +
+           "' src='" + NEW_SRC + "' data-fb='" +
            "https://qzonestyle.gtimg.cn/qzone/em/e" + (n + 100) + ".gif'" +
-           " onerror=\"if(!this.dataset.tried){this.dataset.tried='1';this.src=this.dataset.fb;}else{this.parentNode.classList.add('miss');}\"" +
+           " data-fb2='https://qzonestyle.gtimg.cn/qzone/em/e" + n + ".gif'" +
+           " onerror=\"var f=this.dataset;if(!f.tried1){f.tried1='1';this.src=f.fb;}else if(!f.tried2){f.tried2='1';this.src=f.fb2;}else{this.parentNode.classList.add('miss');}\"" +
            " onload=\"this.parentNode.classList.remove('miss')\">" +
            "<span class='em-txt'>[" + label + "]</span></span>";
   }
@@ -7114,6 +7241,13 @@ var ctxSnapRequest = 0;
          && r.cache_prefix_len < allMsgsX.length){
         boundX = r.cache_prefix_len;
       }
+      // 用户 m25038 图6：决策快照里最后几条本轮 user 被算进了 ②。incoming_messages 是
+      // 后端切出来的「这一轮新来的」，它必须整段留在 ③；哪怕 messages 尾上还跟着机器
+      // 自己的回复（决策快照是判完再落盘的），也不能把它们埋回历史里去。
+      if(incRows && incRows.length && incRows.length < allMsgsX.length){
+        var limX = allMsgsX.length - incRows.length;
+        if(boundX > limX) boundX = limX;
+      }
 
       var stat = "", reloc = "", pos = {};
       var statNames = hasSplit ? (r.system_static_names || []) : (r.system_prompt_names || []);
@@ -8270,6 +8404,10 @@ var ctxSnapRequest = 0;
       renderCtxRounds(ctxRounds, true);
       return;
     }
+    // v4.42（用户 m24522 图6）：记录详情里的转发卡以前点不动——[data-fwd] 只在窗口面板的
+    // winClick 里接，这边没人管。补一条，跟窗口里一样弹大框。
+    var fw2 = e.target.closest ? e.target.closest("[data-fwd]") : null;
+    if(fw2 && !(e.target.closest && e.target.closest("a"))){ openFwdPop(fw2); return; }
     // 详情里的「展开全文」和「收起历史」以前点不动——事件只绑在窗口面板上，请求表这边没人接
     var more = e.target.closest ? e.target.closest("[data-more]") : null;
     if(more){ toggleMore(more); return; }

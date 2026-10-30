@@ -25,7 +25,7 @@ try:
 except Exception:  # 测试桩 / 老版本框架没有这个模块
     Prompt = None
 
-from .forward_fetch import fetch_forward_items, remember_by_mid
+from .forward_fetch import fetch_forward_items, remember_by_mid, media_for_mid
 from ..state.session_state import SessionState
 from ..state.sids import normalize_sid
 from ..state.retry_history import RETRY_META
@@ -2157,13 +2157,20 @@ class DecisionEngine:
         except Exception:
             return 0
         need = []
+        # 内容已经在的转发也别放过：图要单独取（框架只把图压成「[Image attached]」四个字），
+        # 这里靠 fetch 顺手存进插件缓存（用户 m25038 第 4 项）。
+        want_media = False
         for el in chain:
             try:
-                if _looks_forward(el) and not _fw_items(el):
+                if not _looks_forward(el):
+                    continue
+                if _fw_items(el):
+                    want_media = True
+                else:
                     need.append(el)
             except Exception:
                 continue
-        if not need:
+        if not need and not want_media:
             return 0
         mid = ""
         for attr in ("message_id", "msg_id", "id"):
@@ -2180,6 +2187,8 @@ class DecisionEngine:
             logger.info("[multi-decision] 空转发补取跳过：没找到 QQ 适配器（mid=%s）" % mid)
             return 0
         try:
+            if not need and media_for_mid(mid):
+                return 0
             items = await fetch_forward_items(bot, mid)
         except Exception as exc:
             logger.info("[multi-decision] 空转发补取异常 mid=%s：%s: %s" % (mid, type(exc).__name__, exc))
