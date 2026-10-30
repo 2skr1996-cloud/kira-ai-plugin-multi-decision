@@ -137,8 +137,31 @@ def _same_row(a: Any, b: Any) -> bool:
     return _row_body(a) == _row_body(b)
 
 
+def _msg_sig_of(msg) -> str:
+    """一条消息的指纹：角色 + 整段正文（A4，用户 m26791：以前只取前 400 字）。"""
+    try:
+        if isinstance(msg, dict):
+            role = str(msg.get("role") or "")
+            content = msg.get("content")
+        else:
+            role = str(getattr(msg, "role", "") or "")
+            content = getattr(msg, "content", "")
+    except Exception:
+        return ""
+    if not isinstance(content, str):
+        try:
+            content = json.dumps(content, ensure_ascii=False)
+        except Exception:
+            content = str(content)
+    return role + "|" + content.strip()
+
+
 def _row_key(value: Any) -> str:
-    """比对两条消息是不是同一条：去掉唤醒标记、压掉空白、取前 400 字。"""
+    """比对两条消息是不是同一条：去掉唤醒标记、压掉空白。
+
+    A4（用户 m26791）：以前只取前 400 字——两条长消息前半段一样、后半段不同，
+    会被当成同一条，历史与本轮的分界、命中判断都跟着错。改成整段比。
+    """
     text = str(value or "")
     if not text:
         return ""
@@ -148,7 +171,7 @@ def _row_key(value: Any) -> str:
         # 框架会把 user_prompt 里的 @昵称 改写成 [At 1429260473(nickname: 樱井桃华)]，
         # 窗口与 messages 里仍是 @樱井桃华；不还原就只差这一处。
         text = _AT_MARK.sub(lambda m: "@" + (m.group(1) or "").strip(), text)
-    return " ".join(text.split())[:400]
+    return " ".join(text.split())
 #: 插件自己拼在本轮消息最下面的那一段（格式强化 / 系统动态段）。用户 m06046 图4：
 #: 以前它没进这个名单，被算成「本轮消息」，动态段那一栏就只剩框架给的几十字。
 DYNAMIC_TAIL_NAME = "dynamic_tail"
@@ -618,25 +641,12 @@ class RequestLog:
 
     @staticmethod
     def _msg_sig(msg) -> str:
-        """一条消息在缓存里的身份：角色 + 正文前 400 字（v4.10）。
+        """一条消息在缓存里的身份：角色 + 整段正文（v4.10，A4 于 m26791 改全文）。
 
-        跟 stage 里切尾部用的比对口径一致，两边不会打架。
+        以前只比正文前 400 字：两条长消息前半段一样就被当成同一条，公共前缀会
+        虚长、「命中 N 条」跟着虚高。改成整段比，跟 stage 切尾部的口径也一致。
         """
-        try:
-            if isinstance(msg, dict):
-                role = str(msg.get("role") or "")
-                content = msg.get("content")
-            else:
-                role = str(getattr(msg, "role", "") or "")
-                content = getattr(msg, "content", "")
-        except Exception:
-            return ""
-        if not isinstance(content, str):
-            try:
-                content = json.dumps(content, ensure_ascii=False)
-            except Exception:
-                content = str(content)
-        return role + "|" + content.strip()[:400]
+        return _msg_sig_of(msg)
 
     @staticmethod
     def _tail_equal(arr: list, inc: list) -> bool:
@@ -652,11 +662,10 @@ class RequestLog:
             a = arr[len(arr) - k + i] or {}
             b = inc[i] or {}
             try:
-                ca = str(a.get("content") or "").strip()[:400]
-                cb = str(b.get("content") or "").strip()[:400]
+                # A4（用户 m26791）：跟 _msg_sig 同一口径（整段比，不再只比前 400 字）。
+                if _msg_sig_of(a) != _msg_sig_of(b):
+                    return False
             except Exception:
-                return False
-            if ca != cb:
                 return False
         return True
 
@@ -763,56 +772,47 @@ class RequestLog:
             return {}
         prev_pair = None
         seen_self = False
-        for f in files:
-            if f.name == name:
-                seen_self = True
-                continue
-            if not seen_self:
-                continue  # 只看比这一份更早的
-            try:
-                pd = json.loads(f.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            o = _outcome_of(pd)
-            if oc == "decision":
-                if o == "trim":
+        # A2（用户 m26791）：挑基准跟落盘时同一套规则——决策轮只排除裁切快照；
+        # 回复轮先找上一份回复请求，找不到再退到「最近一次任意真实请求」。
+        # 以前这里没有那条兜底，找不到就整段放弃，列表上的命中数和详情里的对不上。
+        allow_any = oc != "decision"
+        for _round in range(2):
+            for f in files:
+                if f.name == name:
+                    seen_self = True
                     continue
-            elif o in ("decision", "trim"):
-                continue
-            prev_pair = (f.name, pd)
-            break
+                if not seen_self:
+                    continue  # 只看比这一份更早的
+                try:
+                    pd = json.loads(f.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                o = _outcome_of(pd)
+                if oc == "decision" or allow_any:
+                    if o == "trim":
+                        continue
+                elif o in ("decision", "trim"):
+                    continue
+                prev_pair = (f.name, pd)
+                break
+            if prev_pair is not None or oc == "decision" or not allow_any:
+                break
+            allow_any = False  # 第一轮按「上一份回复」挑，没找到再放开成任意请求
         if prev_pair is None:
             return {}
-        # v4.28（用户 m22895）：当前这份只看它自己的 messages——_series_of 对决策
-        # 快照会把 incoming_messages 补到尾部（那是当时还没并进窗口的待发），
-        # 页面 ② 画的却是 messages：补上去 flags 比消息多几条，前端整串丢弃、
-        # 退回老二分口径，② 末尾就冒出两条本不该有的「不命中」。
-        cur_msgs = list(data.get("messages") or [])
         prev_msgs = self._series_of(prev_pair[1])
+        cur_msgs = list(data.get("messages") or [])
         if not cur_msgs or not prev_msgs:
             return {}
         # 前缀比的是指纹（跟落盘时一致），_tail_split 要原始消息自己取指纹。
         prev_ser = [self._msg_sig(m) for m in prev_msgs]
-        cur_sigs = [self._msg_sig(m) for m in cur_msgs]
-        pre = self._common_prefix(prev_ser, cur_sigs)
-        trim_btw = False
-        try:
-            trim_btw = self._trim_between(sid, prev_pair[0])
-        except Exception:
-            trim_btw = False
-        # 用户 m26142 第 4 条：这一份之前刚裁过窗口，前缀对不上就是裁切造成的——
-        # 全算未命中，别再拿裁切前那截公共前缀说「这几条命中」。
-        if trim_btw and pre:
-            pre = 0
-        cold, fresh, flags = self._tail_split(prev_ser, cur_msgs, pre)
-        return {
-            "cache_prefix_len": pre,
-            "cache_cold_len": cold,
-            "cache_input_len": fresh,
-            "cache_tail_flags": flags,
-            "cache_prefix_of": prev_pair[0],
-            "cache_trim_between": trim_btw,
-        }
+        # 决策快照真正发出去的是「窗口 + 待发」，跟落盘时一样把待发补到尾部。
+        tail = None
+        if oc == "decision":
+            inc = data.get("incoming_messages") or []
+            if isinstance(inc, list) and inc:
+                tail = list(inc)
+        return self._prefix_info(sid, cur_msgs, tail, prev_pair[0], prev_ser)
 
     @staticmethod
     def _common_prefix(prev: list, cur: list) -> int:
@@ -837,37 +837,56 @@ class RequestLog:
         # 上一轮若是决策请求，那批消息只发给了决策模型，主模型的缓存里没有；
         # 拿决策快照当基准会把它们算成冷（用户看到「上一份同类请求里没有这些」）。
         # 决策轮仍用 any，保持 v4.15 的修复（用户 m19439）。
+        prev_name, prev_series = self._basis_of(sid, kind)
+        if not prev_series:
+            return {}
+        return self._prefix_info(sid, messages, tail, prev_name, prev_series)
+
+    def _basis_of(self, sid: str, kind: str) -> tuple:
+        """落盘时挑基准：回复轮认上一份回复请求，找不到再退到任意真实请求。
+
+        v4.23（用户 m21976）：回复轮的基准是「上一份回复请求」——上一轮若是决策
+        请求，那批消息只发给了决策模型，主模型的缓存里没有。决策轮仍认任意真实
+        请求（v4.15 用户 m19439）。
+
+        A2（用户 m26791）：详情重算（recalc_cache）以前没有这条兜底，找不到上一份
+        同类就整段放弃、退回页面自己猜，于是列表上的命中数和详情里的对不上。
+        现在两边都从这里挑基准。
+        """
         use_kind = "reply" if str(kind or "") == "reply" else "any"
         prev_name, prev_series = self._prev_series(sid, use_kind)
         if not prev_series and use_kind != "any":
             prev_name, prev_series = self._prev_series(sid, "any")
-        if not prev_series:
-            return {}
+        return prev_name, prev_series
+
+    def _prefix_info(self, sid: str, messages: list, tail: list,
+                     prev_name: str, prev_series: list) -> dict:
+        """给定基准，算这份快照的公共前缀与逐条标记（A2 用户 m26791 抽出来的）。
+
+        落盘（_prefix_of）与详情重算（recalc_cache）都走这一条，算出来的
+        「命中 / 未命中 / 本轮输入」才是同一个数。
+        """
         cur_msgs = list(messages or [])
         if tail and not self._tail_equal(cur_msgs, tail):
             cur_msgs = cur_msgs + list(tail)
         cur = [self._msg_sig(m) for m in cur_msgs]
         prefix_len = self._common_prefix(prev_series, cur)
+        # v4.26（用户 m22281）：不命中是不是裁切造成的，写进快照供页面说明。
+        try:
+            trim_btw = self._trim_between(sid, prev_name)
+        except Exception:
+            trim_btw = False
+        # 用户 m26142 第 4 条：中间裁过窗口的，整份都算未命中（裁切本来就把前缀打断了）。
+        # v4.56（A2）：以前这里只把 cache_prefix_len 置零，逐条标记又用原来的
+        # prefix_len 重算了一遍，覆盖回「命中」——页面上的命中数和前缀对不上。
+        if trim_btw and prefix_len:
+            prefix_len = 0
         info = {
             "cache_prefix_len": prefix_len,
             "cache_prefix_of": prev_name,
             "cache_prefix_base": len(prev_series),
+            "cache_trim_between": trim_btw,
         }
-        # v4.26（用户 m22281）：不命中是不是裁切造成的，写进快照供页面说明。
-        try:
-            info["cache_trim_between"] = self._trim_between(sid, prev_name)
-        except Exception:
-            info["cache_trim_between"] = False
-        # 用户 m26142 第 4 条：中间裁过窗口的，整份都算未命中（裁切本来就把前缀打断了）。
-        if info.get("cache_trim_between") and info.get("cache_prefix_len"):
-            info["cache_prefix_len"] = 0
-            try:
-                cold, fresh, flags = self._tail_split(prev_series, list(messages or []), 0)
-                info["cache_cold_len"] = cold
-                info["cache_input_len"] = fresh
-                info["cache_tail_flags"] = flags
-            except Exception:
-                pass
         # v4.14（用户 m19095）：前缀之后那段还要再分一次——上一次请求之后新进来
         # 的群消息与决策注记，是这一轮要送进去的输入，不能算冷。
         # v4.15（用户 m19439）：决策轮也走这一套。上一轮请求过、这轮却对不上前缀
@@ -1538,7 +1557,7 @@ class RequestLog:
             inc_disp = list(inc)
         # v4.10（用户 m17328 第 1 条）：决策这一份的 ② 只放真历史，本轮那几条
         # 只出现在 ③，不然同一批消息画两遍。切法与回复快照一致：从尾部逐条比
-        # content 前 400 字，全等才切。
+        # _msg_sig（角色 + 整段正文；A4 用户 m26791 起不再只比前 400 字），全等才切。
         hist_msgs = msgs
         hist_disp = disp
         dec_split = False
@@ -1548,8 +1567,7 @@ class RequestLog:
             for i in range(k):
                 a = msgs[len(msgs) - k + i]
                 b = inc[i]
-                if (str(a.get("content") or "").strip()[:400]
-                        != str(b.get("content") or "").strip()[:400]):
+                if self._msg_sig(a) != self._msg_sig(b):
                     same = False
                     break
             if same:

@@ -3875,8 +3875,12 @@ class WindowManager:
             if role == "user":
                 refs = refs_seq[ui] if ui < len(refs_seq) else []
                 ui += 1
-                if not media and refs:
-                    media = refs_media(refs, raw_sid)
+                # 纯图那条的正文只剩「[图片]」，media_list 会给出一个 missing 占位，
+                # 以前 if not media 永远不成立，refs_media 成了死代码——真机上明明
+                # 插件握着 ref、文件也在，③ 却画「图片已清理」。只有「一张能用的图
+                # 都没有」时才回退去按 refs 反查。
+                if refs and not [x for x in media if not x.get("missing")]:
+                    media = refs_media(refs, raw_sid) or media
             if media:
                 item["media"] = media
             nm = _get(m, "name") or ""
@@ -4660,6 +4664,9 @@ class WindowManager:
             # v3.89（用户 m05321 第 2 条）：这次裁切实际按多少条历史留的
             # （= window_keep - 待发计入条数），以及待发一共几条原始项
             "keep_hist": keep_hist,
+            # v3.89 那条注释从重构起就少了一直没写进 record 的字段：待发一共几条原始项
+            # （= 折叠前的条数，和 keep_hist 同一口径）。用户 m26791 审查时补回。
+            "pending_msgs": len(pend_msgs),
             "before_chars": before_chars,
             "after_chars": after_chars,
             "cut_index": cut + cut_extra,

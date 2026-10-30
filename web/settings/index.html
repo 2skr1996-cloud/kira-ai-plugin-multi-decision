@@ -6071,11 +6071,12 @@ var DM_SPECIAL = { trigger_probability: 1 };
     { k: "stats_window_days", unit: "天" }
   ];
   // v3.72（用户第 8 / 9 条）：这两项的上下限 schema 里没写、/config 的 bounds 也不一定有，
-  // 页面自己兜一层：数据使用最少 7 天，回看周数 4-52 周（renderAdaptiveRow 里做夹值）。
+  // 页面自己兜一层：数据使用最少 7 天，回看周数 4-12 周（renderAdaptiveRow 里做夹值）。
+  // A3（用户 m26791）：上限 52 → 12，跟后端 _BOUNDS 和「分桶最多扫 120 天」对齐。
   var ADAPTIVE_LIM = {
     adaptive_tune_minutes: [1, 120],
     stats_window_days: [7, 365],
-    adaptive_weekday_window_weeks: [4, 52]
+    adaptive_weekday_window_weeks: [4, 12]
   };
   // v3.74（用户 m00024 第 4-d 条）：「每轮最多调几个点」太长，把这一行读作「每轮调整 2%」。
   // 只改这张表上的显示名，schema 里的键名与说明不动（后端照旧按 adaptive_step 读）。

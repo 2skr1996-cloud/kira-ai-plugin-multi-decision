@@ -3384,7 +3384,7 @@ class DecisionEngine:
         return {
             "step": self._c("adaptive_step", sid),
             "weekday_bucket": bool(self._c("adaptive_weekday_bucket", sid)),
-            "weekday_window_days": max(4, int(self._c("adaptive_weekday_window_weeks", sid) or 8)) * 7,
+            "weekday_window_days": max(4, min(12, int(self._c("adaptive_weekday_window_weeks", sid) or 8))) * 7,
             "week_days": max(7, int(self._c("stats_window_days", sid) or 7)),
             "cooldown": float(gap) * 60.0,
         }
@@ -4425,7 +4425,7 @@ class DecisionEngine:
         if phase is None:
             return False
         try:
-            opt = self.plugin.decision_options()
+            opt = self.plugin.decision_options(sid)
         except Exception:
             logger.exception("[multi-decision] 取决策配置失败，按没装进阶模式继续")
             return False

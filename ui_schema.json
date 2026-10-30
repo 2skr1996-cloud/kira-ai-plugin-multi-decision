@@ -588,6 +588,6 @@
     "name": "用几周",
     "type": "integer",
     "default": 8,
-    "hint": "最少 4 周。"
+    "hint": "4 到 12 周，默认 8 周。"
   }
 }

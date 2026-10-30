@@ -953,7 +953,7 @@ class PromptLayouts:
 
     async def _context(self, sid, opt=None, layout=None):
         dp = self.plugin.decision_phase
-        opt = opt or self.plugin.decision_options()
+        opt = opt or self.plugin.decision_options(sid)
         persona = ""
         if opt.persona:
             try:
@@ -973,11 +973,11 @@ class PromptLayouts:
                 personas[name] = ""
         return {"persona": persona, "personas": personas, "tools": self._tools_text(opt), "opt": opt}
 
-    def _tools_text(self, opt=None):
+    def _tools_text(self, opt=None, sid=""):
         """用户 m02159 图3：勾了哪个工具就写哪个，两边共用同一份勾选（prompt_tools.json）。"""
         dp = self.plugin.decision_phase
         try:
-            opt = opt or self.plugin.decision_options()
+            opt = opt or self.plugin.decision_options(sid)
             picked = dp.pick_tools(opt.tools)
         except Exception:
             logger.exception("[multi-decision] 取工具清单失败，这一段留空")
@@ -1154,7 +1154,7 @@ class PromptLayouts:
 
     def preview_reply(self, sid="", layout=None):
         doc = self.layout("reply", sid)[0] if layout is None else layout
-        return dict(self._render("reply", sid, doc, {"tools": self._tools_text()}, sample=True), sid=sid)
+        return dict(self._render("reply", sid, doc, {"tools": self._tools_text(None, sid)}, sample=True), sid=sid)
 
     async def prefetch_personas(self, sid="", layout=None):
         """用户 m23323 图2：真实回复这一路是同步装配，人格正文没预热就整段丢弃。
@@ -1212,7 +1212,7 @@ class PromptLayouts:
                 if not personas[pname]:
                     # 用户 m23323 图2：真实请求里人设整段丢了，得能在日志里一眼看见是哪一段。
                     logger.warning("[multi-decision] 回复提示词：人格「%s」正文读不到，这一段没有注入", pname)
-        tools_text = self._tools_text()
+        tools_text = self._tools_text(None, sid)
         rendered, output = self._render("reply", sid, doc, {"personas": personas, "tools": tools_text},
                                         rows=self._rows(request)), []
         for _w in rendered.get("warnings") or []:
