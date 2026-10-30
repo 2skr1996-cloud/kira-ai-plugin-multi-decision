@@ -7233,33 +7233,12 @@ var ctxSnapRequest = 0;
         if(boundX < 0) boundX = allMsgsX.length;
       }
       var isDecX = (String(r.outcome || "") === "decision" || String(r.trigger_reason || "") === "decision" || r.decision_only === true);
-      // v4.35（用户 m19642）：回复快照的 ②③ 边界改跟「会话前缀」走。cache_prefix_len 是
-      // 跟上一份回复请求逐条比出来的公共前缀，它之后才是这一轮新进来的消息；history_messages
-      // 是请求内部自己的切分（只把最后两条算 incoming），拿它当边界会把十几条新消息留在 ② 里
-      // （图1 的 32~50 全堆在历史，③ 只剩两条注记）。决策快照的 ②③ 早就对了，这里不碰它。
-      if(!isDecX && typeof r.cache_prefix_len === "number" && r.cache_prefix_len > 0
-         && r.cache_prefix_len < allMsgsX.length){
-        boundX = r.cache_prefix_len;
-      }
-      // 用户 m25902 图1：②③ 的分界就是「这一轮新来的那批」从哪儿开始。
-      // incoming_messages 只有在确实是 messages 的一段尾块时才能当依据——按 message_id
-      // 认人（窗口里是 [Oct 30 2026 21:43 Fri] …、快照里是 [21:43] …，逐字比永远不等）；
-      // 决策快照的 incoming 是「还没并进窗口的待发」，跟 messages 尾上那几条无关，
-      // 拿条数硬减就会把上一次注记 / 上一轮 bot 回复一起推进 ③（用户 m25902 图2）。
-      var incTailX = -1;
-      if(incRows && incRows.length && incRows.length <= allMsgsX.length){
-        var kIncX = incRows.length;
-        for(var sIX = allMsgsX.length - kIncX; sIX >= 0; sIX--){
-          var okIX = true;
-          for(var jIX = 0; jIX < kIncX; jIX++){
-            var aIX = allMsgsX[sIX + jIX] || {}, bIX = incRows[jIX] || {};
-            if(String(aIX.role || "") !== String(bIX.role || "")){ okIX = false; break; }
-            if(!sameMsgText(String(rawContent(aIX.content) || ""), String(rawContent(bIX.content) || ""))){ okIX = false; break; }
-          }
-          if(okIX){ incTailX = sIX; break; }
-        }
-      }
-      if(incTailX >= 0) boundX = incTailX;
+      // 用户 m26535：回复快照的边界只有一个依据——「上一条 bot 回复」。
+      // 以前这里还试过 cache_prefix_len（公共前缀）和 incoming 尾块匹配，两种都是绕路：
+      // 22:04 那条 bot 回复明明在第 32 条，② 却画到 37 条。现在一律卡在最后一条 bot 回复上，
+      // 它自己留在 ② 末尾当那一条未命中。
+      // 例外只有一种：本条记录里已经装进了「这一轮刚发出去的那条回复」——它排在最后一条
+      // 决策注记之后，属于本轮，不能拿来当边界（1793289148676 那种老记录）。
       // 用户 m26142 第 2 条：决策快照用决策自己的标准——② 到「上一次决策的注记」为止
       // （含这条注记：它算历史，是 ② 里唯一一条未命中），③ 从这之后开始算本轮。
       // 回复快照那套（上一条 bot 回复之后算本轮）不动，两条链路各用各的。
@@ -7272,15 +7251,22 @@ var ctxSnapRequest = 0;
         // 这时候整份都算本轮（② 空着，③ 装全部），不再退回去用别的锚点凑一个边界。
         boundX = (dnoteX >= 0) ? (dnoteX + 1) : 0;
       } else {
-        // 用户 m26455 图1：回复快照的判定点是「上一条 bot 的回复」。裁切把更早的消息全切走
-        // 之后，窗口里根本没有这条回复——那就没有判定点了，这一份全算本轮（② 空着）。
-        // 以前这里会退到 history_messages 的长度，把 19 条新消息糊进 ②（23:21:34 那条）。
+        // 用户 m26455 图1 / m26535：判定点就是「上一条 bot 的回复」——② 画到它为止（它在
+        // ② 末尾，是那唯一一条未命中），③ 从它之后开始。裁切把更早的消息全切走、窗口里
+        // 根本没有这条回复时，没有判定点，这一份全算本轮（② 空着）。以前这里会退到
+        // history_messages 的长度，把 19 条新消息糊进 ②（23:21:34 那条）。
+        var lastNoteX = -1;
+        for(var lnX = allMsgsX.length - 1; lnX >= 0; lnX--){
+          if(noteRowX(allMsgsX[lnX])){ lastNoteX = lnX; break; }
+        }
         var botX = -1;
         for(var bxX = allMsgsX.length - 1; bxX >= 0; bxX--){
+          // 最后一条注记之后的 assistant 是「这一轮刚发出去的回复」，不是上一条，跳过。
+          if(lastNoteX >= 0 && bxX > lastNoteX) continue;
           var bmxX = allMsgsX[bxX] || {};
           if(String(bmxX.role || "") === "assistant" && !noteRowX(bmxX)){ botX = bxX; break; }
         }
-        if(botX < 0) boundX = 0;
+        boundX = (botX >= 0) ? (botX + 1) : 0;
       }
 
       var stat = "", reloc = "", pos = {};
@@ -7300,6 +7286,10 @@ var ctxSnapRequest = 0;
         // 注意这里必须用 += ：占比条是上面拼好的，用 = 会把它整个吞掉。
         var allMsgs = r.messages || [];
         var rh = allMsgs.slice(0, boundX);
+        // 用户 m26535：② 的字符数按「真正画出来的那几条」加起来算。以前用的是请求里存的
+        // 历史字符总数，边界一挪（37 → 32 条）它还挂在旧数上，标题就成了「32 条 · 4016 字符」。
+        var charsRh = 0;
+        rh.forEach(function(m9){ charsRh += String(rawContent(m9.content) || "").length; });
         var up = r.user_prompt || "";
         var lastTxt = "";
         allMsgs.forEach(function(m, i){
@@ -7405,7 +7395,7 @@ var ctxSnapRequest = 0;
         });
         // v3.93（用户 m07570 图7）：决策快照的 ② 改叫「聊天历史」，③ 才是本轮输入。
         h += rawBlock("② 历史消息",
-                      "· " + rh.length + " 条 · " + (rh.length ? histChars : 0) + " 字符" +
+                      "· " + rh.length + " 条 · " + charsRh + " 字符" +
                       (preLenRaw >= 0
                         ? (" · 命中 " + hitsRaw + " 条 · 未命中 " + coldRaw + " 条")
                         : ""),
@@ -7735,7 +7725,10 @@ var ctxSnapRequest = 0;
       miss2 = Math.max(0, shownN2 - hits2);
       // 用户 m26443：窗口裁过、② 空着的时候这里会写出负数（3452 - 4092 = -640），
       // 标题跟正文（「这一轮没有历史」）自相矛盾，一律按真正画出来的条数/字符数报。
-      var chars2 = hist.length ? Math.max(0, histChars - skipChars2) : 0;
+      var chars2 = 0;
+      for(var c2X = 0; c2X < hist.length; c2X++){
+        chars2 += String(rawContent((hist[c2X] || {}).content) || "").length;
+      }
       h += "<div class='seqh'>② 历史消息" +
              " <span class='dim' data-histhead='1'>· " + hist.length + " 条 · " + chars2 +
            " 字符" + (preLen >= 0 ? (" · 命中 " + hits2 + " 条 · 未命中 " + miss2 + " 条") : "") + "</span>" +
