@@ -7241,13 +7241,25 @@ var ctxSnapRequest = 0;
          && r.cache_prefix_len < allMsgsX.length){
         boundX = r.cache_prefix_len;
       }
-      // 用户 m25038 图6：决策快照里最后几条本轮 user 被算进了 ②。incoming_messages 是
-      // 后端切出来的「这一轮新来的」，它必须整段留在 ③；哪怕 messages 尾上还跟着机器
-      // 自己的回复（决策快照是判完再落盘的），也不能把它们埋回历史里去。
-      if(incRows && incRows.length && incRows.length < allMsgsX.length){
-        var limX = allMsgsX.length - incRows.length;
-        if(boundX > limX) boundX = limX;
+      // 用户 m25902 图1：②③ 的分界就是「这一轮新来的那批」从哪儿开始。
+      // incoming_messages 只有在确实是 messages 的一段尾块时才能当依据——按 message_id
+      // 认人（窗口里是 [Oct 30 2026 21:43 Fri] …、快照里是 [21:43] …，逐字比永远不等）；
+      // 决策快照的 incoming 是「还没并进窗口的待发」，跟 messages 尾上那几条无关，
+      // 拿条数硬减就会把上一次注记 / 上一轮 bot 回复一起推进 ③（用户 m25902 图2）。
+      var incTailX = -1;
+      if(incRows && incRows.length && incRows.length <= allMsgsX.length){
+        var kIncX = incRows.length;
+        for(var sIX = allMsgsX.length - kIncX; sIX >= 0; sIX--){
+          var okIX = true;
+          for(var jIX = 0; jIX < kIncX; jIX++){
+            var aIX = allMsgsX[sIX + jIX] || {}, bIX = incRows[jIX] || {};
+            if(String(aIX.role || "") !== String(bIX.role || "")){ okIX = false; break; }
+            if(!sameMsgText(String(rawContent(aIX.content) || ""), String(rawContent(bIX.content) || ""))){ okIX = false; break; }
+          }
+          if(okIX){ incTailX = sIX; break; }
+        }
       }
+      if(incTailX >= 0) boundX = incTailX;
 
       var stat = "", reloc = "", pos = {};
       var statNames = hasSplit ? (r.system_static_names || []) : (r.system_prompt_names || []);
@@ -7309,7 +7321,10 @@ var ctxSnapRequest = 0;
         // 进来」的消息虽然占着 messages 的位置，但它们属于本轮输入，
         // 归到 ③ 去画；② 只留真正命中或冷掉的历史。
         // v4.33：② 之后剩下的就是 ③，不再按 f 位挑；决策快照的 ③ 另有 incoming，不吃这一段。
-        var rhMoved = isDecX ? [] : allMsgs.slice(boundX);
+        // v4.52（用户 m25902 图2）：决策快照以前把 messages 末尾那几条直接丢掉（③ 只画
+        // incoming），最新那次就永远看不到「上一次注记 / 上一轮 bot 回复」这两条 assistant。
+        // 三档统一：② 之后剩下的都归 ③，incoming 再按 message_id 去重。
+        var rhMoved = allMsgs.slice(boundX);
         var movedCharsR = 0;
         rhMoved.forEach(function(m9){ movedCharsR += String(rawContent(m9.content) || "").length; });
         // v4.36（用户 m19945 图1/图2）：本轮那条判定注记常常已经先落进窗口（messages 末尾），
@@ -7862,10 +7877,10 @@ var ctxSnapRequest = 0;
         // 注记先落进窗口（messages 末尾），被它判的那条还在 user_prompt / incoming 里，
         // 按原序画就成了「决策 → 被 @ 的消息」——先被 @ 才触发决策，顺序反了。
         var suffixRows9 = [];
-        if(isDecSnap === false){
-          for(var qi9 = bound2; qi9 < msgsAll9.length; qi9++){
-            if(msgsAll9[qi9]) suffixRows9.push(msgsAll9[qi9]);
-          }
+        // v4.52（用户 m25902 图2）：决策快照的 ③ 以前只画 incoming，messages 末尾那几条
+        // （上一次注记 / 上一轮 bot 回复 / 这次那条 user）一条都不画。现在跟回复快照同一套。
+        for(var qi9 = bound2; qi9 < msgsAll9.length; qi9++){
+          if(msgsAll9[qi9]) suffixRows9.push(msgsAll9[qi9]);
         }
         var tailNotes9 = [];
         if(isDecSnap === false && suffixRows9.length){
@@ -7952,7 +7967,7 @@ var ctxSnapRequest = 0;
           // v4.35（用户 m19642）：本轮实际发出去的 user 段，后面那串真消息里已经有同一条就不再画。
           // 以前是逐字比，可 messages 里的时间戳只到分钟、user_prompt 里带完整日期，永远比不上，
           // 同一条就成了两张卡（红框重复）。现在按 message_id 认，认不出再比去掉时间戳的正文。
-          if(isDecSnap === false){
+          {
             var rawOne9 = String(one == null ? "" : one);
             var hitS9 = false;
             for(var s9 = 0; s9 < suffixRaw9.length; s9++){

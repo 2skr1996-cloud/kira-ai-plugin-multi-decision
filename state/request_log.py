@@ -99,6 +99,44 @@ def _join_reloc_blocks(blocks) -> str:
     return "\n\n".join(p for p in parts if p.strip())
 
 
+_TS_HEAD_RE = re.compile(
+    r"^\s*(?:\[\d{1,2}:\d{2}\]"
+    r"|\[[A-Za-z]{3}\s+\d{1,2}\s+\d{4}[^\]]*\]"
+    r"|\[\d{4}-\d{2}-\d{2}[^\]]*\])\s*"
+)
+
+
+def _row_ids(value: Any) -> list[str]:
+    return re.findall(r"message_id:\s*(-?\d+)", str(value or ""))
+
+
+def _row_body(value: Any) -> str:
+    """剥掉开头的时间戳再压空白——窗口里是「[Oct 30 2026 21:43 Fri] …」，
+    快照里是「[21:43] …」，同一句话两种写法。"""
+    text = str(value or "")
+    for _ in range(3):
+        nxt = _TS_HEAD_RE.sub("", text, count=1)
+        if nxt == text:
+            break
+        text = nxt
+    return _row_key(text)
+
+
+def _same_row(a: Any, b: Any) -> bool:
+    """v4.52（用户 m25902 图1）：两条消息是不是同一条。
+
+    以前拿 _row_key 逐字比，可窗口行带完整日期、快照行只有 [HH:MM]，永远不相等，
+    于是本轮那几条既留在 ② 又画进 ③（同一条消息在历史里也出现一次）。
+    先认 message_id，都没有 id 才比剥掉时间戳的正文。
+    """
+    ia, ib = _row_ids(a), _row_ids(b)
+    if ia and ib:
+        return ia[0] == ib[0]
+    if ia or ib:
+        return False
+    return _row_body(a) == _row_body(b)
+
+
 def _row_key(value: Any) -> str:
     """比对两条消息是不是同一条：去掉唤醒标记、压掉空白、取前 400 字。"""
     text = str(value or "")
@@ -946,7 +984,7 @@ class RequestLog:
         hist_messages = messages
         if round_rows and len(messages) >= len(round_rows):
             k = len(round_rows)
-            keys = [_row_key(b.get("content")) for b in round_rows]
+            # v4.52：不再逐字比（窗口带完整日期、快照只有 [HH:MM]），改按 message_id 认人。
             # 逐条对齐尾部是不可靠的：窗口里顺序是「先并本轮 → 再落判定注记 →
             # 最后才是 bot 回复」，快照里却常常只有 [本轮, 注记]，两边差一条，
             # zip 一配就全错，切分永远失败（用户本轮：回复记录 ③ 里同一条 @
@@ -957,7 +995,8 @@ class RequestLog:
                 for i in range(k):
                     a = messages[start + i]
                     ca = a.get("content") if isinstance(a, dict) else getattr(a, "content", "")
-                    if _row_key(ca) != keys[i]:
+                    cb = (round_rows[i] or {}).get("content") if isinstance(round_rows[i], dict) else getattr(round_rows[i], "content", "")
+                    if not _same_row(ca, cb):
                         ok = False
                         break
                 if ok:
@@ -1093,7 +1132,7 @@ class RequestLog:
                         for i in range(k):
                             got = messages[len(messages) - k + i]
                             body = got.get("content") if isinstance(got, dict) else getattr(got, "content", "")
-                            if _row_key(body) != _row_key(cand[i]["content"]):
+                            if not _same_row(body, cand[i]["content"]):
                                 same = False
                                 break
                         if same:
