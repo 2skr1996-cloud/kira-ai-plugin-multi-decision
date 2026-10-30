@@ -1460,6 +1460,11 @@ class RequestLog:
         消息应该变成快照，待发也要算进快照里，你可以在快照里标注这些是待发」。待发
         那几项由调用方在 view 里标 pending，页面据此加「待发」标记与虚线框；条数 /
         字符数也按整份快照（窗口 + 待发）算，柱子高度就是它真实的长度。
+
+        v4.52（用户 m28586 第 6 项）：调用点反过来了——这份快照在**裁切之前**写，
+        内容是「裁前窗口 + 待发」，所以 after 那几个数进来时还是 0，等裁完由
+        patch_round() 回填进同一份文件。这样窗口里被删掉的那批内容一定留得下，
+        不会出现「既不在请求快照里、也不在裁切快照里」。
         """
         if not self.enabled:
             return ""
@@ -1522,9 +1527,61 @@ class RequestLog:
             "trim_snapshot_user": _count_messages(
                 [m for m in msgs if str((m or {}).get("role") or "") == "user"]
             ),
+            # v4.52（用户 m28586 第 6 项）：裁前裁后的「计入条数」与「用户合计」各记一份。
+            # 页面上柱子、悬停、快照正文现在说同一套数字——以前柱高是用户数、
+            # 悬停是原始条数，同一个裁切能报出 70 和 67 两个值。
+            "trim_counted_before": int(cut.get("counted_before") or 0),
+            "trim_counted_after": int(cut.get("counted_after") or 0),
+            "trim_user_total_before": int(cut.get("user_total_before") or 0),
+            "trim_user_total_after": int(cut.get("user_total_after") or 0),
+            # 这一次是谁触发的裁切（before_request / decision / buffer / idle_check），
+            # 悬停里直接说人话，省得猜「为什么这时候裁」。
+            "trim_trigger": str(cut.get("trigger") or ""),
             "trim_only": True,
         }
         return self._save_round(sid, record, ledger=False) or ""
+
+    def patch_round(self, path: str, fields: dict) -> bool:
+        """回填一份已落盘快照的几个键（v4.52，用户 m28586 第 6 项）。
+
+        裁切改成「先落快照、再动刀」：快照内容在裁剪之前就写好了，「裁完剩几条」
+        这些数只能事后补。只覆盖传进来的键，其余原样不动；文件不在就当没发生。
+        """
+        p = Path(str(path or ""))
+        if not p.is_file():
+            return False
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            logger.exception("[multi-decision] 回填快照失败：读不出来")
+            return False
+        if not isinstance(data, dict):
+            return False
+        data.update(dict(fields or {}))
+        try:
+            p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            return True
+        except Exception:
+            logger.exception("[multi-decision] 回填快照失败：写不进去")
+            return False
+
+    def discard_round(self, path: str) -> bool:
+        """撤掉一份刚落盘的快照（裁切最后一刀没裁掉时用，别留假柱子）。"""
+        p = Path(str(path or ""))
+        if not p.is_file():
+            return False
+        try:
+            p.unlink()
+        except Exception:
+            logger.debug("[multi-decision] 撤销快照失败（已吞掉）", exc_info=True)
+            return False
+        try:
+            for k, name in list(self._names.items()):
+                if name == p.name:
+                    self._names.pop(k, None)
+        except Exception:
+            pass
+        return True
 
     def write_decision_snapshot(self, sid: str, rec: dict) -> str:
         """v3.91（用户 m05749）：进阶决策这一层单独落一份快照。
@@ -2245,6 +2302,12 @@ class RequestLog:
                 "trim_after": int(data.get("trim_after") or 0),
                 # v3.89（用户 m05321 第 1 条）：快照里有多少条是待发（悬停要写出来）
                 "trim_pending_count": int(data.get("trim_pending_count") or 0),
+                # v4.52：裁前裁后的计入条数 / 用户合计 / 谁触发的，悬停要用
+                "trim_counted_before": int(data.get("trim_counted_before") or 0),
+                "trim_counted_after": int(data.get("trim_counted_after") or 0),
+                "trim_user_total_before": int(data.get("trim_user_total_before") or 0),
+                "trim_user_total_after": int(data.get("trim_user_total_after") or 0),
+                "trim_trigger": data.get("trim_trigger") or "",
                 "trigger_reason": data.get("trigger_reason") or "",
                 "trigger_count": data.get("trigger_count") or 0,
                 "count_threshold": data.get("count_threshold") or 0,

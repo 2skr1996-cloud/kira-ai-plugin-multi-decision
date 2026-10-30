@@ -327,6 +327,41 @@ class PromptLayouts:
         self._tools = new
         return clean
 
+    @staticmethod
+    def _ensure_persona(kind, doc):
+        """用户 m28586 第 1 条：回复页的「角色扮演」整块被弄丢过（保存后人格段凭空消失）。
+
+        这里在读的时候兜底：只要有模块编排、却一块 persona 都没有，就按默认位置补一块空白人格段
+        ——决策页排第一（人设先定调子），回复页紧跟在「角色设定」后面。补出来的这一块跟默认的
+        一样只读：正文永远取人设文件，界面上改不动。
+        """
+        if not isinstance(doc, dict) or doc.get("mode") != "modules":
+            return doc
+        mods = doc.get("modules")
+        if not isinstance(mods, list):
+            return doc
+        if any(str(m.get("type") or "") == "persona" for m in mods if isinstance(m, dict)):
+            return doc
+        insert_at = 0
+        if kind == "reply":
+            for i, m in enumerate(mods):
+                if isinstance(m, dict) and str(m.get("type") or "") == "framework":
+                    insert_at = i + 1
+                    break
+        used = {str(m.get("id") or "") for m in mods if isinstance(m, dict)}
+        mid = ("reply-persona" if kind == "reply" else "decision-persona")
+        if mid in used:
+            mid = mid + "-restored"
+            n = 2
+            while mid in used:
+                mid = "%s-restored%d" % ("reply-persona" if kind == "reply" else "decision-persona", n)
+                n += 1
+        out = dict(doc)
+        new_mods = list(mods)
+        new_mods.insert(insert_at, module(mid, "persona", TYPE_LABELS["persona"], ""))
+        out["modules"] = tail_order(new_mods)
+        return out
+
     def _relabel(self, doc):
         """用户 m01209 图1：模块名一直跟着所选模板名走，不让名字和内容对不上。"""
         names = {t["id"]: t["name"] for t in self.templates()}
@@ -899,11 +934,11 @@ class PromptLayouts:
         all_scopes, scope = self._data.get("layouts", {}), self._scope(sid)
         own = all_scopes.get(scope, {}).get(kind)
         if own is not None:
-            return self._relabel(normalize_layout(own, kind)), False
+            return self._relabel(self._ensure_persona(kind, normalize_layout(own, kind))), False
         inherited = all_scopes.get("*", {}).get(kind) if scope != "*" else None
         if inherited is not None:
-            return self._relabel(normalize_layout(inherited, kind)), True
-        return self._relabel(self.default_layout(kind, sid)), bool(sid)
+            return self._relabel(self._ensure_persona(kind, normalize_layout(inherited, kind))), True
+        return self._relabel(self._ensure_persona(kind, self.default_layout(kind, sid))), bool(sid)
 
     def save(self, kind, sid, layout, expected_revision):
         if not isinstance(expected_revision, str) or expected_revision != self.revision():
@@ -1318,10 +1353,13 @@ class PromptLayouts:
         doc, inherited = self.layout(kind, sid or context_sid)
         if not sid:
             own = self._data.get("layouts", {}).get("*", {}).get(kind)
-            doc = normalize_layout(own, kind) if own is not None else self.default_layout(kind, context_sid)
+            # 用户 m28586 第 1 条：没有会话（看全局）这条分支也得补人格段，
+            # 否则页面上「角色扮演」只在指定会话时才出现，保存时又被悄悄写回去。
+            doc = (self._ensure_persona(kind, normalize_layout(own, kind)) if own is not None
+                   else self._ensure_persona(kind, self.default_layout(kind, context_sid)))
             inherited = False
         if draft is not None:
-            doc = normalize_layout(draft, kind)
+            doc = self._ensure_persona(kind, normalize_layout(draft, kind))
         await self.refresh_live(context_sid)
         context = await self._context(context_sid, None, doc)
         preview = self._render(kind, context_sid, doc, context, sample=True)

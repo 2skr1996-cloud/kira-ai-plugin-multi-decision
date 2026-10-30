@@ -1225,7 +1225,7 @@ html[data-theme="dark"] .setrow .warnpill{color:#fbbf24;background:rgba(251,191,
 /* v4.10 二轮：暗色下原生复选框会发白，给盒内这几处单独用暗色控件；参数行标签不折行、数字框收窄；
    右栏限高后可自己滚，页签两等分不横铺。 */
 html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{color-scheme:dark;}
-.pp-tabs{grid-template-columns:auto auto auto;width:max-content;max-width:100%;}
+.pp-tabs{grid-template-columns:auto auto auto auto;width:max-content;max-width:100%;}
 .pp-tab{padding:0 10px;}
 .pp-left .dlb{flex:0 0 108px;white-space:nowrap;}
 .pp-left .drow .num{width:96px;min-width:0;flex:none;}
@@ -1274,6 +1274,13 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
 .ptpl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px;margin:8px 0;}
 .ptpl-card{border:1px solid var(--line);border-radius:9px;background:var(--soft);padding:8px 9px;min-width:0;}
 .ptpl-card.editing{grid-column:1/-1;background:var(--card);}
+/* 用户 m28586 第 5 条：提示词结构页做成「左右两个框拼一起」——左边中文名＋说明，右边结构名＋实际内容。 */
+.ptpl-pairs{display:grid;gap:9px;margin:8px 0;}
+.ptpl-pair{display:grid;grid-template-columns:1fr 1fr;gap:9px;align-items:stretch;}
+.ptpl-pair .ptpl-card{margin:0;}
+.ptpl-desc{font-size:11.5px;line-height:1.62;color:var(--muted);max-height:152px;overflow:auto;white-space:pre-wrap;}
+.ptpl-live{white-space:pre-wrap;word-break:break-word;max-height:152px;color:var(--fg);}
+@media (max-width:640px){.ptpl-pair{grid-template-columns:1fr;}}
 .ptpl-h{display:flex;align-items:baseline;gap:6px;margin:0 0 5px;}
 .ptpl-h b{font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ptpl-n{margin-left:auto;font-size:11px;color:var(--muted);flex:none;}
@@ -2310,6 +2317,27 @@ var DM_SPECIAL = { trigger_probability: 1 };
         esc(label + suffix) + (c.available === false ? "（不可用）" : "") + "</option>";
     }).join("");
   }
+  // 用户 m28586 第 4 条：自定义模块也要出现在「＋ 新增」的下拉里，方便随时加回来。
+  // 列的是「另一页」上那些自定义块（当前页上的本来就在，不用再搬一份）。
+  function ppCloneOptions(s){
+    var out = "", seen = {};
+    ["decision", "reply"].forEach(function(k){
+      var st = ppState(k);
+      if(!st || !st.loaded || !st.layout || !st.layout.modules) return;
+      var same = k === s.kind;
+      st.layout.modules.forEach(function(m, i){
+        if(!ppModIsCustom(st, m)) return;
+        var nm = String(m.label || "自写文本"), body = String(m.content || "");
+        var sig = nm + "|" + body;
+        if(seen[sig]) return;
+        seen[sig] = true;
+        out += "<option value='" + esc(JSON.stringify(["clone", k + "#" + i])) + "'>" +
+          esc(nm + (same ? "（自定义 · 再复制一份）"
+                         : "（自定义 · 从" + (k === "decision" ? "决策" : "回复") + "页搬来）")) + "</option>";
+      });
+    });
+    return out ? ("<optgroup label='你的自定义模块'>" + out + "</optgroup>") : "";
+  }
   function ppButton(s, action, text, index, disabled){
     return "<button type='button' class='dmini' data-pm-kind='" + s.kind + "' data-pm-action='" + action + "'" +
       (index === undefined ? "" : " data-pm-index='" + index + "'") + (disabled ? " disabled" : "") + ">" + text + "</button>";
@@ -2391,7 +2419,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 所以上下移一律禁用，只留启用/停用。用户 m03879：系统动态段同样是钉死的位置。
     // 用户 m04617 图8：动态段能上下挪（默认还是排在实时窗下面、系统动态段上面）。
     var fixedPos = isRealtime || isSystemDyn || isDynamic;
-    var ro = isIdentity || isSystemDyn;
+    // 用户 m27528 第 5 条：角色扮演（人格）这一段锁死——只能看，不能在这儿改，
+    // 换人设请用右上角的下拉。以前它能改，一改就悄悄复制成一份「我的副本」。
+    var ro = isIdentity || isSystemDyn || isPersona;
     // 用户 m04617 图6：选了人格以后，卡片上的字数得跟真正注入的那一段一致，
     // 不能再显示目录里那份预览（60 字的空骨架），否则看着像「选了反而没注入」。
     // 用户 m05691：动态段默认不含正文（跟着默认模板走），字数与正文都按真正注入的那段显示。
@@ -2407,13 +2437,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
       : ((typ === "text" || isDynamic) ? String(module.content || "") : ppReferenceText(s, module));
     // 用户 m04343 第 4 条：默认模板改过正文就自动算「自定义」，标题后面挂个小标，
     // 不用再点「编辑（存成我的模板）」转一次。
-    var defTpl = null;
-    if(typ === "text"){
-      var nm0 = String(module.label || "").trim();
-      (s.catalog || []).forEach(function(c){
-        if(!defTpl && c.skeleton && String(c.label || "") === nm0) defTpl = c;
-      });
-    }
+    // 用户 m28586 第 2 条：跟「自定义」页共用同一套判断（ppDefTplOf），
+    // 免得一处标「自定义」、另一处还当默认模板。
+    var defTpl = (typ === "text") ? ppDefTplOf(s, module) : null;
     var tweaked = !!(defTpl && String(module.content || "") !== String(defTpl.text || ""));
     // 用户 m03879 图3/图7：不会变的那些段标题不需要改，描述直接写在标题右边就够了。
     var editableTitle = (typ === "text" || typ === "custom");
@@ -2423,7 +2449,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         : ((s.kind === "reply") ? "空人格 · 用框架原文" : "空人格 · 不注入"))
       : (isTools ? "勾选注入"
         : (isDynamic ? "拼在聊天记录最后"
-          : (typ === "framework" ? "原段" : (typ === "custom" ? "我的模板" : ""))));
+          : (typ === "framework" ? "原段" : (typ === "custom" ? "自定义" : ""))));
     // 用户 m03879 图3：位置标签只说明「注入在哪」，放到「N 字」左边。
     // 用户 m04343 第 4 条：框架原段（系统模板）也挂「系统段」标签，跟系统动态段一个样。
     var isSysSeg = isSystemDyn || isIdentity || isTools || typ === "framework";
@@ -2446,8 +2472,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
     }else if(isDynamic){
       source = "动态段：拼在本轮聊天记录最后，紧贴模型开口的位置";
     }else{
-      source = typ === "text" ? "自写文本：只在这一段里，随便改"
-        : (typ === "custom" ? "自写副本：保存的固定文本"
+      source = typ === "text" ? "自定义：只在这一段里，随便改"
+        : (typ === "custom" ? "自定义模板：保存的固定文本"
           : (ref ? String(ref.source || "引用当前原文") : "目录中没有此引用"));
     }
     var chars = String(body ? body.length : 0);
@@ -2465,13 +2491,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 来源下拉：只有还能换内容的段才给（人格 / 框架原段 / 自写）；位置段与身份段没得选。
     // 用户 m04617 图8：动态段也要有下拉——它本身就是一段模板，能换成别的写法。
     var hasSelect = !(isIdentity || isTools || isRealtime || isSystemDyn);
-    // 用户 m04343 第 4 条：「编辑（存成我的模板）」只留给系统模板（框架原段）；自写块和默认
-    // 模板正文本来就能直接改，改完自动算自定义，右边不再挂那个按钮。
-    var convert = (typ === "framework" && !isPersona && !ro)
-      ? ("<button type='button' class='dmini pm-cta' data-pm-kind='" + s.kind + "' data-pm-action='promote'" +
-         " data-pm-index='" + index + "'" + (ppCanConvert(s,module) ? "" : " disabled") +
-         ">编辑（存成我的模板）</button>")
-      : (typ === "custom" ? ppButton(s,"edit_tpl","改这个模板",index,false) : "");
+    // 用户 m28586 第 3 条：右边那个「编辑（存成我的模板）」按钮撤掉。规则就一句话——
+    // 直接在下面的正文框里改字，改完自动复制一份存进模板库（名字变成「原名·复制（自写）」），
+    // 默认模板一个字都不动。这里只剩「自定义模板」那块去模板库改正文的入口。
+    var convert = (typ === "custom" && module.key) ? ppButton(s,"edit_tpl","改这个模板",index,false) : "";
     var noteText = isPersona ? ""
       : (note || ((!custom && !isTools && (!ref || ref.available === false)) ? "这个引用现在没内容，预览会给警告。" : ""));
     // 用户 m04343 第 4 条：来源下拉搬到标题右边同一行（标题照旧能改名）；下面那行只留说明和按钮。
@@ -2510,29 +2533,32 @@ var DM_SPECIAL = { trigger_probability: 1 };
           (isDynamic && index > 0 && String((s.layout.modules[index - 1] || {}).type || "") === "realtime_marker")) +
         ppIcon(s,"down","\u2193","下移",index,fixedPos || nextIsRt || index === s.layout.modules.length - 1) + (locked
           ? (lockText ? "<span class='pm-lock' title='" + esc(lockTip) + "'>" + lockText + "</span>" : "")
-          : ppIcon(s,"remove","\u2715","删除",index)) + "</div></div></div>" +
+          : ppIcon(s,"remove","\u2715","删除",index) + ppIcon(s,"dup","\u29c9","复制一段出来",index)) + "</div></div></div>" +
       metaHtml +
       (isTools ? ppToolBox(s, module, index) :
       "<details class='pm-body'" + (open ? " open" : "") + " data-pm-open='" + index + "'>" +
         "<summary class='pm-sum'>" + (isPersona ? "人格正文 " : "正文 ") + esc(chars) + " 字符" +
         (isDynamic ? "（动态段 · 可编辑，拼在聊天记录最后）"
           : (isRealtime ? "（可编辑）· 只标位置，不注入 system"
-            : (custom ? "（可编辑）" : (ro ? "（框架自动填写，只能看不能改）" : "（引用原文，只读）")))) + "</summary>" +
+            : (custom ? "（可编辑）" : (isPersona ? "（只读 · 换人设请用右上角的下拉）"
+              : (ro ? "（框架自动填写，只能看不能改）" : "（引用原文，只读）"))))) + "</summary>" +
         "<div class='pm-body-row'>" +
         // 用户 m23323 图3：<textarea> 后面紧跟的第一个换行会被 HTML 解析吃掉，
         // 正文以空行开头时回填一次就少一行、越编辑越少。这里先自己补一个换行。
         "<textarea class='darea pm-content' rows='5' aria-label='" +
         (custom ? "模块文本"
-          : (isIdentity ? "你的身份（只读）"
-            : (isSystemDyn ? "系统动态段（只读）"
-              : (isRealtime ? "实时窗口说明" : "改这里会自动存成你自己的模板")))) +
+          : (isPersona ? "人格正文（只读）"
+            : (isIdentity ? "你的身份（只读）"
+              : (isSystemDyn ? "系统动态段（只读）"
+                : (isRealtime ? "实时窗口说明" : "改这里会自动存成你自己的模板"))))) +
         "' data-pm-field='content' data-pm-index='" + index + "'" +
         (custom || isRealtime || isDynamic ? "" : (ro ? " readonly" : " data-pm-promote='1'")) + ">\n" + esc(body) + "</textarea>" +
         // 用户 m05124 图1：这句「只标位置」挪到上面第二行（正文摘要）去了，正文行里不再重复。
         "</div>" +
         (isRealtime ? "<div class='pm-hint'>这段只是给模型标出「聊天记录长这样、放在这里」，不会当成指令执行；想更像真记录就往下多写两行。</div>" : "") +
-        (!custom && !ro && !isRealtime ? "<div class='pm-hint'>直接在这里改：会先存成「" + esc(String(module.label || "这一段")) +
-          " · 我的副本」再让你编辑，默认模板不会被改。</div>" : "") +
+        (isPersona ? "<div class='pm-hint'>人格正文只能看不能改：要动人设，去人设文件里改，或者用右上角的下拉换一份。在这里敲字不会被存下来。</div>" : "") +
+        (!custom && !ro && !isRealtime ? "<div class='pm-hint'>直接在这里改：改完自动存成一份「" + esc(String(module.label || "这一段")) +
+          "·复制（自写）」，算你自己的；默认模板不会被改。</div>" : "") +
         foot + "</details>") +
 
       (!custom && !isPersona && !isTools && ref && ref.available === false && !body && ref.template ?
@@ -2570,7 +2596,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
           "<span class='pm-newcard-d' title='挑一个模板，选好拼到哪，点「＋ 新增」加进上面'>挑模板 → 选拼到哪 → 加进上面</span></div>" +
         "<div class='pm-newcard-row'>" +
           "<select class='dipt' data-pm-add aria-label='新增模块来源'>" +
-            ppTypeOptions(s,{type:"text",key:""},true) + "</select>" +
+            ppTypeOptions(s,{type:"text",key:""},true) + ppCloneOptions(s) + "</select>" +
           // 用户 m13212 图1：右边用标签代替下拉——系统段 / 动态段各一个，点一下就是加到那里。
           "<span class='pm-zone' role='group' aria-label='加到哪一段'>" +
             "<button type='button' class='pm-zone-b" + (zonePick === "dynamic" ? "" : " on") +
@@ -2591,7 +2617,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
           ppButton(s,"inherit",s.sid ? "恢复跟随全局" : "恢复自动默认",undefined,s.saving) + "</div>" +
         // 用户 m05124 图2：说明跟按钮并成一段，左边缘跟「新增模块」卡对齐；全文放 title。
         "<div class='pm-tip' title='" + esc((s.kind === "reply"
-          ? "上面那几段是引用，想改就点「编辑（存成我的模板）」，默认模板不会被覆盖；"
+          ? "上面那几段是引用，想改就直接在下面的正文框里改，会存成「原名·复制（自写）」，默认模板不会被覆盖；"
           : "判断规则可以拆成几块写，谁写长了就单独挪；") +
           "删光模块就是空 system，这里只改草稿，点上面的「保存此提示词」才生效。") + "'>" +
           esc((s.kind === "reply" ? "改引用会先存成你的模板；" : "判断规则可拆几块写；") +
@@ -2894,13 +2920,20 @@ var DM_SPECIAL = { trigger_probability: 1 };
       s.error = "工具清单没存上：" + err.message; ppPaintStatus(s);
     });
   }
+  // 用户 m27528 第 5 条：比「正文有没有真改」——换行归一化后逐字比，
+  // textarea 里被 HTML 解析吃掉的那个开头换行不算改。
+  function ppTextSame(a, b){
+    var norm = function(x){ return String(x == null ? "" : x).replace(/\r\n?/g, "\n").replace(/^\n/, ""); };
+    return norm(a) === norm(b);
+  }
   function ppPromote(s, index, text){
     var module = s.layout && s.layout.modules ? s.layout.modules[index] : null;
     if(!module || s.promoting) return Promise.resolve(false);
     var body = typeof text === "string" ? text : ppReferenceText(s, module);
     if(!body){ s.notice = "这一段现在是空的，先有正文再转。"; ppRenderEditor(s); ppPaintStatus(s); return Promise.resolve(false); }
     s.promoting = true;
-    var name = String(module.label || "自写文本") + " · 我的副本";
+    // 用户 m28586 第 3 条：自动复制出来的名字固定成「原名·复制（自写）」。
+    var name = String(module.label || "这一段") + "·复制（自写）";
     return ppRequest("/prompt-templates", {action:"save", name:name, content:body}).then(function(d){
       s.promoting = false;
       var item = (d && d.item) || {};
@@ -2910,7 +2943,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       s.catalog.push({type:"custom", key:String(item.id), label:module.label, text:body,
                       source:"自定义模板", available:true, group:"custom", tag:"自定义"});
       ppChanged(s, true);
-      s.notice = "已存成自定义模板「" + module.label + "」，默认模板没被改。";
+      s.notice = "已存成自定义「" + module.label + "」，默认模板没被改。";
       ppRenderEditor(s);
       return true;
     }).catch(function(err){
@@ -2926,6 +2959,22 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(action === "add"){
       var pair;
       try{ pair = JSON.parse(selected || '["text",""]'); }catch(e){ return; }
+      // 用户 m28586 第 4 条：从另一页把自己的自定义模块搬回来——照原样复制成一块文本，排在系统段末尾。
+      if(Array.isArray(pair) && String(pair[0] || "") === "clone"){
+        var spec = String(pair[1] || "").split("#");
+        var cst = ppState(String(spec[0] || "")), cmod = null;
+        if(cst && cst.layout && cst.layout.modules) cmod = cst.layout.modules[Number(spec[1] || -1)];
+        if(!cmod) return;
+        var cm = {id:"pm-" + Date.now().toString(36) + "-" + (++ppModuleCounter), type:"text", key:"",
+                  label:String(cmod.label || "自写文本"), content:String(cmod.content || ""), enabled:true};
+        var cat = list.length;
+        for(var ci = 0; ci < list.length; ci++){
+          var ct = String((list[ci] || {}).type || "");
+          if(ct === "realtime_marker" || ct === "dynamic" || ct === "system_dynamic"){ cat = ci; break; }
+        }
+        list.splice(cat, 0, cm);
+        ppChanged(s,true); return;
+      }
       if(!Array.isArray(pair) || pair.length !== 2 || !ppTypeAllowed(s,pair[0])) return;
       // 用户 m04617 图4：新增条上选了「加到动态段」，就建一块动态段（拼在聊天记录最后）。
       if(String(zone || "") === "dynamic"){
@@ -2956,6 +3005,17 @@ var DM_SPECIAL = { trigger_probability: 1 };
       // 用户 m23323 图3：任何一段都不能越过「实时窗口」往下——越过就跑到聊天记录后面去了。
       if(String((list[index+1] || {}).type || "") === "realtime_marker") return;
       list.splice(index,1); list.splice(index+1,0,module);
+    }
+    else if(action === "dup" && module){
+      // 用户 m27528 第 5 条：模块也能复制一份——副本排在原段后面，名字带「（副本）」后缀
+      // （来源下拉里一眼认得出），正文照抄；动副本不碰原段。
+      if(module.type === "persona" || module.type === "identity" || module.type === "realtime_marker") return;
+      var cp = {};
+      Object.keys(module).forEach(function(k){ cp[k] = module[k]; });
+      cp.id = "pm-" + Date.now().toString(36) + "-" + (++ppModuleCounter);
+      cp.label = String(module.label || "这一段") + "（副本）";
+      if(cp.type !== "text" && cp.type !== "custom"){ cp.type = "text"; cp.key = ""; cp.content = ppReferenceText(s, module); }
+      list.splice(index + 1, 0, cp);
     }
     else if(action === "promote" && module){ ppPromote(s, index); return; }
     else if(action === "edit_tpl" && module && module.type === "custom"){
@@ -3054,12 +3114,65 @@ var DM_SPECIAL = { trigger_probability: 1 };
       "<button type='button' class='dmini' data-tpl='edit' data-tpl-id='" + esc(String(t.id)) + "'>编辑</button>" +
       "<button type='button' class='dmini' data-tpl='del' data-tpl-id='" + esc(String(t.id)) + "'>删除</button></div></div>";
   }
+  // 用户 m27528 第 5 条：两块提示词里的自写模块，也要在这一页看得到、改得动——
+  // 改这里的正文，提示词页那一份跟着变；反过来提示词页改完，这里刷新就是新的。
+  // 用户 m28586 第 2 条：默认模板（决策那边「什么时候接 / 什么时候别接 / 节奏与分寸 / 输出规则」）
+  // 不划进自定义；只有正文真改过的那一块、或者本来就是自己写的，才算「自定义」。
+  function ppDefTplOf(s, m){
+    var nm = String((m && m.label) || "").trim(), hit = null;
+    if(!nm || !s || !s.catalog) return null;
+    s.catalog.forEach(function(c){ if(!hit && c.skeleton && String(c.label || "") === nm) hit = c; });
+    return hit;
+  }
+  function ppModIsCustom(s, m){
+    var t = String((m && m.type) || "");
+    if(t === "custom") return true;
+    if(t !== "text") return false;
+    var def = ppDefTplOf(s, m);
+    if(!def) return true;
+    return String(m.content || "") !== String(def.text || "");
+  }
+  function ppSelfModRows(){
+    var rows = [];
+    ["decision", "reply"].forEach(function(k){
+      var st = ppState(k);
+      if(!st || !st.loaded || !st.layout || !st.layout.modules) return;
+      st.layout.modules.forEach(function(m, i){
+        var t = String(m.type || "");
+        if(t !== "text" && t !== "custom") return;
+        if(!ppModIsCustom(st, m)) return;
+        rows.push({kind:k, index:i, name:String(m.label || "自写文本"), body:String(m.content || ""), on:m.enabled !== false});
+      });
+    });
+    return rows;
+  }
+  function ppSelfModHtml(){
+    var rows = ppSelfModRows();
+    var head = "<div class='pm-note'>下面是两块提示词里改过或自己写的那几段（没改过的默认模板不列；第几段、叫什么、多少字照实显示）。" +
+      "这里的正文和提示词页是同一份：这边改完点「保存这一段」，那边立刻就是新的；那边改完回这里刷新一下也一样。</div>";
+    if(!rows.length) return head + "<div class='pm-note'>现在还没有自定义模块。去「决策提示词 / 回复提示词」页点「＋ 新增」加一段，或者直接改某一段正文，就会出现在这里。</div>";
+    return head + "<div class='ptpl-grid'>" + rows.map(function(r){
+      return "<div class='ptpl-card'><div class='ptpl-h'><b>" + esc(r.name) + "</b>" +
+        "<span class='ptpl-n'>" + (r.kind === "decision" ? "决策" : "回复") + " · 第 " + (r.index + 1) + " 段 · " +
+        r.body.length + " 字符" + (r.on ? "" : " · 已停用") + "</span></div>" +
+        "<textarea class='darea ptpl-self' rows='4' aria-label='" + esc(r.name) + "（自写模块正文）'" +
+        " data-self-field='content' data-self-kind='" + r.kind + "' data-self-index='" + r.index + "'>\n" + esc(r.body) + "</textarea>" +
+        "<div class='ptpl-acts'><button type='button' class='dmini' data-self-act='save' data-self-kind='" + r.kind +
+        "' data-self-index='" + r.index + "'>保存这一段</button>" +
+        "<button type='button' class='dmini' data-self-act='jump' data-self-kind='" + r.kind +
+        "' data-self-index='" + r.index + "'>去提示词页看</button></div></div>";
+    }).join("") + "</div>";
+  }
   function ppTplPageHtml(){
     var e = PP_TPL.editing;
-    return "<div class='dcard pp-compact' id='pp-tpl'><div class='dhead'>自定义模板" +
-      "<i class='di' title='你自己写的模板。选来源时它们排在默认模板前面，随便改，不会动到默认模板。'>i</i>" +
-      "<span class='dhead-x'>" + PP_TPL.items.length + " 个</span></div>" +
-      "<div class='pm-note'>下拉里带（自定义）的就是这里的模板；编辑默认模板时会自动往这里存一份副本。</div>" +
+    return "<div class='dcard pp-compact' id='pp-tpl'><div class='dhead'>自定义" +
+      "<i class='di' title='自定义＝你改过或自己写的。选来源时它们排在默认模板前面，随便改，不会动到默认模板。'>i</i>" +
+      "<span class='dhead-x'>" + (ppSelfModRows().length + PP_TPL.items.length) + " 个</span></div>" +
+      "<div class='pm-note'>没改过的默认模板不算自定义，只在上头两页原样带着；只有改过正文或自己写的才进这里。" +
+      "改默认模板时会自动存一份「原名·复制（自写）」，原件一个字都不动。</div>" +
+      "<div class='dhead'>提示词里的自定义模块<span class='dhead-x'>" + ppSelfModRows().length + " 个</span></div>" +
+      ppSelfModHtml() +
+      "<div class='dhead'>存下来的模板<span class='dhead-x'>" + PP_TPL.items.length + " 个</span></div>" +
       (PP_TPL.error ? "<div class='pm-warning'>" + esc(PP_TPL.error) + "</div>" : "") +
       (PP_TPL.notice ? "<div class='pm-note'>" + esc(PP_TPL.notice) + "</div>" : "") +
       (e && !e.id ? "<div class='ptpl-card editing'>" + ppTplEditorHtml() + "</div>" : "") +
@@ -3116,25 +3229,119 @@ var DM_SPECIAL = { trigger_probability: 1 };
       PP_TPL.saving = false; PP_TPL.error = "删除失败：" + err.message; ppTplRender();
     });
   }
+  // 用户 m27528 第 6 条：第四个页签，专门讲这六个代码段（占位符）能干嘛。
+  var PP_GUIDE_SEGS = [
+    {key:"persona", name:"人格", one:"你在「角色扮演」那一段选的人格文件全文。",
+     use:"想在自己的段落里带上完整人设时用它，比如另写一段「简短版人设」只有在私聊时用。",
+     change:"换人格文件就跟着换；没选人格时这一格是空的。", eg:"按这份人设说话，别跳出角色：\n{{persona}}"},
+    {key:"identity", name:"身份", one:"「你的身份」那一段：框架给的账号、群号、bot 自己的名字与身份说明。",
+     use:"写自检、写记忆、写「我是谁」的时候带上它，模型才不会把自己当成路人。",
+     change:"换群、换账号就跟着变。", eg:"先确认我是谁：{{identity}}"},
+    {key:"tools", name:"工具", one:"「工具说明」那一段：按你在工具段勾的清单生成。",
+     use:"把工具清单塞到自定义段落里，模型才知道这一轮能调什么。",
+     change:"勾选增减就跟着变。", eg:"能用的工具只有这些：\n{{tools}}"},
+    {key:"realtime", name:"实时窗", one:"那句「聊天记录长这样、放在这里」的位置说明。",
+     use:"想在别处提醒模型聊天记录的格式时用它；正常情况不用写，这一段本来就注入了。",
+     change:"固定文案，不会变。", eg:"下面就是聊天记录，照着这个格式读：\n{{realtime}}"},
+    {key:"memory", name:"记忆", one:"框架拼在 system 末尾的核心记忆（长期记忆）。",
+     use:"要「先读记忆再开口」时把它摆到你想要的顺序上。",
+     change:"记忆更新就跟着变；没有记忆时这一格是空的。", eg:"先看记忆里有没有说过这件事：\n{{memory}}"},
+    {key:"time", name:"时间", one:"当前时间那一行。",
+     use:"写「几点了该说什么」这类段落时用它，模型才知道现在几点。",
+     change:"每一轮都是发请求那一刻的时间。", eg:"现在是 {{time}}，按这个时间说话。"},
+  ];
+  // 用户 m28586 第 5 条：每段一张「左右拼起来」的卡——左边顶上是中文名、下面说它干嘛的；
+  // 右边顶上是结构名（{{persona}} 这种）、下面是它此刻真正的字。六个代码段＋四个少用的全列。
+  var PP_GUIDE_MORE_SEGS = [
+    {key:"sessions", name:"会话信息", one:"框架给的会话清单（当前是哪个会话 / 群 / 会话数）。",
+     change:"换会话就跟着变。", eg:"{{sessions}}"},
+    {key:"chat_env", name:"聊天环境", one:"这段时间群里在聊什么的环境摘要。",
+     change:"每一轮现算。", eg:"{{chat_env}}"},
+    {key:"accounts", name:"账号", one:"跟 {{identity}} 是同一份账号信息（平台、账号、昵称、管理员）。",
+     change:"换群、换账号就跟着变。", eg:"{{accounts}}"},
+    {key:"tools_note", name:"工具说明尾注", one:"工具段末尾那句「最多调几轮」的说明。",
+     change:"改「工具最多几轮」就跟着变。", eg:"{{tools_note}}"},
+  ];
+  function ppGuideLive(key){
+    // 实际内容：优先拿右边预览里已经渲染好的那一段（跟真请求同一份），没有再退回示例。
+    var tries = [ppPane === "decision" ? "decision" : "reply", "reply", "decision"];
+    for(var i = 0; i < tries.length; i++){
+      var st = ppState(tries[i]);
+      if(!st || !st.loaded) continue;
+      var part = ppRenderedPart(st, key);
+      if(part && String(part.text || "").trim()) return String(part.text);
+    }
+    return "";
+  }
+  function ppGuidePageHtml(){
+    var rows = PP_GUIDE_SEGS.concat(PP_GUIDE_MORE_SEGS);
+    return "<div class='dcard pp-compact' id='pp-guide'><div class='dhead'>提示词结构" +
+      "<i class='di' title='左边：这一段叫什么、干嘛用的。右边：它在请求里的结构名，以及此刻真正的字。'>i</i>" +
+      "<span class='dhead-x'>" + rows.length + " 段</span></div>" +
+      "<div class='pm-note'>用法只有一句：在任意「自定义」文本里写 <code>{{名字}}</code> 这样的框，发请求那一刻会换成那一段的真实内容。" +
+      "写错名字不会报错，框会原样留在请求里——所以在请求记录里看到 {{xxx}} 就知道是名字写错了。</div>" +
+      "<div class='ptpl-pairs'>" + rows.map(function(g){
+        var live = ppGuideLive(g.key);
+        var body = live || ("这一段现在没有内容。写法示例：\n" + String(g.eg || ""));
+        return "<div class='ptpl-pair'>" +
+          "<div class='ptpl-card'><div class='ptpl-h'><b>" + esc(g.name) + "</b>" +
+            "<span class='ptpl-n'>干嘛用的</span></div>" +
+            "<div class='ptpl-desc'>" + esc(g.one || "") +
+            (g.use ? "\n\n" + esc(g.use) : "") + (g.change ? "\n\n什么时候会变：" + esc(g.change) : "") +
+            "</div></div>" +
+          "<div class='ptpl-card'><div class='ptpl-h'><b>{{" + esc(g.key) + "}}</b>" +
+            "<span class='ptpl-n'>" + (live ? "实际内容 · " + live.length + " 字" : "示例") + "</span></div>" +
+            "<pre class='ptpl-body ptpl-live'>" + esc(body) + "</pre></div>" +
+          "</div>";
+      }).join("") + "</div></div>";
+  }
+  function ppGuideRender(){
+    var box = document.getElementById("pp-guide");
+    if(!box) return;
+    var wrap = document.createElement("div");
+    wrap.innerHTML = ppGuidePageHtml();
+    var next = wrap.firstChild;
+    if(next && box.parentNode) box.parentNode.replaceChild(next, box);
+  }
   function promptPageBlockHtml(){
-    var pane = ppPane === "reply" || ppPane === "templates" ? ppPane : "decision";
+    var pane = (ppPane === "reply" || ppPane === "templates" || ppPane === "guide") ? ppPane : "decision";
     return "<div class='pp'><div class='pp-tabs'>" +
       "<button type='button' class='pp-tab" + (pane === "decision" ? " on" : "") + "' data-pp='decision'>决策提示词<span class='pp-sub'>判这一轮回不回</span></button>" +
       "<button type='button' class='pp-tab" + (pane === "reply" ? " on" : "") + "' data-pp='reply'>回复提示词<span class='pp-sub'>真正开口说话</span></button>" +
-      "<button type='button' class='pp-tab" + (pane === "templates" ? " on" : "") + "' data-pp='templates'>自定义模板<span class='pp-sub'>你自己的模板库</span></button></div>" +
+      "<button type='button' class='pp-tab" + (pane === "templates" ? " on" : "") + "' data-pp='templates'>自定义<span class='pp-sub'>改过的和自写的</span></button>" +
+      "<button type='button' class='pp-tab" + (pane === "guide" ? " on" : "") + "' data-pp='guide'>提示词结构<span class='pp-sub'>每一段长什么样</span></button></div>" +
       "<div class='pp-pane' data-pane='decision'" + (pane === "decision" ? "" : " hidden") + "><div class='pp-left'>" +
       promptEditorBlockHtml("decision") + dmodelBlockHtml() + "</div><div class='pp-right'>" + promptPrevBlockHtml("decision") + "</div></div>" +
       "<div class='pp-pane' data-pane='reply'" + (pane === "reply" ? "" : " hidden") + "><div class='pp-left'>" +
       promptEditorBlockHtml("reply") + "</div><div class='pp-right'>" + promptPrevBlockHtml("reply") + "</div></div>" +
       "<div class='pp-pane pp-pane-wide' data-pane='templates'" + (pane === "templates" ? "" : " hidden") + ">" +
-      ppTplPageHtml() + "</div></div>";
+      ppTplPageHtml() + "</div>" +
+      "<div class='pp-pane pp-pane-wide' data-pane='guide'" + (pane === "guide" ? "" : " hidden") + ">" +
+      ppGuidePageHtml() + "</div></div>";
   }
   // Switching panes/scope keeps canonical drafts in PP_STATES, never serializes them to storage.
+  // 用户 m27528 第 5 条：自定义模板页要同时列出「决策 / 回复」两块提示词里的自写模块。
+  // 两个编辑器的数据是点开各自页签才懒加载的——只开过决策页就只列到决策那几段，
+  // 看着像「回复那边的自写模块丢了」。进这一页时把缺的那块补上，回来再画一遍。
+  function ppEnsureTplStates(){
+    ["decision", "reply"].forEach(function(k){
+      var st = ppState(k);
+      if(!st || st.loaded || st.loading) return;
+      ppLoad(st, false).then(function(){ if(ppPane === "templates") ppTplRender(); }, function(){});
+    });
+  }
   function ppSetPane(name){
-    ppPane = name === "reply" ? "reply" : (name === "templates" ? "templates" : "decision");
+    ppPane = (name === "reply" || name === "templates" || name === "guide") ? name : "decision";
     Array.prototype.forEach.call(document.querySelectorAll("#settings .pp-tab"),function(b){ b.classList.toggle("on",b.getAttribute("data-pp") === ppPane); });
     Array.prototype.forEach.call(document.querySelectorAll("#settings .pp-pane"),function(p){ p.hidden = p.getAttribute("data-pane") !== ppPane; });
-    if(ppPane === "templates"){ ppTplLoad(); ppTplRender(); return; }
+    if(ppPane === "templates"){ ppTplLoad(); ppEnsureTplStates(); ppTplRender(); return; }
+    if(ppPane === "guide"){
+      // 用户 m28586 第 5 条：右边要显示「实际内容」，所以先确保当前这一块的预览拿到了，再重画一次。
+      ppLayout(); ppGuideRender();
+      var gst = ppState("reply");
+      if(gst && gst.loaded && !gst.preview){ try{ ppPreview(gst).then(ppGuideRender, function(){}); }catch(e){} }
+      return;
+    }
     ppAutoPreview();
   }
   // v4.10：提示词页外层 .panel 带着 overflow:hidden，会把右栏的 position:sticky 一起废掉（右栏不再吸顶）。
@@ -3154,10 +3361,19 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var h = Math.round(window.innerHeight - Math.max(top, 0) - 14);
     pp.style.height = Math.max(420, h) + "px";
   }
+  // 用户 m28586 第 4 条：另一页的自定义模块要能出现在「＋ 新增」下拉里，所以进提示词页时
+  // 顺手把另一块也读一次；读不到就算了，不影响当前这一页。
+  function ppWarmOther(kind){
+    var st = ppState(kind === "decision" ? "reply" : "decision");
+    if(!st || st.loaded || st.loading) return;
+    ppLoad(st, false).then(function(){ if(curPage === "prompt" && ppPane === kind) ppRenderEditor(ppState(kind)); }, function(){});
+  }
   function ppAutoPreview(){
     if(curPage !== "prompt") return;
     ppLayout();
-    if(ppPane === "templates"){ ppTplLoad(); ppTplRender(); return; }
+    ppWarmOther(ppPane);
+    if(ppPane === "templates"){ ppTplLoad(); ppEnsureTplStates(); ppTplRender(); return; }
+    if(ppPane === "guide"){ return; }
     var s = ppState(ppPane);
     ppRenderEditor(s); ppPaintPreview(s);
     return s.loaded ? ppPreview(s) : ppLoad(s,false);
@@ -3241,6 +3457,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
         PP_TPL.editing[t.getAttribute("data-tpl-field")] = t.value;
         return;
       }
+      if(t && t.getAttribute && t.getAttribute("data-self-field")){
+        var sst0 = ppState(t.getAttribute("data-self-kind"));
+        var smi0 = Number(t.getAttribute("data-self-index"));
+        var sm0 = (sst0 && sst0.layout && sst0.layout.modules) ? sst0.layout.modules[smi0] : null;
+        if(sm0){ sm0.content = String(t.value); ppChanged(sst0, false); }
+        return;
+      }
       var root = editorFor(t);
       if(!root || !t.getAttribute) return;
       var toolName = t.getAttribute("data-pm-tool");
@@ -3254,7 +3477,12 @@ var DM_SPECIAL = { trigger_probability: 1 };
       var st = ppState(root.getAttribute("data-pp-editor")), at = Number(t.getAttribute("data-pm-index"));
       if(field === "content" && t.getAttribute("data-pm-promote")){
         var mod = st.layout && st.layout.modules ? st.layout.modules[at] : null;
-        if(mod && mod.type !== "text" && mod.type !== "custom"){ ppPromote(st, at, t.value); return; }
+        // 用户 m27528 第 5 条：只有正文真的跟原文不一样了才转「自写」。
+        // 点开看看、重新渲染一遍、光标进去又出来，都不算改——以前一碰就悄悄复制出一份副本。
+        if(mod && mod.type !== "text" && mod.type !== "custom"){
+          if(ppTextSame(t.value, ppReferenceText(st, mod))){ return; }
+          ppPromote(st, at, t.value); return;
+        }
       }
       ppUpdateField(st,field,at,t.value);
     }
@@ -3307,6 +3535,29 @@ var DM_SPECIAL = { trigger_probability: 1 };
         return;
       }
       // v4.10：右栏标题带上的「复制 / 放大」，以及模块正文折叠状态的记忆（折叠状态存在 s.open，重渲染后不丢）。
+      var selfBtn = t.closest ? t.closest("[data-self-act]") : null;
+      if(selfBtn){
+        e.preventDefault();
+        var sact = selfBtn.getAttribute("data-self-act");
+        var smk = selfBtn.getAttribute("data-self-kind");
+        var smi = Number(selfBtn.getAttribute("data-self-index"));
+        var sst = ppState(smk);
+        if(sact === "save" && sst && sst.loaded){
+          ppSave(sst, false).then(function(ok){
+            PP_TPL.notice = ok ? "这一段已存进提示词。" : "";
+            ppTplRender();
+          });
+        }else if(sact === "jump" && sst && sst.loaded){
+          if(!sst.open) sst.open = {};
+          sst.open[smi] = true;
+          ppSetPane(smk);
+          setTimeout(function(){
+            var card = document.querySelector("[data-pp-editor='" + smk + "'] [data-pm-module='" + smi + "']");
+            if(card && card.scrollIntoView) card.scrollIntoView({block:"center"});
+          }, 80);
+        }
+        return;
+      }
       var copyBtn = t.closest ? t.closest("[data-pp-copy]") : null;
       if(copyBtn){ ppCopy(copyBtn.getAttribute("data-pp-copy"), copyBtn); e.preventDefault(); return; }
       var expandBtn = t.closest ? t.closest("[data-pp-expand]") : null;

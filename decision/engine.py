@@ -3808,9 +3808,46 @@ class DecisionEngine:
             if self._trim_deferred(sid):
                 continue
             try:
+                # 用户 m27528 第 1 条：待发堆到缓冲线、窗口却已经只剩保留条数时，
+                # 先把待发并进窗口，否则 _trim_gate 那句「没有可裁余量就直接跳过」
+                # 会让待发一路堆着（休息时段尤其明显）。
+                self._fold_pending_pile(sid)
                 plugin.window.maybe_trim(sid, trigger="buffer")
             except Exception:
                 logger.exception(f"[multi-decision] {sid} 缓冲裁切失败（已忽略）")
+
+    def _fold_pending_pile(self, sid: str) -> int:
+        """待发攒过缓冲线、窗口却已经没有裁切余量时，先把待发并进窗口。
+
+        用户 m27528 第 1 条：休息时段不触发决策，fold_pending 只在「判不回」
+        那条路上跑（engine.py 判不回分支），窗口裁到 keep 之后 maybe_trim 在
+        _trim_gate 里因为「counted_before <= keep」直接返回，于是待发一路堆到
+        天亮，下一轮请求一口气带上八十多条。这里补一条：待发够「阈值 + 缓冲」
+        就并进来，再交给 maybe_trim 按 keep 压回去。
+        """
+        plugin = self.plugin
+        if plugin.window is None:
+            return 0
+        try:
+            if not plugin.eff("window_enabled", sid):
+                return 0
+            keep = max(1, int(plugin.eff("window_keep", sid)))
+            threshold = max(keep + 1, int(plugin.eff("window_trim_threshold", sid)))
+            buffer_extra = max(0, int(plugin.eff("window_buffer", sid) or 0))
+            cur = int(plugin.window.size(sid) or 0)
+            pend = int(plugin.window.pending_counted(sid) or 0)
+        except Exception:
+            return 0
+        # 窗口还有余量就先让 maybe_trim 自己裁，别多此一举
+        if cur > keep:
+            return 0
+        if pend < threshold + buffer_extra:
+            return 0
+        try:
+            return int(plugin.window.fold_pending(sid) or 0)
+        except Exception:
+            logger.exception(f"[multi-decision] {sid} 待发并入窗口失败（已忽略）")
+            return 0
 
     # ------------------------------------------------------------------ 触发链
 

@@ -4442,10 +4442,16 @@ class WindowManager:
         plan = self._trim_gate(sid, trigger)
         if plan is None:
             return None
+        # v4.52（用户 m28586 第 6 项）：先落快照，再动刀。以前是裁完再写，中间隔着
+        # 中期摘要与窗口日志；请求前裁切更是压根不写快照，被裁掉的那批在任何一份
+        # 快照里都看不到，页面上就是「中间少了一段」。
+        snap_path = self._trim_snapshot_pre(sid, plan, trigger)
         done = self._trim_apply(sid, plan)
         if done is None:
+            # 一条也没裁掉：刚才那份快照是个空承诺，撤掉，别在走势图上留一根假柱子。
+            self._trim_snapshot_drop(snap_path)
             return None
-        return self._trim_record(sid, plan, done, trigger, event_id)
+        return self._trim_record(sid, plan, done, trigger, event_id, snap_path)
 
     def _trim_gate(self, sid: str, trigger: str) -> Optional[dict]:
         """判这一轮要不要裁。只读窗口，不碰任何状态；返回 None＝不裁。
@@ -4520,6 +4526,24 @@ class WindowManager:
         protect = bool(plugin.eff("protect_tool_groups", sid))
         before_chars = self._chars(st.messages)
         before_msgs = list(st.messages)
+        # v4.52（用户 m28586 第 6 项）：待发与「历史留几条」都在这里算好，一路带进
+        # plan —— 裁切现在要「先落快照、再动刀」，快照里也得有这份待发。
+        try:
+            pend_msgs = self._pending_messages(st)
+        except Exception:  # pragma: no cover - 待发坏了也不能挡住裁切
+            logger.exception("[multi-decision] 生成待发消息失败，保留条数退回原口径")
+            pend_msgs = []
+        pend_all = count_messages(pend_msgs)
+        # v3.89（用户 m05321 第 2 条）：保留条数要**把待发一起算**——待发下一轮就会
+        # 并进窗口，历史还按满 keep 留的话，裁完立刻又挨着触发线。
+        # v4.52（用户 m28586 第 6 项）：原来直接 max(1, keep - pend_all)，待发比 keep
+        # 还多时历史只剩 1 条（实测 67 → 4 条、user 直接归零），一次裁掉一整片。
+        # 现在兜一个下限：历史至少留 keep 的一半，剩下的等待发并进窗口后再裁。
+        keep_hist = max(1, keep - pend_all)
+        keep_floor = max(1, keep // 2)
+        if keep_hist < keep_floor:
+            keep_hist = keep_floor
+        keep_hist = min(keep_hist, keep)
         return {
             "st": st,
             "keep": keep,
@@ -4531,6 +4555,9 @@ class WindowManager:
             "user_total_before": user_total_before,
             "before_chars": before_chars,
             "before_msgs": before_msgs,
+            "pend_msgs": pend_msgs,
+            "pend_all": pend_all,
+            "keep_hist": keep_hist,
         }
 
     def _trim_apply(self, sid: str, plan: dict) -> Optional[dict]:
@@ -4557,13 +4584,24 @@ class WindowManager:
         # 10条左右的历史+20条左右的待发」。原来 keep 只按窗口算，裁完 30 条历史，
         # 待发那 20 条下一轮照样并进来 → 立刻 50 条，离 70 条只差 20，很快就又裁。
         # 现在历史只留 keep - 待发条数；待发本身就超过 keep 时留 1 条（历史不能空）。
-        try:
-            pend_msgs = self._pending_messages(st)
-        except Exception:  # pragma: no cover - 待发坏了也不能挡住裁切
-            logger.exception("[multi-decision] 生成待发消息失败，保留条数退回原口径")
-            pend_msgs = []
-        pend_all = count_messages(pend_msgs)
-        keep_hist = max(1, keep - pend_all)
+        pend_msgs = plan.get("pend_msgs")
+        if pend_msgs is None:
+            try:
+                pend_msgs = self._pending_messages(st)
+            except Exception:  # pragma: no cover - 待发坏了也不能挡住裁切
+                logger.exception("[multi-decision] 生成待发消息失败，保留条数退回原口径")
+                pend_msgs = []
+        pend_all = plan.get("pend_all")
+        if pend_all is None:
+            pend_all = count_messages(pend_msgs)
+        keep_hist = plan.get("keep_hist")
+        if keep_hist is None:
+            # v4.52（用户 m28586 第 6 项）：跟 _trim_gate 同一套兜底——待发就把保留
+            # 条数吃光时，历史至少留一半，别砍到只剩 1 条把窗口清空。
+            share = keep - pend_all
+            if share < max(1, keep // 2):
+                share = max(1, keep // 2)
+            keep_hist = share
         hist_before = before_msgs
         # user_only=False：keep 按全量计入消息算（用户 m02080）
         cut = trim_by_count(st.messages, keep_hist, protect=protect, user_only=False)
@@ -4617,8 +4655,59 @@ class WindowManager:
             "keep_hist": keep_hist,
         }
 
+    def _trim_snapshot_pre(self, sid: str, plan: dict, trigger: str) -> str:
+        """先把「裁前窗口 + 待发」落成一份快照，再动刀（v4.52，用户 m28586 第 6 项）。
+
+        以前快照是在裁完之后写的，中间还隔着中期摘要与窗口日志；请求前那次裁切
+        （trigger=before_request）更是压根不写快照——被裁掉的那批既不在任何一份
+        快照里，也进不了摘要，记录页上就是「中间凭空少了一段」。
+        现在顺序反过来：这份快照的内容就是裁切那一刻的完整上下文，裁完只回填
+        after 那几个数（_trim_record 里做）。
+        """
+        try:
+            rlog = getattr(self.plugin, "request_log", None)
+            if rlog is None:
+                return ""
+            pend_msgs = list(plan.get("pend_msgs") or [])
+            snap = list(plan.get("before_msgs") or []) + pend_msgs
+            view = view_of(snap, raw_sid=self.raw_sid(sid))
+            if pend_msgs:
+                for it in view[max(0, len(view) - len(pend_msgs)):]:
+                    it["pending"] = True
+            cut = {
+                "ts": time.time(),
+                "before": plan.get("before") or 0,
+                "counted_before": plan.get("counted_before") or 0,
+                "user_before": plan.get("user_before") or 0,
+                "pending_before": plan.get("pending_before") or 0,
+                "user_total_before": plan.get("user_total_before") or 0,
+                "after": 0,
+                "counted_after": 0,
+                "user_after": 0,
+                "user_total_after": 0,
+                "after_chars": 0,
+                "trigger": trigger,
+            }
+            return str(
+                rlog.write_trim_snapshot(sid, snap, cut, view=view, pending_n=len(pend_msgs)) or ""
+            )
+        except Exception:
+            logger.debug("[multi-decision] 先写裁切快照失败（已吞掉）", exc_info=True)
+            return ""
+
+    def _trim_snapshot_drop(self, path: str) -> None:
+        """裁切最后一条也没裁掉时，把刚才先写的那份快照撤掉。"""
+        if not path:
+            return
+        try:
+            rlog = getattr(self.plugin, "request_log", None)
+            if rlog is not None:
+                rlog.discard_round(path)
+        except Exception:
+            logger.debug("[multi-decision] 撤销裁切快照失败（已吞掉）", exc_info=True)
+
     def _trim_record(self, sid: str, plan: dict, done: dict, trigger: str,
-                     event_id: str) -> dict:
+                     event_id: str, snap_path: str = "") -> dict:
         """记账：状态计数、裁切记录、轮次身份、中期摘要、快照、一行 info 日志。
 
         这里不改窗口内容，只写。返回值就是 maybe_trim 的返回值（record）。
@@ -4702,28 +4791,45 @@ class WindowManager:
         # v3.75（用户本轮第 5 条）：这种「没人说话时顺手裁」不挂在任何一次请求上，
         # 以前只留一行窗口日志，趋势图上就看不见——窗口在「实时快照」那根柱子里
         # 突然变短。现在单独落一份快照，列表里多一次独立记录。
-        if trigger != "before_request":
-            try:
-                rlog = getattr(plugin, "request_log", None)
-                if rlog is not None:
-                    # v3.88（用户 m05012 第 2 条）：快照条数按它自己的内容算，不硬拔高。
-                    # v3.89（用户 m05321 第 1 条）：快照 = 触发那一刻的完整内容，即
-                    # **裁前窗口 + 攒着的待发**，待发那几项逐条标 pending（页面显示
-                    # 「待发」+ 虚线框）。用户原话：「触发时候，当前这些消息应该变成
-                    # 快照，待发也要算进快照里，你可以在快照里标注这些是待发」。
-                    # 裁切本身只动窗口，所以下一轮的实时窗才是裁后的 keep 条。
+        # v4.52（用户 m28586 第 6 项）：这份快照已经在裁之前写好了（_trim_snapshot_pre），
+        # 请求前那次裁切也照写。这里只把裁完的数补进去——一次裁切仍然只有一根柱子。
+        fields = {
+            "trim_after": after,
+            "trim_after_user": user_after,
+            "trim_counted_after": counted_after,
+            "trim_user_total_after": user_after + int(pending_before or 0),
+        }
+        rlog = getattr(plugin, "request_log", None)
+        if rlog is not None:
+            if snap_path:
+                try:
+                    rlog.patch_round(snap_path, fields)
+                except Exception:
+                    logger.debug(
+                        "[multi-decision] 回填裁切快照失败（已吞掉）", exc_info=True
+                    )
+            else:
+                # 先写那一步失败（或老调用点没给路径）：退回「裁完再写」，别丢整份快照。
+                try:
+                    # v3.88：快照条数按它自己的内容算，不硬拔高。
+                    # v3.89：快照 = 触发那一刻的完整内容，即**裁前窗口 + 攒着的待发**。
                     snap = list(before_msgs) + list(pend_msgs)
                     view = view_of(snap, raw_sid=self.raw_sid(sid))
                     if pend_msgs:
                         for it in view[max(0, len(view) - len(pend_msgs)):]:
                             it["pending"] = True
+                    cut_rec = dict(record)
+                    cut_rec.update(fields)
+                    cut_rec["trim_user_total_before"] = int(user_total_before or 0)
+                    cut_rec["trim_counted_before"] = int(counted_before or 0)
+                    cut_rec["trigger"] = trigger
                     rlog.write_trim_snapshot(
-                        sid, snap, record, view=view, pending_n=len(pend_msgs)
+                        sid, snap, cut_rec, view=view, pending_n=len(pend_msgs)
                     )
-            except Exception:
-                logger.debug(
-                    "[multi-decision] 写裁切快照失败（已吞掉）", exc_info=True
-                )
+                except Exception:
+                    logger.debug(
+                        "[multi-decision] 写裁切快照失败（已吞掉）", exc_info=True
+                    )
         logger.info(
             f"[multi-decision] {sid} 窗口裁切 {before} → {after} 条"
             f"（窗口内用户 {user_before} + 待发 {pending_before} = 合计 {user_total_before}，"
