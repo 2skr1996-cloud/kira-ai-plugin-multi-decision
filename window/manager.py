@@ -413,6 +413,89 @@ def _media_by_ids(content, raw_sid: str = "") -> list:
     return out
 
 
+def _mid_of_text(text) -> str:
+    """从一行消息原文里取 message_id（没有就空串）。"""
+    m = _MID_RE.search(str(text or ""))
+    return m.group(1).strip() if m else ""
+
+
+def _state_messages(st) -> list:
+    """取某个会话的窗口消息列表（没有就空）。"""
+    try:
+        return list(getattr(st, "messages", None) or [])
+    except Exception:
+        return []
+
+def media_map_of(msgs) -> dict:
+    """窗口状态 -> {message_id: [media...]}，给 attach_window_images 用。
+
+    用户 m22856 图1：一条「动图＋文字」的消息正文里根本没有 [图片] 占位，按占位
+    反查永远挂不上图，模型那边只剩一句干文字。窗口状态里明明记着这条消息的
+    media（收消息那一刻就留了副本），按 message_id 建张表，挂图那一步按表来。
+    """
+    out = {}
+    for m in msgs or []:
+        try:
+            refs = _get(m, "media") or []
+        except Exception:
+            refs = []
+        if not refs:
+            continue
+        mid = _mid_of_text(_get(m, "raw") or _get(m, "text") or "")
+        if not mid:
+            continue
+        bucket = out.setdefault(mid, [])
+        for r in refs:
+            if isinstance(r, dict):
+                bucket.append(r)
+    return out
+
+
+def _materialize_session_media(rel: str, raw_sid: str, mid: str) -> str:
+    """把插件缓存里的图复制成框架认得的 session_media 路径。
+
+    框架的 resolve_media_references 只认 <data>/session_media 下的真实文件；
+    with_owned_images 也只收 session_media/<会话哈希>/<消息哈希>/<文件> 或
+    archive/<内容哈希> 两种形状。插件自己按 URL 抓下来的图（sha1(url).gif）
+    两边都不满足，塞进去会被整段丢掉（用户 m22856 图1 就是这张动图）。
+    """
+    root = _data_root()
+    if root is None or not raw_sid or not mid:
+        return ""
+    rel = str(rel or "").replace("\\", "/").strip().lstrip("/")
+    if not rel:
+        return ""
+    if rel.startswith(_MEDIA_ROOT + "/"):
+        return rel if ensure_media_file(rel) else ""
+    src = root / rel
+    try:
+        size = src.stat().st_size
+    except OSError:
+        return ""
+    if size <= 0 or not src.is_file():
+        return ""
+    name = rel.rsplit("/", 1)[-1]
+    if not name or name.startswith("."):
+        return ""
+    target_rel = "%s/%s/%s/%s" % (
+        _MEDIA_ROOT,
+        hashlib.sha256(str(raw_sid).encode("utf-8")).hexdigest(),
+        hashlib.sha256(str(mid).encode("utf-8")).hexdigest(),
+        name,
+    )
+    target = root / target_rel
+    try:
+        if not (target.is_file() and target.stat().st_size == size):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.parent / (name + ".mdmirror")
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, target)
+        _touch_cache_file(src)
+        return target_rel
+    except Exception:
+        return ""
+
+
 def _media_by_mid_index(mid: str) -> list:
     """按消息哈希回插件自己的索引里找副本（原图已被框架挪走/清掉时的兜底）。
 
@@ -496,6 +579,39 @@ def _sniff_image_mime(path) -> str:
     return ""
 
 
+def _refs_from_chain(chain, root: Path) -> list:
+    """从框架消息库里那条 chain 认出归档过的图（v4.46，用户 m22856）。
+
+    形状：session_media/archive/<内容哈希>，扁平、无后缀、与 message_id 无关，
+    只能靠 chain 里 element.file 指回来。文件没了就当没有。
+    """
+    try:
+        items = json.loads(chain) if isinstance(chain, (str, bytes, bytearray)) else chain
+    except Exception:
+        return []
+    out, seen = [], set()
+    for el in items or []:
+        if not isinstance(el, dict):
+            continue
+        if str(el.get("type") or "") not in ("image", "sticker", "emoji"):
+            continue
+        if str(el.get("file_type") or "") != "archive":
+            continue
+        rel = str(el.get("file") or "").strip().replace("\\", "/")
+        if not rel or rel in seen:
+            continue
+        target = root / rel
+        try:
+            if not target.is_file() or target.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
+        seen.add(rel)
+        out.append({"path": rel,
+                    "mime": str(el.get("mime") or "") or _sniff_image_mime(target)})
+    return out
+
+
 def _media_from_db(mid: str) -> list:
     """按 message_id 查框架消息库，返回它归档过的图片路径（相对 data）。
 
@@ -530,33 +646,183 @@ def _media_from_db(mid: str) -> list:
     chain = row[0] if row else None
     if not chain:
         return []
-    try:
-        items = json.loads(chain) if isinstance(chain, (str, bytes, bytearray)) else chain
-    except Exception:
-        return []
-    out, seen = [], set()
-    for el in items or []:
-        if not isinstance(el, dict):
-            continue
-        if str(el.get("type") or "") not in ("image", "sticker", "emoji"):
-            continue
-        if str(el.get("file_type") or "") != "archive":
-            continue
-        rel = str(el.get("file") or "").strip().replace("\\", "/")
-        if not rel or rel in seen:
-            continue
-        target = root / rel
-        try:
-            if not target.is_file() or target.stat().st_size <= 0:
-                continue
-        except OSError:
-            continue
-        seen.add(rel)
-        out.append({"path": rel, "mime": str(el.get("mime") or "") or _sniff_image_mime(target)})
+    out = _refs_from_chain(chain, root)
     if out:
         if len(_MEDIA_DB_CACHE) >= _MEDIA_DB_LIMIT:
             _MEDIA_DB_CACHE.clear()
         _MEDIA_DB_CACHE[mid] = out
+    return out
+
+
+#: v4.46（用户 m22856）：一条消息一条消息地查库太贵——真机上一张「文字＋动图」
+#: 的消息要走 _media_from_db，一次 1.2 秒；整窗 80 条就是一分半，请求直接卡死。
+#: 所以改成「一次请求批量反查一遍」，库里读不出来就歇 5 分钟再试，别每轮都白等。
+_MEDIA_DB_DOWN_UNTIL = 0.0
+_MEDIA_DB_CHUNK = 300
+
+
+_MEDIA_DIRS_CACHE = {}
+_MEDIA_DIRS_TTL = 60.0
+
+
+def _media_dirs(raw_sid: str, base: Path) -> list:
+    """反查时要扫的会话目录：先本会话，再其余会话（顺序固定，缓存键才稳）。
+
+    列一次 session_media 要几十毫秒（archive 里上千个文件），一次请求一次就够，
+    60 秒内的重复调用直接用上次的结果。
+    """
+    key = str(base)
+    hit = _MEDIA_DIRS_CACHE.get(key)
+    if hit and (time.time() - hit[0]) < _MEDIA_DIRS_TTL:
+        own = hit[1]
+        if raw_sid:
+            me = hashlib.sha256(str(raw_sid).encode("utf-8")).hexdigest()
+            if me not in own:
+                own = [me] + list(own)
+        return own
+    dirs = []
+    if raw_sid:
+        dirs.append(hashlib.sha256(str(raw_sid).encode("utf-8")).hexdigest())
+    try:
+        if base.is_dir():
+            for d in sorted(base.iterdir(), key=lambda x: x.name):
+                if d.is_dir() and d.name != "archive" and d.name not in dirs:
+                    dirs.append(d.name)
+    except OSError:
+        pass
+    _MEDIA_DIRS_CACHE[key] = (time.time(), list(dirs))
+    if len(_MEDIA_DIRS_CACHE) > 64:
+        _MEDIA_DIRS_CACHE.clear()
+    return dirs
+
+
+def _media_scan_mid(mid: str, base: Path, dirs) -> list:
+    """框架自己落的那些图：session_media/<会话哈希>/<消息哈希>/<文件>。"""
+    mid_hash = hashlib.sha256(mid.encode("utf-8")).hexdigest()
+    for sid_hash in dirs:
+        folder = base / sid_hash / mid_hash
+        found = []
+        try:
+            if not folder.is_dir():
+                continue
+            for f in sorted(folder.iterdir()):
+                try:
+                    if not f.is_file() or f.stat().st_size <= 0:
+                        continue
+                except OSError:
+                    continue
+                found.append({"path": "%s/%s/%s/%s" % (_MEDIA_ROOT, sid_hash, mid_hash, f.name),
+                              "mime": mimetypes.guess_type(f.name)[0] or ""})
+        except OSError:
+            continue
+        if found:
+            return found
+    return []
+
+
+def _media_bulk(texts, raw_sid: str = "") -> dict:
+    """把一批消息里能认回来的图一次查完，返回 {message_id: [ref...]}。
+
+    顺序与 _media_by_ids 完全一致，只是把「索引加载」「库连接」这两件贵事
+    从「每条消息一次」压成「每次请求一次」：① 框架 session_media 目录；
+    ② 插件自己的 _index.json 副本；③ 框架消息库里归档过的原图。
+    """
+    mids, seen_ids = [], set()
+    for t in texts or []:
+        for mid in _MID_RE.findall(str(t or "")):
+            mid = mid.strip()
+            if mid and mid not in seen_ids:
+                seen_ids.add(mid)
+                mids.append(mid)
+    out = {}
+    if not mids:
+        return out
+    try:
+        from core.utils.path_utils import get_data_path
+
+        base = Path(get_data_path()) / _MEDIA_ROOT
+    except Exception:
+        return out
+    dirs = _media_dirs(raw_sid, base)
+    key_dirs = tuple(dirs)
+    pend = []
+    for mid in mids:
+        key = (mid, key_dirs)
+        hit = _MEDIA_ID_CACHE.get(key)
+        if hit and _media_paths_alive(hit):
+            out[mid] = hit
+            continue
+        found = _media_scan_mid(mid, base, dirs)
+        if found:
+            out[mid] = found
+            _MEDIA_ID_CACHE[key] = found
+        else:
+            pend.append(mid)
+    cache = _media_cache_root()
+    if pend and cache is not None:
+        try:
+            by_path = _index_load(cache).get("byPath") or {}
+        except Exception:
+            by_path = {}
+        if by_path:
+            by_hash = {}
+            for rel_key, name in by_path.items():
+                parts = str(rel_key or "").split("/")
+                if len(parts) >= 3 and name:
+                    by_hash.setdefault(parts[-2], []).append(str(name))
+            still = []
+            for mid in pend:
+                names = by_hash.get(hashlib.sha256(mid.encode("utf-8")).hexdigest()) or []
+                found, used = [], set()
+                for name in names:
+                    if name in used:
+                        continue
+                    path = cache / name
+                    try:
+                        if not path.is_file() or path.stat().st_size <= 0:
+                            continue
+                    except OSError:
+                        continue
+                    used.add(name)
+                    try:
+                        rel = path.relative_to(base.parent).as_posix()
+                    except Exception:
+                        continue
+                    found.append({"path": rel,
+                                  "mime": mimetypes.guess_type(name)[0] or ""})
+                if found:
+                    out[mid] = found
+                    _MEDIA_ID_CACHE[(mid, key_dirs)] = found
+                else:
+                    still.append(mid)
+            pend = still
+    if pend:
+        root = _data_root()
+        db = (root / "data.db") if root is not None else None
+        if db is not None and db.is_file() and time.time() >= _MEDIA_DB_DOWN_UNTIL:
+            import sqlite3
+
+            got = {}
+            try:
+                con = sqlite3.connect("file:%s?mode=ro" % db.as_posix(), uri=True, timeout=1.0)
+                try:
+                    for i in range(0, len(pend), _MEDIA_DB_CHUNK):
+                        chunk = pend[i:i + _MEDIA_DB_CHUNK]
+                        sql = ("SELECT platform_message_id, chain FROM messages "
+                               "WHERE platform_message_id IN (%s)") % ",".join("?" * len(chunk))
+                        for pmid, chain in con.execute(sql, chunk):
+                            refs = _refs_from_chain(chain, root)
+                            if refs:
+                                got[str(pmid)] = refs
+                finally:
+                    con.close()
+            except Exception:
+                globals()["_MEDIA_DB_DOWN_UNTIL"] = time.time() + 300.0
+                logger.debug("[multi-decision] 批量读消息库认图失败（5 分钟内不再试）", exc_info=True)
+            for mid, refs in got.items():
+                out[mid] = refs
+                _MEDIA_ID_CACHE[(mid, key_dirs)] = refs
+                _MEDIA_DB_CACHE[mid] = refs
     return out
 
 
@@ -2071,7 +2337,23 @@ def stamp_assistant_time(messages) -> List[Any]:
                     stamp = time.strftime("%H:%M", time.localtime(float(_nts)))
             except Exception:
                 stamp = ""
-            if not stamp or _TIME_HEAD_RE.match(text):
+            if _TIME_HEAD_RE.match(text):
+                out.append(msg)
+                continue
+            if not stamp:
+                # v4.40（用户 m22856）：老注记的 ts 可能已经丢了（旧版序列化只留
+                # role/content/name）。宁可差几分钟，也不能让这一行光秃秃没有时间：
+                # 退回「前面最近一条用户消息的时间」，前面没有就用后面最近一条。
+                for j in range(i - 1, -1, -1):
+                    if times[j]:
+                        stamp = times[j]
+                        break
+                if not stamp:
+                    for j in range(i + 1, len(times)):
+                        if times[j]:
+                            stamp = times[j]
+                            break
+            if not stamp:
                 out.append(msg)
                 continue
         else:
@@ -2503,7 +2785,7 @@ def _apply_derived(messages, gif_mode: str = "grid") -> List[Any]:
 
 
 def attach_window_images(messages, raw_sid: str, keep: int = 128,
-                         gif_mode: str = "grid") -> List[Any]:
+                         gif_mode: str = "grid", media_map=None) -> List[Any]:
     """给窗口里的历史消息真正挂上图片（v4.41，用户 m21746）。
 
     以前只有「本轮新发的那条」带图，历史里的图一律退化成 [图片] 文本——模型
@@ -2519,11 +2801,20 @@ def attach_window_images(messages, raw_sid: str, keep: int = 128,
     不设体积上限（v4.44，用户 m22319）：真机 14:04/14:05 两轮各带 16.7 MB 原图，
     上游照收；张数由 history_images 管，够不够发得出去交给压缩与上游判断，别提前替它砍图。
 
+    v4.45（用户 m22856）：带文字的图根本没有 [图片] 占位，按占位反查永远挂不上，
+    所以改成「有 message_id 就查」，查不到就原样放回去——没图的行绝不变形态。
+
     只改发出去的那一份，窗口本体一行不动，页面上照旧看得到原图。
     """
     out = list(messages or [])
     if not raw_sid:
         return _apply_derived(out, gif_mode)
+    # v4.46（用户 m22856）：整窗的图一次查完（目录 / 插件索引 / 消息库各走一遍），
+    # 不能一条消息查一次库——真机上那是 1.2 秒 × 条数。
+    try:
+        bulk = _media_bulk([_get(m, "content") for m in out], raw_sid)
+    except Exception:
+        bulk = {}
     kept = 0
     for i in range(len(out) - 1, -1, -1):
         content = _get(out[i], "content")
@@ -2532,16 +2823,32 @@ def attach_window_images(messages, raw_sid: str, keep: int = 128,
             kept += sum(1 for p in content if _part_type(p) in IMAGE_TYPES)
             continue
         text = content if isinstance(content, str) else text_of_content(content)
-        if not text or not _PIC_TEXT_RE.search(text):
+        if not text:
+            continue
+        mid = _mid_of_text(text)
+        extra = list((media_map or {}).get(mid) or []) if mid else []
+        # v4.45（用户 m22856）：带文字的动图/图片，正文里没有 [图片] 占位，
+        # 只看占位永远挂不上。这里不再要求「有占位」：有 message_id 就去反查，
+        # 反查到就挂（_media_by_ids 自己会走窗口索引与归档库兜底），查不到就
+        # 原样放回去——没图的行绝不变形态、不断前缀。
+        if not mid and not _PIC_TEXT_RE.search(text):
             continue
         refs = []
         if keep < 0 or kept < keep:
-            try:
-                refs = _media_by_ids(text, raw_sid) or []
-            except Exception:
-                refs = []
+            refs = list(bulk.get(mid) or []) if mid else []
+            if not refs and extra:
+                for _r in extra:
+                    _p = _materialize_session_media(str(_r.get("path") or ""), raw_sid, mid)
+                    if not _p:
+                        continue
+                    refs.append({"path": _p,
+                                 "mime": str(_r.get("mime") or "")
+                                 or (mimetypes.guess_type(_p)[0] or "")})
             if keep >= 0:
                 refs = refs[:max(0, keep - kept)]
+        if not refs and not _PIC_TEXT_RE.search(text):
+            # 没有占位的行：挂不上图就别把形态从字符串改成数组，免得白断一次前缀
+            continue
         try:
             new = with_owned_images(content, refs, raw_sid, force_list=True)
         except Exception:
@@ -2873,6 +3180,8 @@ class WindowManager:
         fixed = regroup_images(st.messages)
         if fixed is not st.messages:
             st.messages = fixed
+        # 注记自己的时刻先补回来（v4.40，用户 m22856），不然下面按 ts 出时间戳会落空
+        self._backfill_note_ts(st)
         msgs = strip_observe(st.messages)
         msgs = strip_error_messages(msgs)
         # v4.03（用户 m11947）：注记就在窗口本体里，页面照着画，不再重插。
@@ -3043,6 +3352,52 @@ class WindowManager:
             "dec": True,
             "ts": float(d.get("ts") or 0),
         }
+
+    def _backfill_note_ts(self, st) -> int:
+        """给丢了 ts 的老注记把自己的时刻找回来（v4.40，用户 m22856）。
+
+        注记的时间戳只认它自己的 ts（判定那一刻）。窗口序列化以前只留
+        role/content/name，热重载一轮 ts 就没了，于是原文/对照里那几条注记
+        没有 [HH:MM]。这里按正文从决策账本里认领：认到就把 ts 补回消息本体，
+        之后序列化会带着它走，不会再丢。
+        """
+        if st is None:
+            return 0
+        rows = [d for d in (getattr(st, "decisions", None) or []) if isinstance(d, dict)]
+        if not rows:
+            return 0
+        used = set()
+        fixed = 0
+        for msg in list(getattr(st, "messages", None) or []):
+            try:
+                if not is_decision_note(msg) or _get(msg, "ts"):
+                    continue
+                text = str(text_of_content(_get(msg, "content")) or "")
+                _m = _DEC_NOTE_HEAD.match(text) or _DEC_NOTE_TS_HEAD.match(text)
+                body = text[_m.end():] if _m else text
+                for i, d in enumerate(rows):
+                    if i in used or self._decision_body(d) != body:
+                        continue
+                    ts = float(d.get("ts") or 0)
+                    if ts <= 0:
+                        continue
+                    used.add(i)
+                    if isinstance(msg, dict):
+                        msg["ts"] = ts
+                        msg["dec"] = True
+                    else:
+                        try:
+                            setattr(msg, "ts", ts)
+                        except Exception:
+                            pass
+                    fixed += 1
+                    break
+            except Exception:
+                continue
+        if fixed:
+            logger.debug("[multi-decision] 注记补回判定时刻 %d 条（窗口 %d 条）",
+                         fixed, len(getattr(st, "messages", None) or []))
+        return fixed
 
     def _decision_note(self, sid: str):
         """最后一条判定对应的那条消息（页面与兼容旧调用用）。"""
@@ -3388,7 +3743,8 @@ class WindowManager:
         # v4.41（用户 m21746）：历史里的图也要真发给模型，不能只留一个 [图片]。
         msgs = attach_window_images(msgs, self.raw_sid(sid),
                                     self._int_eff("history_images", sid, 128),
-                                    self._gif_mode(sid))
+                                    self._gif_mode(sid),
+                                    media_map_of(_state_messages(self._states.get(sid))))
         # bot 自己说的话也要带时间与名字（用户 m30009 / m32754）：框架存的
         # assistant 只有 <msg message_id="…">，既没时间也没名字，模型分不清谁说的。
         # 顺序不能反：名字要落在 <msg ...> 之后，时间要落在最前面。
@@ -3405,6 +3761,8 @@ class WindowManager:
         st = self._states.get(sid)
         if st is None or not st.messages:
             return []
+        # 注记自己的时刻先补回来（v4.40，用户 m22856）：原文/对照里的注记要有 [HH:MM]
+        self._backfill_note_ts(st)
         msgs = strip_observe(st.messages)
         msgs = strip_error_messages(msgs)
         # v4.03（用户 m11947）：注记现在真写进窗口本体了（commit_decision），
@@ -3420,7 +3778,8 @@ class WindowManager:
         # v4.41（用户 m21746）：历史里的图也要真发给模型，不能只留一个 [图片]。
         msgs = attach_window_images(msgs, self.raw_sid(sid),
                                     self._int_eff("history_images", sid, 128),
-                                    self._gif_mode(sid))
+                                    self._gif_mode(sid),
+                                    media_map_of(_state_messages(self._states.get(sid))))
         # bot 自己说的话也要带时间与名字（用户 m32754）：这两个函数原来只挂在
         # messages_of / normalize 上，真正发出去的 snapshot 漏了，请求原文里
         # assistant 既没有 [HH:MM] 也没有 [桃华]。
