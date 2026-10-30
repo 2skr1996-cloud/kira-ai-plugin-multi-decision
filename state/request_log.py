@@ -1581,6 +1581,11 @@ class RequestLog:
             "decision_model": str(data.get("model") or ""),
             "decision_via": str(data.get("via") or ""),
             "decision_attempts": int(data.get("attempts") or 0),
+            # v4.39（用户 m20816）：这一轮决策带了几张图。0 张 = 那会儿没图、或者
+            # 开关关着、或者带图那次失败退回了纯文字（fallback 为真）。
+            "decision_images": [it for it in (data.get("images") or []) if isinstance(it, dict)],
+            "decision_image_count": int(data.get("image_count") or 0),
+            "decision_images_fallback": bool(data.get("images_fallback")),
             "decision_elapsed": float(data.get("elapsed") or 0.0),
             # 用户 m05124 第 8 条：决策轮也把「触发 → 真正开始判」的防抖等待存下来，
             # 记录页的「用时」列才能写成「防抖 7s + 2s」。
@@ -2154,6 +2159,11 @@ class RequestLog:
                 # 用户 m05124 第 8 条：决策轮的防抖等待（触发 → 真正开始判）。
                 "decision_debounce": float(data.get("decision_debounce") or 0.0),
                 "decision_tools": list(data.get("decision_tools") or []),
+                # v4.39（用户 m20816）：决策行带上「看图几张」，页面明细里能直接看到
+                # 这一轮模型到底有没有把图收到。
+                "decision_images": list(data.get("decision_images") or []),
+                "decision_image_count": int(data.get("decision_image_count") or 0),
+                "decision_images_fallback": bool(data.get("decision_images_fallback")),
                 # v3.94（用户 m08398 图7/图8）：决策行也要跟回复记录一样给出
                 # token（入/出）与缓存命中，决策表才能照抄回复表的列。
                 "input_tokens": int(data.get("input_tokens") or 0),

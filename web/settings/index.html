@@ -2103,6 +2103,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
         row("切回主模型等待", dnum("decision_fallback_cooldown", "秒"), "用备用模型撑过这段时间，再试回主模型。") +
         row("单次超时", dnum("decision_timeout", "秒"), "一次决策最多等多久，超时按失败算。") +
         row("工具最多几轮", dnum("decision_tool_rounds", "轮"), "决策时允许连着调几次工具。") +
+        row("决策看图", "<label class='sw2'><input type='checkbox' data-k='decision_see_images'" +
+          (dVal("decision_see_images", true) ? " checked" : "") +
+          "><span class='tr'></span>" + ST_SW + "</label>",
+          "决策模型也看一眼这一轮消息里的图。它本身得是能看图的模型；万一上游不认图，会自动退回纯文字再判一次。") +
       "</div><div class='drows'>" +
         row("决策失败时", "<select class='dipt' data-k='decision_fail_action' id='dec-fail'>" +
           "<option value='allow'" + (act === "allow" ? " selected" : "") + ">跳过决策调用回复</option>" +

@@ -106,6 +106,12 @@
     "default": 60,
     "hint": "一次决策最多等几秒，超时算失败。"
   },
+  "decision_see_images": {
+    "name": "决策看图",
+    "type": "switch",
+    "default": true,
+    "hint": "决策模型也看一眼这一轮消息里的图片。它本身得是能看图的模型；万一上游不认图，会自动退回纯文字再判一次。"
+  },
   "decision_fail_action": {
     "name": "决策失败时",
     "type": "string",

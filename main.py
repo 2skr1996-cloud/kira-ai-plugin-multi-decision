@@ -881,6 +881,10 @@ class MultiDecisionPlugin(BasePlugin):
         # 用户 m13212 后：必回（@ / 叫名字）默认跳过抖动——都被点名了还干等几秒，
         # 用户看到的就是「@ 完一秒多才动」。想让它也老实等完，把这个开关关掉。
         self.jitter_skip_must_go = _as_bool(cfg.get("jitter_skip_must_go"), True)
+        # v4.39（用户 m20816）：决策也要能看图——以前决策的 user 消息是纯文字，图片
+        # 只剩「[图片]」四个字，模型看不到。开关默认开。v4.40（用户 m21305）：张数
+        # 不再单独设，跟回复同一个口径吃 history_images（默认 128）。
+        self.decision_see_images = _as_bool(cfg.get("decision_see_images"), True)
         # v3.44（用户本轮第 2 条）：连发合并同样加开关，默认关——关着时同一人连发
         # 每条都照常计数；开了才按 burst_merge_seconds 合并。
         self.burst_merge_enabled = _as_bool(cfg.get("burst_merge_enabled"), False)
@@ -2599,8 +2603,14 @@ class MultiDecisionPlugin(BasePlugin):
         sid = str(sid or "").strip()
         # 测试按钮不该把异常甩成 500（页面只会显示 Internal Server Error，看不出是哪一步挂的）。
         try:
+            _imgs = []
+            try:
+                if getattr(self, "decision_see_images", True) is not False:
+                    _imgs = self.window.decision_images(sid)
+            except Exception:
+                _imgs = []
             got = await self.decision_phase.decide(
-                sid, self._decision_messages(sid), self.decision_options())
+                sid, self._decision_messages(sid), self.decision_options(), images=_imgs)
         except Exception as exc:
             logger.exception("[multi-decision] 决策测试失败")
             return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc), "result": {}}

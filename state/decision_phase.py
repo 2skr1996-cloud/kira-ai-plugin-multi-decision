@@ -24,11 +24,13 @@ flush_session_messages 让框架带着完整系统提示词跑 agent。进阶模
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +291,62 @@ def parse_decision(text: str):
     reason = str(data.get("reason") or data.get("理由") or "").strip()
     say = str(data.get("say") or data.get("说") or "").strip()
     return {"reply": bool(reply), "reason": reason[:120], "say": say[:200]}
+
+
+#: 单张图上限 4MB（v4.39，用户 m20816）：再大 base64 之后会把请求撑爆，干脆不带。
+_IMG_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _sniff_image_mime(raw: bytes, rel: str = "") -> str:
+    """按文件头认图片类型，认不出再退回后缀（v4.39，用户 m20816）。"""
+    head = raw[:16]
+    if head[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head[:2] == b"BM":
+        return "image/bmp"
+    low = str(rel or "").lower()
+    for ext, mime in ((".jpg", "image/jpeg"), (".jpeg", "image/jpeg"), (".png", "image/png"),
+                      (".gif", "image/gif"), (".webp", "image/webp"), (".bmp", "image/bmp")):
+        if low.endswith(ext):
+            return mime
+    return ""
+
+
+def _image_data_url(path: str) -> str:
+    """把一张图编成 data URL，直接塞进决策的 user 消息（v4.39，用户 m20816）。
+
+    没走框架的 kira_image_ref：决策这条链是插件自己拼 LLMRequest，框架内部怎么解析
+    那个引用这边看不到也验不了；data URL 是最通用的形态，上游不认的话 decide() 会
+    退回纯文字再判一次。
+    """
+    rel = str(path or "").strip().replace("\\", "/")
+    if not rel:
+        return ""
+    if rel.startswith("data:"):
+        return rel
+    if rel.startswith(("http://", "https://")):
+        return rel
+    try:
+        from core.utils.path_utils import get_data_path  # type: ignore
+
+        target = Path(get_data_path()) / rel
+        if not target.is_file():
+            return ""
+        raw = target.read_bytes()
+    except Exception:
+        return ""
+    if not raw or len(raw) > _IMG_MAX_BYTES:
+        return ""
+    mime = _sniff_image_mime(raw, rel)
+    if not mime:
+        return ""
+    return "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii"))
 
 
 @dataclass
@@ -832,7 +890,7 @@ class DecisionPhase:
     # ---------- 对外入口 ----------
 
     async def decide(self, sid: str, messages, opt: DecisionOptions,
-                     identity: str = "") -> dict:
+                     identity: str = "", images=None) -> dict:
         """跑一次决策。返回结构给 engine / 快照 / 页面共用。"""
         started = time.time()
         persona = ""
@@ -868,12 +926,30 @@ class DecisionPhase:
         user_text = body or "（这段时间没人说话）"
         if dyn:
             user_text = user_text + "\n\n" + dyn
+        # v4.39（用户 m20816）：决策也要能看图。以前 user 消息永远是纯字符串，
+        # transcript 里的图只剩「[图片]」四个字，模型根本不知道有图。
+        img_parts, img_rows = self.image_parts(images or [])
+        user_content = ([{"type": "text", "text": user_text}] + img_parts) if img_parts else user_text
         payload = [
             {"role": "system", "content": system_text},
-            {"role": "user", "content": user_text},
+            {"role": "user", "content": user_content},
         ]
         got = await self._chain(payload, tools, opt)
         parsed = got.get("parsed")
+        # 带图那次没成（上游不认 image_url / 图太大 / 模型没有视觉），退回纯文字再判
+        # 一次：宁可这一次看不见图，也不能因为有图把整轮判断判死。
+        img_fallback = False
+        if img_parts and not (bool(got.get("ok")) and parsed):
+            logger.warning("[multi-decision] 决策带图失败（%s），退回纯文字重判一次",
+                           str(got.get("error") or "")[:200])
+            img_fallback = True
+            payload = [
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_text},
+            ]
+            got = await self._chain(payload, tools, opt)
+            parsed = got.get("parsed")
+            img_parts, img_rows = [], []
         out = {
             "ok": bool(parsed) and bool(got.get("ok")),
             "reply": bool(parsed.get("reply")) if parsed else False,
@@ -896,6 +972,10 @@ class DecisionPhase:
             "user_prompt": user_text,
             "dynamic_text": dyn,
             "dynamic_parts": dyn_parts,
+            # v4.39（用户 m20816）：这一轮真带了几张图、都是谁在什么时候发的。
+            "images": img_rows,
+            "image_count": len(img_rows),
+            "images_fallback": img_fallback,
             "sid": sid,
         }
         if not out["ok"]:
@@ -903,6 +983,38 @@ class DecisionPhase:
             out["reply"] = (opt.fail_action != "block")
             out["failed"] = True
         return out
+
+    def image_parts(self, images):
+        """把这一轮的图片编成 user 消息里的多模态 parts（v4.39，用户 m20816）。
+
+        形态照 OpenAI 那套：每张图前面先插一行「图 1 · [18:21] 大椰果」，模型才知道
+        这张图对应聊天记录里的哪一句；图片本体是 data URL。一张都编不出来时返回
+        空 parts，调用方就发纯文字——跟改动之前完全一样，不会因为没图多出空段。
+        """
+        rows = []
+        parts = []
+        for it in list(images or []):
+            if not isinstance(it, dict):
+                continue
+            url = _image_data_url(str(it.get("path") or ""))
+            if not url:
+                continue
+            label = "图 %d" % (len(rows) + 1)
+            ts = str(it.get("ts") or "").strip()
+            who = str(it.get("who") or "").strip()
+            if ts:
+                label += " · [%s]" % ts
+            if who:
+                label += " %s" % who
+            rows.append({"path": str(it.get("path") or ""), "mime": str(it.get("mime") or ""),
+                         "ts": ts, "who": who, "mid": str(it.get("mid") or "")})
+            parts.append({"type": "text", "text": label})
+            parts.append({"type": "image_url", "image_url": {"url": url}})
+        if not rows:
+            return [], []
+        head = {"type": "text", "text": ("【本轮图片】下面 %d 张图是这段聊天里刚发过来的，"
+                                         "看清楚再决定要不要接话：" % len(rows))}
+        return [head] + parts, rows
 
     def status(self) -> dict:
         return {

@@ -1996,6 +1996,32 @@ def is_decision_note(msg) -> bool:
     return t.startswith("判定要回") or t.startswith("判定不回")
 
 
+#: 图片消息里的 [HH:MM] 与 [user_nickname: X]（v4.39，用户 m20816）。
+_IMG_TS_RE = re.compile(r"\[\s*(\d{1,2}:\d{2})\s*\]")
+#: 窗口里的时间戳不一定是「[18:21]」这种纯时间：框架那边有时是
+#: 「[Oct 30 2026 18:21 Fri]」。这一条专门在这种长括号里捞时间。
+_IMG_TS_LOOSE_RE = re.compile(r"\[[^\[\]]{0,48}?(\d{1,2}:\d{2})(?::\d{2})?[^\[\]]{0,48}?\]")
+_IMG_WHO_RE = re.compile(r"\[user_nickname:\s*([^\],\|]+)")
+
+
+def img_meta(text) -> tuple:
+    """从一条消息原文里抠出「发图时间」和「谁发的」（v4.39，用户 m20816）。
+
+    决策带图时要给每张图配一行「图 2 · [18:21] 大椰果」，模型才知道这张图对应
+    聊天记录里的哪一句；抠不出来就留空，绝不因此丢图。
+    """
+    t = str(text or "")
+    ts = ""
+    m = _IMG_TS_RE.search(t) or _IMG_TS_LOOSE_RE.search(t)
+    if m:
+        ts = m.group(1)
+    who = ""
+    m2 = _IMG_WHO_RE.search(t)
+    if m2:
+        who = m2.group(1).strip()
+    return ts, who
+
+
 def stamp_assistant_time(messages) -> List[Any]:
     """给 assistant 消息补上时间（用户 m30009 图4）。
 
@@ -3107,6 +3133,96 @@ class WindowManager:
                 item["name"] = str(nm)
             out.append(item)
         return out
+
+    def decision_images(self, sid: str, limit: Optional[int] = None) -> List[dict]:
+        """这一轮决策该看的图片（v4.39，用户 m20816）。
+
+        决策那条链是自己拼 LLMRequest 的，user 消息永远是纯文本，transcript 里的
+        图片只剩「[图片]」四个字——模型压根不知道有图。这里把窗口里的图捞出来
+        交给决策那边编成 data URL。
+
+        v4.40（用户 m21305）：不再自己定张数。跟回复那条同一个口径——窗口里留
+        几张原图（history_images，默认 128）就带几张，要少带去调那个设置。
+        显式传 limit 就按它截（0 = 不带图）。
+        """
+        st = self._states.get(sid)
+        if st is None:
+            return []
+        if limit is None:
+            try:
+                want = int(self._int_eff("history_images", sid, 128))
+            except Exception:
+                want = 128
+        else:
+            want = int(limit or 0)
+        want = max(0, want)
+        if want <= 0:
+            return []
+        raw_sid = self._raw_sids.get(sid) or ""
+
+        def one(path, mime, text="", mid=""):
+            rel = str(path or "").strip().replace("\\", "/")
+            if not rel:
+                return None
+            ts, who = img_meta(text)
+            return {"path": rel, "mime": str(mime or ""), "ts": ts, "who": who,
+                    "mid": str(mid or "")}
+
+        # ① 窗口：从尾部往前把图收齐，够 want 张就停（顺序最后再翻回正序）。
+        win_rows: List[dict] = []
+        try:
+            for msg in reversed(list(getattr(st, "messages", None) or [])):
+                if len(win_rows) >= want:
+                    break
+                role = str(_get(msg, "role") or "")
+                if role != "user":
+                    continue
+                content = _get(msg, "content")
+                # 正文和三处图片都得试：窗口里有些消息 content 是 None（只剩
+                # text / media 两个键），有些是 list parts，还有些只有 media。
+                text = text_of_content(content)
+                if not str(text or "").strip():
+                    text = str(_get(msg, "text") or _get(msg, "raw") or "")
+                found = []
+                try:
+                    found = media_list(content, raw_sid) or []
+                except Exception:
+                    found = []
+                if not found:
+                    found = [x for x in list(_get(msg, "media") or []) if isinstance(x, dict)]
+                for m in found:
+                    if m.get("missing"):
+                        continue
+                    row = one(m.get("path"), m.get("mime"), text)
+                    if row:
+                        win_rows.append(row)
+        except Exception:
+            logger.exception("[multi-decision] 取窗口图片失败（决策只看待发里的图）")
+        win_rows.reverse()
+        # ② 待发：还没并进窗口的那批，就是这一轮真正新来的。
+        pend_rows: List[dict] = []
+        try:
+            for it in list(getattr(st, "pending", []) or []):
+                if not isinstance(it, dict) or str(it.get("mark") or "") == "bot":
+                    continue
+                text = str(it.get("raw") or it.get("text") or "")
+                for m in refs_media(it.get("media_refs") or [], raw_sid):
+                    if m.get("missing"):
+                        continue
+                    row = one(m.get("path"), m.get("mime"), text, str(it.get("mid") or ""))
+                    if row:
+                        pend_rows.append(row)
+        except Exception:
+            logger.exception("[multi-decision] 取待发图片失败（决策按窗口里的图判）")
+        out: List[dict] = []
+        seen = set()
+        for row in win_rows + pend_rows:
+            key = row["path"]
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+        return out[-want:]
 
     @staticmethod
     def _as_openai(msg):

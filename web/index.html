@@ -6317,6 +6317,15 @@ var ctxSnapRequest = 0;
       var mlab = String(r.model_label || r.decision_model || "—");
       if(mlab.length > 26) mlab = mlab.slice(0, 26) + "…";
       var el = Number(r.decision_elapsed) || 0;
+      // v4.39（用户 m20816）：决策也能看图了——结论旁边标一下这一轮真带了几张。
+      var icnt = Number(r.decision_image_count) || 0;
+      var ifb = !!r.decision_images_fallback;
+      // 用最窄的写法：这一格本来就只有「30 条」几个字，塞个大徽标会把
+      // 「结论 / 理由」两列挤窄（真机 1256 宽时会挤到「要回」竖着排）。
+      var itag = icnt
+        ? " <span class='dim' title='" + esc("这一轮决策带了 " + icnt + " 张图" +
+            (ifb ? "（带图那次没成功，已退回纯文字重判）" : "")) + "'>· 图" + icnt + "</span>"
+        : (ifb ? " <span class='tag warn' title='带图那次没成功，已退回纯文字重判'>看图退回</span>" : "");
       // 用户 m05124 第 8 条：决策轮也要看得到防抖——「防抖 7s + 2s」。
       var del = Number(r.decision_debounce) || 0;
       var tk = r.tokens || {};
@@ -6331,7 +6340,9 @@ var ctxSnapRequest = 0;
               (del ? "<span class='dim'>防抖 </span>" + fmtDur(del) : "<span class='dim'>—</span>") + "</td>";
       html += "<td class='num'" + (el ? " title='" + esc("判定本身用了 " + fmtDur(el)) + "'" : "") + ">" +
               (el ? fmtDur(el) : "<span class='dim'>—</span>") + "</td>";
-      html += "<td class='num'>" + (Number(r.window_total) || 0) + " 条</td>";
+      // 看图张数跟着「窗口条数」走：那是这一轮喂进去多少内容，放结论格里会把
+      // 「理由」列挤窄、整行被撑成好几行（真机截图见过）。
+      html += "<td class='num'>" + (Number(r.window_total) || 0) + " 条" + itag + "</td>";
       html += "<td class='num tokc'>" + (tk.input
         ? "<span class='tokw'>" + tokText(tk.input) + " / " + tokText(tk.output) + "</span>"
         : "<span class='dim'>—</span>") + "</td>";

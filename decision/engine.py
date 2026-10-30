@@ -4397,7 +4397,17 @@ class DecisionEngine:
         flow = self._input_flows.get(sid)
         epoch = flow.epoch if flow is not None and flow.phase == "active" else None
         started = time.time()
-        got = await phase.decide(sid, msgs, opt)
+        # v4.39（用户 m20816）：决策也要能看图。v4.40（用户 m21305）：不再自己
+        # 定张数——跟回复那条同一个口径，窗口里留几张原图（history_images，
+        # 默认 128）就带几张；开关关掉才退回纯文字。
+        dec_imgs = []
+        try:
+            if self._c("decision_see_images", sid) is not False:
+                dec_imgs = self.window.decision_images(sid)
+        except Exception:
+            logger.exception("[multi-decision] 决策取图失败（这一轮按纯文字判）")
+            dec_imgs = []
+        got = await phase.decide(sid, msgs, opt, images=dec_imgs)
         if self._closed or (epoch is not None and
                 (flow.epoch != epoch or flow.phase != "active")):
             return True  # A timed-out/cancelled decision may not mutate a later window.
@@ -4429,6 +4439,10 @@ class DecisionEngine:
             "user_prompt": str(got.get("user_prompt") or ""),
             "dynamic_text": str(got.get("dynamic_text") or ""),
             "dynamic_parts": list(got.get("dynamic_parts") or []),
+            # v4.39（用户 m20816）：这一轮决策到底带了几张图、是不是退回纯文字了。
+            "images": list(got.get("images") or []),
+            "image_count": int(got.get("image_count") or 0),
+            "images_fallback": bool(got.get("images_fallback")),
             "input_tokens": int(got.get("input_tokens") or 0),
             "output_tokens": int(got.get("output_tokens") or 0),
             "cached_tokens": int(got.get("cached_tokens") or 0),
