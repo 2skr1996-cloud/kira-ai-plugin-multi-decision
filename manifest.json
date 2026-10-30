@@ -1,7 +1,7 @@
 {
   "display_name": "多样决策",
   "plugin_id": "kira-ai-plugin-multi-decision",
-  "version": "A3.0.2",
+  "version": "A3.0.3",
   "author": "sijun",
   "description": "接管群聊触发判定与上下文窗口：多样规则决策（计数 / 概率 / 节奏 / 模型判定）、唤醒&必回与休息时段开关、配额与退避、自管窗口，替代默认聊天的掷骰子判定。",
   "repo": "https://github.com/2skr1996-cloud/kira-ai-plugin-multi-decision",
