@@ -381,10 +381,28 @@
     "hint": "一直没触发请求时，窗口攒到「保留条数 + 缓冲」条就强制裁一次，别让上下文无限长。"
   },
   "history_images": {
-    "name": "历史里保留几张原图",
+    "name": "历史最多带几张原图",
     "type": "integer",
     "default": 128,
-    "hint": "历史只留最近这么多张原图，更早换成 [图片]；0 = 全换。"
+    "hint": "回复和决策共用这一个数：窗口里最近这么多张图原样带给模型，更早的只留 [图片]。调大＝模型看得更全，请求也更大更贵；0 = 历史图一张都不带（这一轮新发的照常带）。"
+  },
+  "history_gif_first": {
+    "name": "只读首帧",
+    "type": "switch",
+    "default": false,
+    "hint": "动图只发第 1 帧，压成一张静图。最省，但后面那些帧的动作模型看不到。"
+  },
+  "history_gif_original": {
+    "name": "原图发送",
+    "type": "switch",
+    "default": false,
+    "hint": "动图原样发出去，一帧不少。看得最全，也最贵——几 MB 的动图会原封不动进请求。"
+  },
+  "history_gif_grid": {
+    "name": "九帧模式",
+    "type": "switch",
+    "default": true,
+    "hint": "等距抽最多 9 帧拼成一张九宫格，后面跟一句说明（第几张是从哪抽的）。默认这档，体积和内容最平衡。"
   },
   "window_trim_threshold": {
     "name": "裁切触发阈值",

@@ -290,14 +290,20 @@ def _plain_text(content) -> str:
     return ""
 
 
-def with_owned_images(content, refs, raw_sid: str):
-    """Attach only direct-message refs with exact session and owner hashes."""
+def with_owned_images(content, refs, raw_sid: str, force_list: bool = False):
+    """Attach only direct-message refs with exact session and owner hashes.
+
+    force_list=True：无论有没有 refs 都交回数组形态（v4.41，用户 m21746）。
+    历史行也走这条，同一条消息的形态从头到尾不变——不然图一过保鲜期，
+    这条消息就从数组变回字符串，上游 token 序列跟着变，前缀缓存整段作废。
+    """
     # v4.25（用户 m22166）：带图消息的形态必须稳定。以前只有真拿到 refs 才把
     # content 换成数组，同一条历史消息就会随「这轮图在不在」在字符串与数组之间
     # 来回变——上游的 token 序列跟着变，字符前缀整段断掉，命中预估掉到 0.1%。
     # 现在只要文本里有 [Image attached] 占位就固定成数组形态（有 refs 就带上）。
     text = _plain_text(content)
-    want_list = isinstance(content, (list, tuple)) or _IMAGE_PLACEHOLDER in text
+    want_list = (force_list or isinstance(content, (list, tuple))
+                 or _IMAGE_PLACEHOLDER in text)
     parts = list(content) if isinstance(content, (list, tuple)) else [{"type": "text", "text": text}]
     heads = [_HEAD_RE.match(line) for line in text.split("\n")]
     mids = {m.group(2).strip() for m in heads if m}

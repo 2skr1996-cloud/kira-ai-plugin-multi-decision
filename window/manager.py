@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
+import math
 import mimetypes
 import os
 import re
@@ -2192,6 +2194,368 @@ def strip_old_images(messages, keep: int = 128) -> List[Any]:
     return out
 
 
+#: 历史行里能看出「这儿有图」的占位（框架与插件两套写法都认）
+_PIC_TEXT_RE = re.compile(r"\[(?:图片|表情|Image attached|image|Image)\]", re.I)
+
+
+#: 历史图的「发出去那一份」（v4.45，用户 m22454）
+#:
+#: 目标：模型看得懂，别再为一张 4.8 MB 的动图付钱。
+#: - 动图：等距抽最多 9 帧，拼成九宫格，后面跟一句说明；
+#: - 静态大图：压到最长边 1280；压完反而更大就保留原图（已经压过的 JPEG 常见）；
+#: - 小于 1 MB 的静态图一律不动，原样发最清楚。
+#:
+#: 文件名 = sha1(源文件内容) + 参数，同一个源永远算出同一个名字，字节也完全一样，
+#: 所以前缀缓存不会因为「每轮重算」而断。文件写在 session_media/derived 下——框架的
+#: resolve_media_references 只认 session_media 里的真实文件，plugin_data 下会被当成
+#: 「图片没了」换成 [image unavailable]（探针实测，见 changelog）。
+_DERIVE_DIR = "session_media/derived"
+_DERIVE_MAX_FRAMES = 9
+_DERIVE_TILE = 384
+_DERIVE_GAP = 6
+_DERIVE_GRID_Q = 88
+_DERIVE_STATIC_SIDE = 1280
+_DERIVE_STATIC_Q = 95
+_DERIVE_STATIC_MIN = 1024 * 1024
+_DERIVE_KEEP_MAX = 600
+_DERIVE_SHA_CACHE: dict = {}
+_DERIVE_MEMO: dict = {}
+# v4.45（用户 m22611）：历史里的动图怎么发给模型，三档互斥——九帧拼图（默认）/ 原图 /
+# 只读首帧；三个都不开就是 skip：这张图不发，正文里只留 [图片]。
+_GIF_MODES = ("grid", "original", "first", "skip")
+
+
+def _derive_root() -> Optional[Path]:
+    root = _data_root()
+    if root is None:
+        return None
+    return root / _DERIVE_DIR
+
+
+def _src_digest(path: Path) -> str:
+    """源文件内容 sha1，用来给衍生图起一个稳定的名字。"""
+    try:
+        st = path.stat()
+    except OSError:
+        return ""
+    key = (str(path), int(st.st_size), int(st.st_mtime))
+    hit = _DERIVE_SHA_CACHE.get(key)
+    if hit:
+        return hit
+    digest = ""
+    try:
+        h = hashlib.sha1()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        digest = h.hexdigest()
+    except Exception:
+        return ""
+    if len(_DERIVE_SHA_CACHE) > 4096:
+        _DERIVE_SHA_CACHE.clear()
+    _DERIVE_SHA_CACHE[key] = digest
+    return digest
+
+
+def _frame_rgb(frame):
+    """一帧统一成白底 RGB，带透明的表情不会变成黑块。"""
+    from PIL import Image  # noqa: F401  （延迟导入，环境没装 PIL 时整块降级）
+
+    rgba = frame.convert("RGBA")
+    bg = Image.new("RGB", rgba.size, (255, 255, 255))
+    bg.paste(rgba, mask=rgba.split()[-1])
+    return bg
+
+
+def _grid_jpeg(im, frames: int) -> tuple:
+    """等距抽帧拼九宫格，返回 (jpeg 字节, 列, 行, 实际帧数)。"""
+    from PIL import Image
+
+    k = max(1, min(_DERIVE_MAX_FRAMES, frames))
+    if k == 1:
+        idxs = [0]
+    else:
+        idxs = [int(round(i * (frames - 1) / (k - 1))) for i in range(k)]
+    tiles = []
+    for i in idxs:
+        im.seek(int(i))
+        bg = _frame_rgb(im.copy())
+        bg.thumbnail((_DERIVE_TILE, _DERIVE_TILE), Image.LANCZOS)
+        tiles.append(bg)
+    cols = 1 if k == 1 else (2 if k <= 4 else 3)
+    rows = int(math.ceil(k / float(cols)))
+    cw = max(t.width for t in tiles)
+    ch = max(t.height for t in tiles)
+    gap = _DERIVE_GAP
+    canvas = Image.new("RGB", (cols * cw + (cols + 1) * gap, rows * ch + (rows + 1) * gap), (250, 250, 250))
+    for i, t in enumerate(tiles):
+        ry, cx = divmod(i, cols)
+        x = gap + cx * (cw + gap) + (cw - t.width) // 2
+        y = gap + ry * (ch + gap) + (ch - t.height) // 2
+        canvas.paste(t, (x, y))
+    buf = io.BytesIO()
+    canvas.save(buf, "JPEG", quality=_DERIVE_GRID_Q, optimize=True)
+    return buf.getvalue(), cols, rows, k
+
+
+def _shrink_jpeg(im) -> bytes:
+    """静态图压到最长边 1280，质量 95（与框架自带压缩同参）。"""
+    from PIL import Image
+
+    im.seek(0)
+    frame = _frame_rgb(im)
+    frame.thumbnail((_DERIVE_STATIC_SIDE, _DERIVE_STATIC_SIDE), Image.LANCZOS)
+    buf = io.BytesIO()
+    frame.save(buf, "JPEG", quality=_DERIVE_STATIC_Q, optimize=True)
+    return buf.getvalue()
+
+
+def _prune_derived(root: Path) -> None:
+    """衍生图只留最近 _DERIVE_KEEP_MAX 份，删最老的（删了下轮还会照原样重算）。"""
+    try:
+        files = [f for f in root.glob("mdp_*.jpg") if f.is_file()]
+    except OSError:
+        return
+    if len(files) <= _DERIVE_KEEP_MAX:
+        return
+    files.sort(key=lambda f: f.stat().st_mtime if f.exists() else 0.0)
+    for f in files[: len(files) - _DERIVE_KEEP_MAX]:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
+def _derive_media(rel: str, gif_mode: str = "grid") -> Optional[dict]:
+    """把一张历史图做成「便宜又看得懂」的一份，返回 {path, note}；不需要或不支持就 None。
+
+    动图按 gif_mode 分三档（v4.45，用户 m22611）：grid → 九宫格 + 一句说明；
+    original → 原样发（返回 None）；first → 只发第 1 帧、压成一张静图；
+    skip → 返回 {"skip": True, "note": …}，调用方把图整个撤掉。
+    静态大图 → 压到 1280。源图不存在、PIL 解不开、压完反而更大，一律返回 None。
+    """
+    root = _data_root()
+    droot = _derive_root()
+    if root is None or droot is None or not rel:
+        return None
+    try:
+        src = (root / str(rel).replace("\\", "/")).resolve()
+    except Exception:
+        return None
+    # 原图被框架清掉了也先试着从插件副本还原回来（用户 m02080 那套 _index.json）：
+    # 还原成功再压，比直接退回 [图片] 强
+    if not src.is_file():
+        try:
+            ensure_media_file(rel)
+        except Exception:
+            pass
+    try:
+        if not src.is_file():
+            return None
+        src_size = src.stat().st_size
+    except OSError:
+        return None
+    if src_size <= 0:
+        return None
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        im = Image.open(src)
+    except Exception:
+        return None
+    try:
+        frames = int(getattr(im, "n_frames", 1) or 1)
+    except Exception:
+        frames = 1
+    note = ""
+    if frames > 1:
+        mode = str(gif_mode or "grid").strip().lower()
+        if mode == "original":
+            return None
+        if mode == "skip":
+            # 三个开关全关：这张动图不发，正文里那条 [图片] 就留着当占位
+            return {"skip": True,
+                    "note": "（这张是动图，按设置没有发给模型）"}
+        if mode == "first":
+            try:
+                blob = _shrink_jpeg(im)
+            except Exception:
+                return None
+            tag = "f%d_%d" % (_DERIVE_STATIC_SIDE, _DERIVE_STATIC_Q)
+            note = "（动图 · 共 %d 帧，只发了第 1 帧，后面的帧没发）" % frames
+        else:
+            try:
+                blob, cols, rows, k = _grid_jpeg(im, frames)
+            except Exception:
+                return None
+            tag = "g%d_%d_%d" % (k, _DERIVE_TILE, _DERIVE_GRID_Q)
+            note = "（动图 · 共 %d 帧，上面是等距抽的 %d 帧拼图，%d×%d，从左到右、从上到下）" % (
+                frames, k, cols, rows)
+    else:
+        if src_size <= _DERIVE_STATIC_MIN:
+            return None
+        try:
+            blob = _shrink_jpeg(im)
+        except Exception:
+            return None
+        if not blob or len(blob) >= src_size:
+            return None
+        tag = "s%d_%d" % (_DERIVE_STATIC_SIDE, _DERIVE_STATIC_Q)
+    digest = _src_digest(src)
+    if not digest:
+        return None
+    name = "mdp_%s_%s.jpg" % (digest[:32], tag)
+    try:
+        droot.mkdir(parents=True, exist_ok=True)
+        target = droot / name
+        if target.is_file() and target.stat().st_size == len(blob):
+            os.utime(target, None)
+        else:
+            tmp = droot / (name + ".tmp")
+            tmp.write_bytes(blob)
+            os.replace(tmp, target)
+        _prune_derived(droot)
+        return {"path": _DERIVE_DIR + "/" + name, "note": note}
+    except Exception:
+        return None
+
+
+def _derive_cached(rel: str, gif_mode: str = "grid"):
+    """同一份源图（路径 + 大小 + 修改时间没变）只算一次，每轮请求别重复解图。
+
+    模式也要进键：换档之后同一张动图得重算一遍，不能吃到上一档的结果（v4.45）。
+    """
+    key = None
+    try:
+        root = _data_root()
+        if root is not None and rel:
+            src = (root / str(rel).replace("\\", "/"))
+            st = src.stat()
+            key = (str(rel), int(st.st_size), int(st.st_mtime),
+                   str(gif_mode or "grid"))
+    except Exception:
+        key = None
+    if key is not None and key in _DERIVE_MEMO:
+        return _DERIVE_MEMO[key]
+    res = _derive_media(rel, gif_mode)
+    if key is not None:
+        if len(_DERIVE_MEMO) > 4096:
+            _DERIVE_MEMO.clear()
+        _DERIVE_MEMO[key] = res
+    return res
+
+
+def swap_derived_parts(parts, gif_mode: str = "grid") -> list:
+    """把一条消息里的图片引用换成衍生图（动图九宫格 / 静态压缩），并补上说明。
+
+    gif_mode 三档见 _derive_media；skip 时这张动图整个撤掉、只留一句说明。
+    """
+    if not isinstance(parts, list):
+        return parts
+    out = []
+    changed = False
+    for part in parts:
+        if not (isinstance(part, dict) and _part_type(part) in IMAGE_TYPES):
+            out.append(part)
+            continue
+        hit = None
+        try:
+            hit = _derive_cached(str(part.get("path") or ""), gif_mode)
+        except Exception:
+            hit = None
+        if not hit:
+            out.append(part)
+            continue
+        if hit.get("skip"):
+            # 跳过：图不发，换成一句说明（正文那条 [图片] 还在，模型知道这里本来有图）
+            if hit.get("note"):
+                out.append({"type": "text", "text": hit["note"]})
+            changed = True
+            continue
+        out.append({"type": "kira_image_ref", "path": hit["path"], "mime_type": "image/jpeg",
+                    "detail": str(part.get("detail") or "high")})
+        if hit.get("note"):
+            out.append({"type": "text", "text": hit["note"]})
+        changed = True
+    return out if changed else parts
+
+
+def _apply_derived(messages, gif_mode: str = "grid") -> List[Any]:
+    """把整份消息里的图片都换成「发出去那一份」（动图九宫格 / 静态压缩）。
+
+    不能只在「刚挂上去的那几条」上做：窗口本体里本来就带图的消息（最近 128 张）
+    压根不走挂图那条路，不在这里补一遍，它们就会原样发 4.8 MB 的动图。
+    """
+    out = list(messages or [])
+    for i, msg in enumerate(out):
+        content = _get(msg, "content")
+        if not isinstance(content, list):
+            continue
+        try:
+            new = swap_derived_parts(list(content), gif_mode)
+        except Exception:
+            continue
+        if new != content:
+            out[i] = _with_content(msg, new)
+    return out
+
+
+def attach_window_images(messages, raw_sid: str, keep: int = 128,
+                         gif_mode: str = "grid") -> List[Any]:
+    """给窗口里的历史消息真正挂上图片（v4.41，用户 m21746）。
+
+    以前只有「本轮新发的那条」带图，历史里的图一律退化成 [图片] 文本——模型
+    压根不知道那张图长什么样，有人回头问「刚那张图里是什么」，它只能瞎编。
+    这里按 message_id 去 session_media 反查，把最近 keep 张真图重新挂回各自的
+    消息上，张数与决策链路同一个口径（history_images）。
+
+    形态固定：只要这条消息里有图片占位，content 一律是数组——能挂上就是
+    [text, ref...]，超出张数就是 [text]。不这么做，同一条历史消息会随「图还在
+    不在」在字符串与数组之间来回变，上游 token 序列跟着变、字符前缀整段断掉
+    （v4.25，用户 m22166 那次命中直接掉到 0.1%）。
+
+    不设体积上限（v4.44，用户 m22319）：真机 14:04/14:05 两轮各带 16.7 MB 原图，
+    上游照收；张数由 history_images 管，够不够发得出去交给压缩与上游判断，别提前替它砍图。
+
+    只改发出去的那一份，窗口本体一行不动，页面上照旧看得到原图。
+    """
+    out = list(messages or [])
+    if not raw_sid:
+        return _apply_derived(out, gif_mode)
+    kept = 0
+    for i in range(len(out) - 1, -1, -1):
+        content = _get(out[i], "content")
+        # 已经是数组、里面就有图：只算张数，不再重复挂
+        if _has_image(content):
+            kept += sum(1 for p in content if _part_type(p) in IMAGE_TYPES)
+            continue
+        text = content if isinstance(content, str) else text_of_content(content)
+        if not text or not _PIC_TEXT_RE.search(text):
+            continue
+        refs = []
+        if keep < 0 or kept < keep:
+            try:
+                refs = _media_by_ids(text, raw_sid) or []
+            except Exception:
+                refs = []
+            if keep >= 0:
+                refs = refs[:max(0, keep - kept)]
+        try:
+            new = with_owned_images(content, refs, raw_sid, force_list=True)
+        except Exception:
+            new = content
+        if isinstance(new, list) and new != content:
+            try:
+                new = swap_derived_parts(new, gif_mode)
+            except Exception:
+                pass
+            out[i] = _with_content(out[i], new)
+            kept += sum(1 for p in new if isinstance(p, dict) and _part_type(p) in IMAGE_TYPES)
+    return _apply_derived(out, gif_mode)
+
+
 def strip_observe(messages) -> List[Any]:
     """复制一份消息，去掉历史里残留的观察窗块和每条消息的群标识（不改原对象）。
 
@@ -2263,6 +2627,10 @@ class WindowManager:
     def _restore(self) -> int:
         """从寄存处接回窗口。返回接回来的会话数。"""
         saved = getattr(self._keep, "states", None) or {}
+        # 原始 sid 映射也接回来：热重载后第一轮还没 collect，图片反查全靠它
+        raw = getattr(self._keep, "raw_sids", None) or {}
+        if raw:
+            self._raw_sids.update({str(k): str(v) for k, v in dict(raw).items()})
         if not saved:
             return 0
         n = 0
@@ -2392,6 +2760,7 @@ class WindowManager:
             except Exception:  # pragma: no cover
                 continue
         self._keep.states = out
+        self._keep.raw_sids = dict(self._raw_sids)
         # 私聊另外落盘（内部自带限频，每轮不会真写盘）
         self._save_dm()
 
@@ -2485,8 +2854,14 @@ class WindowManager:
         return out
 
     def raw_sid(self, sid: str) -> str:
-        """归一 sid 对应的框架原始 sid（图片按 message_id 反查要用）。"""
-        return self._raw_sids.get(sid) or ""
+        """归一 sid 对应的框架原始 sid（图片按 message_id 反查要用）。
+
+        v4.42（用户 m21746 收尾）：这张映射表只在 collect 时才填，插件一热重载就是空的
+        ——那之后先跑的决策/快照组装拿不到 raw sid，图片反查一律落空，历史里每张图都
+        退回「[图片]」空壳（14:12 那条决策记录 arr 0 就是这么来的）。群聊/私聊的原始
+        sid 本来就是 sid 本身，映射查不到时直接用它。
+        """
+        return self._raw_sids.get(sid) or str(sid or "")
 
     def messages_of(self, sid: str, limit: int = 0) -> list:
         """当前窗口里的消息，转成可 JSON 化的精简结构（观察窗用）。"""
@@ -3010,6 +3385,10 @@ class WindowManager:
         msgs = regroup_images(msgs)
         msgs = shrink_timestamps(msgs)
         msgs = strip_old_images(msgs, self._int_eff("history_images", sid, 128))
+        # v4.41（用户 m21746）：历史里的图也要真发给模型，不能只留一个 [图片]。
+        msgs = attach_window_images(msgs, self.raw_sid(sid),
+                                    self._int_eff("history_images", sid, 128),
+                                    self._gif_mode(sid))
         # bot 自己说的话也要带时间与名字（用户 m30009 / m32754）：框架存的
         # assistant 只有 <msg message_id="…">，既没时间也没名字，模型分不清谁说的。
         # 顺序不能反：名字要落在 <msg ...> 之后，时间要落在最前面。
@@ -3038,6 +3417,10 @@ class WindowManager:
         msgs = regroup_images(msgs)
         msgs = shrink_timestamps(msgs)
         msgs = strip_old_images(msgs, self._int_eff("history_images", sid, 128))
+        # v4.41（用户 m21746）：历史里的图也要真发给模型，不能只留一个 [图片]。
+        msgs = attach_window_images(msgs, self.raw_sid(sid),
+                                    self._int_eff("history_images", sid, 128),
+                                    self._gif_mode(sid))
         # bot 自己说的话也要带时间与名字（用户 m32754）：这两个函数原来只挂在
         # messages_of / normalize 上，真正发出去的 snapshot 漏了，请求原文里
         # assistant 既没有 [HH:MM] 也没有 [桃华]。
@@ -3424,6 +3807,36 @@ class WindowManager:
             return int(v)
         except Exception:
             return default
+
+    def _bool_eff(self, key: str, sid: str, default: bool) -> bool:
+        """读一个开关型配置的有效值（单群覆盖优先）。拿不到就用 default。"""
+        try:
+            v = self.plugin.eff(key, sid)
+        except Exception:
+            return default
+        if v is None:
+            return default
+        if isinstance(v, str):
+            t = v.strip().lower()
+            if t in ("", "none", "null"):
+                return default
+            return t in ("1", "true", "on", "yes", "y", "开", "是")
+        return bool(v)
+
+    def _gif_mode(self, sid: str) -> str:
+        """历史里的动图怎么发给模型（v4.45，用户 m22611）。
+
+        三个开关互斥，后端按优先级取：九帧拼图 > 原图 > 只读首帧 > 跳过。
+        界面上开一个会关掉另两个，所以正常情况下只会命中前三个里的一个；
+        全都不开就是 skip——历史里的动图不发给模型。
+        """
+        if self._bool_eff("history_gif_grid", sid, True):
+            return "grid"
+        if self._bool_eff("history_gif_original", sid, False):
+            return "original"
+        if self._bool_eff("history_gif_first", sid, False):
+            return "first"
+        return "skip"
 
     def _summary_on(self, sid: str) -> bool:
         try:

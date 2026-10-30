@@ -1661,7 +1661,12 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     // 两列网格是「按顺序从左到右填」：偶数位落左列、奇数位落右列，所以要隔一个插一个杂项，
     // 右列才是「历史里保留几张原图 / 保护工具调用组 / 裁切点选择方式」。
     { p: "window", t: "窗口", keys: ["window_keep", "history_images", "window_trim_threshold",
-        "protect_tool_groups", "window_buffer"] },   // 用户 m10096：trim_strategy 已从设置里撤下（只剩机械裁切一种）
+        "protect_tool_groups", "window_buffer"] },
+    // v4.45（用户 m22611）：历史里的动图怎么发给模型，三档互斥、默认九帧拼图；
+    // 三个都不开＝跳过（图上不来，正文只留 [图片]）。判定在后端 _gif_mode。
+    { p: "window", t: "历史里的动图",
+      note: "三档互斥（开一个关另两个）；全关＝跳过",
+      keys: ["history_gif_first", "history_gif_original", "history_gif_grid"] },   // 用户 m10096：trim_strategy 已从设置里撤下（只剩机械裁切一种）
     // v3.67（用户 m20117 第 1 条）：中期摘要的保留份数 / 天数也归到这一组——
     // 它是窗口那边的特殊功能，不该混在缓存账本里（缓存页因此只剩 5 类）。
     // v3.85（用户 m04430 → m04550）：设置页是两列网格（偶数位在左、奇数位在右）。
@@ -3593,6 +3598,20 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(el) el.checked = false;
     return true;
   }
+  // v4.45（用户 m22611）：历史里的动图三档互斥——只读首帧 / 原图发送 / 九帧模式。
+  // 开一个就把另外两个关掉；三个都不开＝跳过，历史里的动图不发给模型。
+  var GIF_TRIO = ["history_gif_first", "history_gif_original", "history_gif_grid"];
+  function gifMutex(k, on){
+    if(GIF_TRIO.indexOf(k) < 0) return false;
+    if(!on) return true;              // 关掉当前这档 → 三个全关＝跳过
+    GIF_TRIO.forEach(function(twin){
+      if(twin === k) return;
+      if(configCache) configCache[twin] = false;
+      var el = document.querySelector("#settings [data-k=" + JSON.stringify(twin) + "]");
+      if(el) el.checked = false;
+    });
+    return true;
+  }
   // 老配置里两个都开着（行为上等于只开必回）：渲染时把「触发」显示成关的，
   // 免得一进页面就看见两个都亮；下次保存时自然写成互斥的那一种。
   function wakeShown(k, ak, on){
@@ -4928,6 +4947,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
     }
     // 用户 m10297 第 2 条：唤醒组一行里「触发 / 必回」互斥，逻辑在 wakeMutex。
     if(dk0 && wakeMutex(dk0, !!e.target.checked)){
+      dirty = true;
+    }
+    // v4.45（用户 m22611）：历史动图三档互斥（只读首帧 / 原图发送 / 九帧模式）。
+    if(dk0 && gifMutex(dk0, !!e.target.checked)){
       dirty = true;
     }
     // v3.16（用户 m40583）：三列标题上的模式开关 + 普通模式列里的两个子开关。

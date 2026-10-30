@@ -6266,7 +6266,9 @@ var ctxSnapRequest = 0;
     var dAgg = {n: 0, inp: 0, out: 0, cached: 0, hitSum: 0, hitW: 0, estSum: 0, estW: 0, bytes: 0};
     dShown.forEach(function(r){
       var t0 = r.tokens || {};
-      dAgg.bytes += Number(r.payload_bytes) || 0;
+      // v4.41（用户 m21541）：本页合计也要把图片 base64 算进去，不然决策带图的轮次
+      // 合计比实际小一大截（13 张图 ≈ 几 MB，文字才 9 KB）。
+      dAgg.bytes += payloadInfo(r).total;
       if(t0.cache_hit !== null && t0.cache_hit !== undefined && t0.input){
         dAgg.hitSum += Number(t0.cache_hit) * Number(t0.input);
         dAgg.hitW += Number(t0.input);
@@ -6303,7 +6305,7 @@ var ctxSnapRequest = 0;
       "<th class='lft'>模型</th>" + "<th class='lft' title='触发 → 真正开始这一轮之间等的那段（防抖 / 抖动），必回（@ / 叫名字）这一路不等'>防抖用时</th>" +
       "<th class='lft'>用时</th><th class='lft'>窗口条数</th>" +
       "<th class='lft' title='这一次决策调用的入 / 出 token'>token（入 / 出）</th>" +
-      "<th class='lft' title='决策提示词 + 聊天记录 + 本轮输入的 UTF-8 字节数'>体积估算</th>" +
+      "<th class='lft' title='决策提示词 + 聊天记录 + 本轮输入的 UTF-8 字节数；带图的轮次把图片 base64 也算进来'>体积估算</th>" +
       "<th class='lft'>命中预估</th><th class='lft'>缓存命中</th>" +
       "<th class='lft' title='这一轮是怎么被叫起来的：概率类写触发概率，@ 或叫昵称写来源'>触发类型</th></tr></thead><tbody>";
     dShown.forEach(function(r){
@@ -6346,9 +6348,21 @@ var ctxSnapRequest = 0;
       html += "<td class='num tokc'>" + (tk.input
         ? "<span class='tokw'>" + tokText(tk.input) + " / " + tokText(tk.output) + "</span>"
         : "<span class='dim'>—</span>") + "</td>";
+      // v4.41（用户 m21541）：决策的体积估算以前只报文字，带图的轮次看着像没体积。
+      // 现在跟回复表同一套：文 X · 图 Y（没图就写「无图」，一眼能分清）。
       var pb = Number(r.payload_bytes) || 0;
-      html += "<td class='num' title='决策提示词 + 聊天记录 + 本轮输入的 UTF-8 字节数'>" +
-              (pb ? fmtBytes(pb) : "<span class='dim'>—</span>") + "</td>";
+      var pdec = payloadInfo(r);
+      var picnt = Number(r.image_count) || 0;
+      var pcellD;
+      if(pdec.known){
+        pcellD = "文 " + fmtBytes(r.text_payload_bytes || pb) +
+          (picnt ? " · 图 " + (pdec.partial ? "≥" : "") + fmtBytes(r.image_base64_estimated_bytes || 0)
+                 : " · <span class='dim'>无图</span>") +
+          (pdec.partial && picnt ? "（" + (r.image_unknown_count || 0) + " 张未知）" : "");
+      } else {
+        pcellD = pb ? fmtBytes(pb) : "<span class='dim'>—</span>";
+      }
+      html += "<td class='num' title='" + esc(pdec.note) + "'>" + pcellD + "</td>";
       var est = (r.hit_estimate === null || r.hit_estimate === undefined) ? null : Number(r.hit_estimate);
       html += "<td class='num'>" + (est === null ? "<span class='dim'>—</span>"
         : "<span class='est'>" + est.toFixed(1) + "%</span>") + "</td>";
@@ -6475,7 +6489,7 @@ var ctxSnapRequest = 0;
             "<th class='lft' title='触发 → 真正开始请求之间等的那段（防抖 / 抖动）；必回（@ / 叫名字）这一路不等'>防抖用时</th>" +
             "<th class='lft' title='流水线总耗时：请求开始到请求结束，不含防抖等待与回复吐字'>用时</th><th class='lft'>窗口条数</th>" +
             "<th class='lft' title='这一轮所有步骤的合计；多步（有工具调用）时会把上下文重复计一次'>token（入 / 出）</th>" +
-            "<th class='lft' title='文本JSON + 请求图片base64投影预测；不是实际wire抓包字节'>体积估算</th>" +
+            "<th class='lft' title='文本JSON + 请求图片base64投影预测（图片按 base64 计入体积）；不是实际wire抓包字节'>体积估算</th>" +
             "<th class='lft'>命中预估</th>" +
             "<th class='lft'>缓存命中</th><th class='lft'>触发</th></tr></thead><tbody>";
     shown.forEach(function(r){
@@ -6544,8 +6558,17 @@ var ctxSnapRequest = 0;
       }
       if(wUser && wAll > wUser) wTip += "；窗口共 " + wAll + " 条（含 bot " + (wAll - wUser) + " 条）";
       else if(!wUser && wAll) wTip += "；这条是 v3.21 之前的记录，只存了含 bot 的总数 " + wAll + " 条";
+      // v4.41（用户 m21541）：条数旁边标上这一轮真正发出去的图——历史里的图仍以
+      // [图片] 占位留着，只有本轮新发的图才会变成 base64 跟着请求走，所以只数这些。
+      var rimg = Number(r.image_count) || 0;
+      var rimgB = Number(r.image_base64_estimated_bytes) || 0;
+      if(rimg) wTip += "；这一轮随请求真发出去的图 " + rimg + " 张（base64 " + fmtBytes(rimgB) + "）";
+      var rimgTag = rimg
+        ? " <span class='dim' title='" + esc("这一轮随请求发出 " + rimg + " 张图，base64 " + fmtBytes(rimgB) +
+            "；历史窗口里的图仍以 [图片] 占位，不重复发") + "'>· 图" + rimg + "</span>"
+        : "";
       html += "<td class='num' title='" + esc(wTip) + "'>" + (wUser ? wUser + " 条"
-                                     : (wAll ? wAll + " 条" : "<span class='dim' title='这条是 v2.64 之前的记录，当时没存真实条数'>—</span>")) + "</td>";
+                                     : (wAll ? wAll + " 条" : "<span class='dim' title='这条是 v2.64 之前的记录，当时没存真实条数'>—</span>")) + rimgTag + "</td>";
       // 字符数 / 字符每 token / 文本体积各占一列：原来三条全挤在 token 单元格
       // 底下那一行小字里，右边空出一大片，也没法按列比较（用户 m33271 图1）
       // v3.58（用户 m16875 图4）：token 是整轮各步之和。多步（有工具调用）时第二步会把前面的
@@ -6564,10 +6587,14 @@ var ctxSnapRequest = 0;
       var pi = payloadInfo(r);
       // 整格只留一行（用户 m41961）：文 14.8 KB · 图 3.95 MB。图片张数和口径说明都挂 title，
       // 不再把「约 3.97 MB」大字单独占一行。
+      // v4.41（用户 m21541）：没图的轮次也把「无图」写出来，不然「文 19.3 KB」看不出
+      // 是「这轮真没图」还是「有图没算进体积」。
+      var rpcnt = Number(r.image_count) || 0;
       var pcell = pi.known
         ? "文 " + fmtBytes(r.text_payload_bytes || 0) +
-          (r.image_count ? " · 图 " + fmtBytes(r.image_base64_estimated_bytes || 0) : "") +
-          (pi.partial ? "（" + (r.image_unknown_count || 0) + " 张未知）" : "")
+          (rpcnt ? " · 图 " + (pi.partial ? "≥" : "") + fmtBytes(r.image_base64_estimated_bytes || 0)
+                 : " · <span class='dim'>无图</span>") +
+          (pi.partial && rpcnt ? "（" + (r.image_unknown_count || 0) + " 张未知）" : "")
         : (pi.total ? pi.label : "<span class='dim'>—</span>");
       html += "<td class='num' title='" + esc(pi.note + "；不含展示反查图。") + "'>" + pcell + "</td>";
       // 命中预估（用户 m41511）：后端按「本轮公共前缀占比」算基准，只在距上一轮

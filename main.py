@@ -350,6 +350,10 @@ PER_SESSION_KEYS = (
     "window_enabled",
     "window_keep",
     "history_images",
+    # v4.45（用户 m22611）：历史里的动图怎么发（九帧 / 原图 / 只读首帧），三个都关＝跳过。
+    "history_gif_grid",
+    "history_gif_original",
+    "history_gif_first",
     "window_trim_threshold",
     "protect_tool_groups",
     "summary_enabled",
@@ -961,6 +965,12 @@ class MultiDecisionPlugin(BasePlugin):
         # 所以正常群聊几乎不会摸到上限；设 128 张和 MaiBot 的 max_image_num 一致，
         # 好处是历史内容几乎不变，前缀缓存不会因为「图被换掉」而断。
         self.history_images = max(0, _as_int(cfg.get("history_images"), 128))
+        # v4.45（用户 m22611）：历史里的动图怎么发给模型，三档互斥——
+        # 九帧拼图（默认）/ 原图发送 / 只读首帧；三个都不开＝跳过，图不发。
+        # 判定顺序在 window/manager.py 的 _gif_mode 里（grid > original > first > skip）。
+        self.history_gif_grid = _as_bool(cfg.get("history_gif_grid"), True)
+        self.history_gif_original = _as_bool(cfg.get("history_gif_original"), False)
+        self.history_gif_first = _as_bool(cfg.get("history_gif_first"), False)
         self.window_trim_threshold = max(1, _as_int(cfg.get("window_trim_threshold"), 60))
         # v3.85（用户 m04418 第 2 条）：撤掉「重启后回填条数」这条设置——群聊窗口
         # 热重载由寄存处接回、私聊另有 window_dm.json 存档，都不需要从框架记忆里回填。

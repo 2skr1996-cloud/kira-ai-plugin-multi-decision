@@ -999,6 +999,11 @@ class DecisionPhase:
             url = _image_data_url(str(it.get("path") or ""))
             if not url:
                 continue
+            # v4.41（用户 m21541）：体积估算要算上这次真发出去的图。base64 的长度就是
+            # wire 上多出来的体积，源图大小按同一套公式反推（跟 payload_metrics 一致）。
+            _enc = url.split(",", 1)[1] if (url.startswith("data:") and "," in url) else ""
+            _b64 = len(_enc)
+            _src = (_b64 // 4 * 3 - _b64 + len(_enc.rstrip("="))) if _b64 else 0
             label = "图 %d" % (len(rows) + 1)
             ts = str(it.get("ts") or "").strip()
             who = str(it.get("who") or "").strip()
@@ -1007,7 +1012,8 @@ class DecisionPhase:
             if who:
                 label += " %s" % who
             rows.append({"path": str(it.get("path") or ""), "mime": str(it.get("mime") or ""),
-                         "ts": ts, "who": who, "mid": str(it.get("mid") or "")})
+                         "ts": ts, "who": who, "mid": str(it.get("mid") or ""),
+                         "b64": _b64, "bytes": _src})
             parts.append({"type": "text", "text": label})
             parts.append({"type": "image_url", "image_url": {"url": url}})
         if not rows:
