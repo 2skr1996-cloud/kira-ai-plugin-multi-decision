@@ -221,6 +221,17 @@ def _clean_user(text) -> str:
         m.group("time").strip(), nick, "（叫你）" if you else "", body)
 
 
+_RE_MID = re.compile(r"\[message_id:\s*(-?\d+)\]|<msg\b[^>]*\bmessage_id=\"?(-?\d+)\"?", re.I)
+
+
+def _mid_of_text(text) -> str:
+    """这条消息在原文里带的 message_id（图靠它对号入座）。"""
+    m = _RE_MID.search(str(text or ""))
+    if not m:
+        return ""
+    return str(m.group(1) or m.group(2) or "").strip()
+
+
 def _text_of(value) -> str:
     """把消息 content 摊成纯文本（多模态只取 text 段）。"""
     if value is None:
@@ -926,30 +937,33 @@ class DecisionPhase:
         user_text = body or "（这段时间没人说话）"
         if dyn:
             user_text = user_text + "\n\n" + dyn
-        # v4.39（用户 m20816）：决策也要能看图。以前 user 消息永远是纯字符串，
-        # transcript 里的图只剩「[图片]」四个字，模型根本不知道有图。
-        img_parts, img_rows = self.image_parts(images or [])
-        user_content = ([{"type": "text", "text": user_text}] + img_parts) if img_parts else user_text
-        payload = [
-            {"role": "system", "content": system_text},
-            {"role": "user", "content": user_content},
-        ]
+        # v4.64（用户 m35742）：决策请求改成跟回复请求一个样子——[system] + 一条聊天一条消息，
+        # 图挂在自己那条消息里，动态段拼在最后一条 user 后面。
+        # 以前的写法是「整段摊成一条 user、图夹在正文前后」：正文每轮都要长几条，一长就把
+        # 后面那串图整串顶成未命中（真实记录长期只有 13%）；把图提到最前面也救不了——
+        # 窗口一裁，最旧那张图没了，整串前缀立刻全废（实测 16:30/16:34 两轮都只剩 system
+        # 的 384 命中）。拆成一条条消息以后，老消息和它自己的图都停在原位，新消息只接在
+        # 后面，前缀就是追加式的——跟回复侧同一个道理。
+        payload_msgs, img_rows = self.chat_payload(messages, images or [], dyn)
+        payload = [{"role": "system", "content": system_text}] + payload_msgs
+        if len(payload) < 2:
+            payload.append({"role": "user", "content": user_text})
         got = await self._chain(payload, tools, opt)
         parsed = got.get("parsed")
         # 带图那次没成（上游不认 image_url / 图太大 / 模型没有视觉），退回纯文字再判
         # 一次：宁可这一次看不见图，也不能因为有图把整轮判断判死。
         img_fallback = False
-        if img_parts and not (bool(got.get("ok")) and parsed):
+        if img_rows and not (bool(got.get("ok")) and parsed):
             logger.warning("[multi-decision] 决策带图失败（%s），退回纯文字重判一次",
                            str(got.get("error") or "")[:200])
             img_fallback = True
-            payload = [
-                {"role": "system", "content": system_text},
-                {"role": "user", "content": user_text},
-            ]
+            no_img, _unused = self.chat_payload(messages, None, dyn)
+            payload = [{"role": "system", "content": system_text}] + no_img
+            if len(payload) < 2:
+                payload.append({"role": "user", "content": user_text})
             got = await self._chain(payload, tools, opt)
             parsed = got.get("parsed")
-            img_parts, img_rows = [], []
+            img_rows = []
         out = {
             "ok": bool(parsed) and bool(got.get("ok")),
             "reply": bool(parsed.get("reply")) if parsed else False,
@@ -984,15 +998,9 @@ class DecisionPhase:
             out["failed"] = True
         return out
 
-    def image_parts(self, images):
-        """把这一轮的图片编成 user 消息里的多模态 parts（v4.39，用户 m20816）。
-
-        形态照 OpenAI 那套：每张图前面先插一行「图 1 · [18:21] 大椰果」，模型才知道
-        这张图对应聊天记录里的哪一句；图片本体是 data URL。一张都编不出来时返回
-        空 parts，调用方就发纯文字——跟改动之前完全一样，不会因为没图多出空段。
-        """
+    def _image_rows(self, images) -> list:
+        """把要发的图编成 data URL，顺手记下体积（v4.39，用户 m20816）。"""
         rows = []
-        parts = []
         for it in list(images or []):
             if not isinstance(it, dict):
                 continue
@@ -1004,23 +1012,94 @@ class DecisionPhase:
             _enc = url.split(",", 1)[1] if (url.startswith("data:") and "," in url) else ""
             _b64 = len(_enc)
             _src = (_b64 // 4 * 3 - _b64 + len(_enc.rstrip("="))) if _b64 else 0
-            label = "图 %d" % (len(rows) + 1)
-            ts = str(it.get("ts") or "").strip()
-            who = str(it.get("who") or "").strip()
-            if ts:
-                label += " · [%s]" % ts
-            if who:
-                label += " %s" % who
             rows.append({"path": str(it.get("path") or ""), "mime": str(it.get("mime") or ""),
-                         "ts": ts, "who": who, "mid": str(it.get("mid") or ""),
-                         "b64": _b64, "bytes": _src})
-            parts.append({"type": "text", "text": label})
-            parts.append({"type": "image_url", "image_url": {"url": url}})
+                         "ts": str(it.get("ts") or "").strip(), "who": str(it.get("who") or "").strip(),
+                         "mid": str(it.get("mid") or "").strip(),
+                         "b64": _b64, "bytes": _src, "url": url})
+        return rows
+
+    def image_parts(self, images):
+        """把所有图编成一串多模态 parts（老写法，留作兜底）。"""
+        rows = self._image_rows(images or [])
         if not rows:
             return [], []
-        head = {"type": "text", "text": ("【本轮图片】下面 %d 张图是这段聊天里刚发过来的，"
-                                         "看清楚再决定要不要接话：" % len(rows))}
-        return [head] + parts, rows
+        parts = []
+        for i, r in enumerate(rows):
+            label = "图 %d" % (i + 1)
+            if r["ts"]:
+                label += " · [%s]" % r["ts"]
+            if r["who"]:
+                label += " %s" % r["who"]
+            parts.append({"type": "text", "text": label})
+            parts.append({"type": "image_url", "image_url": {"url": r["url"]}})
+        head = {"type": "text", "text": ("【本轮图片】下面这些图是这段聊天里刚发过来的，"
+                                         "看清楚再决定要不要接话：")}
+        return [head] + parts, [dict((k, v) for k, v in r.items() if k != "url") for r in rows]
+
+    def chat_payload(self, messages, images=None, dyn: str = "") -> tuple:
+        """把窗口消息编成一条条聊天消息（v4.64，用户 m35742）。
+
+        跟回复请求同一个形状：一条聊天一条消息，user / assistant 分开，
+        图挂在自己那条消息里；动态段拼在最后一条 user 的正文后面。
+        返回 (payload_msgs, image_rows)，image_rows 是不带 base64 的那份，给记录页用。
+        """
+        rows = self._image_rows(images or [])
+        by_mid = {}
+        loose = []
+        for r in rows:
+            if r.get("mid"):
+                by_mid.setdefault(str(r["mid"]), []).append(r)
+            else:
+                loose.append(r)
+        msgs = []
+        for m in messages or []:
+            role = str(_field(m, "role") or "").strip().lower()
+            if role == "system":
+                continue
+            raw = _text_of(_field(m, "content")).strip()
+            body = "\n".join(_clean_bot(raw)) if role == "assistant" else _clean_user(raw)
+            got = by_mid.pop(_mid_of_text(raw), []) if rows else []
+            if not body and not got:
+                continue
+            if got:
+                parts = [{"type": "text", "text": body or "[图片]"}]
+                for r in got:
+                    parts.append({"type": "image_url", "image_url": {"url": r["url"]}})
+                msgs.append({"role": role or "user", "content": parts})
+            else:
+                msgs.append({"role": role or "user", "content": body})
+        # 对不上号的图（老记录里没带 message_id）不丢：单独一条 user 摆在最后。
+        if by_mid:
+            _seen = set()
+            for r in rows:
+                k = str(r.get("mid") or "")
+                if k and k in by_mid and k not in _seen:
+                    _seen.add(k)
+                    loose.extend(by_mid[k])
+        if loose:
+            parts = [{"type": "text", "text": ("【本轮图片】这几张图是这段聊天里刚发过来的，"
+                                               "看清楚再决定要不要接话：")}]
+            for r in loose:
+                parts.append({"type": "image_url", "image_url": {"url": r["url"]}})
+            msgs.append({"role": "user", "content": parts})
+        if dyn:
+            for i in range(len(msgs) - 1, -1, -1):
+                if msgs[i].get("role") != "user":
+                    continue
+                c = msgs[i].get("content")
+                if isinstance(c, str):
+                    msgs[i]["content"] = (c + "\n\n" + dyn) if c else dyn
+                else:
+                    for part in c:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            part["text"] = (str(part.get("text") or "") + "\n\n" + dyn).strip()
+                            break
+                    else:
+                        c.append({"type": "text", "text": dyn})
+                break
+            else:
+                msgs.append({"role": "user", "content": dyn})
+        return msgs, [dict((k, v) for k, v in r.items() if k != "url") for r in rows]
 
     def status(self) -> dict:
         return {

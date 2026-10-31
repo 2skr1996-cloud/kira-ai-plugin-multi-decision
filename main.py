@@ -58,6 +58,8 @@ from .window.manager import (
     _media_by_ids,
     _assistant_prefix,
     _sniff_image_mime,
+    round_kind,
+    trim_owner_of,
 )
 from .window.split import regroup_images, expand_packed_messages
 from .window.trim import count_messages, count_user_messages
@@ -4562,6 +4564,69 @@ class MultiDecisionPlugin(BasePlugin):
 
         return await asyncio.to_thread(self._requests_payload, sid, limit)
 
+    def _mark_reply_state(self, sid: str, rows: list) -> None:
+        """给判定「要回」的决策轮标一句：之后那一轮回复到底怎么了。
+
+        用户 m35302：判定要回不等于真的回了——可能模型跑出空输出，也可能那一轮压根
+        没跑起来。走势图据此决定这根柱子画不画、写什么：
+          replied → 后面那一轮真的发出去了（那根柱子自己会说话，这根不画）
+          empty   → 跑到了、没产出能发的内容（空回复）
+          failed  → 跑出错
+          missing → 过了宽限也没有对应的回复请求，分不清失败还是空输出，按失败算
+          pending → 刚判完、回复还在路上，先别急着画成失败
+        """
+        if not rows or self.request_log is None:
+            return
+        try:
+            all_rows = self.request_log.list_rounds_cached(sid, 200)
+        except Exception:
+            logger.debug("[multi-decision] 回复轮索引失败", exc_info=True)
+            return
+        cand = []
+        for it in all_rows or []:
+            if not isinstance(it, dict):
+                continue
+            if bool(it.get("decision_only")) or bool(it.get("trim_only")):
+                continue
+            if str(it.get("outcome") or "") == "trim":
+                continue
+            if not bool(it.get("decision_passed")):
+                continue
+            try:
+                cand.append((float(it.get("ts") or 0), it))
+            except (TypeError, ValueError):
+                continue
+        cand.sort(key=lambda x: x[0])
+        # 比还留着的最老一轮复复记录还早的决策，后面那轮回复早就被清掉了。
+        # 查不到不等于失败，这种一律算「不知道」，别给老记录盖一根红柱子。
+        oldest = cand[0][0] if cand else 0.0
+        now = time.time()
+        for it in rows:
+            if not bool(it.get("decision_reply")):
+                continue
+            try:
+                t0 = float(it.get("ts") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not oldest or t0 < oldest:
+                it["reply_state"] = "unknown"
+                continue
+            hit = None
+            for t1, r1 in cand:
+                if t0 < t1 <= t0 + 300:
+                    hit = r1
+                    break
+            if hit is None:
+                it["reply_state"] = "pending" if (now - t0) < 90 else "missing"
+                continue
+            out = str(hit.get("outcome") or "")
+            if bool(hit.get("replied")) or out == "replied":
+                it["reply_state"] = "replied"
+            elif hit.get("failed") or out in ("failed", "error") or hit.get("error"):
+                it["reply_state"] = "failed"
+            else:
+                it["reply_state"] = "empty"
+
     def _requests_payload(self, sid: str, limit: int = 20, kind: str = "request") -> dict:
         """api_requests 的计算体。只读盘与内存，放线程里跑是安全的。"""
         # 用户 m13250 第 2 条：请求页标题要跟着「保留请求数」走，所以 limit<=0 就按保留数给满，
@@ -4616,6 +4681,9 @@ class MultiDecisionPlugin(BasePlugin):
                     logger.debug("[multi-decision] 决策命中预估失败", exc_info=True)
                     it["hit_estimate"] = None
                 out.append(it)
+            # 用户 m35302：判定要回的那一轮，先看清后面那一轮回复到底有没有发生，
+            # 走势图据此决定画不画这根柱子。
+            self._mark_reply_state(sid, out)
             # v4.13（用户 m18728 第 1 条）：决策分支以前直接 return，没走 _attach_round_trims，
             # trims_after 这个字段压根不存在——走势图上决策柱永远拿不到裁切标记，
             # 判要回/判不回之后真正发生的裁切都没法标在决策柱上。这里补上同一套绑定。
@@ -5075,27 +5143,57 @@ class MultiDecisionPlugin(BasePlugin):
         return {"outcome": outcome, "failed": failed, "error": error,
                 "replied": bool(record.get("replied")) and not failed}
 
+    @staticmethod
+    def _is_trim_row(item: dict) -> bool:
+        """这一条是不是裁切快照（它自己也占一行，但不是一次请求）。"""
+        return str(item.get("outcome") or "") == "trim" or item.get("trim_only") is True
+
+    @staticmethod
+    def _round_kind(item: dict) -> str:
+        """这一行是决策快照还是请求快照。（实现在 window/manager.py，测试直接用）"""
+        return round_kind(item)
+
+    def _trim_owner_by_time(self, rounds: list, cut: dict):
+        """event_id 认不出来时，这次裁切该挂在哪一轮。"""
+        return trim_owner_of(rounds, cut)
+
     def _attach_round_trims(self, sid: str, items: list) -> None:
-        """先在后端绑定裁切，前端倒序/翻页不再改变归属。"""
+        """先在后端绑定裁切，前端倒序/翻页不再改变归属。
+
+        v4.58（用户 m29554）：决策页和请求页各调一次，每次手里只有自己那种轮次；
+        可「判要回的裁切」是等回复跑完才落刀，只看一种轮次会认错人（决策页把它
+        当成决策轮的，请求页根本看不到决策轮）。归属判定改成把两套轮次合起来看，
+        认出来的那一轮不在当前页就不标——同一根裁切只会在它真正落刀的那根上标橙。
+        """
         ordered = sorted(items, key=lambda x: float(x.get("ts") or 0))
-        by_event = {str(x.get("event_id")): x for x in ordered if x.get("event_id")}
+        rounds = [x for x in ordered if not self._is_trim_row(x)]
+        by_event = {str(x.get("event_id")): x for x in rounds if x.get("event_id")}
         for item in ordered:
             item["trims_after"] = []
         if not ordered or self._window_log is None:
             return
+        universe = list(rounds)
+        try:
+            if self.request_log is not None:
+                for x in (self.request_log.list_rounds_cached(sid, 400) or []):
+                    if self._is_trim_row(x):
+                        continue
+                    universe.append(x)
+        except Exception:
+            logger.debug("[multi-decision] 取两套轮次用于裁切归属失败", exc_info=True)
         for cut in self._window_log.read_recent(1000, sid=sid):
             eid = str(cut.get("event_id") or "")
             owner = by_event.get(eid) if eid else None
-            if eid and owner is None:
-                continue
-            if not eid:
-                ts = float(cut.get("ts") or 0)
-                for idx, item in enumerate(ordered):
-                    start = float(item.get("ts") or 0)
-                    end = float(ordered[idx + 1].get("ts") or 0) if idx + 1 < len(ordered) else float("inf")
-                    if start <= ts < end:
-                        owner = item
-                        break
+            if owner is None:
+                owner = self._trim_owner_by_time(universe, cut)
+                if owner is not None and not any(owner is x for x in rounds):
+                    # 认出来的那一轮不在当前页：换成这一页里同一条（同一时刻、同一类）
+                    key = (round(float(owner.get("ts") or 0), 3), round_kind(owner))
+                    owner = next(
+                        (x for x in rounds
+                         if (round(float(x.get("ts") or 0), 3), round_kind(x)) == key),
+                        None,
+                    )
             if owner is not None:
                 owner["trims_after"].append(dict(cut))
 
@@ -5287,10 +5385,24 @@ class MultiDecisionPlugin(BasePlugin):
                     display["raw_original"] = original_raw
                 if sent_ts is not None:
                     display["ts"] = sent_ts
+            # 用户 m35137：点柱子看的是「这一轮的窗口快照」，以前不分回复轮 / 决策轮，
+            # 一律拿 request_snapshot（history + 打包成一整段的 user_prompt）来拼。
+            # 回复轮那 11 条待发在 user_prompt 里就是一段文本，拼进快照只剩 1 条；
+            # 这一轮写下的决策注记又不在 history 里，整条丢掉 —— 看着像「丢了 11 条和 1 次注记」。
+            # 回复轮改用真正发出去的 messages（历史 + 本轮全部新消息，含注记），决策轮不变。
+            _ws_disp = rec["request_snapshot"]["messages"]
+            _ws_raw = snapshot_msgs
+            if not rec.get("decision_only"):
+                _ws_all_disp = rec.get("display_messages") or []
+                if len(_ws_all_disp) > len(_ws_disp):
+                    _ws_disp = _ws_all_disp
+                _ws_all_raw = data.get("messages") or []
+                if isinstance(_ws_all_raw, list) and len(_ws_all_raw) > len(_ws_raw):
+                    _ws_raw = _ws_all_raw
             rec["window_snapshot"] = dict(rec["request_snapshot"],
-                scope="completed_round", messages=rec["request_snapshot"]["messages"] + rec["sent_display_messages"],
-                size=len(snapshot_msgs) + len(sent_msgs), counted=count_messages(snapshot_msgs + sent_msgs),
-                user_counted=count_user_messages(snapshot_msgs + sent_msgs),
+                scope="completed_round", messages=_ws_disp + rec["sent_display_messages"],
+                size=len(_ws_raw) + len(sent_msgs), counted=count_messages(_ws_raw + sent_msgs),
+                user_counted=count_user_messages(_ws_raw + sent_msgs),
                 sent_counted=count_messages(sent_msgs), sent_identity_verified=verified)
             # v4.01（用户 m11166 图4）：这一轮的判定本身也得落进快照。平时那条注记只由
             # window/manager.py 的 _with_decision_notes 在出口拼，不写盘、不进快照，

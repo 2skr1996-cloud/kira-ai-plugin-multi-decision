@@ -54,6 +54,69 @@ logger = get_logger("multi_decision", "orange")
 _KEEP_MODULE = "_kira_mdp_window_keepalive"
 
 
+def round_kind(item: dict) -> str:
+    """这一行快照是决策轮还是请求轮。
+
+    v4.53（用户 m29175）：走势图把两套列表（请求轮、决策轮）并成一根根柱子，
+    裁切该标在哪根上要先分得清它是什么轮，所以提成模块级函数，测试直接调。
+    """
+    if (str(item.get("outcome") or "") == "decision"
+            or item.get("decision_only") is True
+            or str(item.get("trigger_reason") or "") == "decision"):
+        return "decision"
+    return "request"
+
+
+def _nearest_round(rounds: list, ts: float, cap: float, want: str):
+    """取 ts 之前、cap 秒以内、类型是 want 的最后一轮。"""
+    best = None
+    for item in rounds:
+        # 裁切快照自己也占一行，round_kind 会把它算成请求轮；归属时先剔掉，
+        # 否则橙标会认到这份快照自己身上（用户 m29554）。
+        if str(item.get("outcome") or "") == "trim" or item.get("trim_only") is True:
+            continue
+        its = float(item.get("ts") or 0)
+        if its > ts or (ts - its) > cap:
+            continue
+        if want and round_kind(item) != want:
+            continue
+        if best is None or its > float(best.get("ts") or 0):
+            best = item
+    return best
+
+
+def trim_owner_of(rounds: list, cut: dict, cap: float = 180.0):
+    """event_id 认不出来时，这次裁切该挂在哪一轮（不在列表里就返回 None）。
+
+    v4.52 把裁切快照改成「先落快照、再动刀」以后，这份快照成了轮次列表里最新的
+    一行，裁切记录自己的 event_id 就绑到了它身上（trim-<毫秒>），真正的请求轮
+    一条裁切也拿不到——走势图上「裁过」的橙标全没了（用户 m29175）。
+
+    所以这里只认真正的请求轮，按「裁切之前最后一次开始的轮」归属：
+    - 判不回那一刻裁的（trigger=decision、没延迟）挂决策快照
+    - 判要回、等回复跑完才裁的（deferred）挂回复快照，橙标落在回复那根上
+    - 其余（before_request / buffer / idle_check）挂请求快照
+    - 隔了超过 cap 秒（默认 180）就不认，别把一两小时后的裁切硬塞给上一轮
+    """
+    if not rounds:
+        return None
+    ts = float(cut.get("ts") or 0)
+    dec = _nearest_round(rounds, ts, cap, "decision")
+    req = _nearest_round(rounds, ts, cap, "request")
+    if cut.get("deferred"):
+        # v4.58（用户 m29554）：延迟裁切是在回复结束那一刻动的刀，挂回复那根。
+        return req or dec
+    if str(cut.get("trigger") or "") == "decision":
+        # 老记录没有 deferred 标记：判要回会「先决策、再回复、最后裁」，所以取两者
+        # 中更晚的那一轮；判不回当场就裁，回复在决策之前，自然还选决策轮。
+        if dec is None:
+            return req
+        if req is None:
+            return dec
+        return req if float(req.get("ts") or 0) > float(dec.get("ts") or 0) else dec
+    return req or dec
+
+
 def _keep():
     """取（或第一次创建）同进程共用的窗口寄存处。"""
     mod = sys.modules.get(_KEEP_MODULE)
@@ -274,6 +337,7 @@ def _drop_media_tags(text: str) -> str:
 #: 窗口里存的是框架记忆的纯文本，图片 part 早没了，只能拿 message_id 反查（v2.85）。
 _MEDIA_ROOT = "session_media"
 _MID_RE = re.compile(r"\[message_id:\s*([^\]]{1,200})\]")
+_MID_ATTR_RE = re.compile(r'<msg\b[^>]*\bmessage_id="?(-?\d+)"?', re.I)
 _MEDIA_ID_CACHE: dict = {}
 
 
@@ -1853,6 +1917,15 @@ _DEC_NOTE_TS_HEAD = re.compile(r"^\s*\[(\d{1,2}:\d{2})\]\s*")
 # 老快照里还留着旧名，认注记时两个都得认，不能把历史记录当成 bot 说过的话。
 _DEC_NOTE_NAME_OLD = "对以上聊天记录的决策建议"
 _DEC_NOTE_HEAD = re.compile(r"^\[决策记录\]\s*(\d{1,2}:\d{2})?\s*")
+#: 注记发出去时带的声明（v4.65，用户 m36008）。光靠 role=assistant 和插件侧的 name
+#: 字段，模型看不到「这是谁说的」——它会把自己的判定当成自己说过的一句话。
+_DEC_NOTE_DECL_RE = re.compile(
+    r"^\s*\[(?:对当前聊天消息的决策建议|对以上聊天记录的决策建议)\]\s*")
+
+
+def strip_note_decl(text: str) -> str:
+    """剥掉注记开头的声明，比对与展示都用干净的那一句。"""
+    return _DEC_NOTE_DECL_RE.sub("", str(text or ""), count=1)
 
 
 def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list:
@@ -1920,7 +1993,7 @@ def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list
                 # v4.39（用户 m20312）：注记正文开头也带「[HH:MM] 」了（真正的请求原文）。
                 # 时间拎成 at 给左侧那一列，正文剥掉前缀；raw 保留整行，原文档照原样显示。
                 _m2 = _DEC_NOTE_TS_HEAD.match(text)
-                _body = text[_m2.end():]
+                _body = strip_note_decl(text[_m2.end():])
                 item["text"] = _body
                 item["chars"] = visible_chars(_body)
                 item["at"] = _m2.group(1)
@@ -2269,6 +2342,10 @@ def is_decision_note(msg) -> bool:
     t = text.lstrip()
     if t.startswith("[决策记录]"):
         return True
+    # v4.65（用户 m36008）：出口会给注记加「[对当前聊天消息的决策建议] 」，
+    # 带这个声明的副本也要认成注记。
+    if _DEC_NOTE_DECL_RE.match(t):
+        return True
     # v4.05（用户 m12604）：正文不再带前缀，靠开头的「判定要回／判定不回」认。
     return t.startswith("判定要回") or t.startswith("判定不回")
 
@@ -2339,7 +2416,8 @@ def stamp_assistant_time(messages) -> List[Any]:
         # v4.39（用户 m20312）：「[XX:XX] 时间戳还是要加」——注记也照 bot 消息一样带时间，
         # 但用它自己的 ts（判定那一刻），不按前后 user 推；同一个 ts 每轮算出来一样，前缀不抖。
         stamp = ""
-        if is_decision_note(msg):
+        is_note = is_decision_note(msg)
+        if is_note:
             try:
                 _nts = _get(msg, "ts")
                 if _nts:
@@ -2382,7 +2460,14 @@ def stamp_assistant_time(messages) -> List[Any]:
                 out.append(msg)
                 continue
         # 时间戳放最前面，和 user 的「[23:52] [message_id: …]」一个位置（用户 m30252）
-        newtext = "[" + stamp + "] " + text
+        # v4.65（用户 m36008）：注记的时间后面还要带上「[对当前聊天消息的决策建议]」。
+        # 以前只有 role=assistant，模型分不清这句是判定还是自己说过的话，上下文会串味。
+        head = "[" + stamp + "] "
+        body = text
+        if is_note:
+            head += "[" + _DEC_NOTE_NAME + "] "
+            body = strip_note_decl(text)
+        newtext = head + body
         newc = newtext
         if isinstance(content, (list, tuple)):
             newc = list(content)
@@ -3383,7 +3468,7 @@ class WindowManager:
                     continue
                 text = str(text_of_content(_get(msg, "content")) or "")
                 _m = _DEC_NOTE_HEAD.match(text) or _DEC_NOTE_TS_HEAD.match(text)
-                body = text[_m.end():] if _m else text
+                body = strip_note_decl(text[_m.end():]) if _m else strip_note_decl(text)
                 for i, d in enumerate(rows):
                     if i in used or self._decision_body(d) != body:
                         continue
@@ -3921,7 +4006,18 @@ class WindowManager:
                 return None
             ts, who = img_meta(text)
             return {"path": rel, "mime": str(mime or ""), "ts": ts, "who": who,
-                    "mid": str(mid or "")}
+                    "mid": mid_of(text, mid)}
+
+        def mid_of(text, given=""):
+            """这张图是哪条消息发的——决策那边要按号把图挂回自己那条里（v4.64）。"""
+            key = str(given or "").strip()
+            if key:
+                return key
+            mm = _MID_RE.search(str(text or ""))
+            if mm:
+                return str(mm.group(1) or "").strip()
+            mm = _MID_ATTR_RE.search(str(text or ""))
+            return str(mm.group(1) or "").strip() if mm else ""
 
         # ① 窗口：从尾部往前把图收齐，够 want 张就停（顺序最后再翻回正序）。
         win_rows: List[dict] = []
@@ -4418,7 +4514,7 @@ class WindowManager:
     # ------------------------------------------------------------------ 裁切
 
     def maybe_trim(self, sid: str, trigger: str = "idle_check",
-                   event_id: str = "") -> Optional[dict]:
+                   event_id: str = "", deferred: bool = False) -> Optional[dict]:
         """超阈值就裁到保留条数。
 
         两条线：①攒够 window_trim_threshold 条 user（默认 60）就裁；②攒够
@@ -4451,7 +4547,8 @@ class WindowManager:
             # 一条也没裁掉：刚才那份快照是个空承诺，撤掉，别在走势图上留一根假柱子。
             self._trim_snapshot_drop(snap_path)
             return None
-        return self._trim_record(sid, plan, done, trigger, event_id, snap_path)
+        return self._trim_record(sid, plan, done, trigger, event_id, snap_path,
+                                 deferred=deferred)
 
     def _trim_gate(self, sid: str, trigger: str) -> Optional[dict]:
         """判这一轮要不要裁。只读窗口，不碰任何状态；返回 None＝不裁。
@@ -4707,7 +4804,7 @@ class WindowManager:
             logger.debug("[multi-decision] 撤销裁切快照失败（已吞掉）", exc_info=True)
 
     def _trim_record(self, sid: str, plan: dict, done: dict, trigger: str,
-                     event_id: str, snap_path: str = "") -> dict:
+                     event_id: str, snap_path: str = "", deferred: bool = False) -> dict:
         """记账：状态计数、裁切记录、轮次身份、中期摘要、快照、一行 info 日志。
 
         这里不改窗口内容，只写。返回值就是 maybe_trim 的返回值（record）。
@@ -4765,6 +4862,10 @@ class WindowManager:
             # 记下来也没信息量（审查 bug）
             "tool_group_adjusted": bool(protect and cut > 0 and cut < max(0, before - keep)),
             "trigger": trigger,
+            # v4.58（用户 m29554）：这次裁切是「判要回、等回复跑完才裁」的延迟裁切。
+            # 它是在回复结束那一刻动的刀，橙标要挂在回复那一根上，不是决策那根——
+            # 挂在决策上看着就像「刚判完要回就把窗口裁了」。
+            "deferred": bool(deferred),
             "summary_generated": False,
         }
         # final 先落盘请求、再裁切；把稳定事件身份一起记下来。
@@ -4776,7 +4877,14 @@ class WindowManager:
             record["round_ts"] = now
         elif request_log is not None:
             try:
-                latest = request_log.list_rounds(sid, 1)
+                # v4.53（用户 m29175）：裁切快照 v4.52 起是「先落快照、再动刀」，
+                # 它也会出现在轮次列表里。以前取 list_rounds(sid, 1) 正好取到这份
+                # 自己刚写的快照，event_id 记成 trim-<毫秒>，走势图上就再也标不出
+                # 「这一轮被裁过」。这里跳过裁切快照，只认真正的请求轮。
+                latest = [
+                    x for x in (request_log.list_rounds(sid, 20) or [])
+                    if not (str(x.get("outcome") or "") == "trim" or x.get("trim_only") is True)
+                ]
                 if latest and float(latest[0].get("ts") or 0) <= now:
                     record["event_id"] = latest[0].get("event_id") or ""
                     record["round_ts"] = latest[0].get("ts") or 0
