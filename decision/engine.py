@@ -4156,6 +4156,24 @@ class DecisionEngine:
             events.append(replay)
         self._retry_events[sid] = events
 
+    async def _flush_guarded(self, raw_sid: str, filter_fn, sid: str) -> bool:
+        """把「交给框架跑 agent」这一步加上上限（v4.63，用户 m36670）。
+
+        2026-10-31 17:54 那一轮判了要回，之后插件 2 分钟里一条日志都没打、也没有
+        任何请求记录，直到 17:56 热重载把这一轮掐掉——表现就是 flush 卡在框架里，
+        或者返回了个空。卡住和返回空现在都算失败：打日志、记 last_error、按失败
+        走重试，不再无声无息地丢掉整轮。
+        """
+        timeout = 30.0
+        try:
+            return bool(await asyncio.wait_for(
+                self.ctx.flush_session_messages(raw_sid, filter_fn=filter_fn),
+                timeout=timeout))
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[multi-decision] %s 投递超时：%.0f 秒没回来，按失败处理", sid, timeout)
+            return False
+
     async def _publish_retry(self, raw_sid: str, events: list) -> bool:
         """Use the public buffer/filtered-flush contract without stealing new work."""
         flush = self.ctx.flush_session_messages
@@ -4398,21 +4416,52 @@ class DecisionEngine:
                 ok = await self._publish_retry(raw_sid, events)
             else:
                 if not await self._wait_input_buffered(sid, flow, epoch):
+                    # v4.63（用户 m36670）：这一行以前是空 return，日志里什么都不留，
+                    # 看着就像「决策判了要回，然后插件凭空消失」。
+                    logger.warning(
+                        "[multi-decision] %s 投递前被掐断（phase=%s，epoch=%s/%s），这一轮不再往下跑",
+                        sid, flow.phase, epoch, flow.epoch)
                     return
-                ok = await self.ctx.flush_session_messages(
-                    raw_sid, filter_fn=self._input_selector(flow.active))
+                ok = await self._flush_guarded(
+                    raw_sid, self._input_selector(flow.active), sid)
                 # Preserve explicit no-new-input timer rounds, but never replay a
                 # normal/deferred batch after a failed/empty publication.
                 reason = str(getattr(st, "last_trigger_reason", "") or "")
                 last = self._last_events.get(sid)
-                if (not ok and not flow.active and not flow.deferred and last is not None
+                if (not ok and last is not None
                         and reason in ("silent", "buffer", "curve", "adaptive", "probability", "count")):
+                    # v4.63（用户 m36670）：定时轮（静默兜底 / 曲线 / 概率 / 计数…）本来
+                    # 就没有新消息，filter 一个事件都选不中，flush 必然返回空。以前只有
+                    # not flow.deferred 时才补一次「拿上一条当触发器」的重投；决策那十几秒里
+                    # 只要进来一条新消息（deferred 非空），这次重投就被跳过，于是
+                    # 「判了要回」被静默收束：没有请求、没有日志、没有回复。
+                    # 2026-10-31 17:54 gm:483996686 就是这么丢的（决策 11.8s，回来 2 分钟内
+                    # 插件一条日志都没有，直到 17:56 热重载把这一轮掐掉）。
+                    # 重投只是给框架一个「跑 agent」的由头，内容照样取实时窗口，不会拿旧消息答话。
+                    logger.info(
+                        "[multi-decision] %s 投递为空（本轮 %d 条，排到下一轮 %d 条），"
+                        "按定时轮补投上一条当触发器",
+                        sid, len(flow.active), len(flow.deferred))
                     ok = await self._publish_retry(raw_sid, [last])
             if self._closed or flow.epoch != epoch or flow.phase != "active":
+                logger.warning(
+                    "[multi-decision] %s 投递结果没人接：closed=%s 本轮 epoch=%s/%s phase=%s",
+                    sid, self._closed, epoch, flow.epoch, flow.phase)
                 return  # A synchronous host may have delivered final while awaiting flush.
             if not ok:
                 if retry:
                     self._retry_status(sid, self._retry_roots.get(sid, ""), "cancelled")
+                # v4.63（用户 m36670）：投不出去必须留痕。以前这里一声不响地收束，
+                # 页面上只剩「要回 + 失败」，日志里一个字都没有，根本没法查。
+                st.last_error = "判定要回，但这一轮没能投递出去（flush 没成功）"
+                st.last_error_at = time.time()
+                logger.warning(
+                    "[multi-decision] %s 投递失败：这一轮没能交给框架跑 agent"
+                    "（reason=%s，本轮 %d 条，排到下一轮 %d 条，上一条=%s，retry=%s）",
+                    sid, str(getattr(st, "last_trigger_reason", "") or ""),
+                    len(flow.active), len(flow.deferred),
+                    "有" if self._last_events.get(sid) is not None else "无", retry)
+                self._retry_after_fail(sid, st)
                 await self._settle_input(sid, epoch=epoch)
                 return
             if not retry:
