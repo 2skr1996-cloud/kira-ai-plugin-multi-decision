@@ -1729,6 +1729,14 @@ class RequestLog:
             "window_user": _count_messages(
                 [m for m in msgs if str((m or {}).get("role") or "") == "user"]
             ),
+            # v4.57（用户 m29312）：决策读的是「窗口 + 待发」，柱子只数窗口就少一截——
+            # 12:26:40 那根写 14 条用户，这一轮其实看到 20 条，下一轮并窗后又变 20，
+            # 看着像「先吞掉、下一轮再补回来」。这里把待发那批单独记下来，页面按
+            # 「窗口 + 待发」显示，并把拆分写进悬停。
+            "window_pending_count": len(inc),
+            "window_pending_user": _count_messages(
+                [m for m in inc if str((m or {}).get("role") or "") == "user"]
+            ),
             "window_user_src": "window",
             "assembled": [
                 {"role": "system", "content": system_text, "tag": "system"},
@@ -2295,6 +2303,25 @@ class RequestLog:
                                 else (int(data.get("trim_after_user") or 0)
                                       if (data.get("trim_only") and data.get("trim_after_user"))
                                       else self._user_count_with_incoming(data))),
+                # v4.57（用户 m29312）：决策读的是「窗口 + 待发」。列表要能把待发那批
+                # 一起报给走势柱，否则这一轮写 14、下一轮并窗后写 20，看着像中间被吞了。
+                # 只有决策轮才有「窗口之外」的待发；回复轮的 incoming 已经在窗口里了，
+                # 再加一遍就是重复计数。
+                "window_pending_count": (
+                    len(data.get("incoming_messages") or [])
+                    if (data.get("decision_only") is True
+                        or str(data.get("trigger_reason") or "") == "decision")
+                    else 0
+                ),
+                "window_pending_user": (
+                    _count_messages([
+                        m for m in (data.get("incoming_messages") or [])
+                        if str((m or {}).get("role") or "") == "user"
+                    ])
+                    if (data.get("decision_only") is True
+                        or str(data.get("trigger_reason") or "") == "decision")
+                    else 0
+                ),
                 # v3.87（用户 m04715 第 1 条）：裁切快照的前后条数要带给前端，
                 # 走势柱的悬停说明要用；trim_only 用来认「这不是一轮请求」。
                 "trim_only": bool(data.get("trim_only")),

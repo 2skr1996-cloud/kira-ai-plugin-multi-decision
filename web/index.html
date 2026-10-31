@@ -2101,6 +2101,16 @@ var ctxSnapRequest = 0;
     // v3.75（用户本轮第 5 条）：这不是一次请求，而是「没人说话时顺手做的一次
     // 窗口裁切」单独落的快照。不能算成「未回复」——那样颜色和统计都说错话。
     if(outcome === "trim") return { label: "窗口裁切", cls: "trim", tag: "cut", detail: "" };
+    // 用户 m35302：判定要回、可这一轮从头到尾没等到回复请求（没跑起来，或者跑到一半断了）。
+    // 分不清是失败还是空输出，就按失败画一根，别让这一轮在图上凭空消失。
+    if(outcome === "decision" && String(r.reply_state || "") === "missing"){
+      return {
+        label: "失败",
+        cls: "error",
+        tag: "bad",
+        detail: "判定要回之后，这一轮没有对应的回复请求：可能没跑起来，也可能跑到一半断了。分不清是失败还是空输出，按失败算。",
+      };
+    }
     // v3.99（用户 m10577）：决策轮的快照不是「未回复」，它压根没发请求。
     if(outcome === "decision") return { label: r.decision_reply ? "判定要回" : "判定不回", cls: "dec", tag: "neutral", detail: String(r.decision_reason || "") };
     if(outcome === "pending" || outcome === "running") return { label: "运行中", cls: "pending", tag: "neutral", detail: "" };
@@ -2117,7 +2127,8 @@ var ctxSnapRequest = 0;
         detail: "模型写了话，但没有包在 <msg> 里，框架解析出 0 条消息，所以没发出去。现在会自动补一层壳再发。"
       };
     }
-    return { label: "未回复", cls: "no", tag: "neutral", detail: "" };
+    // 用户 m35302：跑了、但什么都没产出，这是「空回复」，跟「运行出错」分开写。
+    return { label: "空回复", cls: "no", tag: "neutral", detail: "这一轮跑完了，但没有产出能发出去的内容。" };
   }
   // 用户 2026-10-24 图4/图5/图7：出错那一行不能只有「运行出错」——后面到底重试了几次、
   // 最后成没成、回复落在哪一份记录，都要在行里直接看得见；点一下能跳到重试那一轮。
@@ -2271,9 +2282,16 @@ var ctxSnapRequest = 0;
     // 拿当前窗口的条数当基准会把它们全压成一条线。
     // v3.21（用户 m42220）：柱子只数用户侧——bot 自己的回复不占窗口位数，
     // 跟「当前 N 条」的口径（用户消息 + 待发）对齐；老记录没有 window_user 就退回含 bot 的旧口径。
+    // v4.57（用户 m29312）：决策轮读的是「窗口 + 待发」，柱子以前只数窗口本体，
+    // 12:26:40 那根写 14 条用户，可这一轮真正看到的是 20 条；下一轮并窗后又变 20，
+    // 就成了「先吞两条、下一轮再补回来」。这里把待发也算进柱高，
+    // 悬停里写明拆分（窗口 X + 待发 Y），跟记录详情 ②+③ 的条数对得上。
     var wc = function(r){
-      if(typeof r.window_user === "number") return r.window_user;
-      return r.window_total || r.window_counted || r.window_size || 0;
+      var base = (typeof r.window_user === "number")
+        ? r.window_user
+        : (r.window_total || r.window_counted || r.window_size || 0);
+      var pu = Number(r.window_pending_user) || 0;
+      return base + (pu > 0 ? pu : 0);
     };
     var cutAt = Object.create(null);
     arr.forEach(function(r, i){
@@ -2325,12 +2343,19 @@ var ctxSnapRequest = 0;
       var v = wc(r);
       if(cut){ var ubv = Number(cut.user_total_before) || 0; if(ubv > v) v = ubv; }
       var ph = Math.max(2, Math.round(v / max * h));
-      var result = isDec ? {cls: "dec"} : roundResult(r);
+      // 用户 m35302：判定要回、却从头到尾没等到回复请求的那一轮，柱子照旧出现，但画成红的。
+      // 分不清是失败还是空输出，一律当失败；空回复不是这个分支，它有自己的回复柱子。
+      var _missDec = isDec && String(r.reply_state || "") === "missing";
+      var result = isDec ? {cls: (_missDec ? "error" : "dec")} : roundResult(r);
       var errorTip = isDec ? "" : retryTip(r);
       if(errorTip) result = {cls: "error"};
       // v3.22（用户 m42531）：柱高只数用户消息，标题里写死这句话，
       // 免得被当成「窗口里一共多少条」；含 bot 的总数在窗口标题那边。
-      var tip = fmtTime(r.ts) + " · " + v + " 条 [不包含bot消息]" + (errorTip ? " · " + errorTip : "");
+      // v4.57（用户 m29312）：柱高含待发时写明拆分，免得跟记录详情 ② 的条数对不上。
+      var pendU = Number(r.window_pending_user) || 0;
+      var tip = fmtTime(r.ts) + " · " + v + " 条 [不包含bot消息]" +
+                ((pendU > 0 && !cut) ? "（窗口 " + Math.max(0, v - pendU) + " + 待发 " + pendU + "）" : "") +
+                (errorTip ? " · " + errorTip : "");
       if(isTrim){
         // v3.88（用户 m05012 第 2/3 条）：柱子高度按这份快照自己的 user 条数（= 裁后）。
         // v3.89（用户 m05321 第 1 条）：快照现在含待发，悬停要写清其中几条是待发。
@@ -2360,6 +2385,7 @@ var ctxSnapRequest = 0;
                 (tpN ? " · 其中待发 " + tpN + " 条" : "") + " · " + whyT;
         }
       }
+      if(_missDec) tip += " · 失败：判定要回之后没等到回复请求";
       if(cut){
         var pct = cut.before_chars ? Math.round((1 - (cut.after_chars || 0) / cut.before_chars) * 100) : null;
         // v3.71（用户 m23596 第 3 条）：触发线现在把「待发」也算进来，所以悬停要说清
@@ -6390,7 +6416,22 @@ var ctxSnapRequest = 0;
 
   function decisionConcl(r){
     if(r.failed) return "<span class='dcon bad'>失败</span>";
-    if(r.decision_reply) return "<span class='dcon'>要回</span>";
+    if(r.decision_reply){
+      // 用户 m35302：判了要回，可这一轮没等到回复请求 —— 结论照旧写「要回」（那确实是它判的），
+      // 后面挂个红标，别让人以为这条回复成功发出去了。分不清失败还是空输出，都算失败。
+      var _rs = String(r.reply_state || "");
+      if(_rs === "missing"){
+        return "<span class='dcon'>要回</span> <span class='tag bad' title='" +
+          esc("判定要回之后，没有等到回复请求：可能没跑起来，也可能跑到一半断了。分不清是失败还是空输出，按失败算。") +
+          "'>失败</span>";
+      }
+      // 跑了、但什么都没产出，这是空回复，跟出错分开写。
+      if(_rs === "empty"){
+        return "<span class='dcon'>要回</span> <span class='tag neutral' title='" +
+          esc("这一轮回复跑完了，但没产出能发出去的内容。") + "'>空回复</span>";
+      }
+      return "<span class='dcon'>要回</span>";
+    }
     return "<span class='dcon no'>不回</span>";
   }
 
@@ -6530,7 +6571,19 @@ var ctxSnapRequest = 0;
               (el ? fmtDur(el) : "<span class='dim'>—</span>") + "</td>";
       // 看图张数跟着「窗口条数」走：那是这一轮喂进去多少内容，放结论格里会把
       // 「理由」列挤窄、整行被撑成好几行（真机截图见过）。
-      html += "<td class='num'>" + (Number(r.window_total) || 0) + " 条" + itag + "</td>";
+      // v4.57（用户 m29312）：这一格跟回复表、走势柱同口径——只数用户消息，并且把
+      // 「待发」那批一起算上（决策读的就是窗口 + 待发）。以前写的是含 bot 的总数，
+      // 同一轮柱子写 14、表格写 27，两个数对不上，看着像消息被吞了。
+      var dPend = Number(r.window_pending_user) || 0;
+      var dTot = Number(r.window_total) || 0;
+      var dUser = (typeof r.window_user === "number" && r.window_user > 0) ? r.window_user : dTot;
+      var dTip = "只数用户消息（跟走势柱同口径），bot 自己的回复不计入";
+      if(dPend > 0) dTip = "这一轮决策读的是「窗口 + 待发」：窗口 " + dUser + " 条用户消息 + 待发 " +
+                            dPend + " 条 = " + (dUser + dPend) + " 条（跟走势柱同口径），bot 自己的回复不计入";
+      else if(dTot > dUser) dTip += "；窗口共 " + dTot + " 条（含 bot " + (dTot - dUser) + " 条）";
+      html += "<td class='num' title='" + esc(dTip) + "'>" + (dUser + dPend) + " 条" +
+              (dPend > 0 ? " <span class='dim' title='" + esc("其中待发 " + dPend + " 条（还没并进窗口）") + "'>· 待发" + dPend + "</span>" : "") +
+              itag + "</td>";
       html += "<td class='num tokc'>" + (tk.input
         ? "<span class='tokw'>" + tokText(tk.input) + " / " + tokText(tk.output) + "</span>"
         : "<span class='dim'>—</span>") + "</td>";
@@ -6731,8 +6784,13 @@ var ctxSnapRequest = 0;
       // v3.22（用户 m42531）：这一列跟走势柱同口径，只数窗口里的用户消息——窗口里还躺着
       // bot 的回复，混在一起会让人以为「明明才 50 多条，怎么记成 68」。含 bot 的总数放 title。
       var wUser = (typeof r.window_user === "number") ? r.window_user : 0;
+      // v4.57（用户 m29312）：决策轮还要把待发那批算进来（决策读的就是窗口 + 待发），
+      // 否则这一格写 14、下一轮写 20，看着像中间那几条被吞了。
+      var wPend = Number(r.window_pending_user) || 0;
       var wAll = r.window_total || r.window_counted || 0;
       var wTip = "只数窗口里的用户消息（跟走势柱同口径），bot 自己的回复不计入";
+      if(wPend > 0) wTip = "这一轮决策读的是「窗口 + 待发」：窗口 " + wUser + " 条用户消息 + 待发 " +
+                            wPend + " 条 = " + (wUser + wPend) + " 条（跟走势柱同口径），bot 自己的回复不计入";
       // v3.87（用户 m04715 第 1 条）：裁切快照记的是裁切**之前**的窗口，不说清楚会被当成裁后的数
       if(String(r.outcome || "") === "trim" || r.trim_only === true){
         // v3.89（用户 m05321 第 1 条）：快照 = 裁切那一刻的完整内容（裁前窗口 + 待发），
@@ -6753,8 +6811,10 @@ var ctxSnapRequest = 0;
         ? " <span class='dim' title='" + esc("这一轮随请求发出 " + rimg + " 张图，base64 " + fmtBytes(rimgB) +
             "；历史窗口里的图仍以 [图片] 占位，不重复发") + "'>· 图" + rimg + "</span>"
         : "";
-      html += "<td class='num' title='" + esc(wTip) + "'>" + (wUser ? wUser + " 条"
-                                     : (wAll ? wAll + " 条" : "<span class='dim' title='这条是 v2.64 之前的记录，当时没存真实条数'>—</span>")) + rimgTag + "</td>";
+      html += "<td class='num' title='" + esc(wTip) + "'>" + ((wUser || wPend) ? (wUser + wPend) + " 条"
+                                     : (wAll ? wAll + " 条" : "<span class='dim' title='这条是 v2.64 之前的记录，当时没存真实条数'>—</span>")) +
+                (wPend > 0 ? " <span class='dim' title='" + esc("其中待发 " + wPend + " 条（还没并进窗口）") + "'>· 待发" + wPend + "</span>" : "") +
+                rimgTag + "</td>";
       // 字符数 / 字符每 token / 文本体积各占一列：原来三条全挤在 token 单元格
       // 底下那一行小字里，右边空出一大片，也没法按列比较（用户 m33271 图1）
       // v3.58（用户 m16875 图4）：token 是整轮各步之和。多步（有工具调用）时第二步会把前面的
@@ -6937,7 +6997,17 @@ var ctxSnapRequest = 0;
       if(!res[0]) return;   // 临时读取失败保留上一次有效窗口
       if(res[1]) ctxTrims = res[1].items || [];
       if(res[2]) ctxDecTrend = (res[2].items || []).filter(function(x){
-        return x && x.name && String(x.outcome || "") === "decision";
+        if(!(x && x.name && String(x.outcome || "") === "decision")) return false;
+        // 用户 m35221：判定「要回」的那一轮不上走势图 —— 它和随后的回复轮比只差一条 bot 回复，
+        // 真正要看的是回复结束后的那一份快照；判定不回的那一轮照旧出柱子（那是它唯一的快照）。
+        // 记录本身照常落盘，决策记录页那一行还在，只是不占柱子。
+        if(!x.decision_reply) return true;
+        // 用户 m35302：要回也可能根本没回成。后面那一轮回复真的跑了（成功 / 空回复 / 出错）时
+        // 由那根柱子说话；完全没等到回复轮才补一根，标「失败」——分不清是失败还是空输出，一律当失败。
+        // 但查不到当年那一轮回复记录的更老的决策，不能当失败，照旧出紫柱子。
+        var _rst = String(x.reply_state || "");
+        if(!_rst || _rst === "unknown") return true;
+        return _rst === "missing";
       });
       ctxWin = res[0];
       cachePut("win", {sid: sid, win: ctxWin, trims: ctxTrims});

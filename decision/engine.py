@@ -4272,7 +4272,7 @@ class DecisionEngine:
             if trim:
                 _trig = "decision" if _deferred_trim else trigger
                 try:
-                    self.window.maybe_trim(sid, trigger=_trig)
+                    self.window.maybe_trim(sid, trigger=_trig, deferred=_deferred_trim)
                 except Exception:
                     logger.exception("[multi-decision] 收束裁切失败（继续释放隔离）")
         if discard:
