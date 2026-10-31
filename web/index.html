@@ -5982,6 +5982,9 @@ var ctxSnapRequest = 0;
         var tm0 = "";
         var mt0 = b0.match(/^\[(\d{1,2}:\d{2})\]\s*/);
         if(mt0){ tm0 = mt0[1]; b0 = b0.slice(mt0[0].length); }
+        // v4.65（用户 m36008）：正文里已经带了「[对当前聊天消息的决策建议]」声明，
+        // 这里剥掉，名字统一由下面那段补一次。
+        b0 = b0.replace(/^\[\s*(?:对当前聊天消息的决策建议|对以上聊天记录的决策建议)\s*\]\s*/, "");
         var t0 = String(m.ts || "") || tm0;
         var nm0 = String(m.name || m.who || "");
         return (t0 ? "[" + t0 + "]" : "") + (nm0 ? "[" + nm0 + "]" : "") + " " + b0;
@@ -7233,6 +7236,19 @@ var ctxSnapRequest = 0;
     return s0.replace(/^\s*\[[A-Z][a-z]{2}\s+\d{1,2}\s+\d{4}\s+(\d{1,2}:\d{2})(?:\s+[A-Z][a-z]{2})?\]/,
                       function(_w, hm){ return "[" + hm + "]"; });
   }
+  // v4.65（用户 m36008）：注记发出去时带「[HH:MM] [对当前聊天消息的决策建议] 」前缀，
+  // 认注记、画原文都先把这两截剥掉，别把声明画两遍。
+  function decNoteHead(t){
+    var s0 = String(t == null ? "" : t).replace(/^\s+/, "");
+    for(var k0 = 0; k0 < 3; k0++){
+      var m0 = s0.match(/^\[(\d{1,2}:\d{2})\]\s*/);
+      if(!m0) break;
+      s0 = s0.slice(m0[0].length);
+    }
+    var d0 = s0.match(/^\[\s*(?:对当前聊天消息的决策建议|对以上聊天记录的决策建议)\s*\]\s*/);
+    if(d0) s0 = s0.slice(d0[0].length);
+    return s0;
+  }
   // v4.36（用户 m19945）：原文档在美化档的 isDecNoteRow 赋值之前就要认注记，抽到外面来。
   function isDecNoteLike(m){
     if(!m) return false;
@@ -7241,7 +7257,7 @@ var ctxSnapRequest = 0;
     var dec9 = String(rawContent(m.content) || "");
     if(dec9.indexOf("[决策记录]") === 0) return true;
     if(String(m.role || "") !== "assistant") return false;
-    var hd9 = dec9.replace(/^\s+/, "");
+    var hd9 = decNoteHead(dec9);
     return hd9.indexOf("判定要回") === 0 || hd9.indexOf("判定不回") === 0;
   }
 
@@ -7339,7 +7355,7 @@ var ctxSnapRequest = 0;
         var t9 = String(rawContent(m.content) || "");
         if(t9.indexOf("[决策记录]") === 0) return true;
         if(String(m.role || "") !== "assistant") return false;
-        var hd9 = t9.replace(/^\s+/, "");
+        var hd9 = decNoteHead(t9);
         return hd9.indexOf("判定要回") === 0 || hd9.indexOf("判定不回") === 0;
       };
       var allMsgsX = (Array.isArray(r.messages) ? r.messages : []);

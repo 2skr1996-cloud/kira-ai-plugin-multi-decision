@@ -337,6 +337,7 @@ def _drop_media_tags(text: str) -> str:
 #: 窗口里存的是框架记忆的纯文本，图片 part 早没了，只能拿 message_id 反查（v2.85）。
 _MEDIA_ROOT = "session_media"
 _MID_RE = re.compile(r"\[message_id:\s*([^\]]{1,200})\]")
+_MID_ATTR_RE = re.compile(r'<msg\b[^>]*\bmessage_id="?(-?\d+)"?', re.I)
 _MEDIA_ID_CACHE: dict = {}
 
 
@@ -1916,6 +1917,15 @@ _DEC_NOTE_TS_HEAD = re.compile(r"^\s*\[(\d{1,2}:\d{2})\]\s*")
 # 老快照里还留着旧名，认注记时两个都得认，不能把历史记录当成 bot 说过的话。
 _DEC_NOTE_NAME_OLD = "对以上聊天记录的决策建议"
 _DEC_NOTE_HEAD = re.compile(r"^\[决策记录\]\s*(\d{1,2}:\d{2})?\s*")
+#: 注记发出去时带的声明（v4.65，用户 m36008）。光靠 role=assistant 和插件侧的 name
+#: 字段，模型看不到「这是谁说的」——它会把自己的判定当成自己说过的一句话。
+_DEC_NOTE_DECL_RE = re.compile(
+    r"^\s*\[(?:对当前聊天消息的决策建议|对以上聊天记录的决策建议)\]\s*")
+
+
+def strip_note_decl(text: str) -> str:
+    """剥掉注记开头的声明，比对与展示都用干净的那一句。"""
+    return _DEC_NOTE_DECL_RE.sub("", str(text or ""), count=1)
 
 
 def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list:
@@ -1983,7 +1993,7 @@ def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list
                 # v4.39（用户 m20312）：注记正文开头也带「[HH:MM] 」了（真正的请求原文）。
                 # 时间拎成 at 给左侧那一列，正文剥掉前缀；raw 保留整行，原文档照原样显示。
                 _m2 = _DEC_NOTE_TS_HEAD.match(text)
-                _body = text[_m2.end():]
+                _body = strip_note_decl(text[_m2.end():])
                 item["text"] = _body
                 item["chars"] = visible_chars(_body)
                 item["at"] = _m2.group(1)
@@ -2332,6 +2342,10 @@ def is_decision_note(msg) -> bool:
     t = text.lstrip()
     if t.startswith("[决策记录]"):
         return True
+    # v4.65（用户 m36008）：出口会给注记加「[对当前聊天消息的决策建议] 」，
+    # 带这个声明的副本也要认成注记。
+    if _DEC_NOTE_DECL_RE.match(t):
+        return True
     # v4.05（用户 m12604）：正文不再带前缀，靠开头的「判定要回／判定不回」认。
     return t.startswith("判定要回") or t.startswith("判定不回")
 
@@ -2402,7 +2416,8 @@ def stamp_assistant_time(messages) -> List[Any]:
         # v4.39（用户 m20312）：「[XX:XX] 时间戳还是要加」——注记也照 bot 消息一样带时间，
         # 但用它自己的 ts（判定那一刻），不按前后 user 推；同一个 ts 每轮算出来一样，前缀不抖。
         stamp = ""
-        if is_decision_note(msg):
+        is_note = is_decision_note(msg)
+        if is_note:
             try:
                 _nts = _get(msg, "ts")
                 if _nts:
@@ -2445,7 +2460,14 @@ def stamp_assistant_time(messages) -> List[Any]:
                 out.append(msg)
                 continue
         # 时间戳放最前面，和 user 的「[23:52] [message_id: …]」一个位置（用户 m30252）
-        newtext = "[" + stamp + "] " + text
+        # v4.65（用户 m36008）：注记的时间后面还要带上「[对当前聊天消息的决策建议]」。
+        # 以前只有 role=assistant，模型分不清这句是判定还是自己说过的话，上下文会串味。
+        head = "[" + stamp + "] "
+        body = text
+        if is_note:
+            head += "[" + _DEC_NOTE_NAME + "] "
+            body = strip_note_decl(text)
+        newtext = head + body
         newc = newtext
         if isinstance(content, (list, tuple)):
             newc = list(content)
@@ -3446,7 +3468,7 @@ class WindowManager:
                     continue
                 text = str(text_of_content(_get(msg, "content")) or "")
                 _m = _DEC_NOTE_HEAD.match(text) or _DEC_NOTE_TS_HEAD.match(text)
-                body = text[_m.end():] if _m else text
+                body = strip_note_decl(text[_m.end():]) if _m else strip_note_decl(text)
                 for i, d in enumerate(rows):
                     if i in used or self._decision_body(d) != body:
                         continue
@@ -3984,7 +4006,18 @@ class WindowManager:
                 return None
             ts, who = img_meta(text)
             return {"path": rel, "mime": str(mime or ""), "ts": ts, "who": who,
-                    "mid": str(mid or "")}
+                    "mid": mid_of(text, mid)}
+
+        def mid_of(text, given=""):
+            """这张图是哪条消息发的——决策那边要按号把图挂回自己那条里（v4.64）。"""
+            key = str(given or "").strip()
+            if key:
+                return key
+            mm = _MID_RE.search(str(text or ""))
+            if mm:
+                return str(mm.group(1) or "").strip()
+            mm = _MID_ATTR_RE.search(str(text or ""))
+            return str(mm.group(1) or "").strip() if mm else ""
 
         # ① 窗口：从尾部往前把图收齐，够 want 张就停（顺序最后再翻回正序）。
         win_rows: List[dict] = []

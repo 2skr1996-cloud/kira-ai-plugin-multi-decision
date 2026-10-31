@@ -119,6 +119,10 @@ def _row_body(value: Any) -> str:
         if nxt == text:
             break
         text = nxt
+    # v4.65（用户 m36008）：注记发出去时带「[对当前聊天消息的决策建议] 」声明，
+    # 窗口本体没有这一截——比对前先剥掉，否则同一条会被画两遍。
+    text = re.sub(r"^\s*\[(?:对当前聊天消息的决策建议|对以上聊天记录的决策建议)\]\s*",
+                  "", text, count=1)
     return _row_key(text)
 
 
