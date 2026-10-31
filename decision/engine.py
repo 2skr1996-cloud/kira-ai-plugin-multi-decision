@@ -4536,6 +4536,9 @@ class DecisionEngine:
             "images": list(got.get("images") or []),
             "image_count": int(got.get("image_count") or 0),
             "images_fallback": bool(got.get("images_fallback")),
+            # v4.65（用户 m36234）：带图那次的报错与尝试次数，页面 tooltip 直接显示。
+            "images_fallback_error": str(got.get("images_fallback_error") or "")[:300],
+            "images_fallback_attempts": int(got.get("images_fallback_attempts") or 0),
             "input_tokens": int(got.get("input_tokens") or 0),
             "output_tokens": int(got.get("output_tokens") or 0),
             "cached_tokens": int(got.get("cached_tokens") or 0),

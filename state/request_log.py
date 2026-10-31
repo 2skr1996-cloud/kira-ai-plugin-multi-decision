@@ -1789,6 +1789,8 @@ class RequestLog:
             "decision_images": [it for it in (data.get("images") or []) if isinstance(it, dict)],
             "decision_image_count": int(data.get("image_count") or 0),
             "decision_images_fallback": bool(data.get("images_fallback")),
+            "decision_images_fallback_error": str(data.get("images_fallback_error") or "")[:300],
+            "decision_images_fallback_attempts": int(data.get("images_fallback_attempts") or 0),
             "decision_elapsed": float(data.get("elapsed") or 0.0),
             # 用户 m05124 第 8 条：决策轮也把「触发 → 真正开始判」的防抖等待存下来，
             # 记录页的「用时」列才能写成「防抖 7s + 2s」。
@@ -2392,6 +2394,8 @@ class RequestLog:
                 "decision_images": list(data.get("decision_images") or []),
                 "decision_image_count": int(data.get("decision_image_count") or 0),
                 "decision_images_fallback": bool(data.get("decision_images_fallback")),
+                "decision_images_fallback_error": str(data.get("decision_images_fallback_error") or "")[:300],
+                "decision_images_fallback_attempts": int(data.get("decision_images_fallback_attempts") or 0),
                 # v3.94（用户 m08398 图7/图8）：决策行也要跟回复记录一样给出
                 # token（入/出）与缓存命中，决策表才能照抄回复表的列。
                 "input_tokens": int(data.get("input_tokens") or 0),

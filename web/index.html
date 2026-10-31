@@ -6554,10 +6554,16 @@ var ctxSnapRequest = 0;
       var ifb = !!r.decision_images_fallback;
       // 用最窄的写法：这一格本来就只有「30 条」几个字，塞个大徽标会把
       // 「结论 / 理由」两列挤窄（真机 1256 宽时会挤到「要回」竖着排）。
+      // v4.65（用户 m36234）：退回纯文字时，把「带图那次」的真实报错和试了几次一起
+      // 挂到 tooltip 上——以前只有一句「没成功」，查不出是超时、上游拒图，还是没按 JSON 回。
+      var fbWhy = String(r.decision_images_fallback_error || "").trim();
+      var fbN = Number(r.decision_images_fallback_attempts) || 0;
+      var fbTip = "带图那次没成功，已退回纯文字重判" +
+        (fbN ? "（带图试了 " + fbN + " 次）" : "") + (fbWhy ? "：" + fbWhy : "");
       var itag = icnt
         ? " <span class='dim' title='" + esc("这一轮决策带了 " + icnt + " 张图" +
-            (ifb ? "（带图那次没成功，已退回纯文字重判）" : "")) + "'>· 图" + icnt + "</span>"
-        : (ifb ? " <span class='tag warn' title='带图那次没成功，已退回纯文字重判'>看图退回</span>" : "");
+            (ifb ? "，" + fbTip : "")) + "'>· 图" + icnt + "</span>"
+        : (ifb ? " <span class='tag warn' title='" + esc(fbTip) + "'>看图退回</span>" : "");
       // 用户 m05124 第 8 条：决策轮也要看得到防抖——「防抖 7s + 2s」。
       var del = Number(r.decision_debounce) || 0;
       var tk = r.tokens || {};

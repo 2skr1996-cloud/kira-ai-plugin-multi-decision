@@ -32,7 +32,14 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+# v4.65（用户 m36234）：这条链路以前用模块自己的 logger，而插件的文件日志只挂在
+# get_logger("multi_decision") 上——「决策带图失败」这类告警压根没写进 log.log，
+# 事后想查「带图那次到底为什么没成」无从查起。跟 engine / request_log 用同一个。
+try:  # 离线测试里 core 不一定在
+    from core.logging_manager import get_logger as _plugin_logger  # type: ignore
+except Exception:  # pragma: no cover - 只在离线测试里
+    _plugin_logger = None  # type: ignore
+logger = _plugin_logger("multi_decision", "orange") if _plugin_logger else logging.getLogger(__name__)
 
 try:  # 离线测试里 core 不一定在
     from core.provider import LLMRequest  # type: ignore
@@ -83,6 +90,25 @@ reason 是给用户看的一句话，两件事都要照顾到：
 ### 一次只回一个人
 群里可能同时几个人在说话。回的时候挑最该回的那一个人，只对着他说；
 不要一条里同时应付好几个人，也不要挨个都答一遍。"""
+
+# 用户 m36396：决策这一侧也补一段「强化格式遵守」，位置跟回复页那一块一模一样——贴在本轮消息最后。
+# 回复那块讲的是「用 <msg> 包气泡、空壳代表不发」；决策只回一个判断，这块讲的是「只准吐一个 JSON」。
+# 真踩过：模型不吐 JSON、只回一句聊天话（"[16:55] 判定不回（……）"），那一轮按失败算。
+DECISION_FORMAT_HARD = """【格式强化 · 每一条都要照做】
+- 这一次你的全部输出只有一个 JSON 对象：开头是 {，结尾是 }。
+- 前后不要写任何字：不解释、不寒暄、不复述这段规则、不加代码块。
+- 只有这两种形状，字段名逐字照抄：
+  {"reply": true, "reason": "一句话理由，20 字以内"}
+  {"reply": false, "reason": "一句话理由，20 字以内"}
+- reply 只能是 true 或 false，不带引号，不要写成「要回」「不回」。
+- 想说的别的话也只写进 reason；reason 一句话就够。
+- 拿不准就写 false。"""
+
+# 用户 m36396：没按 JSON 回本身就是一次失败。重试时把这句话贴在最后，
+# 别让模型拿着原样的 prompt 原地重复犯错（以前重试是完全相同的消息，它照样再犯一遍）。
+DECISION_RETRY_NOTE = """（提醒）上一条没有按要求的格式回。这一次只输出一个 JSON 对象：
+{"reply": true, "reason": "一句话理由，20 字以内"}
+前面不要写解释，后面不要写别的，也不要加代码块。"""
 
 # 老版本的默认决策提示词（带 say 字段、偏保守那版）。用户在设置页存过一次，这段文字
 # 就落进了配置里；光改上面的常量不会生效，所以读配置时按「逐字相同」认出来换成新稿。
@@ -869,9 +895,13 @@ class DecisionPhase:
                 last = {"ok": False, "error": "模型不可用：" + (model or "快速模型")}
                 continue
             tries = (max(0, opt.retry) + 1) if kind == "main" else 1
+            note = ""
             for t in range(tries):
                 attempts += 1
                 msg_copy = [dict(x) for x in messages]
+                # 用户 m36396：上一次是「没按 JSON 回」才失败的，重试时补一句提醒；网络/上游报错则原样重试。
+                if note:
+                    msg_copy.append({"role": "user", "content": note})
                 last = await self._tool_loop(client, msg_copy, tools, opt, budget)
                 last["attempts"] = attempts
                 last["model"] = model or "fast"
@@ -888,6 +918,11 @@ class DecisionPhase:
                         last.update(budget)
                         return last
                     last["error"] = "模型没按 JSON 回（%s）" % (str(last.get("text") or "")[:80])
+                    note = DECISION_RETRY_NOTE
+                    logger.warning("[multi-decision] 决策第 %d 次没按 JSON 回（%s），重试：%s",
+                                   t + 1, model or "快速模型", str(last.get("text") or "")[:160])
+                else:
+                    note = ""
                 if t < tries - 1 and opt.retry_delay > 0:
                     await asyncio.sleep(opt.retry_delay)
             # 主模型整轮（含重试）都没成，才记账；fallback 失败不再加计
@@ -953,9 +988,15 @@ class DecisionPhase:
         # 带图那次没成（上游不认 image_url / 图太大 / 模型没有视觉），退回纯文字再判
         # 一次：宁可这一次看不见图，也不能因为有图把整轮判断判死。
         img_fallback = False
+        img_err = ""
+        img_tries = 0
         if img_rows and not (bool(got.get("ok")) and parsed):
-            logger.warning("[multi-decision] 决策带图失败（%s），退回纯文字重判一次",
-                           str(got.get("error") or "")[:200])
+            # v4.65（用户 m36234）：带图那次的真实报错要留下来。以前只留「最后一次
+            # 尝试」的 error（纯文字那次），带图为什么没成、试了几次，事后全查不到。
+            img_err = str(got.get("error") or "")[:300]
+            img_tries = int(got.get("attempts") or 0)
+            logger.warning("[multi-decision] 决策带图失败（%d 张图，试了 %d 次）：%s，退回纯文字重判一次",
+                           len(img_rows), img_tries, img_err[:200])
             img_fallback = True
             no_img, _unused = self.chat_payload(messages, None, dyn)
             payload = [{"role": "system", "content": system_text}] + no_img
@@ -990,6 +1031,8 @@ class DecisionPhase:
             "images": img_rows,
             "image_count": len(img_rows),
             "images_fallback": img_fallback,
+            "images_fallback_error": img_err,
+            "images_fallback_attempts": img_tries,
             "sid": sid,
         }
         if not out["ok"]:
