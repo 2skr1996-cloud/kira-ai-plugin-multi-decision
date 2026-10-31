@@ -32,7 +32,14 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+# v4.65（用户 m36234）：这条链路以前用模块自己的 logger，而插件的文件日志只挂在
+# get_logger("multi_decision") 上——「决策带图失败」这类告警压根没写进 log.log，
+# 事后想查「带图那次到底为什么没成」无从查起。跟 engine / request_log 用同一个。
+try:  # 离线测试里 core 不一定在
+    from core.logging_manager import get_logger as _plugin_logger  # type: ignore
+except Exception:  # pragma: no cover - 只在离线测试里
+    _plugin_logger = None  # type: ignore
+logger = _plugin_logger("multi_decision", "orange") if _plugin_logger else logging.getLogger(__name__)
 
 try:  # 离线测试里 core 不一定在
     from core.provider import LLMRequest  # type: ignore
@@ -83,6 +90,21 @@ reason 是给用户看的一句话，两件事都要照顾到：
 ### 一次只回一个人
 群里可能同时几个人在说话。回的时候挑最该回的那一个人，只对着他说；
 不要一条里同时应付好几个人，也不要挨个都答一遍。"""
+
+# 用户 m36396：决策这一侧也补一段「强化格式遵守」，位置跟回复页那一块一模一样——贴在本轮消息最后。
+# 回复那块讲的是「用 <msg> 包气泡、空壳代表不发」；决策只回一个判断，这块讲的是「只准吐一个 JSON」。
+# 真踩过：模型不吐 JSON、只回一句聊天话（"[16:55] 判定不回（……）"），那一轮按失败算。
+DECISION_FORMAT_HARD = """【格式强化】
+只输出一个 JSON 对象，前后不写任何字、不加代码块，字段名照抄：
+{"reply": true, "reason": "一句话理由，20 字以内"}
+{"reply": false, "reason": "一句话理由，20 字以内"}
+reply 只能是 true 或 false；想说的都写进 reason；拿不准写 false。"""
+
+# 用户 m36396：没按 JSON 回本身就是一次失败。重试时把这句话贴在最后，
+# 别让模型拿着原样的 prompt 原地重复犯错（以前重试是完全相同的消息，它照样再犯一遍）。
+DECISION_RETRY_NOTE = """（提醒）上一条没有按要求的格式回。这一次只输出一个 JSON 对象：
+{"reply": true, "reason": "一句话理由，20 字以内"}
+前面不要写解释，后面不要写别的，也不要加代码块。"""
 
 # 老版本的默认决策提示词（带 say 字段、偏保守那版）。用户在设置页存过一次，这段文字
 # 就落进了配置里；光改上面的常量不会生效，所以读配置时按「逐字相同」认出来换成新稿。
@@ -383,7 +405,9 @@ def options_from_config(get) -> DecisionOptions:
     """从 get(key, default) 读配置。get 由调用方给（能带 sid 覆盖）。"""
     def _int(key, default, lo=0, hi=None):
         try:
-            v = int(float(get(key, default) or default))
+            raw = get(key, default)
+            # 数字零是有效值；False 仍沿用原来的默认回退。
+            v = int(float(default if raw is None or raw is False or raw == "" else raw))
         except Exception:
             v = default
         v = max(lo, v)
@@ -811,8 +835,13 @@ class DecisionPhase:
         except Exception:
             return str(got)
 
-    async def _tool_loop(self, client, messages, tools, opt: DecisionOptions, budget: dict) -> dict:
-        """多轮工具循环。返回最后一次模型结果（带上累计 token）。"""
+    async def _tool_loop(self, client, messages, tools, opt: DecisionOptions, budget: dict,
+                         tool_cache: dict = None, reuse: bool = False) -> dict:
+        """多轮工具循环。返回最后一次模型结果（带上累计 token）。
+
+        H07：reuse=True 表示这是同一次决策的重试/降级尝试，同一件工具的同一个参数
+        直接吃上一次的成功结果，不再执行——副作用工具不该因为重试被跑第二遍。
+        """
         names = {str(getattr(t, "name", "") or ""): t for t in tools}
         last = await self._one_call(client, messages, tools, opt.timeout)
         rounds = 0
@@ -837,7 +866,16 @@ class DecisionPhase:
                 calls.append({"id": cid, "type": "function",
                               "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}})
                 tool = names.get(name)
-                result = await self._run_tool(tool, args) if tool else "没有这个工具：" + name
+                key = (name, json.dumps(args, ensure_ascii=False, sort_keys=True))
+                result = None
+                if reuse and tool_cache is not None and tool is not None and key in tool_cache:
+                    result = tool_cache[key]
+                if result is None:
+                    result = await self._run_tool(tool, args) if tool else "没有这个工具：" + name
+                    # 只复用「真跑成功了」的；工具报错允许重试时再试一次。
+                    if (tool is not None and tool_cache is not None
+                            and not result.startswith("工具执行失败：")):
+                        tool_cache[key] = result
                 messages.append({"role": "tool", "tool_call_id": cid, "content": result[:4000]})
             messages.insert(len(messages) - len(calls),
                             {"role": "assistant", "content": last.get("text") or "", "tool_calls": calls})
@@ -847,12 +885,24 @@ class DecisionPhase:
             last = await self._one_call(client, messages, tools, opt.timeout)
         return last
 
-    async def _chain(self, messages, tools, opt: DecisionOptions) -> dict:
-        """主模型 → 重试 → fallback。返回最后一次尝试的结果并附上用量。"""
+    async def _chain(self, messages, tools, opt: DecisionOptions, tool_cache: dict = None) -> dict:
+        """主模型 → 重试 → fallback。返回最后一次尝试的结果并附上用量。
+
+        tool_cache 由 decide() 持有，跨「带图→纯文字降级」也共用，这样工具不会被
+        第二个链重新执行一遍。
+        """
+        if tool_cache is None:
+            tool_cache = {}
         budget = {"in": 0, "out": 0, "cached": 0}
         now = time.time()
-        use_fallback = bool(opt.fallback) and (now < self._fallback_until or
-                                               self._fail_streak >= max(1, opt.fail_switch))
+        tripped = self._fail_streak >= max(1, opt.fail_switch)
+        cooling = self._fallback_until > 0 and now < self._fallback_until
+        # M17：冷却到期后放一次主模型探测。探测期间先把冷却位占住，失败不会变成探测风暴，
+        # 成功则清掉冷却；只有备用一直失败、fail_streak 没被清零时才需要这条出口。
+        probe = bool(opt.fallback) and tripped and not cooling and self._fallback_until > 0
+        if probe:
+            self._fallback_until = now + opt.cooldown
+        use_fallback = bool(opt.fallback) and (cooling or (tripped and not probe))
         order = []
         if use_fallback:
             order.append(("fallback", opt.fallback))
@@ -869,10 +919,15 @@ class DecisionPhase:
                 last = {"ok": False, "error": "模型不可用：" + (model or "快速模型")}
                 continue
             tries = (max(0, opt.retry) + 1) if kind == "main" else 1
+            note = ""
             for t in range(tries):
                 attempts += 1
                 msg_copy = [dict(x) for x in messages]
-                last = await self._tool_loop(client, msg_copy, tools, opt, budget)
+                # 用户 m36396：上一次是「没按 JSON 回」才失败的，重试时补一句提醒；网络/上游报错则原样重试。
+                if note:
+                    msg_copy.append({"role": "user", "content": note})
+                last = await self._tool_loop(client, msg_copy, tools, opt, budget,
+                                             tool_cache, reuse=attempts > 1)
                 last["attempts"] = attempts
                 last["model"] = model or "fast"
                 last["via"] = kind
@@ -884,10 +939,17 @@ class DecisionPhase:
                     parsed = parse_decision(last.get("text") or "")
                     if parsed is not None:
                         self._fail_streak = 0
+                        if probe and kind == "main":
+                            self._fallback_until = 0.0
                         last["parsed"] = parsed
                         last.update(budget)
                         return last
                     last["error"] = "模型没按 JSON 回（%s）" % (str(last.get("text") or "")[:80])
+                    note = DECISION_RETRY_NOTE
+                    logger.warning("[multi-decision] 决策第 %d 次没按 JSON 回（%s），重试：%s",
+                                   t + 1, model or "快速模型", str(last.get("text") or "")[:160])
+                else:
+                    note = ""
                 if t < tries - 1 and opt.retry_delay > 0:
                     await asyncio.sleep(opt.retry_delay)
             # 主模型整轮（含重试）都没成，才记账；fallback 失败不再加计
@@ -948,20 +1010,27 @@ class DecisionPhase:
         payload = [{"role": "system", "content": system_text}] + payload_msgs
         if len(payload) < 2:
             payload.append({"role": "user", "content": user_text})
-        got = await self._chain(payload, tools, opt)
+        tool_cache: dict = {}
+        got = await self._chain(payload, tools, opt, tool_cache)
         parsed = got.get("parsed")
         # 带图那次没成（上游不认 image_url / 图太大 / 模型没有视觉），退回纯文字再判
         # 一次：宁可这一次看不见图，也不能因为有图把整轮判断判死。
         img_fallback = False
+        img_err = ""
+        img_tries = 0
         if img_rows and not (bool(got.get("ok")) and parsed):
-            logger.warning("[multi-decision] 决策带图失败（%s），退回纯文字重判一次",
-                           str(got.get("error") or "")[:200])
+            # v4.65（用户 m36234）：带图那次的真实报错要留下来。以前只留「最后一次
+            # 尝试」的 error（纯文字那次），带图为什么没成、试了几次，事后全查不到。
+            img_err = str(got.get("error") or "")[:300]
+            img_tries = int(got.get("attempts") or 0)
+            logger.warning("[multi-decision] 决策带图失败（%d 张图，试了 %d 次）：%s，退回纯文字重判一次",
+                           len(img_rows), img_tries, img_err[:200])
             img_fallback = True
             no_img, _unused = self.chat_payload(messages, None, dyn)
             payload = [{"role": "system", "content": system_text}] + no_img
             if len(payload) < 2:
                 payload.append({"role": "user", "content": user_text})
-            got = await self._chain(payload, tools, opt)
+            got = await self._chain(payload, tools, opt, tool_cache)
             parsed = got.get("parsed")
             img_rows = []
         out = {
@@ -990,6 +1059,8 @@ class DecisionPhase:
             "images": img_rows,
             "image_count": len(img_rows),
             "images_fallback": img_fallback,
+            "images_fallback_error": img_err,
+            "images_fallback_attempts": img_tries,
             "sid": sid,
         }
         if not out["ok"]:

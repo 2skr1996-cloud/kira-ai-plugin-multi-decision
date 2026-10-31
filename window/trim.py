@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, List
+from typing import Any, List, Optional
 
 # 框架把「同一批进来的多条群消息」拼成一条 role=user 再写进记忆，
 # 所以窗口里一条 user 消息内部可能装着 20 条不同的群消息（每条都带
@@ -151,6 +151,37 @@ def trim_message_to(msg: Any, keep_n: int) -> Any:
     return out
 
 
+def _split_head(orig: Any, kept: Any) -> Any:
+    """把「被劈掉的前半段」单独复制成一条消息（M12）。
+
+    trim_message_to 只返回保留下来的那半段，前半段原来只活在原消息里，调用方
+    拿不到，中期摘要就少写一段（审查 bug）。这里按「保留内容是原内容的尾部」
+    反推前半段；认不出来返回 None，调用方退回旧行为。
+    """
+    full = _get(orig, "content")
+    rest = _get(kept, "content")
+    if not isinstance(full, str) or not isinstance(rest, str):
+        return None
+    if not rest or not full.endswith(rest):
+        return None
+    head = full[: len(full) - len(rest)].rstrip()
+    if not head:
+        return None
+    if isinstance(orig, dict):
+        out = dict(orig)
+        out["content"] = head
+        return out
+    try:
+        out = orig.model_copy(deep=True)
+    except Exception:
+        return None
+    try:
+        out.content = head
+    except Exception:
+        return None
+    return out
+
+
 def choose_cut_index(messages: List[Any], target: int, tolerance: float = 0.2) -> int:
     """在 target 附近找一个安全的切点，找不到就退回 target。"""
     n = len(messages)
@@ -205,6 +236,7 @@ def trim_by_count(
     tolerance: float = 0.2,
     protect: bool = True,
     user_only: bool = False,
+    removed_out: Optional[List[Any]] = None,
 ) -> int:
     """按「计入条数」裁切：留下最新 keep 条计入的消息，工具往返跟着对话一起留。
 
@@ -213,6 +245,10 @@ def trim_by_count(
 
     返回切点（原始下标，0 表示没动）。kept 里若还有悬空的 tool 结果，
     `clean_orphans` 会再从头摘掉几条，它们不进返回的下标、也不进摘要。
+
+    removed_out 给了列表时，把「边界那条打包消息被劈掉的前半段」按原角色
+    复制一份追加进去（M12）——那半段同样是被裁掉的真实消息，调用方要拿它
+    写中期摘要；整条裁掉的那些不经过这里。
     """
     n = len(messages)
     # 只有一条消息也可能要裁：那一条 user 里可能装着十几条群消息（v2.23）
@@ -222,6 +258,7 @@ def trim_by_count(
     counted = 0
     cut = n
     part = None
+    removed = None
     for i in range(n - 1, -1, -1):
         w = weigh(messages[i])
         if w and counted + w > keep:
@@ -231,6 +268,7 @@ def trim_by_count(
                 part = trim_message_to(messages[i], room)
                 if part is not None:
                     cut = i
+                    removed = _split_head(messages[i], part)
             break
         counted += w
         cut = i
@@ -258,5 +296,7 @@ def trim_by_count(
     if not kept or (len(kept) >= n and part is None):
         return 0
     messages[:] = kept
+    if removed_out is not None and removed is not None:
+        removed_out.append(removed)
     return cut
 

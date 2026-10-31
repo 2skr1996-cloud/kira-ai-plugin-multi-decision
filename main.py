@@ -425,8 +425,10 @@ _BOUNDS = {
     "decision_retry": (0, 5),
     "decision_retry_delay": (0, 60),
     "decision_fail_switch": (1, 10),
-    "decision_fallback_cooldown": (0, 86400),
-    "decision_timeout": (5, 600),
+    # Q02（用户 m04478「以设置页显示为准」）：冷却 / 超时跟决策层同一个范围，
+    # 界面允许的值不能在运行时再被悄悄改小（state/decision_phase.py 同数）。
+    "decision_fallback_cooldown": (30, 3600),
+    "decision_timeout": (5, 300),
     "decision_tool_rounds": (0, 5),
     "jitter_seconds": (0, None),
     "jitter_max_rounds": (1, 20),
@@ -484,6 +486,17 @@ _BOUNDS = {
 _ENUMS = {
     "trigger_mode": ("count", "probability", "adaptive"),
 }
+
+
+# Q02（用户 m04478 定「以设置页显示为准」）：下面两个默认值必须跟 ui_schema.json
+# 的 default 一致，否则界面显示一个值、实际生效另一个值。两处要一起改，
+# tests/test_q02_q03_contract.py 会逐项对照，改漏一边就红。
+_UI_DEFAULT_TIME_BANDS = [
+    {"s": 0, "e": 24, "v": 20},
+    {"s": 24, "e": 46, "v": 8},
+    {"s": 46, "e": 48, "v": 20},
+]
+_UI_DEFAULT_PHRASE_FILTER = ["哈哈", "草"]
 
 
 def _merge_sid_key(sid: str) -> str:
@@ -812,6 +825,9 @@ class MultiDecisionPlugin(BasePlugin):
         self._cfg_snapshot = dict(cfg) if isinstance(cfg, dict) else {}
         self._takeover_checked_at = 0.0
         self._takeover_owned = False
+        # M06：接管的是「哪一个」实例。只凭布尔的话，宿主换过实例之后
+        # 停用插件会把不是我们按住的新实例放开（可能是用户自己停用的）。
+        self._takeover_instance = None
         self.enabled = _as_bool(cfg.get("enabled"), True)
         self.decision_enabled = _as_bool(cfg.get("decision_enabled"), True)
         # 单会话总开关的全局默认值。这个键不进 schema（它天生是「每群各一份」），
@@ -878,7 +894,11 @@ class MultiDecisionPlugin(BasePlugin):
         # 并且接管普通模式的阈值/概率与休息时段（曲线已经把一天切成不同概率）。
         # v3.39（用户本轮）：只接管回复概率，休息时段的兜底窗口照用。
         self.bands_enabled = _as_bool(cfg.get("bands_enabled"), False)
-        self.time_bands = _normalize_bands(cfg.get("time_bands"))
+        # 缺键 = 从没存过：用设置页默认那三段曲线；显式清空（""）仍按「没设置」处理。
+        raw_bands = cfg.get("time_bands")
+        self.time_bands = _normalize_bands(
+            _UI_DEFAULT_TIME_BANDS if raw_bands is None else raw_bands
+        )
 
         self.wake_words = _as_list(cfg.get("wake_words"))
         self.nicknames = _as_list(cfg.get("nicknames"))
@@ -932,7 +952,11 @@ class MultiDecisionPlugin(BasePlugin):
         # 才不计入触发——「哈哈」「草」照样能挡，但「好」「嗯」这种真在接话的
         # 短句不再被一起吞掉。
         self.phrase_filter_enabled = _as_bool(cfg.get("phrase_filter_enabled"), True)
-        self.phrase_filter_list = _normalize_phrases(cfg.get("phrase_filter_list"))
+        # 同 Q02：缺键用设置页默认黑名单，显式清空仍是 "[]"。
+        raw_phrases = cfg.get("phrase_filter_list")
+        self.phrase_filter_list = _normalize_phrases(
+            _UI_DEFAULT_PHRASE_FILTER if raw_phrases is None else raw_phrases
+        )
 
         # v3.33（第 6 条）：静默兜底等待时长重新开放成设置项，默认 3 分钟。
         self.silent_trigger_enabled = _as_bool(cfg.get("silent_trigger_enabled"), True)
@@ -952,7 +976,8 @@ class MultiDecisionPlugin(BasePlugin):
         # 模型 + 决策词那部分还在做（ui_schema.json 里的 default 也是 false）。
         self.advanced_enabled = _as_bool(cfg.get("advanced_enabled"), False)
 
-        self.rest_mode_enabled = _as_bool(cfg.get("rest_mode_enabled"), False)
+        # Q02：缺键跟设置页一致（默认开）；显式存 False 仍然关。
+        self.rest_mode_enabled = _as_bool(cfg.get("rest_mode_enabled"), True)
         self.rest_start = str(cfg.get("rest_start") or "23:00")
         self.rest_end = str(cfg.get("rest_end") or "08:00")
         # 默认 2（用户 m03616 第 4 条）；ui_schema.json 里 rest_probability 的
@@ -964,7 +989,8 @@ class MultiDecisionPlugin(BasePlugin):
         # band_rest_enabled / _start / _end 三个键撤掉，只留一个概率。
         self.band_rest_probability = _as_int(cfg.get("band_rest_probability"), 2)
 
-        self.backoff_enabled = _as_bool(cfg.get("backoff_enabled"), True)
+        # Q02：缺键跟设置页一致（默认关）；显式存 True 才开。
+        self.backoff_enabled = _as_bool(cfg.get("backoff_enabled"), False)
         self.backoff_start_rejects = max(1, _as_int(cfg.get("backoff_start_rejects"), 2))
         self.backoff_base_seconds = max(1, _as_int(cfg.get("backoff_base_seconds"), 15))
         self.backoff_max_seconds = max(1, _as_int(cfg.get("backoff_max_seconds"), 300))
@@ -1396,17 +1422,18 @@ class MultiDecisionPlugin(BasePlugin):
             await self.engine.shutdown()
         except Exception:
             logger.exception("[multi-decision] 关闭决策引擎失败")
-        try:
-            if self.window is not None:
-                self.window.shutdown()
-            if self.request_log is not None:
-                self.request_log.shutdown()
-            if self.stats is not None:
-                self.stats.shutdown()
-            if self.band_rhythm is not None:
-                self.band_rhythm.flush()
-        except Exception:
-            logger.exception("[multi-decision] 关闭窗口模块失败")
+        # M05：四个组件逐个收尾。以前共用一个 try，前一个抛错后面全跳过——
+        # 窗口没存、统计没落、节奏没刷，日志里却只有一句「关闭窗口模块失败」。
+        for name, step in (
+            ("窗口模块", lambda: self.window.shutdown() if self.window is not None else None),
+            ("请求记录", lambda: self.request_log.shutdown() if self.request_log is not None else None),
+            ("自适应统计", lambda: self.stats.shutdown() if self.stats is not None else None),
+            ("节奏队列", lambda: self.band_rhythm.flush() if self.band_rhythm is not None else None),
+        ):
+            try:
+                step()
+            except Exception:
+                logger.exception(f"[multi-decision] 关闭{name}失败（继续收尾其它组件）")
         self._release_builtin_chat()
         logger.info("[multi-decision] terminated")
 
@@ -1418,20 +1445,25 @@ class MultiDecisionPlugin(BasePlugin):
         """
         if not self._takeover_owned:
             return
+        owned = self._takeover_instance
+        self._takeover_instance = None
+        self._takeover_owned = False
         try:
             instance = self.ctx.get_plugin_inst("default-chat")
         except Exception:
             instance = None
         if instance is None:
-            self._takeover_owned = False
+            return
+        if owned is None or instance is not owned:
+            logger.info(
+                "[multi-decision] default-chat 已不是我们接管的那个实例，不放开新实例"
+            )
             return
         try:
             instance._terminating = False
             logger.info("[multi-decision] 已放开 default-chat（_terminating=False）")
         except Exception:
             logger.exception("[multi-decision] 放开 default-chat 失败")
-        finally:
-            self._takeover_owned = False
 
     def _takeover_builtin_chat(self):
         """让内置 default-chat 停手，避免它自己的 debounce 提前 flush。
@@ -1459,6 +1491,7 @@ class MultiDecisionPlugin(BasePlugin):
         try:
             instance._terminating = True
             self._takeover_owned = True
+            self._takeover_instance = instance
             self._takeover_checked_at = time.time()
             logger.info("[multi-decision] 已接管 default-chat（置 _terminating=True）")
         except Exception:
@@ -1486,6 +1519,7 @@ class MultiDecisionPlugin(BasePlugin):
         try:
             instance._terminating = True
             self._takeover_owned = True
+            self._takeover_instance = instance
             logger.info("[multi-decision] default-chat 被复位，已重新接管")
         except Exception:
             logger.exception("[multi-decision] 重新接管 default-chat 失败")
@@ -4441,10 +4475,23 @@ class MultiDecisionPlugin(BasePlugin):
             if not isinstance(data, dict):
                 return False
             data["phrase_filter_list"] = json.dumps(payload, ensure_ascii=False)
-            # 原子替换：先写同目录临时文件再 os.replace，避免框架正好在读时读到半截
-            tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp, path)
+            # 原子替换：先写同目录临时文件再 os.replace，避免框架正好在读时读到半截。
+            # 临时名必须每次唯一：固定 .tmp 时两个写者会撞同一个文件，后写者把前写者
+            # 的临时文件挪走，前写者 replace 就抛 FileNotFoundError（写失败还留下垃圾）。
+            # 这只解决「同目录撞名/半截文件」，跨进程的读改写覆盖（最后写入者赢）没有解决。
+            tmp = path.with_name(path.name + ".tmp-" + os.urandom(4).hex())
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(data, ensure_ascii=False, indent=2))
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, path)
+            finally:
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except Exception:
+                    pass
         except Exception:
             logger.exception("[multi-decision] 写全局短语池失败")
             return False
@@ -4657,8 +4704,11 @@ class MultiDecisionPlugin(BasePlugin):
                 if not bool(it.get("decision_only")):
                     continue
                 it["outcome"] = "decision"
-                it["failed"] = False
-                it["error"] = ""
+                # 2026-10-31：决策失败（上游 5xx、超时、没按 JSON 回…）以前在这里被
+                # 一刀清成 False，结论列就成了「要回」，行尾还按图片退回标，看起来像
+                # 一次正常判定。失败/报错必须原样带给页面。
+                it["failed"] = bool(it.get("failed"))
+                it["error"] = str(it.get("error") or "")
                 it["elapsed"] = it.get("decision_elapsed")
                 key = str(it.get("decision_model") or "")
                 if not key or key in ("fast", "default"):
@@ -4769,32 +4819,27 @@ class MultiDecisionPlugin(BasePlugin):
             # 前端按首步算比率，并在行里写出「N 步」。
             steps = (trace or {}).get("steps") or []
             it["steps"] = len(steps)
+            # v3.59（用户 m17212 第 1 条）：实测命中是整轮各步合计，而「命中预估」是首步跨轮前缀，
+            # 多步轮第二步会把前面整段再发一遍，两列天然不同口径。这里把首步命中一起带下去，
+            # 前端就能摆成「整轮 X%（首步 Y%）」，单步轮不受影响。
+            # 两列都以「第一条 input>0 的步」为准，所以一次扫描同时取出来。
             first_in = 0
+            first_hit = None
             for _st in steps:
                 try:
                     _v = int(_st.get("input_tokens") or 0)
                 except (TypeError, ValueError):
                     _v = 0
-                if _v > 0:
-                    first_in = _v
-                    break
-            it["first_input"] = first_in
-            # v3.59（用户 m17212 第 1 条）：实测命中是整轮各步合计，而「命中预估」是首步跨轮前缀，
-            # 多步轮第二步会把前面整段再发一遍，两列天然不同口径。这里把首步命中一起带下去，
-            # 前端就能摆成「整轮 X%（首步 Y%）」，单步轮不受影响。
-            first_hit = None
-            for _st2 in steps:
+                if _v <= 0:
+                    continue
+                first_in = _v
                 try:
-                    _i2 = int(_st2.get("input_tokens") or 0)
+                    _c2 = int(_st.get("cached_tokens") or 0)
                 except (TypeError, ValueError):
-                    _i2 = 0
-                if _i2 > 0:
-                    try:
-                        _c2 = int(_st2.get("cached_tokens") or 0)
-                    except (TypeError, ValueError):
-                        _c2 = 0
-                    first_hit = round(_c2 * 100.0 / _i2, 1)
-                    break
+                    _c2 = 0
+                first_hit = round(_c2 * 100.0 / _v, 1)
+                break
+            it["first_input"] = first_in
             it["first_cache_hit"] = first_hit
             # v3.60（用户 task-8 第 4 项）：多步轮的「实测命中」是各步合计，光给整轮数字
             # 看不出是哪一步把命中拉高/拉低的。这里把每步的 token 与命中率一并带下去，
@@ -5183,17 +5228,25 @@ class MultiDecisionPlugin(BasePlugin):
             logger.debug("[multi-decision] 取两套轮次用于裁切归属失败", exc_info=True)
         for cut in self._window_log.read_recent(1000, sid=sid):
             eid = str(cut.get("event_id") or "")
-            owner = by_event.get(eid) if eid else None
-            if owner is None:
-                owner = self._trim_owner_by_time(universe, cut)
-                if owner is not None and not any(owner is x for x in rounds):
-                    # 认出来的那一轮不在当前页：换成这一页里同一条（同一时刻、同一类）
-                    key = (round(float(owner.get("ts") or 0), 3), round_kind(owner))
+            if eid:
+                owner = by_event.get(eid)
+                if owner is None:
+                    # 有 event_id 就只认这个 id：它可能落在别的页，先到全量轮次里找。
                     owner = next(
-                        (x for x in rounds
-                         if (round(float(x.get("ts") or 0), 3), round_kind(x)) == key),
+                        (x for x in universe
+                         if str(x.get("event_id") or "") == eid),
                         None,
                     )
+            else:
+                owner = self._trim_owner_by_time(universe, cut)
+            if owner is not None and not any(owner is x for x in rounds):
+                # 认出来的那一轮不在当前页：换成这一页里同一条（同一时刻、同一类）
+                key = (round(float(owner.get("ts") or 0), 3), round_kind(owner))
+                owner = next(
+                    (x for x in rounds
+                     if (round(float(x.get("ts") or 0), 3), round_kind(x)) == key),
+                    None,
+                )
             if owner is not None:
                 owner["trims_after"].append(dict(cut))
 
@@ -5261,9 +5314,14 @@ class MultiDecisionPlugin(BasePlugin):
             # 用户本轮第 3 条：② 历史消息只画历史那段。老写法取完整 messages，
             # 本轮那条（stage 已切进 incoming_messages）会在这里再画一遍，
             # 于是 ② 和 ③ 看着像同一条 @ 出现两次。有 history_messages 就优先用它。
-            history_source = copy.deepcopy(
-                data.get("history_messages") or data.get("messages") or []
-            )
+            # 只有「没这个字段/类型不对」才退回完整 messages；显式空列表就是空历史，
+            # 不能当成缺失再画一遍本轮消息。
+            history_source = data.get("history_messages")
+            if not isinstance(history_source, list):
+                history_source = data.get("messages")
+            if not isinstance(history_source, list):
+                history_source = []
+            history_source = copy.deepcopy(history_source)
             try:
                 history_source = regroup_images(history_source)
             except Exception as exc:
@@ -5416,7 +5474,7 @@ class MultiDecisionPlugin(BasePlugin):
                         _stamp = ""
                     _why = str(rec.get("decision_reason") or "").strip()
                     _say = str(rec.get("decision_say") or "").strip()
-                    _head = "判定要回" if rec.get("decision_reply") else "判定不回"
+                    _head = "建议回复" if rec.get("decision_reply") else "建议不回"
                     _body = "[决策记录] " + ((_stamp + " ") if _stamp else "") + _head
                     if _why:
                         _body += "（" + _why + "）"
@@ -5660,7 +5718,29 @@ class MultiDecisionPlugin(BasePlugin):
             target = (data_root / rel).resolve()
         except Exception:
             return {"ok": False, "detail": "路径解析失败"}
-        if not any(is_within_directory(root, target) for root in roots) or not target.is_file():
+        if not any(is_within_directory(root, target) for root in roots):
+            return Response(status_code=404, content=b"")
+        if not target.is_file():
+            # 2026-11-01（用户 m05804）：旧记录里可能留着框架已经清掉的
+            # session_media 原路径，而插件 media_cache 还有副本。先让 public_media
+            # 按索引/同名副本找一次，找到就改读副本；不能因为原路径没了就画
+            # 「图片已清理」。仍然找不到才 404。
+            try:
+                got = public_media(rel)
+            except Exception as exc:
+                logger.debug("[multi-decision] 媒体副本回退失败：%s: %s", type(exc).__name__, exc)
+                got = {}
+            alt = str((got or {}).get("path") or "").strip().replace("\\", "/")
+            if alt and alt != rel:
+                try:
+                    alt_target = (data_root / alt).resolve()
+                except Exception:
+                    alt_target = None
+                if (alt_target is not None
+                        and any(is_within_directory(root, alt_target) for root in roots)
+                        and alt_target.is_file()):
+                    target = alt_target
+        if not target.is_file():
             # 404 而不是 200 + JSON：<img> 才认得出加载失败，去画占位；
             # 以前这里返回 JSON，页面上就是一张裂图 + 一大片空白（用户 m01008 图1）。
             try:

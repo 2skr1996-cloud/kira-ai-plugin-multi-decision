@@ -362,6 +362,32 @@ class PromptLayouts:
         out["modules"] = tail_order(new_mods)
         return out
 
+    @staticmethod
+    def _ensure_decision_format(kind, doc):
+        """用户 m36396：老布局里没有「强化格式遵守」这一块，读的时候补上，默认开着。
+
+        只补决策页（回复页本来就有），也只补一块；补出来的位置由 tail_order 决定
+        ——紧挨聊天记录，在系统动态段前面，跟回复页一个位置。
+        """
+        if kind != "decision" or not isinstance(doc, dict) or doc.get("mode") != "modules":
+            return doc
+        mods = doc.get("modules")
+        if not isinstance(mods, list):
+            return doc
+        if any(str(m.get("type") or "") == "dynamic" for m in mods if isinstance(m, dict)):
+            return doc
+        used = {str(m.get("id") or "") for m in mods if isinstance(m, dict)}
+        mid = "decision-format-hard"
+        n = 2
+        while mid in used:
+            mid = "decision-format-hard-%d" % n
+            n += 1
+        from .decision_phase import DECISION_FORMAT_HARD
+        out = dict(doc)
+        out["modules"] = tail_order(list(mods) + [module(mid, "dynamic", DYNAMIC_TEMPLATE_NAME, "",
+                                                         DECISION_FORMAT_HARD)])
+        return out
+
     def _relabel(self, doc):
         """用户 m01209 图1：模块名一直跟着所选模板名走，不让名字和内容对不上。"""
         names = {t["id"]: t["name"] for t in self.templates()}
@@ -864,7 +890,7 @@ class PromptLayouts:
         if kind == "decision":
             # 用户 m02159 图2：默认不再放「决策提示词」那一大块，而是把判断规则拆成三块
             # 细化好的小规则，直接按顺序拼在左侧。
-            from .decision_phase import DECISION_SKELETONS, DEFAULT_DECISION_FORMAT
+            from .decision_phase import DECISION_FORMAT_HARD, DECISION_SKELETONS, DEFAULT_DECISION_FORMAT
             # 用户 m04343 第 6 条：决策这边「角色扮演」也是第一块（跟回复页一样，人设先定调子）。
             # 用户 m02159 图3：角色扮演段锁住、可留空、可移动；决策这边默认空人格。
             modules.append(module("decision-persona", "persona", TYPE_LABELS["persona"], ""))
@@ -915,9 +941,13 @@ class PromptLayouts:
                 modules.append(module("reply-tools", "tools", TYPE_LABELS["tools"]))
         # 用户 m02159 图1：工具说明和动态尾段之间插一块「实时窗口」，写明聊天记录拼在这里。
         modules.append(module("realtime-tail", "realtime_marker", TYPE_LABELS["realtime_marker"], "", REALTIME_NOTE))
-        # 用户 m05691：决策只判断「回不回」，一个气泡都不产出，格式强化对它没有意义——决策页不再有这块。
-        if kind != "decision":
-            # 用户 m02993：动态段是真正的模板（默认「强化格式遵守」），不再是空占位。
+        # 用户 m02993：动态段是真正的模板（默认「强化格式遵守」），不再是空占位。
+        # 用户 m36396：决策侧也补同一块，正文换成决策自己的「只准吐一个 JSON」——回复那块讲的是 <msg> 包气泡。
+        # 两边位置一致，都贴在本轮消息最后一条。
+        if kind == "decision":
+            modules.append(module("decision-format-hard", "dynamic", DYNAMIC_TEMPLATE_NAME, "",
+                                  DECISION_FORMAT_HARD))
+        else:
             modules.append(module("dynamic-tail", "dynamic", DYNAMIC_TEMPLATE_NAME, "", DYNAMIC_TEMPLATE_DEFAULT))
         # 用户 m04343 第 3 条：动态段紧挨聊天记录（实时窗口下面第一格），系统动态段排在它后面
         # ——系统动态段是框架自己拼在 system 末尾的那些内容（会话信息 / 聊天环境 / 记忆 / 时间）。
@@ -934,11 +964,11 @@ class PromptLayouts:
         all_scopes, scope = self._data.get("layouts", {}), self._scope(sid)
         own = all_scopes.get(scope, {}).get(kind)
         if own is not None:
-            return self._relabel(self._ensure_persona(kind, normalize_layout(own, kind))), False
+            return self._relabel(self._ensure_decision_format(kind, self._ensure_persona(kind, normalize_layout(own, kind)))), False
         inherited = all_scopes.get("*", {}).get(kind) if scope != "*" else None
         if inherited is not None:
-            return self._relabel(self._ensure_persona(kind, normalize_layout(inherited, kind))), True
-        return self._relabel(self._ensure_persona(kind, self.default_layout(kind, sid))), bool(sid)
+            return self._relabel(self._ensure_decision_format(kind, self._ensure_persona(kind, normalize_layout(inherited, kind)))), True
+        return self._relabel(self._ensure_decision_format(kind, self._ensure_persona(kind, self.default_layout(kind, sid)))), bool(sid)
 
     def save(self, kind, sid, layout, expected_revision):
         if not isinstance(expected_revision, str) or expected_revision != self.revision():
@@ -1059,7 +1089,10 @@ class PromptLayouts:
 
     def _dynamic_part(self, m):
         """用户 m02993：动态段是能改的模板，正文拼在本轮 user 消息的最后，不进 system。"""
-        text = m["content"] or DYNAMIC_TEMPLATE_DEFAULT
+        # 用户 m36396：决策那一块正文空着时不能回落到回复版的 <msg> 那段——按模块 id 认人。
+        from .decision_phase import DECISION_FORMAT_HARD
+        _fallback = DECISION_FORMAT_HARD if str(m.get("id") or "").startswith("decision-") else DYNAMIC_TEMPLATE_DEFAULT
+        text = m["content"] or _fallback
         # 用户 m10297 图1：关掉启用时 inject 也要跟着假，否则关掉的模板照样拼进 user 末尾。
         return {"id": m["id"], "label": m["label"], "name": "dynamic", "type": "dynamic",
                 "text": text, "chars": len(text), "dynamic": True,
@@ -1355,11 +1388,13 @@ class PromptLayouts:
             own = self._data.get("layouts", {}).get("*", {}).get(kind)
             # 用户 m28586 第 1 条：没有会话（看全局）这条分支也得补人格段，
             # 否则页面上「角色扮演」只在指定会话时才出现，保存时又被悄悄写回去。
-            doc = (self._ensure_persona(kind, normalize_layout(own, kind)) if own is not None
-                   else self._ensure_persona(kind, self.default_layout(kind, context_sid)))
+            # 用户 m36396：决策页「强化格式遵守」是新加的一块，全局作用域也该有——
+            # 这两处以前只补人格段，老布局在「看全局」时就会少一块，设置页上根本看不到它。
+            doc = (self._ensure_decision_format(kind, self._ensure_persona(kind, normalize_layout(own, kind))) if own is not None
+                   else self._ensure_decision_format(kind, self._ensure_persona(kind, self.default_layout(kind, context_sid))))
             inherited = False
         if draft is not None:
-            doc = self._ensure_persona(kind, normalize_layout(draft, kind))
+            doc = self._ensure_decision_format(kind, self._ensure_persona(kind, normalize_layout(draft, kind)))
         await self.refresh_live(context_sid)
         context = await self._context(context_sid, None, doc)
         preview = self._render(kind, context_sid, doc, context, sample=True)
@@ -1428,11 +1463,12 @@ class PromptLayouts:
         catalog.append({"type": "system_dynamic", "key": "", "label": TYPE_LABELS["system_dynamic"],
                         "text": "", "source": "默认关着；启用后拼在本轮消息最下面", "available": True,
                         "group": "default", "tag": "位置", "suffix": "位置"})
-        if kind != "decision":
-            # 用户 m05691：决策不需要格式强化（它不产出气泡），所以这一项只在回复页出现。
-            catalog.append({"type": "dynamic", "key": "", "label": DYNAMIC_TEMPLATE_NAME,
-                            "text": DYNAMIC_TEMPLATE_DEFAULT, "source": "动态段：拼在本轮聊天记录最后",
-                            "available": True, "group": "default", "tag": "动态段", "suffix": "动态段"})
+        # 用户 m36396：两边都有这一块，只是正文不一样——决策讲 JSON 格式，回复讲 <msg> 气泡。
+        from .decision_phase import DECISION_FORMAT_HARD
+        catalog.append({"type": "dynamic", "key": "", "label": DYNAMIC_TEMPLATE_NAME,
+                        "text": DECISION_FORMAT_HARD if kind == "decision" else DYNAMIC_TEMPLATE_DEFAULT,
+                        "source": "动态段：拼在本轮聊天记录最后",
+                        "available": True, "group": "default", "tag": "动态段", "suffix": "动态段"})
         choices, picked = [], []
         try:
             # 用户 m02159 图3：工具是全局一份（prompt_tools.json），决策和回复两边都勾同一份，
