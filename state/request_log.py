@@ -12,6 +12,7 @@ import mimetypes
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -35,6 +36,32 @@ PRUNE_GRACE_SECONDS = 300
 #: requests/<sid>/ 每会话只留 keep 份（默认 100），忙的群一天就超了；
 #: 账本跟它并列放在 stats/requests.jsonl，只按时间滚动清理。
 LEDGER_KEEP_DAYS = 30
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """H03：同目录唯一临时文件写完再原子替换，失败清掉临时文件、目标保持原样。
+
+    直接覆盖写遇到半途失败会留下半份 JSON；同名的固定 .tmp 又会让两路写互相踩。
+    """
+    tmp: Optional[Path] = None
+    try:
+        fd, name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+        os.close(fd)
+        tmp = Path(name)
+        tmp.write_text(text, encoding="utf-8")
+        try:
+            with open(tmp, "rb+") as fh:
+                os.fsync(fh.fileno())
+        except OSError:
+            pass
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def _outcome_of(data: dict) -> str:
@@ -202,7 +229,7 @@ def _to_dict(msg: Any) -> Any:
     return {"role": getattr(msg, "role", ""), "content": _plain_content(getattr(msg, "content", ""))}
 
 
-_DEC_NOTE_HEAD = ("判定要回", "判定不回")
+_DEC_NOTE_HEAD = ("建议回复", "建议不回", "判定要回", "判定不回")
 
 
 def _decorate_rows(rows: Any, media_by_id: Any) -> None:
@@ -210,7 +237,7 @@ def _decorate_rows(rows: Any, media_by_id: Any) -> None:
 
     快照存的是框架 Message，只有 role/content：窗口里那些 media 与 decnote
     全丢了。于是回复记录 ③ 里既看不到这次决策的注记（前端认注记靠 decnote /
-    name / 「[决策记录]」前缀，注记正文却是「判定要回（…）」），也看不到刚发的图
+    name / 「[决策记录]」前缀，注记正文只写「建议回复／建议不回（…）」或旧「判定要回（…）」），也看不到刚发的图
     （media 为空 → 一张白卡）。这里按正文把注记认回来（跟 window/manager.py
     同一套规则），图片按 message_id 从 request._mdp_incoming_media 取。
     """
@@ -230,6 +257,9 @@ def _decorate_rows(rows: Any, media_by_id: Any) -> None:
             head = re.sub(r"^\[决策记录\]\s*(?:\d{1,2}:\d{2})?\s*", "", text.lstrip())
             # v4.39（用户 m20312）：注记正文现在也带「[HH:MM] 」，认之前先剥掉
             head = re.sub(r"^\[\d{1,2}:\d{2}\]\s*", "", head)
+            # v4.65（用户 m36008）：出口还会加「[对当前聊天消息的决策建议]」；
+            # 建议口吻的新注记和旧判定注记都可能带这个声明，认之前一并剥掉。
+            head = re.sub(r"^\[(?:对当前聊天消息的决策建议|对以上聊天记录的决策建议)\]\s*", "", head)
             if head.startswith(_DEC_NOTE_HEAD):
                 row["decnote"] = True
                 row.setdefault("name", "对当前聊天消息的决策建议")
@@ -589,7 +619,8 @@ class RequestLog:
         返回 (冷条数, 本轮输入条数, 逐条标记串)；标记串与 messages 一一对应，
         h=命中 / c=冷 / f=本轮输入，system 这类不参与统计的记 h。
         """
-        prev_set = set(prev_series or [])
+        # prev_series 只用来区分「冷条是否在上一份请求里出现过」，而两种情况的标记
+        # 都是 c（冷就是冷，命中与否由前缀决定），所以不再为它算指纹集合。
         msgs = list(messages or [])
         n = max(0, min(int(prefix_len or 0), len(msgs)))
         # v4.26（用户 m22251）：本轮输入的起点改成「上一次回复的位置」，不再是
@@ -640,7 +671,7 @@ class RequestLog:
             # 上一次回复之前、又落不进公共前缀的：被裁切搬过位置的历史，算冷。
             # 上一份请求里就没有的（裁切后重建、从没进过 prompt）同样不命中，也记冷。
             cold += 1
-            flags.append("c" if self._msg_sig(m) in prev_set else "c")
+            flags.append("c")
         return cold, fresh, "".join(flags)
 
     @staticmethod
@@ -736,11 +767,15 @@ class RequestLog:
         self._prev_cache[key] = out
         return out
 
-    def _trim_between(self, sid: str, prev_name: str) -> bool:
+    def _trim_between(self, sid: str, prev_name: str, upper_name: str = "") -> bool:
         """基准快照之后、这一份之前有没有发生过裁切（v4.26 用户 m22281）。
 
         裁切会把窗口里的消息重排/搬位置，公共前缀必然从某一处断掉。页面上那条
         黄色说明要能说清「这是裁切造成的」，说不清就只写「不命中缓存」。
+
+        M04：查看历史详情时传 upper_name（这一份自己的文件名），只看
+        (prev_name, upper_name) 之间——后来才发生的裁切不能算到旧快照头上，
+        否则一裁切，所有老记录的命中数都跟着变。
         """
         if not prev_name:
             return False
@@ -749,9 +784,15 @@ class RequestLog:
             files = sorted(folder.glob("*.json"), reverse=True)
         except Exception:
             return False
+        started = not upper_name
         for f in files:
             if f.name == prev_name:
                 return False
+            if not started:
+                # 还没走到「这一份」：它后面的快照都晚于它，跳过（M04）。
+                if f.name == upper_name:
+                    started = True
+                continue
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
             except Exception:
@@ -769,40 +810,11 @@ class RequestLog:
         oc = _outcome_of(data)
         if oc == "trim":
             return {}
-        folder = self.dir / _safe_sid(sid)
-        try:
-            files = sorted(folder.glob("*.json"), reverse=True)
-        except Exception:
-            return {}
-        prev_pair = None
-        seen_self = False
-        # A2（用户 m26791）：挑基准跟落盘时同一套规则——决策轮只排除裁切快照；
-        # 回复轮先找上一份回复请求，找不到再退到「最近一次任意真实请求」。
-        # 以前这里没有那条兜底，找不到就整段放弃，列表上的命中数和详情里的对不上。
-        allow_any = oc != "decision"
-        for _round in range(2):
-            for f in files:
-                if f.name == name:
-                    seen_self = True
-                    continue
-                if not seen_self:
-                    continue  # 只看比这一份更早的
-                try:
-                    pd = json.loads(f.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                o = _outcome_of(pd)
-                if oc == "decision" or allow_any:
-                    if o == "trim":
-                        continue
-                elif o in ("decision", "trim"):
-                    continue
-                prev_pair = (f.name, pd)
-                break
-            if prev_pair is not None or oc == "decision" or not allow_any:
-                break
-            allow_any = False  # 第一轮按「上一份回复」挑，没找到再放开成任意请求
-        if prev_pair is None:
+        # M03：挑基准与落盘同一套（回复先认上一份回复、再退任意请求），
+        # 而且只看比这一份更早的快照——以前第二遍会从头再扫，把后来的请求
+        # 当成基准，老记录的命中数会随着后面继续聊天而变化。
+        prev_pair = self._basis_before(sid, oc, name)
+        if not prev_pair[0]:
             return {}
         prev_msgs = self._series_of(prev_pair[1])
         cur_msgs = list(data.get("messages") or [])
@@ -816,7 +828,42 @@ class RequestLog:
             inc = data.get("incoming_messages") or []
             if isinstance(inc, list) and inc:
                 tail = list(inc)
-        return self._prefix_info(sid, cur_msgs, tail, prev_pair[0], prev_ser)
+        return self._prefix_info(sid, cur_msgs, tail, prev_pair[0], prev_ser, name)
+
+    def _basis_before(self, sid: str, kind: str, name: str) -> tuple:
+        """详情重算挑基准：只看比 name 更早的快照，规则与 _basis_of 一致（M03）。
+
+        落盘时 _basis_of 认「上一份回复请求，找不到再退任意真实请求」；以前详情
+        从最新往回扫，回复轮第一遍先接受任意请求、第二遍又没重置「只看更早」的
+        边界，同一份快照的保存值与详情会算出两个不同的基准。返回 (文件名, 快照)；
+        没有可用基准返回 ("", None)。
+        """
+        folder = self.dir / _safe_sid(sid)
+        try:
+            files = sorted(folder.glob("*.json"), reverse=True)
+        except Exception:
+            return ("", None)
+        passes = ["any"] if str(kind or "") == "decision" else ["reply", "any"]
+        for use in passes:
+            seen_self = False
+            for f in files:
+                if f.name == name:
+                    seen_self = True
+                    continue
+                if not seen_self:
+                    continue  # 只看比这一份更早的
+                try:
+                    pd = json.loads(f.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                o = _outcome_of(pd)
+                if use == "any":
+                    if o == "trim":
+                        continue
+                elif o in ("decision", "trim"):
+                    continue
+                return (f.name, pd)
+        return ("", None)
 
     @staticmethod
     def _common_prefix(prev: list, cur: list) -> int:
@@ -864,7 +911,8 @@ class RequestLog:
         return prev_name, prev_series
 
     def _prefix_info(self, sid: str, messages: list, tail: list,
-                     prev_name: str, prev_series: list) -> dict:
+                     prev_name: str, prev_series: list,
+                     upper_name: str = "") -> dict:
         """给定基准，算这份快照的公共前缀与逐条标记（A2 用户 m26791 抽出来的）。
 
         落盘（_prefix_of）与详情重算（recalc_cache）都走这一条，算出来的
@@ -877,7 +925,7 @@ class RequestLog:
         prefix_len = self._common_prefix(prev_series, cur)
         # v4.26（用户 m22281）：不命中是不是裁切造成的，写进快照供页面说明。
         try:
-            trim_btw = self._trim_between(sid, prev_name)
+            trim_btw = self._trim_between(sid, prev_name, upper_name)
         except Exception:
             trim_btw = False
         # 用户 m26142 第 4 条：中间裁过窗口的，整份都算未命中（裁切本来就把前缀打断了）。
@@ -1391,7 +1439,8 @@ class RequestLog:
         if not self.enabled:
             self._pending.pop(key, None)
             return None
-        record = self._pending.pop(key, None)
+        # H03：先写成功再出队。写失败时记录留在内存里，下次还能重试，不会静默丢。
+        record = self._pending.get(key)
         if record is None:
             return None
         record["replied"] = bool(replied)
@@ -1403,7 +1452,10 @@ class RequestLog:
         record["error"] = ""
         if extra:
             record.update(extra)
-        return self._save_round(sid, record, ledger=True)
+        saved = self._save_round(sid, record, ledger=True)
+        if saved:
+            self._pending.pop(key, None)
+        return saved
 
     def _save_round(self, sid: str, record: dict, ledger: bool = True) -> Optional[str]:
         """把一份快照记录落盘。flush 与「裁切快照」（write_trim_snapshot）共用。
@@ -1421,31 +1473,40 @@ class RequestLog:
             if path.exists():
                 suffix = hashlib.sha256(str(record.get("event_id") or "").encode()).hexdigest()[:12]
                 path = folder / f"{int(record['ts'] * 1000)}_{suffix}.json"
-            path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-            self._names[(sid, str(record.get("event_id") or ""))] = path.name
-            # v4.10（用户 m17328）：这份落盘了，它就是下一轮的「上一次」。
-            # 不在这里刷新的话，下一轮算前缀时读到的还是上上次那份。
-            try:
-                oc = str(record.get("outcome") or "")
-                if oc != "trim":
-                    kind = "decision" if oc == "decision" else "reply"
-                    arr = self._series_of(record)
-                    if isinstance(arr, list) and arr:
-                        sigs = [self._msg_sig(m) for m in arr]
-                        self._prev_cache[(sid, kind)] = (path.name, sigs)
-                        # v4.15：前缀基准改成「最近一次任意真实请求」，这里要一起刷新，
-                        # 否则本轮 stage 时缓存下来的空值会让下一轮永远拿不到基准。
-                        self._prev_cache[(sid, "any")] = (path.name, sigs)
-            except Exception:
-                pass
-            self._prune(folder, sid)
-            # 账本先于返回写：文件会被 _prune 裁掉，账本不会。
-            if ledger:
-                self._append_ledger(sid, record)
-            return str(path)
+            # H03：写进临时文件再替换；这一步失败才算「没写成」。
+            _atomic_write_text(path, json.dumps(record, ensure_ascii=False, indent=2))
         except Exception:
             logger.exception("[multi-decision] 写请求上下文记录失败")
             return None
+        # 到这里文件已经落盘。下面的索引/清理/账本失败只记日志，不能反过来
+        # 让调用方以为这一轮没写成——那会让同一轮被重写、账本记两次。
+        try:
+            self._names[(sid, str(record.get("event_id") or ""))] = path.name
+            # v4.10（用户 m17328）：这份落盘了，它就是下一轮的「上一次」。
+            # 不在这里刷新的话，下一轮算前缀时读到的还是上上次那份。
+            oc = str(record.get("outcome") or "")
+            if oc != "trim":
+                kind = "decision" if oc == "decision" else "reply"
+                arr = self._series_of(record)
+                if isinstance(arr, list) and arr:
+                    sigs = [self._msg_sig(m) for m in arr]
+                    self._prev_cache[(sid, kind)] = (path.name, sigs)
+                    # v4.15：前缀基准改成「最近一次任意真实请求」，这里要一起刷新，
+                    # 否则本轮 stage 时缓存下来的空值会让下一轮永远拿不到基准。
+                    self._prev_cache[(sid, "any")] = (path.name, sigs)
+        except Exception:
+            logger.exception("[multi-decision] 刷新请求前缀基准失败（快照已落盘）")
+        try:
+            self._prune(folder, sid)
+        except Exception:
+            logger.exception("[multi-decision] 清理旧请求快照失败（本轮快照已落盘）")
+        # 账本先于返回写：文件会被 _prune 裁掉，账本不会。
+        if ledger:
+            try:
+                self._append_ledger(sid, record)
+            except Exception:
+                logger.exception("[multi-decision] 写请求账本失败（本轮快照已落盘）")
+        return str(path)
 
     def write_trim_snapshot(self, sid: str, messages: list, cut: dict,
                             view: list = None, pending_n: int = 0) -> str:
@@ -1563,7 +1624,7 @@ class RequestLog:
             return False
         data.update(dict(fields or {}))
         try:
-            p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            _atomic_write_text(p, json.dumps(data, ensure_ascii=False, indent=2))
             return True
         except Exception:
             logger.exception("[multi-decision] 回填快照失败：写不进去")
@@ -1835,9 +1896,7 @@ class RequestLog:
             return ""
         data["trace"] = trace
         try:
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp, path)
+            _atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
             return "merged"
         except Exception:
             logger.exception("[multi-decision] 合并调用轨迹失败")

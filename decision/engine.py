@@ -107,8 +107,6 @@ from ..window.manager import (
 
 logger = get_logger("multi_decision", "orange")
 
-#: 一轮 agent 超过这个秒数还没结算，视为卡死，强制释放忙碌标记
-BUSY_TIMEOUT = 300.0
 # 投递后多久还没结算就强制解锁。正常一轮 5 步以内几十秒，180s 足够宽裕。
 BUSY_WATCHDOG = 180.0
 # 用户 m26142 第 1 条：「判要回后等回复跑完再裁」的兜底时限。超过这个秒数还没等到
@@ -1084,6 +1082,7 @@ class DecisionEngine:
         self._input_flows: dict[str, _InputFlow] = {}
         self._input_tasks: set = set()
         self._tasks: set = set()
+        self._silent_task = None
         # 投递后的超时兜底任务（sid -> asyncio.Task），关闭时要一起取消
         self._watchdogs: dict[str, object] = {}
         self._retries: dict[str, object] = {}
@@ -1096,6 +1095,10 @@ class DecisionEngine:
         # 用户 m05453：这一轮「抖动真的等了几秒」与「决策花了多久」，记录页要分三段写。
         self._round_jitter: dict[str, float] = {}
         self._round_decision: dict[str, float] = {}
+        # H06：这一轮真发出去几条（message_sent 钩子累加）。失败时据此停止自动重试，
+        # 否则整轮重放会把同一句话再发一遍。
+        self._round_sent: dict[str, int] = {}
+        self._round_sent_ids: dict[str, set] = {}
         # 用户 m26142 第 1 条：决策判了要回、但回复还没跑完的会话。这一轮别裁窗口，
         # 等回复结束再裁（以前是判要回立刻裁，回复读到的是裁完的窗口）。
         # 存的是「记下这一笔的时刻」：万一一轮没走到收束（异常、看门狗没兜住），
@@ -1289,6 +1292,10 @@ class DecisionEngine:
             st = self.state(sid)
             st.last_error = ""
             st.last_error_at = 0.0
+        if self._active_rounds.get(sid) != eid:
+            # H06：新的一轮从头数「发了几个」，别把上一轮的账带进来
+            self._round_sent.pop(sid, None)
+            self._round_sent_ids.pop(sid, None)
         self._active_rounds[sid] = eid
         flow = self._input_flow(sid)
         flow.event_id = eid
@@ -2044,9 +2051,11 @@ class DecisionEngine:
         self._retry_status(sid, self._retry_roots.pop(sid, ""), "cancelled")
         self._retry_events.pop(sid, None)
         st = self._states.get(sid)
+        was_busy = bool(st.busy) if st is not None else False
         if st is not None:
             st.retry_at = 0.0
             st.retry_count = 0
+            self._drop_pending_round(st)
         flow = self._input_flow(sid)
         async with flow.lock:
             flow.epoch += 1
@@ -2060,7 +2069,31 @@ class DecisionEngine:
                 st.busy = False
                 st.busy_since = 0.0
                 st.queued = False
+                task = st.debounce_task
+                if (task is not None and not task.done()
+                        and task is not asyncio.current_task() and not was_busy):
+                    task.cancel()
+                    st.debounce_task = None
             await self._discard_buffered_input(sid, set())
+
+    def _drop_pending_round(self, st: SessionState) -> None:
+        """Forget a trigger/countdown that can no longer run.
+
+        A closed session must not keep counter or silent_armed_ts: otherwise
+        the 30s sweep still sees unconsumed input and starts a round.
+        Statistics and last-trigger history stay untouched.
+        """
+        st.counter = 0
+        st.debounce_deadline = 0.0
+        st.debounce_first = 0.0
+        st.debounce_jitter = 0.0
+        st.debounce_spent = 0.0
+        st.round_claimed = 0.0
+        st.trigger_wall = 0.0
+        st.silent_armed_ts = 0.0
+        st.silent_fired_ts = 0.0
+        st.rest_fired_ts = 0.0
+        st.last_silent_ts = 0.0
 
     async def _discard_buffered_input(self, sid: str, keep_ids: set) -> None:
         getter = getattr(self.ctx, "get_buffer", None)
@@ -2124,7 +2157,11 @@ class DecisionEngine:
             logger.exception("[multi-decision] 决策钩子异常（已吞掉，不影响消息流转）")
 
     def _input_flow(self, sid: str) -> _InputFlow:
-        return self._input_flows.setdefault(sid, _InputFlow())
+        # 命中时不要再构造一个临时 _InputFlow（setdefault 的默认值是无条件求值的）。
+        flow = self._input_flows.get(sid)
+        if flow is None:
+            flow = self._input_flows[sid] = _InputFlow()
+        return flow
 
     async def _handle_message(self, event) -> None:
         # asyncio.Lock is FIFO: register before the first media/cache await, not
@@ -2327,8 +2364,8 @@ class DecisionEngine:
         self.health["last_msg_ts"] = now
         self.health["last_msg_sid"] = sid
 
-        # The timer also covers decide; retain an arrival-driven escape hatch.
-        if st.busy and st.busy_since and (now - st.busy_since) > BUSY_TIMEOUT:
+        # 定时器按 watchdog_seconds 走，入口这条兜底必须同一口径（M01）
+        if self._busy_overrun(sid, st, now):
             st.last_error = "上一轮超过忙碌时限未结算"
             st.last_error_at = now
             self._watchdog_record_failure(sid, st)
@@ -2662,8 +2699,6 @@ class DecisionEngine:
         框架要等下一轮 collect 才把 assistant 消息并进历史，在那之前实时窗里
         看不到「我刚说了什么」。这里提前挂一条，下一轮采集时随待发一起清空。
         """
-        if self.window is None or self._closed:
-            return
         try:
             if not bool(getattr(result, "ok", False)):
                 return
@@ -2674,6 +2709,23 @@ class DecisionEngine:
         except Exception:
             sid = ""
         sid = normalize_sid(sid)
+        if sid:
+            # H06：先记「这一轮真发出去过东西」。同一个 message_id 只算一条，
+            # 跟下面窗口去重无关——这里要的是「有没有对外发过」，不是进没进待发列表。
+            try:
+                mid0 = getattr(result, "message_id", None)
+                key0 = str(mid0) if mid0 is not None else ""
+                seen = self._round_sent_ids.get(sid)
+                if seen is None:
+                    seen = self._round_sent_ids[sid] = set()
+                if not key0 or key0 not in seen:
+                    if key0:
+                        seen.add(key0)
+                    self._round_sent[sid] = int(self._round_sent.get(sid, 0) or 0) + 1
+            except Exception:
+                pass
+        if self.window is None or self._closed:
+            return
         if not sid:
             return
         eid = str(getattr(event, "event_id", "") or "")
@@ -2882,6 +2934,18 @@ class DecisionEngine:
         """失败轮结算后按剩余次数排重试；已经排好的不重复排。"""
         if (sid, self._active_rounds.get(sid, "")) in self._cleared_retry_rounds:
             return  # Explicitly cleared pending replay must not return through a late final.
+        sent = int(self._round_sent.get(sid, 0) or 0)
+        if sent > 0:
+            # H06（用户 m03336 选定）：已经真发出去过东西，就别再自动重放整轮，
+            # 否则同一句话会发第二遍。标记失败、留日志，下一条消息照常走。
+            st.retry_at = 0.0
+            root = self._retry_roots.get(sid, "")
+            self._retry_status(sid, root, "failed")
+            self._note_fail(sid, st)
+            logger.warning(
+                f"[multi-decision] {sid} 本轮已经发出 {sent} 条消息，失败也不再自动重试（避免重复发言）"
+            )
+            return
         if st.retry_at > 0:
             return  # 异常钩子已经排好了，别再排一个
         limit = int(self._c("retry_max", sid) or 0)
@@ -3067,6 +3131,8 @@ class DecisionEngine:
         self._round_trigger_at.pop(sid, None)
         self._round_jitter.pop(sid, None)
         self._round_decision.pop(sid, None)
+        self._round_sent.pop(sid, None)
+        self._round_sent_ids.pop(sid, None)
         # 这里不能再清 counter：触发的那一刻已经清过一遍了，此刻 counter 里装的是
         # 「本轮请求期间新到、这轮没覆盖到」的消息。清掉等于让它们永远不计入下一次
         # 触发阈值——群越活跃、回复越慢，实际触发比配置慢一档（审查 bug）
@@ -3640,6 +3706,9 @@ class DecisionEngine:
         st = self._states.get(sid)
         if st is None:
             return {}
+        if self._c("session_enabled", sid) is False:
+            self._drop_pending_round(st)
+            return {}
         now = time.time()
         if not st.is_idle() or st.counter <= 0:
             return {}
@@ -3668,20 +3737,30 @@ class DecisionEngine:
         return {"kind": kind, "at": float(last + need)}
 
     def start_silent_loop(self) -> None:
-        """静默触发：长时间没人说话、buffer 里又攒着消息时，主动冒一次泡。"""
+        """静默触发：长时间没人说话、buffer 里又攒着消息时，主动冒一次泡。
+
+        M02：循环的生死只看插件总开关。以前这里还看两个全局兜底开关，
+        全局关掉就根本不建任务，后面按 sid 取有效配置（_c(..., sid)）
+        永远没机会跑——只给某个群打开兜底等于没开。
+        """
         plugin = self.plugin
-        if not plugin.enabled or not plugin.decision_enabled:
+        if not plugin.enabled or not plugin.decision_enabled or self._closed:
             return
-        if not (plugin.silent_trigger_enabled or plugin.rest_silent_enabled):
-            return
+        task = self._silent_task
+        if task is not None and not task.done():
+            return  # 已经在跑，重复调用不重复建任务
         task = asyncio.create_task(self._silent_loop())
+        self._silent_task = task
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
-        logger.info(
-            f"[multi-decision] 静默兜底已开启：群安静 "
-            f"{plugin.silent_trigger_minutes} 分钟后，把还压着没消化的消息补处理一次"
-            f"（休息时段{'另有 ' + str(plugin.rest_silent_minutes) + ' 分钟兜底' if plugin.rest_silent_enabled else '不兜底'}）"
-        )
+        if plugin.silent_trigger_enabled or plugin.rest_silent_enabled:
+            logger.info(
+                f"[multi-decision] 静默兜底已开启：群安静 "
+                f"{plugin.silent_trigger_minutes} 分钟后，把还压着没消化的消息补处理一次"
+                f"（休息时段{'另有 ' + str(plugin.rest_silent_minutes) + ' 分钟兜底' if plugin.rest_silent_enabled else '不兜底'}）"
+            )
+        else:
+            logger.info("[multi-decision] 静默巡检已启动：全局兜底关着，只对单独开启的会话生效")
 
     async def _silent_loop(self) -> None:
         interval = 30.0
@@ -3696,11 +3775,13 @@ class DecisionEngine:
             raise
 
     def _check_silent(self) -> None:
-        plugin = self.plugin
-        if not (plugin.silent_trigger_enabled or plugin.rest_silent_enabled):
-            return
+        # M02：全局开关不在这里挡——每个会话的开关由下面的 _c(..., sid) 判定，
+        # 全局关掉只是让没单独开过的会话落到默认值，不是让整轮巡检不跑。
         now = time.time()
         for sid, st in list(self._states.items()):
+            if self._c("session_enabled", sid) is False:
+                self._drop_pending_round(st)
+                continue
             if not st.is_idle():
                 continue
             # v3.31（用户 m48323 第 7 条）：静默兜底只补「还压着没消化的消息」，
@@ -3819,8 +3900,8 @@ class DecisionEngine:
     def _fold_pending_pile(self, sid: str) -> int:
         """待发攒过缓冲线、窗口却已经没有裁切余量时，先把待发并进窗口。
 
-        用户 m27528 第 1 条：休息时段不触发决策，fold_pending 只在「判不回」
-        那条路上跑（engine.py 判不回分支），窗口裁到 keep 之后 maybe_trim 在
+        用户 m27528 第 1 条：休息时段不触发决策，fold_pending 只在决策收尾时跑
+        （现由 gate 在提交注记前统一折叠），窗口裁到 keep 之后 maybe_trim 在
         _trim_gate 里因为「counted_before <= keep」直接返回，于是待发一路堆到
         天亮，下一轮请求一口气带上八十多条。这里补一条：待发够「阈值 + 缓冲」
         就并进来，再交给 maybe_trim 按 keep 压回去。
@@ -3846,13 +3927,16 @@ class DecisionEngine:
         try:
             return int(plugin.window.fold_pending(sid) or 0)
         except Exception:
-            logger.exception(f"[multi-decision] {sid} 待发并入窗口失败（已忽略）")
-            return 0
+            logger.exception(f"[multi-decision] {sid} 待发并入窗口失败（停止本次缓冲裁切）")
+            raise
 
     # ------------------------------------------------------------------ 触发链
 
     def _trigger(self, sid: str, reason: str, st: SessionState, prob: float = 0.0) -> None:
         plugin = self.plugin
+        if self._c("session_enabled", sid) is False:
+            self._drop_pending_round(st)
+            return
         now = time.time()
         self.health["triggers"] += 1
         triggered_at = st.counter
@@ -3938,6 +4022,9 @@ class DecisionEngine:
                 if delay > 0:
                     await asyncio.sleep(min(delay, 1.0))
                     continue
+                if self._c("session_enabled", sid) is False:
+                    self._drop_pending_round(st)
+                    return
                 st.debounce_deadline = 0.0
                 # 用户 m05453：抖动到这一刻就结束了，把「真的等了几秒」量下来。
                 # 后面排队与准备的时间不算抖动（那是决策 / 回复那两段的事）。
@@ -4281,13 +4368,15 @@ class DecisionEngine:
         # Keep the boundary closed until all output is durable in the window and
         # trimming has finished. Deferred input is absent from both operations.
         if self.window is not None:
+            folded = True
             try:
                 self.window.fold_pending(sid)
             except Exception:
-                logger.exception("[multi-decision] 收束输出入窗失败（继续释放隔离）")
+                folded = False
+                logger.exception("[multi-decision] 收束输出入窗失败（保留待发，跳过裁切并释放隔离）")
             # 不管这次收束裁不裁，这一轮欠的「判要回后再裁」都得先取走，免得漏到下一轮。
             _deferred_trim = bool(self._trim_after.pop(sid, 0.0))
-            if trim:
+            if trim and folded:
                 _trig = "decision" if _deferred_trim else trigger
                 try:
                     self.window.maybe_trim(sid, trigger=_trig, deferred=_deferred_trim)
@@ -4326,17 +4415,26 @@ class DecisionEngine:
         st = self._states.get(sid)
         if st is None or self._closed:
             return
+        disabled = self._c("session_enabled", sid) is False
         if retry and (not self.plugin.enabled or not self.plugin.decision_enabled
-                      or self._c("session_enabled", sid) is False):
+                      or disabled):
             self._cancel_retry(sid)
             self._retry_status(sid, self._retry_roots.pop(sid, ""), "cancelled")
             self._retry_events.pop(sid, None)
             st.retry_at = 0.0
             st.retry_count = 0
+            if disabled:
+                self._drop_pending_round(st)
+            return
+        if disabled:
+            self._drop_pending_round(st)
             return
         flow = self._input_flow(sid)
         async with flow.lock:
             if self._closed:
+                return
+            if self._c("session_enabled", sid) is False:
+                self._drop_pending_round(st)
                 return
             if st.busy or flow.phase != "idle":
                 # New arrivals are not counted yet, so they cannot queue a round.
@@ -4453,7 +4551,7 @@ class DecisionEngine:
                     self._retry_status(sid, self._retry_roots.get(sid, ""), "cancelled")
                 # v4.63（用户 m36670）：投不出去必须留痕。以前这里一声不响地收束，
                 # 页面上只剩「要回 + 失败」，日志里一个字都没有，根本没法查。
-                st.last_error = "判定要回，但这一轮没能投递出去（flush 没成功）"
+                st.last_error = "建议回复，但这一轮没能投递出去（flush 没成功）"
                 st.last_error_at = time.time()
                 logger.warning(
                     "[multi-decision] %s 投递失败：这一轮没能交给框架跑 agent"
@@ -4641,17 +4739,25 @@ class DecisionEngine:
             "model": str(rec["model"]),
             "elapsed": float(rec["elapsed"]),
         }
+        # 必须先成功折叠（新增 0 条也算成功），再提交注记或放行回复。
+        try:
+            self.window.fold_pending(sid)
+        except Exception:
+            logger.exception("[multi-decision] 决策后入窗失败（保留待发，停止本轮回复与裁切）")
+            st.last_error = "决策后入窗失败，待发已保留，本轮不再回复"
+            st.last_error_at = time.time()
+            if epoch is None:  # Managed rounds release through _settle_input.
+                st.busy = False
+                st.busy_since = 0.0
+                st.queued = False
+            return True
         if rec["reply"]:
             # 用户 m05453：判要回时把决策耗时留给回复轮——回复记录那行要写
             # 「防抖 7s + 决策 5s + 12s」，不然总时长对不上。
             self._round_decision[sid] = round(float(rec["elapsed"] or 0.0), 2)
-            # v4.06（用户 m12879）：判要回先把这一轮的待发并进窗口，再落这条判定——
+            # v4.06（用户 m12879）：这一轮的待发已在上面统一并进窗口，这里只落判定——
             # 它得排在本轮消息之后（本轮 user → 决策理由 → agent 回复），不能卡在
-            # 本轮消息前面被当成历史。待发并完就清空，下面 collect 不会再并一遍。
-            try:
-                self.window.fold_pending(sid)
-            except Exception:
-                logger.exception("[multi-decision] 判要回并入待发失败（已忽略）")
+            # 本轮消息前面被当成历史。
             # v4.05（用户 m12604）：判要回，这条判定就是 agent 自己的一句话——
             # 当场 append 到窗口末尾（本轮消息之后、下面这轮回复之前），之后没
             # 人再动它：不合并、不搬位置、裁切时也不特殊照顾。
@@ -4679,14 +4785,10 @@ class DecisionEngine:
             st.busy_since = 0.0
             st.queued = False
         # v3.96（用户 m09331「判不回也要成为快照的」）：judge 完不回，这一轮就到此
-        # 为止，待发就地并进窗口再清空——否则没有真实请求，collect 永远不跑，待发
-        # 会一路堆到下一次真回，页面上窗口一直空着。
-        try:
-            self.window.fold_pending(sid)
-        except Exception:
-            logger.exception("[multi-decision] 判不回并入待发失败（已忽略）")
+        # 为止，待发已在上方统一并进窗口再清空——否则没有真实请求，collect 永远不跑，
+        # 待发会一路堆到下一次真回，页面上窗口一直空着。
         # v4.05（用户 m12604）：判不回也要留一条，位置在本轮消息之后——待发刚
-        # 并进窗口，这一条紧跟其后，就是 agent 自己说的一句话；下一轮读到的
+        # 并入窗口，这一条紧跟其后，就是 agent 自己说的一句话；下一轮读到的
         # 就是「上一轮我判过不回，理由是…」。判要回那条已在上面落过，这里再调
         # 一次是空转（commit_decision 只追加未 committed 的）。
         try:
@@ -4709,6 +4811,17 @@ class DecisionEngine:
             sid, rec["reason"][:60], rec["elapsed"],
         )
         return True
+
+    def _busy_overrun(self, sid: str, st, now: float) -> bool:
+        """上一轮还忙着、并且已经超过这个会话的看门狗时限。
+
+        入口（新消息到来）和定时器必须同一口径：以前入口写死 300 秒，
+        把 watchdog_seconds 调到 600 的群，第 301 秒来一条消息就被提前
+        收束，和设置页写的秒数对不上（M01）。
+        """
+        if not st.busy or not st.busy_since:
+            return False
+        return (now - st.busy_since) > self._watchdog_seconds(sid)
 
     def _watchdog_seconds(self, sid: str = "") -> float:
         """看门狗到底等多少秒（设置页的「看门狗超时」，用户 2026-10-24 第 4 条）。

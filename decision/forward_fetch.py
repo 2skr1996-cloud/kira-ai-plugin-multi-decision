@@ -126,6 +126,10 @@ _MID_MEDIA_MAX = 64
 # 进程重启就丢，这一份落盘（用户 m25038 第 4 项：老消息/老快照里的转发图还要能认回来）
 _MEDIA_DB: dict = {}
 _MEDIA_DB_LOADED = False
+# 读文件失败时不再把内存清空、也不算「已加载」：下次再读一次，别让一次坏文件
+# 把后面保存的映射盖掉。真要在坏文件之上写时，先把它原样另存一份。
+_MEDIA_DB_LOAD_FAILED = False
+_MEDIA_DB_BACKED_UP = False
 _MEDIA_DB_MAX = 300
 
 
@@ -152,35 +156,110 @@ def _media_db_path():
 
 
 def _media_db() -> dict:
-    global _MEDIA_DB, _MEDIA_DB_LOADED
+    global _MEDIA_DB, _MEDIA_DB_LOADED, _MEDIA_DB_LOAD_FAILED
     if _MEDIA_DB_LOADED:
         return _MEDIA_DB
-    _MEDIA_DB_LOADED = True
     path = _media_db_path()
+    if path is None or not path.is_file():
+        _MEDIA_DB_LOADED = True
+        _MEDIA_DB_LOAD_FAILED = False
+        return _MEDIA_DB
     try:
-        if path is not None and path.is_file():
-            import json
-            blob = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(blob, dict):
-                _MEDIA_DB = {str(k): [x for x in v if isinstance(x, dict)]
-                             for k, v in blob.items() if isinstance(v, list)}
-    except Exception:
-        _MEDIA_DB = {}
+        import json
+        blob = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        # 坏文件：保留内存里已有的映射，也不标「已加载」，下次调用再试一次。
+        _MEDIA_DB_LOAD_FAILED = True
+        logger.info("[multi-decision] 转发配图索引读不出来 %s: %s",
+                    type(exc).__name__, exc)
+        return _MEDIA_DB
+    if not isinstance(blob, dict):
+        # 解析成对象才算「读到了」；list/null/数字是坏内容，同样按失败处理。
+        _MEDIA_DB_LOAD_FAILED = True
+        logger.info("[multi-decision] 转发配图索引不是对象，按读取失败处理")
+        return _MEDIA_DB
+    _MEDIA_DB = {str(k): [x for x in v if isinstance(x, dict)]
+                 for k, v in blob.items() if isinstance(v, list)}
+    _MEDIA_DB_LOADED = True
+    _MEDIA_DB_LOAD_FAILED = False
     return _MEDIA_DB
 
 
+def _media_db_backup_broken(path) -> bool:
+    """坏文件第一次被覆盖前，原样另存一份；存不下就不写，别把旧映射盖掉。"""
+    global _MEDIA_DB_BACKED_UP
+    if _MEDIA_DB_BACKED_UP:
+        return True
+    import os
+    import uuid
+    bak = path.with_name(path.name + ".bad-" + uuid.uuid4().hex[:8])
+    try:
+        with open(bak, "xb") as fp:
+            fp.write(path.read_bytes())
+    except FileExistsError:
+        _MEDIA_DB_BACKED_UP = True
+        return True
+    except Exception as exc:
+        logger.info("[multi-decision] 坏索引另存失败，先不覆盖 %s: %s",
+                    type(exc).__name__, exc)
+        return False
+    _MEDIA_DB_BACKED_UP = True
+    return True
+
+
 def _media_db_save() -> None:
+    global _MEDIA_DB_LOAD_FAILED, _MEDIA_DB_BACKED_UP
     path = _media_db_path()
     if path is None:
         return
+    import json
+    import os
+    import uuid
+    tmp = None
     try:
-        import json
         path.parent.mkdir(parents=True, exist_ok=True)
         while len(_MEDIA_DB) > _MEDIA_DB_MAX:
             _MEDIA_DB.pop(next(iter(_MEDIA_DB)))
-        path.write_text(json.dumps(_MEDIA_DB, ensure_ascii=False), encoding="utf-8")
+        if _MEDIA_DB_LOAD_FAILED and path.is_file():
+            if not _media_db_backup_broken(path):
+                return
+        # 同目录唯一临时文件 + 替换：写一半断掉不会留下半份索引。
+        tmp = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex[:8])
+        with open(tmp, "w", encoding="utf-8") as fp:
+            fp.write(json.dumps(_MEDIA_DB, ensure_ascii=False))
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(tmp, path)
+        tmp = None
+        _MEDIA_DB_LOAD_FAILED = False
     except Exception as exc:
         logger.info("[multi-decision] 转发配图索引没写成 %s: %s", type(exc).__name__, exc)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _sniff_image_ext(blob: bytes) -> str:
+    """按文件头认图片格式，认不出返回 ""（M09）。
+
+    以前按 Content-Type 猜后缀：对方随便回个 image/jpeg 就能把网页存成 .jpg，
+    真实 PNG 配错头又会存成 .jpg，前端按 mime 画图就画不出来。文件头是图片
+    自己带的，不认服务器怎么说。
+    """
+    if not blob:
+        return ""
+    for magic, ext in ((b"\x89PNG\r\n\x1a\n", ".png"),
+                       (b"\xff\xd8\xff", ".jpg"),
+                       (b"GIF87a", ".gif"),
+                       (b"GIF89a", ".gif")):
+        if blob.startswith(magic):
+            return ext
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return ".webp"
+    return ""
 
 
 def _mime_of(ext: str) -> str:
@@ -215,17 +294,14 @@ def _save_image(url: str) -> dict:
             ctype = str(resp.headers.get("Content-Type") or "").lower()
         if not blob or len(blob) > _IMG_MAX:
             return {}
-        ext = ".jpg"
-        if "png" in ctype:
-            ext = ".png"
-        elif "gif" in ctype:
-            ext = ".gif"
-        elif "webp" in ctype:
-            ext = ".webp"
+        ext = _sniff_image_ext(blob)
+        if not ext:
+            logger.info("[multi-decision] 转发配图不是图片（按文件头判断）%s", u[:80])
+            return {}
         folder.mkdir(parents=True, exist_ok=True)
         (folder / (key + ext)).write_bytes(blob)
         return {"path": "plugin_data/%s/media_cache/%s%s" % (_PLUGIN_ID, key, ext),
-                "mime": ctype.split(";")[0].strip() or _mime_of(ext)}
+                "mime": _mime_of(ext)}
     except Exception as exc:
         logger.info("[multi-decision] 转发配图没取到 %s：%s: %s", u[:80], type(exc).__name__, exc)
         return {}

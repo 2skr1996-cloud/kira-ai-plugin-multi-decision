@@ -61,8 +61,12 @@ class DecisionLog:
         except Exception:
             logger.exception("[multi-decision] 写消息日志失败")
             return
-        self._maybe_purge()
-        self._trim_sid(str(record.get("sid") or ""))
+        # 追加已经成功，后面的清理再出错也不能让调用方以为这次没写进去。
+        try:
+            self._maybe_purge()
+            self._trim_sid(str(record.get("sid") or ""))
+        except Exception:
+            logger.exception("[multi-decision] 写日志后的清理失败（本次写入已成功）")
 
     # ------------------------------------------------------------------ 读取
 
@@ -632,11 +636,20 @@ class DecisionLog:
                 except Exception:
                     keep_lines.append(line)
                     continue
+                # 合法 JSON 但不是对象（[]、null、数字）或 ts 读不成数字：这行看不懂，
+                # 原样留着当证据，不让它把整次清理打断、也不替用户删掉。
+                if not isinstance(rec, dict):
+                    keep_lines.append(line)
+                    continue
                 if str(rec.get("sid") or "") != sid:
                     keep_lines.append(line)
                     continue
+                try:
+                    ts_rec = float(rec.get("ts") or 0.0)
+                except (TypeError, ValueError):
+                    keep_lines.append(line)
+                    continue
                 seen += 1
-                ts_rec = float(rec.get("ts") or 0.0)
                 too_old = bool(cutoff) and ts_rec < cutoff
                 # v3.67（用户 m20117）：超份数的先看时间——5 分钟内新写下的留着，
                 # 下一轮裁剪再删；超过保留天数的照旧立即删。

@@ -94,15 +94,11 @@ reason 是给用户看的一句话，两件事都要照顾到：
 # 用户 m36396：决策这一侧也补一段「强化格式遵守」，位置跟回复页那一块一模一样——贴在本轮消息最后。
 # 回复那块讲的是「用 <msg> 包气泡、空壳代表不发」；决策只回一个判断，这块讲的是「只准吐一个 JSON」。
 # 真踩过：模型不吐 JSON、只回一句聊天话（"[16:55] 判定不回（……）"），那一轮按失败算。
-DECISION_FORMAT_HARD = """【格式强化 · 每一条都要照做】
-- 这一次你的全部输出只有一个 JSON 对象：开头是 {，结尾是 }。
-- 前后不要写任何字：不解释、不寒暄、不复述这段规则、不加代码块。
-- 只有这两种形状，字段名逐字照抄：
-  {"reply": true, "reason": "一句话理由，20 字以内"}
-  {"reply": false, "reason": "一句话理由，20 字以内"}
-- reply 只能是 true 或 false，不带引号，不要写成「要回」「不回」。
-- 想说的别的话也只写进 reason；reason 一句话就够。
-- 拿不准就写 false。"""
+DECISION_FORMAT_HARD = """【格式强化】
+只输出一个 JSON 对象，前后不写任何字、不加代码块，字段名照抄：
+{"reply": true, "reason": "一句话理由，20 字以内"}
+{"reply": false, "reason": "一句话理由，20 字以内"}
+reply 只能是 true 或 false；想说的都写进 reason；拿不准写 false。"""
 
 # 用户 m36396：没按 JSON 回本身就是一次失败。重试时把这句话贴在最后，
 # 别让模型拿着原样的 prompt 原地重复犯错（以前重试是完全相同的消息，它照样再犯一遍）。
@@ -409,7 +405,9 @@ def options_from_config(get) -> DecisionOptions:
     """从 get(key, default) 读配置。get 由调用方给（能带 sid 覆盖）。"""
     def _int(key, default, lo=0, hi=None):
         try:
-            v = int(float(get(key, default) or default))
+            raw = get(key, default)
+            # 数字零是有效值；False 仍沿用原来的默认回退。
+            v = int(float(default if raw is None or raw is False or raw == "" else raw))
         except Exception:
             v = default
         v = max(lo, v)
@@ -837,8 +835,13 @@ class DecisionPhase:
         except Exception:
             return str(got)
 
-    async def _tool_loop(self, client, messages, tools, opt: DecisionOptions, budget: dict) -> dict:
-        """多轮工具循环。返回最后一次模型结果（带上累计 token）。"""
+    async def _tool_loop(self, client, messages, tools, opt: DecisionOptions, budget: dict,
+                         tool_cache: dict = None, reuse: bool = False) -> dict:
+        """多轮工具循环。返回最后一次模型结果（带上累计 token）。
+
+        H07：reuse=True 表示这是同一次决策的重试/降级尝试，同一件工具的同一个参数
+        直接吃上一次的成功结果，不再执行——副作用工具不该因为重试被跑第二遍。
+        """
         names = {str(getattr(t, "name", "") or ""): t for t in tools}
         last = await self._one_call(client, messages, tools, opt.timeout)
         rounds = 0
@@ -863,7 +866,16 @@ class DecisionPhase:
                 calls.append({"id": cid, "type": "function",
                               "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}})
                 tool = names.get(name)
-                result = await self._run_tool(tool, args) if tool else "没有这个工具：" + name
+                key = (name, json.dumps(args, ensure_ascii=False, sort_keys=True))
+                result = None
+                if reuse and tool_cache is not None and tool is not None and key in tool_cache:
+                    result = tool_cache[key]
+                if result is None:
+                    result = await self._run_tool(tool, args) if tool else "没有这个工具：" + name
+                    # 只复用「真跑成功了」的；工具报错允许重试时再试一次。
+                    if (tool is not None and tool_cache is not None
+                            and not result.startswith("工具执行失败：")):
+                        tool_cache[key] = result
                 messages.append({"role": "tool", "tool_call_id": cid, "content": result[:4000]})
             messages.insert(len(messages) - len(calls),
                             {"role": "assistant", "content": last.get("text") or "", "tool_calls": calls})
@@ -873,12 +885,24 @@ class DecisionPhase:
             last = await self._one_call(client, messages, tools, opt.timeout)
         return last
 
-    async def _chain(self, messages, tools, opt: DecisionOptions) -> dict:
-        """主模型 → 重试 → fallback。返回最后一次尝试的结果并附上用量。"""
+    async def _chain(self, messages, tools, opt: DecisionOptions, tool_cache: dict = None) -> dict:
+        """主模型 → 重试 → fallback。返回最后一次尝试的结果并附上用量。
+
+        tool_cache 由 decide() 持有，跨「带图→纯文字降级」也共用，这样工具不会被
+        第二个链重新执行一遍。
+        """
+        if tool_cache is None:
+            tool_cache = {}
         budget = {"in": 0, "out": 0, "cached": 0}
         now = time.time()
-        use_fallback = bool(opt.fallback) and (now < self._fallback_until or
-                                               self._fail_streak >= max(1, opt.fail_switch))
+        tripped = self._fail_streak >= max(1, opt.fail_switch)
+        cooling = self._fallback_until > 0 and now < self._fallback_until
+        # M17：冷却到期后放一次主模型探测。探测期间先把冷却位占住，失败不会变成探测风暴，
+        # 成功则清掉冷却；只有备用一直失败、fail_streak 没被清零时才需要这条出口。
+        probe = bool(opt.fallback) and tripped and not cooling and self._fallback_until > 0
+        if probe:
+            self._fallback_until = now + opt.cooldown
+        use_fallback = bool(opt.fallback) and (cooling or (tripped and not probe))
         order = []
         if use_fallback:
             order.append(("fallback", opt.fallback))
@@ -902,7 +926,8 @@ class DecisionPhase:
                 # 用户 m36396：上一次是「没按 JSON 回」才失败的，重试时补一句提醒；网络/上游报错则原样重试。
                 if note:
                     msg_copy.append({"role": "user", "content": note})
-                last = await self._tool_loop(client, msg_copy, tools, opt, budget)
+                last = await self._tool_loop(client, msg_copy, tools, opt, budget,
+                                             tool_cache, reuse=attempts > 1)
                 last["attempts"] = attempts
                 last["model"] = model or "fast"
                 last["via"] = kind
@@ -914,6 +939,8 @@ class DecisionPhase:
                     parsed = parse_decision(last.get("text") or "")
                     if parsed is not None:
                         self._fail_streak = 0
+                        if probe and kind == "main":
+                            self._fallback_until = 0.0
                         last["parsed"] = parsed
                         last.update(budget)
                         return last
@@ -983,7 +1010,8 @@ class DecisionPhase:
         payload = [{"role": "system", "content": system_text}] + payload_msgs
         if len(payload) < 2:
             payload.append({"role": "user", "content": user_text})
-        got = await self._chain(payload, tools, opt)
+        tool_cache: dict = {}
+        got = await self._chain(payload, tools, opt, tool_cache)
         parsed = got.get("parsed")
         # 带图那次没成（上游不认 image_url / 图太大 / 模型没有视觉），退回纯文字再判
         # 一次：宁可这一次看不见图，也不能因为有图把整轮判断判死。
@@ -1002,7 +1030,7 @@ class DecisionPhase:
             payload = [{"role": "system", "content": system_text}] + no_img
             if len(payload) < 2:
                 payload.append({"role": "user", "content": user_text})
-            got = await self._chain(payload, tools, opt)
+            got = await self._chain(payload, tools, opt, tool_cache)
             parsed = got.get("parsed")
             img_rows = []
         out = {

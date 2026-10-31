@@ -1646,7 +1646,7 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     { p: "trigger", t: "决策模式", col: "rhythm", split: 3, rowline: 1,
       // v3.93（用户 m07570 图1 第 2 条）：用户要在描述后面补一句提醒——
       // 开它等于每轮多一次模型调用，而且判定用的提示词在「提示词」页那半边。
-      note: "开启后先单独判一次这轮回不回，判要回才走完整回复。",
+      note: "开启后先单独判一次这轮回不回，建议回复才走完整回复。",
       // v4.08（用户 m16927 第 3 条）：后半句（多一次调用 / 提示词在哪）从说明里拿出来，
       // 单独渲染成行尾的琥珀胶囊，跟「动态调整」那条 .ad-warn 一个样式。
       warn: "多一次模型调用 · 判定提示词在「提示词」页设置",
@@ -3430,7 +3430,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         var r = (d && d.result) || {};
         if(!d || !d.ok){ out.textContent = "试跑失败：" + ((d && d.error) || "接口没回数据"); return; }
         var lines = [];
-        lines.push("结论：" + (r.failed ? "失败（按「决策失败时」的设置处理）" : (r.reply ? "判定要回" : "判定不回")));
+        lines.push("结论：" + (r.failed ? "失败（按「决策失败时」的设置处理）" : (r.reply ? "建议回复" : "建议不回")));
         if(r.reason) lines.push("理由：" + r.reason);
         // m01209 图3：决策只判断回不回，不再顺带指定要说什么。
         lines.push("模型：" + (r.model || "（未记录）") + (r.via === "fallback" ? "（备用）" : "") +
@@ -4881,6 +4881,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
 
   function loadSettings(){
     if(dirty) return;
+    var requestedSid = String(scopeSid || ""), requestedScopeVersion = saveScopeVersion, requestedEditVersion = saveEditVersion;
     // 缓存记录页签的作用范围跟页面顶部那个选择器是同一个东西：换会话时把覆盖缓存一起清掉，
     // 等 loadCacheStats -> mountCacheBlock 拿着新 sid 重新拉。
     cacheScopeSid = scopeSid || "";
@@ -4895,6 +4896,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 全局模式也要拿一次：上下限（bounds）只在 /overrides 里给
     tasks.push(get(API + "/overrides" + (scopeSid ? "?sid=" + encodeURIComponent(scopeSid) : "")));
     Promise.all(tasks).then(function(res){
+      if(requestedScopeVersion !== saveScopeVersion || requestedEditVersion !== saveEditVersion || requestedSid !== String(scopeSid || "") || dirty) return;
       var d = res[0] || {};
       var ov = res[2];
       schemaCache = (res[1] && res[1].schema) || d.schema || {};
@@ -4933,6 +4935,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       loadCacheStats();
       loadPhraseBlock();   // 用户 m07085 第 7 条：配置画完再补一次插件侧的最新短语清单
     }).catch(function(e){
+      if(requestedScopeVersion !== saveScopeVersion || requestedEditVersion !== saveEditVersion || requestedSid !== String(scopeSid || "") || dirty) return;
       document.getElementById("settings").innerHTML = '<div class="empty">读取配置失败：' + esc(e.message) + "</div>";
     });
   }
@@ -5002,7 +5005,16 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // 防抖 700ms 把连续调整（连续加外号、拖动数字）合并成一次提交——
   // 每提交一次都会热重载插件，逐项提交会把插件反复重启。
   var saveTimer = null, saving = false, saveAgain = false;
+  var saveEditVersion = 0, saveScopeVersion = 0, saveAckVersion = -1;
+  function settingsScopeChanged(){
+    saveScopeVersion += 1;
+    saveAgain = false;
+    if(saveTimer){ clearTimeout(saveTimer); saveTimer = null; }
+  }
   function scheduleSave(){
+    saveEditVersion += 1;
+    lastEditAt = Date.now();
+    if(saving) saveAgain = true;
     var msg = document.getElementById("set-msg");
     if(msg) msg.textContent = "修改中…";
     if(saveTimer) clearTimeout(saveTimer);
@@ -5013,6 +5025,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // 用户拨完曲线开关马上点回首页，防抖还没到点页面就走了，PUT 根本没发出去，
   // 回来一看开关又弹回原样（就是这个 bug）。所以这类离散动作立刻保存。
   function saveNow(){
+    saveEditVersion += 1;
     if(saveTimer){ clearTimeout(saveTimer); saveTimer = null; }
     saveSettings();
   }
@@ -5025,7 +5038,11 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(!dirty) return true;
     // 补发是 keepalive 的异步请求，下面拿不到结果；失败时把 dirty 恢复回来，
     // 页面若还在（bfcache 回退 / 跳转被拦）还能再存一次，别显示成「已保存」。
+    var flushSid = String(scopeSid || ""), flushScopeVersion = saveScopeVersion, flushEditVersion = saveEditVersion;
     var onFail = function(msg){
+      // 旧作用域/草稿或已确认版本的失败，不能倒退当前页面的保存状态。
+      if(flushScopeVersion !== saveScopeVersion || flushSid !== String(scopeSid || "") ||
+         flushEditVersion !== saveEditVersion || flushEditVersion <= saveAckVersion) return;
       dirty = true;
       try{ var m = document.getElementById("set-msg"); if(m) m.textContent = msg; }catch(x){}
     };
@@ -5093,7 +5110,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(!done) return 0;
     renderSettings();   // 表单按新值重画，免得控件还显示旧值
     dirty = true;
-    saveSettings();     // 走原来的自动保存（PUT /config + reload）
+    saveNow();          // 同其它离散编辑一起登记版本，再走原自动保存
     return done;
   }
 
@@ -5113,70 +5130,75 @@ var DM_SPECIAL = { trigger_probability: 1 };
   function saveSettings(){
     lastEditAt = Date.now();
     if(saving){ saveAgain = true; return; }
+    if(saveTimer){ clearTimeout(saveTimer); saveTimer = null; }
+    // 一次请求只确认它实际提交的快照；不能在回包时重新收集表单冒充已保存。
+    var sid = String(scopeSid || ""), scopeVersion = saveScopeVersion, editVersion = saveEditVersion;
+    var values = JSON.parse(JSON.stringify(collectSettings()));
+    var promptRefEpoch = PP_REF_DIRTY[sid] || 0;
+    function currentScope(){ return scopeVersion === saveScopeVersion && sid === String(scopeSid || ""); }
     saving = true;
+    saveAgain = false;
+    dirty = true;
     var msg = document.getElementById("set-msg");
-    if(scopeSid){ saveOverrides(); return; }
     if(msg) msg.textContent = "保存中…";
-    var promptRefEpoch = PP_REF_DIRTY[""] || 0;
-    fetch(CORE + "/config", {
-      method: "PUT",
-      credentials: "same-origin",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ config: collectSettings() })
-    }).then(function(r){
-      if(!r.ok) throw new Error("HTTP " + r.status);
-      // 连续调参时不要每次都重载：等到 1.2 秒没有新改动再重载；若这期间又改了，
-      // 直接跳过（下一轮会带着最新配置一起重载一次）。
-      return waitQuiet(1200).then(function(){
-        if(saveAgain) return null;
-        return fetch(CORE + "/reload", {method: "POST", credentials: "same-origin"});
+    var request;
+    if(sid){
+      request = saveOverrides(sid, values);
+    }else{
+      request = fetch(CORE + "/config", {
+        method: "PUT", credentials: "same-origin",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({config: values})
+      }).then(function(r){
+        if(!r.ok) throw new Error("HTTP " + r.status);
+        // 连续全局编辑只在最后一次配置稳定后重载；切走的旧请求不操作新表单。
+        return waitQuiet(1200).then(function(){
+          if(currentScope() && saveAgain) return null;
+          return fetch(CORE + "/reload", {method: "POST", credentials: "same-origin"});
+        });
+      }).then(function(r){
+        if(r && !r.ok) throw new Error("重载失败 HTTP " + r.status);
+        return null;
       });
-    }).then(function(r){
-      if(r && !r.ok) throw new Error("重载失败 HTTP " + r.status);
+    }
+    return request.then(function(d){
+      if(!currentScope() || editVersion !== saveEditVersion || saveAgain) return;
+      saveAckVersion = editVersion;
       dirty = false;
-      saving = false;
-      // 自动保存不整页重绘：每改一项就重排表单会打断操作（正在输入的名字会被刷掉）。
-      // 本地把刚提交的值当新基线，控件已经是用户刚设的样子。
-      configCache = collectSettings();
-      if(msg) msg.textContent = "已自动保存";
+      if(sid){
+        overrideCache = d.override || {};
+        var n = Object.keys(overrideCache).length;
+        if(msg) msg.textContent = n ? ("已自动保存 " + n + " 项覆盖（立即生效）") : "已恢复跟随全局";
+        setSub(sidLabel(sid) + " · 已覆盖 " + n + " 项 · 其余跟随全局（改完自动保存，不用重载）");
+      }else{
+        configCache = values;
+        if(msg) msg.textContent = "已自动保存";
+      }
       checkConfig();
-      ppReferencesSaved("",promptRefEpoch);
-      // 保存期间又改了东西：补一轮，别把后一次改动吞掉。
-      if(saveAgain){ saveAgain = false; saveSettings(); }
+      ppReferencesSaved(sid, promptRefEpoch);
     }).catch(function(e){
+      if(!currentScope()) return;
+      dirty = true;
+      if(msg) msg.textContent = "自动保存失败：" + ((e && e.message) || String(e));
+    }).then(function(){
+      // 成功/HTTP失败/业务失败/网络失败共用收尾；仅补发真正存在的新编辑。
       saving = false;
-      if(msg) msg.textContent = "自动保存失败：" + e.message;
-      if(saveAgain){ saveAgain = false; saveSettings(); }
+      if(saveAgain){ saveAgain = false; if(dirty) saveSettings(); }
     });
   }
 
-  function saveOverrides(){
-    var promptSavedSid = String(scopeSid || ""), promptRefEpoch = PP_REF_DIRTY[promptSavedSid] || 0;
-    var all = collectSettings();
+  function saveOverrides(sid, all){
     var vals = {};
     scopeKeys.forEach(function(k){ if(Object.prototype.hasOwnProperty.call(all, k)) vals[k] = all[k]; });
-    // merge=1：表单里只有 schema 的键，session_enabled 这种不在表单里的覆盖键
-    // 要靠后端把现有覆盖并进来，否则一保存就被清掉（会话会被重新打开）
-    var url = API + "/overrides?sid=" + encodeURIComponent(scopeSid) + "&merge=1" +
+    // merge=1 保留 session_enabled 等表单外覆盖；null 仍表示恢复跟随全局。
+    var url = API + "/overrides?sid=" + encodeURIComponent(sid) + "&merge=1" +
               "&values=" + encodeURIComponent(JSON.stringify(vals));
-    fetch(url, {method: "POST", credentials: "same-origin"}).then(function(r){
+    return fetch(url, {method: "POST", credentials: "same-origin"}).then(function(r){
       if(!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
     }).then(function(d){
       if(!d.ok) throw new Error(d.detail || "保存失败");
-      dirty = false;
-      saving = false;
-      overrideCache = d.override || {};
-      var n = Object.keys(overrideCache).length;
-      var msg = document.getElementById("set-msg");
-      if(msg) msg.textContent = n ? ("已自动保存 " + n + " 项覆盖（立即生效）") : "已恢复跟随全局";
-      if(scopeSid) setSub(sidLabel(scopeSid) + " · 已覆盖 " + n + " 项 · 其余跟随全局（改完自动保存，不用重载）");
-      checkConfig();
-      ppReferencesSaved(promptSavedSid,promptRefEpoch);
-    }).catch(function(e){
-      saving = false;
-      var msg2 = document.getElementById("set-msg");
-      if(msg2) msg2.textContent = "自动保存失败：" + e.message;
+      return d;
     });
   }
 
@@ -5538,21 +5560,22 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // v4.00（用户 m10782）：「请求快照」拆成「回复快照」和「决策快照」两类，单位都是份。
   var CACHE_UNIT = { media: "张", requests: "份", decision_snapshots: "份",
                      decisions: "条", windows: "条", summaries: "份", stats: "条" };
-  // 这几类缓存的保留天数 / 上限都由缓存记录页自己管（v3.62 起还能按会话单独设），
-  // 后端不一定逐键给 bounds，所以 min/max 在这里兜一份（和后端约定：天数 0~3650、
-  // 决策/窗口至少留 1 天、摘要上限 0~1000、条数上限 0~100000）。0 一律表示不限。
+  // 这张表是设置页自己的兜底副本（后端不一定逐键给 bounds），必须与
+  // main.py 的 _BOUNDS 一致：下限、上限都按后端抄，不在这边放宽。
+  // 后端下限是 1 的条数类键，这里也写 1 —— 0 只在后端下限为 0 的键上表示
+  // 「不限」，下限 1 的键填 0 会被后端夹回 1，界面不该先放行。
   // v3.63（用户 m19536 第 1/5 条）：上限分成「群聊默认 / 私聊默认」两套键（*_dm 是私聊那套）；
   // 消息日志与会话统计不设上限、只按天数滚动，而且天数下限锁 56 天（自适应要用这段数据），
   // 所以这两个键的下限跟后端 bounds 一样写 56。
   var CACHE_NUM_BOUNDS = {
-    media_cache_limit: [0, 100000], media_cache_limit_dm: [0, 100000],
+    media_cache_limit: [1, 100000], media_cache_limit_dm: [0, 100000],
     media_cache_keep_days: [0, 3650],
     requests_keep_days: [0, 3650], decisions_keep_days: [56, 3650],
-    windows_keep: [0, 100000], windows_keep_dm: [0, 100000],
+    windows_keep: [0, 1000], windows_keep_dm: [0, 1000],
     windows_keep_days: [1, 3650], summaries_keep: [0, 1000], summaries_keep_dm: [0, 1000],
     summaries_keep_days: [0, 3650], stats_keep_days: [56, 3650],
-    trace_keep: [0, 100000], trace_keep_dm: [0, 100000],
-    decision_keep: [0, 100000], decision_keep_dm: [0, 100000]
+    trace_keep: [1, 1000], trace_keep_dm: [1, 1000],
+    decision_keep: [1, 1000], decision_keep_dm: [1, 1000]
   };
   // v3.62（用户 m18059）：这些缓存设置现在既能写全局默认值，也能只写给某个群/私聊。
   // 前端自己留一份清单——后端 /overrides 的 keys 里还没收这几个键时，表格照样画得出来。
@@ -5880,6 +5903,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       return;
     }
     scopeSid = sid;
+    settingsScopeChanged();
     cacheScopeSid = sid;
     cacheScopeOv = null;
     cacheScopeErr = "";
@@ -7339,6 +7363,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 改了没保存就切走 = 静默丢改动，得先问一声（审查 bug）
     if(dirty && !(await mdConfirm("有改动还没存完，切走就丢了。继续吗？"))) return;
     scopeSid = sid;
+    settingsScopeChanged();
     cacheScopeSid = sid;       // 缓存记录页跟着看同一个作用范围
     dirty = false;
     document.getElementById("set-msg").textContent = "";

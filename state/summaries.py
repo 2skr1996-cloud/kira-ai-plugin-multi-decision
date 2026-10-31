@@ -7,7 +7,10 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import time
+import uuid
 from pathlib import Path
 
 from core.plugin import logger
@@ -24,6 +27,7 @@ class Summaries:
                  keep: int = 0, keep_days: int = 0):
         self.path = Path(data_dir) / filename
         self._data: dict[str, dict] = {}
+        self._backup_required = False
         # 用户 m13708 第 4/5 条：摘要也要有上限和保留天数。
         # keep = 最多留多少个会话的摘要（每个群聊/私聊各一条），0 = 不限；
         # keep_days = 摘要最多留多少天，0 = 不限。
@@ -80,22 +84,54 @@ class Summaries:
 
     def _load(self):
         try:
-            if self.path.exists():
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    for sid, item in raw.items():
-                        if isinstance(item, dict) and item.get("text"):
-                            self._data[str(sid)] = {
-                                "text": str(item.get("text") or ""),
-                                "ts": float(item.get("ts") or 0.0),
-                                "count": int(item.get("count") or 0),
-                                "lines": int(item.get("lines") or 0),
-                            }
-        except Exception:
-            logger.exception("[multi-decision] 读取中期摘要失败（忽略，用空表）")
-            self._data = {}
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("summary root is not an object")
+        except FileNotFoundError:
+            return
+        except Exception as exc:
+            # 整份不可读时，后续保存必须先保全原文件，不能把空表直接覆盖回去。
+            self._backup_required = True
+            logger.error(f"[multi-decision] 读取中期摘要失败（{type(exc).__name__}），保存前需备份原文件")
+            return
+
+        for index, (sid, item) in enumerate(raw.items(), 1):
+            field = "entry"
+            try:
+                if not isinstance(item, dict):
+                    raise TypeError("summary entry is not an object")
+                field = "text"
+                if not item.get("text"):
+                    continue
+                text = str(item["text"])
+                field = "ts"
+                ts = float(item.get("ts") or 0.0)
+                if not math.isfinite(ts):
+                    raise ValueError("summary timestamp is not finite")
+                field = "count"
+                count = int(item.get("count") or 0)
+                field = "lines"
+                lines = int(item.get("lines") or 0)
+            except (TypeError, ValueError, OverflowError) as exc:
+                # 不输出 sid、正文、原始数值或异常正文，避免日志泄漏会话内容。
+                logger.warning(f"[multi-decision] 跳过中期摘要第{index}项，字段{field}无效（{type(exc).__name__}）")
+                continue
+            self._data[str(sid)] = {"text": text, "ts": ts, "count": count, "lines": lines}
 
     def _save(self):
+        if self._backup_required:
+            try:
+                original = self.path.read_bytes()
+                backup = self.path.with_name(f"{self.path.name}.corrupt-{uuid.uuid4().hex}.bak")
+                # 独占创建，重名/读取/写入/同步任一步失败都不得覆盖损坏原件。
+                with backup.open("xb") as stream:
+                    stream.write(original)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                self._backup_required = False
+            except Exception as exc:
+                logger.error(f"[multi-decision] 中期摘要原文件备份失败（{type(exc).__name__}），拒绝本次保存")
+                return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".json.tmp")
@@ -133,10 +169,9 @@ class Summaries:
             "lines": max(0, int(lines or 0)),
         }
         self._data[sid] = item
-        # 写一条就顺手看看要不要按上限/天数剪（用户 m13708 第 4 条）：
-        # 只在真的删了东西时才多写一次盘。
-        if self._prune():
-            self._save()
+        # 写一条就顺手看看要不要按上限/天数剪（用户 m13708 第 4 条）。
+        # 清理只改内存，保存一次就够——以前清理命中时会连写两遍同样的内容。
+        self._prune()
         self._save()
         return dict(item)
 

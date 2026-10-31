@@ -1252,9 +1252,9 @@ _MEDIA_INDEX_DIRTY: dict = {}
 
 
 def _index_load(cache: Path) -> dict:
-    key = str(cache)
-    if key in _MEDIA_INDEX:
-        return _MEDIA_INDEX[key]
+    cache_key = str(cache)
+    if cache_key in _MEDIA_INDEX:
+        return _MEDIA_INDEX[cache_key]
     data = {"byPath": {}, "byHash": {}, "bySid": {}}
     try:
         raw = json.loads((cache / _MEDIA_INDEX_FILE).read_text(encoding="utf-8"))
@@ -1267,23 +1267,23 @@ def _index_load(cache: Path) -> dict:
             by_sid = raw.get("bySid")
             if isinstance(by_sid, dict):
                 buckets = {}
-                for key, val in by_sid.items():
+                for sid_key, val in by_sid.items():
                     if isinstance(val, dict):
-                        buckets[str(key)] = {str(a): str(b) for a, b in val.items() if a and b}
+                        buckets[str(sid_key)] = {str(a): str(b) for a, b in val.items() if a and b}
                 data["bySid"] = buckets
     except Exception:
         pass
-    _MEDIA_INDEX[key] = data
+    _MEDIA_INDEX[cache_key] = data
     return data
 
 
 def _index_save(cache: Path, force: bool = False) -> None:
     """把索引写回磁盘。攒够 20 次变更或 force 才落盘，热路径上不做 IO。"""
-    key = str(cache)
-    data = _MEDIA_INDEX.get(key)
+    cache_key = str(cache)
+    data = _MEDIA_INDEX.get(cache_key)
     if data is None:
         return
-    if not force and _MEDIA_INDEX_DIRTY.get(key, 0) < 20:
+    if not force and _MEDIA_INDEX_DIRTY.get(cache_key, 0) < 20:
         return
     for name in ("byPath", "byHash"):
         items = data.get(name) or {}
@@ -1294,15 +1294,31 @@ def _index_save(cache: Path, force: bool = False) -> None:
     if len(buckets) > _MEDIA_INDEX_SIDS:
         data["bySid"] = dict(list(buckets.items())[-_MEDIA_INDEX_SIDS:])
         buckets = data["bySid"]
-    for key, items in list(buckets.items()):
+    for sid_key, items in list(buckets.items()):
         if len(items) > _MEDIA_INDEX_SID_LIMIT:
-            buckets[key] = dict(list(items.items())[-_MEDIA_INDEX_SID_LIMIT:])
+            buckets[sid_key] = dict(list(items.items())[-_MEDIA_INDEX_SID_LIMIT:])
     try:
         cache.mkdir(parents=True, exist_ok=True)
-        tmp = cache / (_MEDIA_INDEX_FILE + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, cache / _MEDIA_INDEX_FILE)
-        _MEDIA_INDEX_DIRTY[key] = 0
+        # M11：临时文件按次唯一。旧实现固定用 _index.json.tmp，而后台巡检线程
+        # （引擎每 10 分钟 to_thread 跑一次裁缓存）与事件循环线程会撞同一个临时
+        # 文件：一路写到一半被另一路截断重写，剩下的字节就接着写进「已经发布」
+        # 的索引里，落盘成两份拼起来的残档。唯一名字 + fsync + 失败清理。
+        tmp = cache / (_MEDIA_INDEX_FILE + "." + os.urandom(4).hex() + ".tmp")
+        try:
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            try:
+                with open(tmp, "rb+") as fh:
+                    os.fsync(fh.fileno())
+            except OSError:
+                pass
+            os.replace(tmp, cache / _MEDIA_INDEX_FILE)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        _MEDIA_INDEX_DIRTY[cache_key] = 0
     except Exception:
         pass
 
@@ -2108,7 +2124,11 @@ def clean_content(content):
     return content
 
 
-_ERROR_RE = re.compile(r"^\s*\[ProviderError\]")
+# 上游报错可能被框架包成 [21:44] <msg>[名字] <text>[ProviderError] …</text></msg>，
+# 不能只看开头；只认带 ProviderError 且后面跟已知错误正文的 assistant 假回复。
+_ERROR_RE = re.compile(
+    r"\[ProviderError\]\s*(?:All models in the group failed|InternalServerError|Error code:|$)"
+)
 # 模型看到历史里 assistant 都带【名字】，自己输出时也会跟着写一个；
 # 再叠上我们加的就会变成【樱井桃华】【桃华】。加之前先剥掉已有的。
 _OLD_TAG_RE = re.compile(r"^\s*【[^】]{1,24}】\s*")
@@ -2173,8 +2193,16 @@ def _stamp_bot_tag(text: str, tag: str) -> str:
 
 
 def is_error_message(msg) -> bool:
-    """上游报错被框架当成 assistant 回复存进了历史（[ProviderError] …）。"""
-    return bool(_ERROR_RE.match(text_of_content(_get(msg, "content")) or ""))
+    """上游报错被框架当成 assistant 回复存进了历史（[ProviderError] …）。
+
+    2026-11-01（用户 m05804）：错误正文前会带 [21:44] <msg>[名字] <text>，
+    原来按开头匹配完全认不出，错误就被当历史带进下一轮。只对 assistant 生效，
+    用户引用同一段报错时不能删用户的话。
+    """
+    if str(_get(msg, "role") or "").strip().lower() != "assistant":
+        return False
+    text = str(text_of_content(_get(msg, "content")) or "")
+    return bool(_ERROR_RE.search(text))
 
 
 def strip_error_messages(messages) -> List[Any]:
@@ -2347,7 +2375,9 @@ def is_decision_note(msg) -> bool:
     if _DEC_NOTE_DECL_RE.match(t):
         return True
     # v4.05（用户 m12604）：正文不再带前缀，靠开头的「判定要回／判定不回」认。
-    return t.startswith("判定要回") or t.startswith("判定不回")
+    # 2026-10-31（用户 m05138）：新注记改写成「建议回复／建议不回」，旧记录继续认。
+    return (t.startswith("建议回复") or t.startswith("建议不回")
+            or t.startswith("判定要回") or t.startswith("判定不回"))
 
 
 #: 图片消息里的 [HH:MM] 与 [user_nickname: X]（v4.39，用户 m20816）。
@@ -3429,7 +3459,7 @@ class WindowManager:
     def _decision_msg(self, d: dict):
         """一条判定 → 一条 assistant 消息（v4.05，用户 m12604）。
 
-        正文就是一句「判定不回（理由）」，跟 agent 自己说的一句话没两样；身份靠
+        正文就是一句「建议回复／建议不回（理由）」，跟 agent 自己说的一句话没两样；身份靠
         role=assistant + 消息名「对当前聊天消息的决策建议」标出来。时间放进 msg[ts]，
         不再写进正文——正文多一截「[决策记录] HH:MM」，模型会照着学，用户也说那是
         旧格式。
@@ -3470,7 +3500,10 @@ class WindowManager:
                 _m = _DEC_NOTE_HEAD.match(text) or _DEC_NOTE_TS_HEAD.match(text)
                 body = strip_note_decl(text[_m.end():]) if _m else strip_note_decl(text)
                 for i, d in enumerate(rows):
-                    if i in used or self._decision_body(d) != body:
+                    if i in used:
+                        continue
+                    if (self._decision_body(d) != body
+                            and self._decision_body(d, legacy=True) != body):
                         continue
                     ts = float(d.get("ts") or 0)
                     if ts <= 0:
@@ -3512,9 +3545,16 @@ class WindowManager:
             return ""
 
     @staticmethod
-    def _decision_body(d: dict) -> str:
-        """决策正文，不带「[决策记录] 时间」前缀（页面按普通消息那样摆）。"""
-        body = "判定要回" if d.get("reply") else "判定不回"
+    def _decision_body(d: dict, legacy: bool = False) -> str:
+        """决策正文，不带「[决策记录] 时间」前缀（页面按普通消息那样摆）。
+
+        legacy=True 只用于认领旧注记的时间戳：早先写的是「判定要回／判定不回」，
+        现在改成建议口吻，旧记录仍要能对上。
+        """
+        if legacy:
+            body = "判定要回" if d.get("reply") else "判定不回"
+        else:
+            body = "建议回复" if d.get("reply") else "建议不回"
         why = str(d.get("reason") or "").strip()
         if why:
             body += "（" + why[:200] + "）"
@@ -3760,8 +3800,8 @@ class WindowManager:
         try:
             extra = self._pending_messages(st)
         except Exception:
-            logger.exception("[multi-decision] %s 取待发失败（这一轮不并入）", sid)
-            extra = []
+            logger.exception("[multi-decision] %s 取待发失败（保留待发，停止本次折叠）", sid)
+            raise
         # 去重口径与 collect 那条路完全一致：merge_trusted_messages 内部复用
         # 主路的五道关（编号、内容指纹、占位与原件互斥、占位升级原件、并完再
         # 收口成对重复）。以前这里自己写了一套精简版，只比 message_id 和正文
@@ -4701,7 +4741,10 @@ class WindowManager:
             keep_hist = share
         hist_before = before_msgs
         # user_only=False：keep 按全量计入消息算（用户 m02080）
-        cut = trim_by_count(st.messages, keep_hist, protect=protect, user_only=False)
+        # M12：劈开边界那条打包 user 时，被劈掉的前半段由 trim_by_count 交回来
+        split_removed: list = []
+        cut = trim_by_count(st.messages, keep_hist, protect=protect, user_only=False,
+                            removed_out=split_removed)
         # v4.11（用户 m17596 第 1 条后半）：裁完窗口第一条要是 assistant，说明它前面
         # 那条 user 已经被裁走了，模型读到的开头就是「我上一句说了什么」——上下文从
         # 半截对话开始。再往前多裁一条，让窗口从 user 开始（用户原话「如果裁切后
@@ -4716,19 +4759,27 @@ class WindowManager:
             if str(_role or "") == "assistant":
                 st.messages.pop(0)
                 cut_extra = 1
-        cut_msgs = hist_before[:cut + cut_extra] if (cut > 0 or cut_extra > 0) else []
+        if cut_extra > 0:
+            # 多裁的那条整条都在 hist_before 里，别再把劈出来的半段叠上去
+            cut_msgs = hist_before[:cut + cut_extra]
+        elif cut > 0:
+            cut_msgs = list(hist_before[:cut]) + list(split_removed)
+        else:
+            cut_msgs = list(split_removed)
         # cut==0 但条数没少、计入条数变少了 = 只把窗口第一条（一条装着十几条群
         # 消息的打包 user）劈了一刀。被劈掉的那半段也是真实消息，得进中期摘要，
         # 否则摘要出现缺口（审查 bug）
-        if cut <= 0 and before_msgs and (
-            count_messages(st.messages) < counted_before
-            or count_user_messages(st.messages) < user_before
-        ):
-            cut_msgs = [before_msgs[0]]
+        # 第八批 L05：裁切后的条数/用户条数只在这里算一次，「打包 user 被劈开」的判定
+        # 与后面的空裁判断都用这一份，不再对同一份 messages 重复遍历。
         after = st.size()
         counted_after = count_messages(st.messages)
         user_after = count_user_messages(st.messages)
         after_chars = self._chars(st.messages)
+        if cut <= 0 and before_msgs and (
+            counted_after < counted_before or user_after < user_before
+        ):
+            # 只劈了一刀：摘要写被劈掉的那半段，别把保留下来的半段也当成裁掉的
+            cut_msgs = list(split_removed) or [before_msgs[0]]
         # v3.72（用户 m33207 第 3 条）：一条都没裁掉就别留记录。以前这种「空裁」
         # 照样写一条（cut=0、before == after），页面上一堆「24 条就裁了」，
         # 实际窗口一点没变。真劈了一刀（cut_msgs 非空）的情况不算空裁。

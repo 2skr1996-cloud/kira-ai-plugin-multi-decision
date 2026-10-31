@@ -1199,7 +1199,7 @@ a.tag.ret .go{margin-left:5px;font-weight:700;font-size:13px;line-height:1;}
       // 颜色换成紫色实底 hi-dec——以前 hi-adapt 那点浅底打不过下面 .cfg.st .chip.on 的绿，
       // 看着跟别的状态胶囊一样。
       out.push({t: "决策模式", sec: "st", on: true, hi: "dec", right: true,
-        tip: "决策模式开着：触发后先让决策模型看窗口，判回才跑完整回复；判定不回就只留一条决策记录"});
+        tip: "决策模式开着：触发后先让决策模型看窗口，建议回复才跑完整回复；建议不回就只留一条决策记录"});
     }
     var bandOnNow = !!ef.bands_enabled && !dmNow;
     var rhythmMode = (modeShown === "probability" || (!dmNow && (c.mode === "bands" || c.mode === "adaptive")) || bandOnNow);
@@ -1552,16 +1552,16 @@ a.tag.ret .go{margin-left:5px;font-weight:700;font-size:13px;line-height:1;}
       ["平均回复间隔", per == null ? "—" : per, per == null ? "" : "条/次",
         "平均每多少条消息回一次", "最近 24 小时"],
       // 用户本轮：紧挨「平均回复间隔」右边再加一格「最近24小时决策」。
-      // 主值是 24 小时内决策模型跑过的次数，副行只写其中判要回几次（判定不回不发请求，
-      // 所以这个数跟「最近24小时请求」不是一回事），判不回 / 判定失败挂在悬停提示里。
+      // 主值是 24 小时内决策模型跑过的次数，副行只写其中建议回复几次（建议不回不发请求，
+      // 所以这个数跟「最近24小时请求」不是一回事），建议不回 / 决策失败挂在悬停提示里。
       ["最近24小时决策", decOk ? dec.rounds : "—", decOk ? "次" : "",
-        decOk ? ("最近 24 小时决策模型跑了 " + dec.rounds + " 次；其中判要回 " +
-                 (Number(dec.reply) || 0) + " 次、判不回 " + (Number(dec.silent) || 0) +
+        decOk ? ("最近 24 小时决策模型跑了 " + dec.rounds + " 次；其中建议回复 " +
+                 (Number(dec.reply) || 0) + " 次、建议不回 " + (Number(dec.silent) || 0) +
                  " 次" +
-                 (Number(dec.failed) ? "、判定失败 " + dec.failed + " 次" : "") +
-                 "（判定不回不发请求，不计入请求卡）")
+                 (Number(dec.failed) ? "、决策失败 " + dec.failed + " 次" : "") +
+                 "（建议不回不发请求，不计入请求卡）")
               : "还没有决策记录：决策模式开着、并且真触发过一轮才有",
-        decOk ? ("要回 " + (Number(dec.reply) || 0) + " 次") : ""],
+        decOk ? ("建议回复 " + (Number(dec.reply) || 0) + " 次") : ""],
       // 请求和回复拆成两张卡（用户 m41511），成功率只挂在请求这张上。
       // 用户 m05552 第 2 条：失败轮和重试轮以前根本没进统计（结算日志只在成功路径写），
       // 卡片永远 100%。现在后端把失败轮也写进结算日志、重试轮另记 is_retry，
@@ -2101,18 +2101,18 @@ var ctxSnapRequest = 0;
     // v3.75（用户本轮第 5 条）：这不是一次请求，而是「没人说话时顺手做的一次
     // 窗口裁切」单独落的快照。不能算成「未回复」——那样颜色和统计都说错话。
     if(outcome === "trim") return { label: "窗口裁切", cls: "trim", tag: "cut", detail: "" };
-    // 用户 m35302：判定要回、可这一轮从头到尾没等到回复请求（没跑起来，或者跑到一半断了）。
+    // 用户 m35302：建议回复、可这一轮从头到尾没等到回复请求（没跑起来，或者跑到一半断了）。
     // 分不清是失败还是空输出，就按失败画一根，别让这一轮在图上凭空消失。
     if(outcome === "decision" && String(r.reply_state || "") === "missing"){
       return {
         label: "失败",
         cls: "error",
         tag: "bad",
-        detail: "判定要回之后，这一轮没有对应的回复请求：可能没跑起来，也可能跑到一半断了。分不清是失败还是空输出，按失败算。",
+        detail: "建议回复之后，这一轮没有对应的回复请求：可能没跑起来，也可能跑到一半断了。分不清是失败还是空输出，按失败算。",
       };
     }
     // v3.99（用户 m10577）：决策轮的快照不是「未回复」，它压根没发请求。
-    if(outcome === "decision") return { label: r.decision_reply ? "判定要回" : "判定不回", cls: "dec", tag: "neutral", detail: String(r.decision_reason || "") };
+    if(outcome === "decision") return { label: r.decision_reply ? "建议回复" : "建议不回", cls: "dec", tag: "neutral", detail: String(r.decision_reason || "") };
     if(outcome === "pending" || outcome === "running") return { label: "运行中", cls: "pending", tag: "neutral", detail: "" };
     // 用户 m05552 第 1 条：全站不再写「已回复」，统一叫「请求成功」——这一格说的是
     // 请求有没有跑成功，跟「模型决定不回」不是一回事。
@@ -2147,19 +2147,38 @@ var ctxSnapRequest = 0;
       // 用户 m05205 第 3 条：每行重试要说清自己是第几次、现在到哪一步，不能两行都只写「重试轮」。
       // 用户 m05828 第 2 条：「重试失败 X1 / X2」里的 X 看不出是第几次，像倍数，去掉；
       // 第几次只留在悬停提示里。箭头也换成实心 ↗（原来的 › 太细，看不出能点）。
+      // 用户 m05459：重试行只看本行自己的结果和序号。链最终成功时，前面失败的那次
+      // 仍然是「首次重试」，不能跟着整条链写成「重试成功」。
       var nth = Math.max(0, Number(link.attempt_index) || 0);
+      var attempts = Math.max(0, Number(link.attempts) || 0);
+      var status = String(link.status || "");
+      var rowBad = linkRes.cls === "error";
+      var rowPending = linkRes.cls === "pending";
+      var rowOk = !rowBad && !rowPending && linkRes.cls !== "trim";
+      var finalFail = rowBad && status !== "scheduled" && status !== "running" &&
+                      status !== "unknown" && status !== "succeeded" &&
+                      !(attempts > 0 && nth > 0 && nth < attempts);
       var t2;
-      if(link.succeeded === true) t2 = "重试成功";
-      else if(linkRes.cls === "error") t2 = "重试失败";
-      else if(link.status === "scheduled") t2 = "等待重试";
+      if(rowOk) t2 = "重试成功";
+      else if(rowBad && finalFail) t2 = "重试失败";
+      else if(nth === 1) t2 = "首次重试";
+      else if(nth === 2) t2 = "二次重试";
+      else if(nth > 2) t2 = "第 " + nth + " 次重试";
+      else if(status === "scheduled") t2 = "等待重试";
       else t2 = "重试中";
       var tip2 = "这一行是前面那次出错之后自动补的" +
                  (nth ? "（第 " + nth + " 次重试）" : "") +
-                 (Number(link.attempts) > 0 ? "，原轮共安排 " + Number(link.attempts) + " 次" : "") +
+                 (attempts > 0 ? "，原轮共安排 " + attempts + " 次" : "") +
                  (link.root_name ? "；点开原轮记录" : "");
+      if(status === "scheduled") tip2 += "；正在排队";
+      else if(status === "running") tip2 += "；正在运行";
+      else if(status === "cancelled") tip2 += "；重试已取消";
+      else if(status === "unknown") tip2 += "；重试状态未知";
+      else if(rowBad && status === "succeeded") tip2 += "；这次没成功，后面补上了";
+      else if(finalFail) tip2 += "；没有更多重试了";
       // 用户 m05552 第 1 条：重试轮自己就是一个结果标签（药丸），不再在「运行出错」
       // 后面再挂一行小字——两行都写「运行出错」分不清哪次是哪次。
-      var lcls = "tag ret " + (link.succeeded === true ? "ok" : linkRes.cls === "error" ? "bad" : "wait");
+      var lcls = "tag ret " + (rowOk ? "ok" : rowBad ? "bad" : "wait");
       if(link.root_name){
         return "<a class='" + lcls + "' data-round-link='" + esc(link.root_name) + "' title='" + esc(tip2) + "'>" +
                esc(t2) + "<span class='go'>↗</span></a>";
@@ -2385,7 +2404,7 @@ var ctxSnapRequest = 0;
                 (tpN ? " · 其中待发 " + tpN + " 条" : "") + " · " + whyT;
         }
       }
-      if(_missDec) tip += " · 失败：判定要回之后没等到回复请求";
+      if(_missDec) tip += " · 失败：建议回复之后没等到回复请求";
       if(cut){
         var pct = cut.before_chars ? Math.round((1 - (cut.after_chars || 0) / cut.before_chars) * 100) : null;
         // v3.71（用户 m23596 第 3 条）：触发线现在把「待发」也算进来，所以悬停要说清
@@ -2495,8 +2514,9 @@ var ctxSnapRequest = 0;
   function atPoolAdd(nm){
     nm = String(nm == null ? "" : nm).trim();
     if(!nm || nm.length > 40) return;
-    // 不含空白的昵称，通用正则本来就能整段吃掉，不用进池
-    if(nm.indexOf(" ") < 0 && nm.indexOf("\u3000") < 0) return;
+    // 含空白或方括号的昵称，通用 @ 正则吃不全，整段记下来先替换
+    if(nm.indexOf(" ") < 0 && nm.indexOf("\u3000") < 0
+       && nm.indexOf("[") < 0 && nm.indexOf("]") < 0) return;
     if(AT_POOL.indexOf(nm) < 0) AT_POOL.push(nm);
   }
 
@@ -2551,9 +2571,17 @@ var ctxSnapRequest = 0;
         }
       });
     }
+    // 2026-11-01（用户 m06025 图1）：@[ 后面的方括号不一定是包装，可能是昵称本身
+    // （[%ĀĀ␇Ö]我在未来，等你）。只有 ] 后面就是空白/标点/结尾时才按包装剥括号；
+    // 后面还接着字的，整段到空白为止，再按昵称规则洗掉装饰性前缀。
+    // s 已经过 esc，这里拿到的 nm 也是转义后的文本，不要再 esc 一次。
+    s = s.replace(/@\[([^\]\n]{1,40})\](?=\s|$|[，。、；：！？,.;:!?])/g, function(_, nm){ return keepAt(nm); });
+    s = s.replace(/@(\[[^\]\n]{1,40}\](?!\()[^\s<>@]{1,60})/g, function(_, nm){ return keepAt(cleanNick(nm)); });
     // v4.49（用户 m25038 第 3 项）：还有一种「昵称在前、号在括号里」的写法
     // [At 大椰果(3503680592)]——嵌套引用的原话里就是这种，以前原样漏成方括号不做徽章。
-    s = s.replace(/\[At\s+([^\s\[\]()]{1,40})\(\s*-?\d+\s*\)\s*\]/g, function(_, nm){ return keepAt(esc(nm)); });
+    // 2026-11-01（用户 m06138 图2）：昵称里带空格（Mcp_management service）时旧字符类
+    // 在空格处就断了，整段 [At …] 原样漏出来。这里允许空格，lazy 到电话号码前的左括号。
+    s = s.replace(/\[At\s+([^\[\]()]{1,40}?)\s*\(\s*-?\d+\s*\)\s*\]/g, function(_, nm){ return keepAt(esc(String(nm).trim())); });
     // 昵称自己带括号时（[At 1(nickname: 白色(^0^)/季节)]）不能用 [^)]，会在第一个 ) 处截断
     s = s.replace(/\[At\s+(\d+)\(\s*nickname:\s*([\s\S]{1,80}?)\)\s*\]/g, function(_, id, nm){ return keepAt(nm); })
          .replace(/\[At\s+(\d+)\]/g, function(_, id){ return keepAt(id); })
@@ -3913,7 +3941,7 @@ var ctxSnapRequest = 0;
         idx[mid] = {
           name: String(meta.name || "").replace(/\s+/g, " ").trim(),
           ts: mts,
-          body: String(p.body || "").replace(/\s+$/, ""),
+          body: String(p.body || meta.fwd || "").replace(/\s+$/, ""),
           // 用户 m12256：被引用那条自己带的图，引用块里要画出来
           media: segMed[pi] || null
         };
@@ -3961,13 +3989,23 @@ var ctxSnapRequest = 0;
     // 用户 m12256：那张图本来就不属于「本条消息」，而是被引用那条自己的——大椰果 18:21
     // 发了一张图，哦豁 18:37 引用它，本条 media 是空的，光凭上面那条老规则只能画一个
     // 「图片」占位。索引里已经存了被引用那条的媒体，优先用它。
-    var qsrc = (q.media && q.media.length) ? q.media : ((media && media.length) ? media : null);
-    var qm = qsrc ? thumbsHtml(qsrc) : "";
-    // 被引用的是合并转发时不能走下面的「洗占位」：那段会把所有空白（含换行）压成一个空格，
-    // 转发里的逐条换行被压平后 forwardHtml 只能解出 1 条、条目文本还粘在一起（用户 m03014 图1）。
-    // 转发里的 [图片] 占位由 forwardHtml 自己洗，图片由它塞进卡片，这里原样交给它。
+    // 2026-11-01（用户 m06138 图1）：引用里的转发常常只剩一个空壳 [Forward]，
+    // 但原消息就在本窗口索引里。能按 id 查到原正文时把正文接回来，别一边把图
+    // 漏在引用块外、一边又写「内容未获取」。
+    if(/^\[Forward\s*\]$/.test(String(body).trim()) && q.id){
+      var fwdHit = QUOTE_IDX[String(q.id)] || QUOTE_FAR[String(q.id)];
+      if(fwdHit && /^\[Forward/.test(String(fwdHit.body || "").trim())){
+        body = String(fwdHit.body || "");
+        if(!(q.media && q.media.length) && fwdHit.media && fwdHit.media.length){
+          q = { id: q.id, text: q.text, who: q.who, ts: q.ts, media: fwdHit.media };
+        }
+      }
+    }
     var qIsFwd = String(body).trim().indexOf("[Forward") === 0;
-    if(qm && !qIsFwd){
+    var qsrc = (q.media && q.media.length) ? q.media : ((media && media.length) ? media : null);
+    // 转发图片只跟转发卡走：空壳 [Forward] 没有卡片可放图，更不能把图单独漏在引用块里。
+    var qm = (qIsFwd || !qsrc) ? "" : thumbsHtml(qsrc);
+    if(qm){
       // 图就在块里摆着了，原话里那句「[图片]」占位别再来一行，跟 QQ 的引用不一样就露馅
       body = tidyBody(body).replace(/\[(?:Image attached|图片|表情|image)\]/gi, " ")
                  .replace(/[\s\u00a0]+/g, " ").trim();
@@ -4173,6 +4211,18 @@ var ctxSnapRequest = 0;
     function stripFwdPics(t){
       return String(t || "").replace(/\[(?:图片|表情)\](?:\s*×\s*\d+)?/g, "").replace(/[ \t]{2,}/g, " ").trim();
     }
+    // 2026-11-01（用户 m06138 图1）：条目已经有真图时，预览行不再把同一个 [图片]
+    // 画成小方块；只有还有图没认领到（被清理/没下发）才保留占位 chip。
+    function fwdPreviewText(r, got){
+      var t = String(r.text || "");
+      var need = (fwdPicN(t) + fwdEmoN(t)) * (r.n || 1);
+      var shown = 0;
+      (got || []).forEach(function(it){
+        var o = (typeof it === "string") ? { path: it } : (it || {});
+        if(!o.missing && (o.path || o.url)) shown++;
+      });
+      return (need > 0 && shown >= need) ? stripFwdPics(t) : t;
+    }
     // m24522 ④⑥：占位不再当字面文字铺出来，统一换成小图标（卡片预览与弹层共用）
     function fwdPicChip(t){
       var ico = { "图片": "🖼", "表情": "🙂", "语音": "🎙", "视频": "🎬" };
@@ -4184,7 +4234,8 @@ var ctxSnapRequest = 0;
     }
     var lis = merged.map(function(r, idx){
       var got = claims[idx] || [];
-      var body = r.sub ? fwdSubChip(r.sub) : fwdPicChip(r.text || "") + (r.n > 1 ? " ×" + r.n : "");
+      var pre = r.sub ? "" : fwdPreviewText(r, got);
+      var body = r.sub ? fwdSubChip(r.sub) : fwdPicChip(pre) + (r.n > 1 && pre ? " ×" + r.n : "");
       return "<div class='fwd-it'><span class='fw-w'>" + esc(r.who || "某人") + "</span>" +
              (r.when ? "<span class='fw-t'>" + esc(r.when) + "</span>" : "") +
              "<span class='fw-c'>" + body + fwdMini(got) + "</span></div>";
@@ -4632,12 +4683,13 @@ var ctxSnapRequest = 0;
   // 统一画成和分享卡（cardHtml）同一套的 .qcard 小卡：左边 B 图标、中间标题、
   // 脚下来源域名 + 「打开」，整张卡是一个 <a>。只认 http(s)（走 safeWebUrl 校验），
   // 标题和链接一律 esc 后拼字符串，不拼 innerHTML。
+  // 2026-11-01（用户 m05804 图2）：微信公众号文章链接也走这条，复用同一套卡片。
   function biliPattern(){
     // 只吃 ASCII 可见字符：真链接里不会有中文，不然「…/BV1xx，好家伙」会把
     // 后面的中文连标点一起吞进 href（用户第 4 条）
     // 用户 m02993 图9：直播平台也在里面，但 biliHtml 只给「认得出是直播间」的
     // 非 B 站链接画卡，点播页（youtube.com/watch、twitch.tv/videos）照旧留文本。
-    return /(https?:\/\/(?:[\w-]+\.)*(?:bilibili\.com|b23\.tv|youtube\.com|youtu\.be|twitch\.tv|douyin\.com|douyu\.com|huya\.com|kuaishou\.com)\/[^\s<>"'「」【】\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]*)/g;
+    return /(https?:\/\/(?:[\w-]+\.)*(?:bilibili\.com|b23\.tv|mp\.weixin\.qq\.com|youtube\.com|youtu\.be|twitch\.tv|douyin\.com|douyu\.com|huya\.com|kuaishou\.com)\/[^\s<>"'「」【】\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]*)/g;
   }
   // 链接前面紧贴的【标题】：标题里可能还套一层【第14集】，
   // 所以从后往前按【】配平找起点，不能简单地 indexOf("【")
@@ -4668,6 +4720,9 @@ var ctxSnapRequest = 0;
     if(host === "t.bilibili.com" || /\/opus\//i.test(u)) return "动态";
     return "";
   }
+  function isWechatUrl(url){
+    return /^https?:\/\/mp\.weixin\.qq\.com\/s\//i.test(String(url || ""));
+  }
   function biliHtml(text, renderText){
     // 用户第 4 条：正文 / 引用原话里的 B 站链接（bilibili.com 与 b23.tv 两种长相）
     // 统一画成可点的小卡，视觉跟分享卡（.qcard）一套；只放行 http(s)，
@@ -4680,11 +4735,19 @@ var ctxSnapRequest = 0;
       if(cutP){ tail = cutP[0]; url = url.slice(0, url.length - tail.length); }
       var href = safeWebUrl(url);
       if(!href) continue;   // 不是 http(s) 就留给下面的文本，绝不拼进 href
+      var cut = biliTitle(src.slice(end, m.index));
+      // 2026-11-01（用户 m05804 图2）：微信文章不猜标题、不发请求，先给一张
+      // 固定标题的站内卡；链接前面若带了【标题】，就用那个标题。
+      if(isWechatUrl(href)){
+        out += renderText(cut.pre) +
+               cardHtml({ app: "微信公众号", title: cut.title || "微信公众号文章", url: href });
+        end = m.index + raw.length - tail.length;
+        continue;
+      }
       // 用户 m02993 图9：非 B 站域名只有认得出是直播间才画卡，否则整段留给文本
       var live = liveInfo(href), hh = "";
       try { hh = new URL(href).hostname.replace(/^www\./, "").toLowerCase(); } catch(e2){ hh = ""; }
       if(!/(^|\.)(bilibili\.com|b23\.tv)$/.test(hh) && !live) continue;
-      var cut = biliTitle(src.slice(end, m.index));
       // 用户 m02993 图9：卡片的标题位写清是哪种内容，别一律「哔哩哔哩视频」；
       // 直播间写「直播间 <房号>」，配 LIVE 图标 + 红色「直播」徽标。
       var kind = live ? "直播" : biliKind(href);
@@ -4710,11 +4773,19 @@ var ctxSnapRequest = 0;
       if(cutP){ tail = cutP[0]; url = url.slice(0, url.length - tail.length); }
       var href = safeWebUrl(url);
       if(!href) continue;
+      var cut = biliTitle(src.slice(end, m.index));
+      // 微信文章和 B 站链接一样先抽出来，正文不会被卡在 .mono 里掉到下一行
+      if(isWechatUrl(href)){
+        rest += cut.pre;
+        html += cardHtml({ app: "微信公众号", title: cut.title || "微信公众号文章", url: href });
+        end = m.index + raw.length - tail.length;
+        hit = true;
+        continue;
+      }
       var hh = "", live = liveInfo(href);
       try { hh = new URL(href).hostname.replace(/^www\./, "").toLowerCase(); } catch(e3){ hh = ""; }
       // 只有 B 站自己（以及认得出的直播间）才抽成卡，别的平台留给 richText 原样画
       if(!/(^|\.)(bilibili\.com|b23\.tv)$/.test(hh) && !live) continue;
-      var cut = biliTitle(src.slice(end, m.index));
       var kind = live ? "直播" : biliKind(href);
       var defTitle = live ? ("直播间" + (live.room ? " " + live.room : ""))
                           : (kind ? ("哔哩哔哩" + kind) : "哔哩哔哩链接");
@@ -6417,25 +6488,45 @@ var ctxSnapRequest = 0;
     }).catch(function(){});
   }
 
+  // 2026-10-31（用户 m05138）：决策只给建议，不再用「要回／不回」下命令。
+  // 失败也不再挤在窗口条数那一格，结论列直接写「决策失败」，悬停看当时的报错。
+  function decImageFbTip(r){
+    var why = String(r.decision_images_fallback_error || "").trim();
+    var n = Number(r.decision_images_fallback_attempts) || 0;
+    return "带图那次没成功，已退回纯文字重判" +
+      (n ? "（带图试了 " + n + " 次）" : "") + (why ? "：" + why : "");
+  }
+
+  function decisionFailTip(r){
+    var err = String(r.error || "").trim().slice(0, 300);
+    var tip = "决策没有走通" +
+      (r.decision_reply ? "，已按失败放行继续回复" : "，这一轮没有继续回复") +
+      (err ? "：" + err : "");
+    if(r.decision_images_fallback) tip += "；" + decImageFbTip(r);
+    return tip;
+  }
+
   function decisionConcl(r){
-    if(r.failed) return "<span class='dcon bad'>失败</span>";
+    if(r.failed){
+      return "<span class='dcon bad' title='" + esc(decisionFailTip(r)) + "'>决策失败</span>";
+    }
     if(r.decision_reply){
-      // 用户 m35302：判了要回，可这一轮没等到回复请求 —— 结论照旧写「要回」（那确实是它判的），
+      // 用户 m35302：建议回复之后没等到回复请求 —— 结论照旧写「建议回复」（那确实是它判的），
       // 后面挂个红标，别让人以为这条回复成功发出去了。分不清失败还是空输出，都算失败。
       var _rs = String(r.reply_state || "");
       if(_rs === "missing"){
-        return "<span class='dcon'>要回</span> <span class='tag bad' title='" +
-          esc("判定要回之后，没有等到回复请求：可能没跑起来，也可能跑到一半断了。分不清是失败还是空输出，按失败算。") +
+        return "<span class='dcon'>建议回复</span> <span class='tag bad' title='" +
+          esc("建议回复之后，没有等到回复请求：可能没跑起来，也可能跑到一半断了。分不清是失败还是空输出，按失败算。") +
           "'>失败</span>";
       }
       // 跑了、但什么都没产出，这是空回复，跟出错分开写。
       if(_rs === "empty"){
-        return "<span class='dcon'>要回</span> <span class='tag neutral' title='" +
+        return "<span class='dcon'>建议回复</span> <span class='tag neutral' title='" +
           esc("这一轮回复跑完了，但没产出能发出去的内容。") + "'>空回复</span>";
       }
-      return "<span class='dcon'>要回</span>";
+      return "<span class='dcon'>建议回复</span>";
     }
-    return "<span class='dcon no'>不回</span>";
+    return "<span class='dcon no'>建议不回</span>";
   }
 
   // v3.94（用户 m08398 图4/图5）：决策快照的 ③ 要跟回复记录同一种长相，一条条摆出来。
@@ -6556,14 +6647,16 @@ var ctxSnapRequest = 0;
       // 「结论 / 理由」两列挤窄（真机 1256 宽时会挤到「要回」竖着排）。
       // v4.65（用户 m36234）：退回纯文字时，把「带图那次」的真实报错和试了几次一起
       // 挂到 tooltip 上——以前只有一句「没成功」，查不出是超时、上游拒图，还是没按 JSON 回。
-      var fbWhy = String(r.decision_images_fallback_error || "").trim();
-      var fbN = Number(r.decision_images_fallback_attempts) || 0;
-      var fbTip = "带图那次没成功，已退回纯文字重判" +
-        (fbN ? "（带图试了 " + fbN + " 次）" : "") + (fbWhy ? "：" + fbWhy : "");
-      var itag = icnt
-        ? " <span class='dim' title='" + esc("这一轮决策带了 " + icnt + " 张图" +
-            (ifb ? "，" + fbTip : "")) + "'>· 图" + icnt + "</span>"
-        : (ifb ? " <span class='tag warn' title='" + esc(fbTip) + "'>看图退回</span>" : "");
+      var fbTip = ifb ? decImageFbTip(r) : "";
+      // 2026-10-31（用户 m05138）：失败只写在结论列，这一格不再塞「决策失败」徽标；
+      // 「看图退回」也只在决策成功时作为补充，别把两种结果混在一行。
+      var itag;
+      if(icnt){
+        itag = " <span class='dim' title='" + esc("这一轮决策带了 " + icnt + " 张图" +
+            (ifb ? "，" + fbTip : "")) + "'>· 图" + icnt + "</span>";
+      }else{
+        itag = (ifb && !r.failed) ? " <span class='tag warn' title='" + esc(fbTip) + "'>看图退回</span>" : "";
+      }
       // 用户 m05124 第 8 条：决策轮也要看得到防抖——「防抖 7s + 2s」。
       var del = Number(r.decision_debounce) || 0;
       var tk = r.tokens || {};
@@ -7264,7 +7357,41 @@ var ctxSnapRequest = 0;
     if(dec9.indexOf("[决策记录]") === 0) return true;
     if(String(m.role || "") !== "assistant") return false;
     var hd9 = decNoteHead(dec9);
-    return hd9.indexOf("判定要回") === 0 || hd9.indexOf("判定不回") === 0;
+    return hd9.indexOf("建议回复") === 0 || hd9.indexOf("建议不回") === 0
+      || hd9.indexOf("判定要回") === 0 || hd9.indexOf("判定不回") === 0;
+  }
+
+  // 详情页 ②/③ 的分界：这一轮新来的那批从哪一条开始（返回条数，0 表示整份都算本轮）。
+  // 决策快照与回复快照各用各的锚点，都不看缓存 flags 的 f 位（它从上一条普通回复起就全标 f）。
+  //  - 决策（用户 m26142 第 2 条）：到「上一次决策的注记」为止，含这条注记（它是 ② 里唯一一条未命中）。
+  //    窗口裁过、注记整条被裁走时（用户 m26455）没有判定点，整份算本轮，不再退回去用别的锚点凑。
+  //  - 回复（用户 m26455 图1 / m26535）：到「上一条 bot 的回复」为止，它在 ② 末尾当那唯一一条未命中。
+  //    例外是记录里已经装进了这一轮刚发出去的那条回复（排在最后一条注记之后），不能拿它当边界。
+  //    窗口里根本没有上一条回复时（裁切把更早的消息全切走），整份算本轮。
+  // 以前这里还试过 history_messages 前缀比对与 incoming 尾块匹配（v4.06–v4.33），两种都会被锚点
+  // 无条件覆盖，是死路：22:04 那条 bot 回复明明在第 32 条，② 却画到 37 条。
+  function segBoundX(r){
+    var rec = r || {};
+    var msgs = (Array.isArray(rec.messages) ? rec.messages : []);
+    var isDec = (String(rec.outcome || "") === "decision" ||
+                 String(rec.trigger_reason || "") === "decision" ||
+                 rec.decision_only === true);
+    if(isDec){
+      for(var dnx = msgs.length - 1; dnx >= 0; dnx--){
+        if(isDecNoteLike(msgs[dnx])) return dnx + 1;
+      }
+      return 0;
+    }
+    var lastNote = -1;
+    for(var lnx = msgs.length - 1; lnx >= 0; lnx--){
+      if(isDecNoteLike(msgs[lnx])){ lastNote = lnx; break; }
+    }
+    for(var bx = msgs.length - 1; bx >= 0; bx--){
+      if(lastNote >= 0 && bx > lastNote) continue;
+      var bm = msgs[bx] || {};
+      if(String(bm.role || "") === "assistant" && !isDecNoteLike(bm)) return bx + 1;
+    }
+    return 0;
   }
 
   function toggleRequestRow(name){
@@ -7352,73 +7479,10 @@ var ctxSnapRequest = 0;
       var histRows = (incRows && Array.isArray(r.history_messages)) ? r.history_messages : null;
       var hasSplit = (typeof r.system_static === "string");
       // v4.33（用户 m19120 / m19154）：三档共用同一个边界——「这一轮新来的那批」从哪里开始。
-      // 只认两条依据：显式 history_messages 确是 messages 的逐项前缀，或者「最后一条真 assistant 回复之后」。
+      // 规则收在模块级 segBoundX()：决策看最后一条决策注记，回复看最后一条 bot 回复；
       // 缓存 flags 的 f 位不是分区依据（它从上一条普通回复起就全标 f）。
-      var noteRowX = function(m){
-        if(!m) return false;
-        if(m.decnote === true) return true;
-        if(String(m.name || m.who || "") === DEC_NOTE_NAME) return true;
-        var t9 = String(rawContent(m.content) || "");
-        if(t9.indexOf("[决策记录]") === 0) return true;
-        if(String(m.role || "") !== "assistant") return false;
-        var hd9 = decNoteHead(t9);
-        return hd9.indexOf("判定要回") === 0 || hd9.indexOf("判定不回") === 0;
-      };
-      var allMsgsX = (Array.isArray(r.messages) ? r.messages : []);
-      var boundX = -1;
-      if(histRows && histRows.length <= allMsgsX.length){
-        var prefixOkX = true;
-        for(var piX = 0; piX < histRows.length; piX++){
-          var aX = allMsgsX[piX] || {}, bX = histRows[piX] || {};
-          if(String(aX.role || "") !== String(bX.role || "")){ prefixOkX = false; break; }
-          if(rawContent(aX.content) !== rawContent(bX.content)){ prefixOkX = false; break; }
-        }
-        if(prefixOkX) boundX = histRows.length;
-      }
-      if(boundX < 0 && histRows && histRows.length === 0) boundX = 0;
-      if(boundX < 0){
-        for(var biX = allMsgsX.length - 1; biX >= 0; biX--){
-          var bmX = allMsgsX[biX] || {};
-          if(String(bmX.role || "") === "assistant" && !noteRowX(bmX)){ boundX = biX + 1; break; }
-        }
-        if(boundX < 0) boundX = allMsgsX.length;
-      }
+      var boundX = segBoundX(r);
       var isDecX = (String(r.outcome || "") === "decision" || String(r.trigger_reason || "") === "decision" || r.decision_only === true);
-      // 用户 m26535：回复快照的边界只有一个依据——「上一条 bot 回复」。
-      // 以前这里还试过 cache_prefix_len（公共前缀）和 incoming 尾块匹配，两种都是绕路：
-      // 22:04 那条 bot 回复明明在第 32 条，② 却画到 37 条。现在一律卡在最后一条 bot 回复上，
-      // 它自己留在 ② 末尾当那一条未命中。
-      // 例外只有一种：本条记录里已经装进了「这一轮刚发出去的那条回复」——它排在最后一条
-      // 决策注记之后，属于本轮，不能拿来当边界（1793289148676 那种老记录）。
-      // 用户 m26142 第 2 条：决策快照用决策自己的标准——② 到「上一次决策的注记」为止
-      // （含这条注记：它算历史，是 ② 里唯一一条未命中），③ 从这之后开始算本轮。
-      // 回复快照那套（上一条 bot 回复之后算本轮）不动，两条链路各用各的。
-      if(isDecX){
-        var dnoteX = -1;
-        for(var dnxX = allMsgsX.length - 1; dnxX >= 0; dnxX--){
-          if(noteRowX(allMsgsX[dnxX])){ dnoteX = dnxX; break; }
-        }
-        // 用户 m26455：窗口裁过以后，上一次决策的注记可能整条被裁走，② 就找不到判定点了。
-        // 这时候整份都算本轮（② 空着，③ 装全部），不再退回去用别的锚点凑一个边界。
-        boundX = (dnoteX >= 0) ? (dnoteX + 1) : 0;
-      } else {
-        // 用户 m26455 图1 / m26535：判定点就是「上一条 bot 的回复」——② 画到它为止（它在
-        // ② 末尾，是那唯一一条未命中），③ 从它之后开始。裁切把更早的消息全切走、窗口里
-        // 根本没有这条回复时，没有判定点，这一份全算本轮（② 空着）。以前这里会退到
-        // history_messages 的长度，把 19 条新消息糊进 ②（23:21:34 那条）。
-        var lastNoteX = -1;
-        for(var lnX = allMsgsX.length - 1; lnX >= 0; lnX--){
-          if(noteRowX(allMsgsX[lnX])){ lastNoteX = lnX; break; }
-        }
-        var botX = -1;
-        for(var bxX = allMsgsX.length - 1; bxX >= 0; bxX--){
-          // 最后一条注记之后的 assistant 是「这一轮刚发出去的回复」，不是上一条，跳过。
-          if(lastNoteX >= 0 && bxX > lastNoteX) continue;
-          var bmxX = allMsgsX[bxX] || {};
-          if(String(bmxX.role || "") === "assistant" && !noteRowX(bmxX)){ botX = bxX; break; }
-        }
-        boundX = (botX >= 0) ? (botX + 1) : 0;
-      }
 
       var stat = "", reloc = "", pos = {};
       var statNames = hasSplit ? (r.system_static_names || []) : (r.system_prompt_names || []);
