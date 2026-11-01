@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 from collections import deque
 import inspect
 import json
@@ -16,6 +17,7 @@ import re
 import time
 import uuid
 from typing import Optional
+from types import SimpleNamespace
 
 from core.chat.message_elements import Emoji, File, Image, Record, Sticker, Text, Video
 from core.logging_manager import get_logger
@@ -29,6 +31,7 @@ from .forward_fetch import fetch_forward_items, remember_by_mid, media_for_mid
 from ..state.session_state import SessionState
 from ..state.sids import normalize_sid
 from ..state.retry_history import RETRY_META
+from ..state.reply_media import ReplyMediaAdapter
 from ..window.buffer import ids_of
 from ..window.split import _looks_image, mark_mention, mark_messages, split_user_content
 
@@ -101,6 +104,7 @@ from ..window.manager import (
     shrink_content,
     shrink_timestamp,
     strip_group_tags,
+    stamp_assistant_time,
     is_decision_note,
     text_of_content,
 )
@@ -1073,6 +1077,11 @@ class DecisionEngine:
     def __init__(self, plugin):
         self.plugin = plugin
         self.ctx = plugin.ctx
+        # 宿主会在钩子后追加 native 图；仅在带私有标记的回复发送前统一替换。
+        self._reply_failure_token = object()
+        self._reply_media = ReplyMediaAdapter(
+            self.ctx, logger=logger, on_failure=self._handle_reply_preparation_failure)
+        self._reply_media.install()
         self._states: dict[str, SessionState] = {}
         # 归一 sid -> 框架原始 sid。v2.42 把会话 id 的机器人名前缀去掉了，
         # 但框架自己的会话记忆（buffer、记忆库）还挂在原始 id 上，
@@ -1109,6 +1118,9 @@ class DecisionEngine:
         self._retry_events: dict[str, list] = {}
         self._round_roots: dict[tuple[str, str], str] = {}
         self._retry_roots: dict[str, str] = {}
+        # A retry may reuse order only after the first full identity guard succeeded.
+        # Keep hashes/identities, never message bodies, and never persist across reload.
+        self._reply_order_proofs: dict[str, dict] = {}
         self._cleared_retry_rounds: set[tuple[str, str]] = set()
         # 已经写过 round_end 的轮（(sid, event_id) -> 写入时刻）。失败轮可能先被
         # 异常钩子/看门狗写一条，隔一会儿又来个 final，同一个 event_id 不能记两遍，
@@ -1393,13 +1405,14 @@ class DecisionEngine:
         # 晚点再取就是空的，快照也就切不出本轮那一段了。
         round_ids = self._incoming_ids(request)
 
-        self._drop_incoming(request)
+        self._mark_mentions(request, sid)
+        retained = self._retain_decision_round(request, sid, round_ids, event=event)
+        if not retained:
+            self._drop_incoming(request)
 
         self._split_incoming(request)
 
         self._strip_seen_incoming(request)
-
-        self._mark_mentions(request, sid)
 
         # 本轮消息发出去之后立刻记进窗口（v2.53，原来只有群聊冷启动才记）。
         # 不记的话它们要等下一轮 collect 从框架记忆里捞回来，这中间的间隙里
@@ -1407,6 +1420,25 @@ class DecisionEngine:
         # commit 在 snapshot 之后，本轮请求不会因此多出内容。
         if self.window is not None and self._c("window_enabled", sid):
             self.window.commit_round(sid, getattr(request, "user_prompt", None), media_by_id=media_by_id)
+
+        # 原始本轮先入窗；模型侧再统一投影，别把派生图与说明写回页面/存档。
+        try:
+            self._prepare_reply_media(request, sid, media_by_id, event=event)
+        except Exception:
+            logger.exception(f"[multi-decision] {sid} 本轮图片准备失败（保留原请求）")
+            if getattr(request, "_mdp_retained_round", None):
+                # The adapter did not take over: keep the original Prompt, but remove
+                # only its still-present history duplicate, not all current round users.
+                self._reply_media.unstage(request)
+                delattr(request, "_mdp_retained_round")
+                if hasattr(request, "_mdp_retained_ready"):
+                    delattr(request, "_mdp_retained_ready")
+                self._drop_incoming(request)
+                try:
+                    self._prepare_reply_media(request, sid, media_by_id, event=event)
+                except Exception:
+                    self._reply_media.unstage(request)
+                    logger.exception(f"[multi-decision] {sid} 本轮顺序降级准备失败（原生路径不重复正文）")
 
         self._drop_noisy_prompts(request)
 
@@ -1422,10 +1454,19 @@ class DecisionEngine:
                 await layouts.prefetch_personas(sid)
             except Exception:
                 logger.exception("[multi-decision] 预取人格失败（本轮按没有这段继续）")
+            if (self._closed or flow.epoch != epoch or flow.phase != "active"
+                    or self._active_rounds.get(sid) != eid or flow.event_id != eid
+                    or (sid, eid) in self._settled_rounds):
+                return
             reply_prompt.apply(request, sid)
 
+        st = self._states.get(sid)
+        decision_passed = bool(getattr(st, "decision_passed", False))
+        # Consume the transient flag even when logging is disabled or staging fails.
+        # Trusted retries carry their own immutable full-identity proof instead.
+        if st is not None:
+            st.decision_passed = False
         if self.request_log is not None:
-            st = self._states.get(sid)
             self.request_log.stage(
                 sid,
                 request,
@@ -1444,10 +1485,10 @@ class DecisionEngine:
                 incoming_rows=self._round_rows(sid, round_ids),
                 # v4.11（用户 m17596 第 6 条）：这一轮是不是决策判要回之后才发的。
                 # 记一次就清，重试轮沿用同一份 pending 不受影响。
-                decision_passed=bool(getattr(st, "decision_passed", False)) if st else False,
+                decision_passed=decision_passed,
             )
-            if st is not None:
-                st.decision_passed = False
+        # Frozen identity for our own pre-provider preparation errors only.
+        request._mdp_reply_round = (self._reply_failure_token, sid, eid, epoch)
 
     def _repair_render_failures(self, request) -> None:
         """渲染失败的 Prompt 降级成原文，别让整段 system 消失。
@@ -1677,6 +1718,138 @@ class DecisionEngine:
             logger.exception("[multi-decision] 提取本轮消息 id 失败（已忽略）")
         return set()
 
+    def _retain_decision_round(self, request, sid: str, round_ids, *, event=None) -> bool:
+        """Keep the proven current user -> committed decision order; never move old notes."""
+        for attr in ("_mdp_retained_round", "_mdp_retained_ready"):
+            if hasattr(request, attr):
+                delattr(request, attr)
+        st = self._states.get(sid)
+        if self.window is None or not self._c("window_enabled", sid) or not round_ids:
+            return False
+        eid = str(getattr(event, "event_id", "") or "")
+        root = self._round_roots.get((sid, eid), "") if eid else ""
+        known_retry = bool(eid and root and root != eid)
+        first_pass = bool(getattr(st, "decision_passed", False)) and not known_retry
+        proof = self._reply_order_proofs.get(sid)
+        if not first_pass and not (known_retry and self._retry_roots.get(sid) == root
+                and isinstance(proof, dict) and proof.get("root_event_id") == root):
+            return False
+        try:
+            source = list(self.window.state(sid).messages or [])
+            decisions = self.window.state(sid).decisions
+            decision = decisions[-1] if decisions else None
+            if (not isinstance(decision, dict) or not decision.get("reply")
+                    or not decision.get("committed") or decision.get("failed")
+                    or float(decision.get("ts") or 0) <= 0 or not source):
+                return False
+            expected = self.window._decision_msg(decision)
+            get = lambda m, key: m.get(key) if isinstance(m, dict) else getattr(m, key, None)
+            if not expected or any(get(source[-1], k) != expected.get(k)
+                                   for k in ("role", "name", "content", "ts")):
+                return False
+            history = list(getattr(request, "messages", None) or [])
+            formatted = stamp_assistant_time([expected])[0]
+            if (not history or any(get(history[-1], k) != get(formatted, k)
+                                   for k in ("role", "name", "content"))):
+                return False
+            wanted = set(round_ids)
+            incoming = []
+            for prompt in getattr(request, "user_prompt", None) or []:
+                if getattr(prompt, "name", "") == "message":
+                    content = getattr(prompt, "content", "")
+                    incoming.extend(split_user_content(content) or [content])
+            if len(incoming) != len(wanted):
+                return False
+            # Compare full original text, not a same-ID body that could contain new edits.
+            def original_text(content):
+                if isinstance(content, (list, tuple)):
+                    content = "".join(str(p.get("text") or "") for p in content
+                                      if isinstance(p, dict) and p.get("type") == "text")
+                return shrink_timestamp(strip_group_tags(str(content or ""))).strip()
+            def native_at_text(content, mid):
+                # Pending text uses @nickname; host formatting may differ from At.repr.
+                # Only this message's real top-level elements can prove equivalence.
+                batch = [m for m in getattr(event, "messages", None) or []
+                         if str(getattr(m, "message_id", "") or "") == mid]
+                if len(batch) != 1:
+                    return None
+                chain = list(getattr(batch[0], "chain", None) or [])
+                slots, tokens = [], set()
+                for element in chain:
+                    if type(element).__name__ != "At":
+                        continue
+                    pid = str(getattr(element, "pid", "") or "")
+                    nick = str(getattr(element, "nickname", "") or "")
+                    token = getattr(element, "repr", None)
+                    if (not pid or not isinstance(token, str)
+                            or token not in {"[At %s(nickname: %s)]" % (pid, nick),
+                                             "[At %s(%s)]" % (nick, pid), "[At %s]" % pid}
+                            or any(c in pid + nick for c in "\r\n[]")):
+                        return None
+                    # The host message formatter intentionally does not use At.repr:
+                    # it renders the same element as [At pid(nickname: nick)].
+                    host = "[At %s(nickname: %s)]" % (pid, nick) if nick else "[At %s]" % pid
+                    variants = {token, host}
+                    slots.append((variants, "@" + (nick or pid)))
+                    tokens.update(variants)
+                if not slots:
+                    return None
+                text = original_text(content)
+                # Match every proved slot once, in native element order. Extra/literal
+                # labels, swapped targets and all other text differences still fail.
+                pattern = "|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True))
+                found = list(re.finditer(pattern, text))
+                if len(found) != len(slots):
+                    return None
+                pieces, cursor = [], 0
+                for match, (variants, replacement) in zip(found, slots):
+                    token = match.group(0)
+                    if token not in variants or any(
+                            token in str(getattr(e, "text", "") or "")
+                            for e in chain if type(e).__name__ != "At"):
+                        return None
+                    pieces.extend((text[cursor:match.start()], replacement))
+                    cursor = match.end()
+                pieces.append(text[cursor:])
+                return "".join(pieces)
+
+            ordered, message_hashes = [], []
+            for part in incoming:
+                mids = ids_of([{"role": "user", "content": part}])
+                if len(mids) != 1 or not mids <= wanted:
+                    return False
+                mid = next(iter(mids))
+                raw_matches = [m for m in source[:-1] if get(m, "role") == "user"
+                               and mid in ids_of([m])]
+                positions = [i for i, m in enumerate(history[:-1]) if get(m, "role") == "user"
+                             and mid in ids_of([m])]
+                if mid in ordered or len(raw_matches) != 1 or len(positions) != 1:
+                    return False
+                source_text = original_text(get(raw_matches[0], "content"))
+                if source_text != original_text(part) and source_text != native_at_text(part, mid):
+                    return False
+                ordered.append(mid)
+                message_hashes.append(hashlib.sha256(source_text.encode("utf-8")).hexdigest())
+            suffix = history[len(history)-1-len(ordered):-1]
+            if len(suffix) != len(ordered) or any(
+                    get(m, "role") != "user" or ids_of([m]) != {mid}
+                    for m, mid in zip(suffix, ordered)):
+                return False
+            current_proof = {"root_event_id": root, "decision_ts": float(decision["ts"]),
+                             "ids": ordered, "message_hashes": message_hashes}
+            # Matching IDs alone cannot prove a retry: edits to both the raw window
+            # and its Prompt must not inherit an older decision/order authorization.
+            if not first_pass and proof != current_proof:
+                return False
+            if first_pass and root:
+                self._reply_order_proofs[sid] = copy.deepcopy(current_proof)
+            request._mdp_retained_round = {"ids": ordered, "note_index": len(history)-1,
+                                           "decision_ts": float(decision["ts"])}
+            return True
+        except Exception:
+            logger.exception("[multi-decision] 本轮顺序身份校验失败（保持原去重路径）")
+            return False
+
     def _drop_incoming(self, request) -> int:
         """窗口末几条就是本轮 user_prompt 时把它们删掉，本轮交给 user_prompt 发。
 
@@ -1787,6 +1960,51 @@ class DecisionEngine:
             logger.debug(f"[multi-decision] 本轮消息拆成 {changed} 条")
         return changed
 
+    def _prepare_reply_media(self, request, sid: str, media_by_id=None, *, event=None) -> int:
+        """模型历史/本轮共用一次限图；宿主原始 Prompt 始终保持字符串。"""
+        if self.window is None:
+            return 0
+        prompts = getattr(request, "user_prompt", None)
+        if not isinstance(prompts, list):
+            return 0
+        history = list(getattr(request, "messages", None) or [])
+        incoming = [{"role": "user", "content": getattr(p, "content", "")}
+                    for p in prompts if (getattr(p, "name", "") or "") == "message"]
+        retained = getattr(request, "_mdp_retained_round", None)
+        retained_ids = set(retained.get("ids") or []) if isinstance(retained, dict) else set()
+        extra = [row for row in incoming
+                 if not (ids_of([row]) and ids_of([row]) <= retained_ids)]
+        rows = history + extra
+        prepared = self.window.prepare_messages(sid, rows, media_by_id=media_by_id)
+        if len(prepared) != len(rows):
+            raise ValueError("media preparation changed message count")
+        ready, offset, kept_ids = [], len(history), []
+        for row in incoming:
+            mids = ids_of([row])
+            if mids and mids <= retained_ids:
+                positions = [i for i, m in enumerate(history) if ids_of([m]) == mids
+                             and str((m.get("role") if isinstance(m, dict)
+                                      else getattr(m, "role", "")) or "") == "user"]
+                if len(positions) != 1:
+                    raise ValueError("retained incoming no longer has one history source")
+                ready.append(prepared[positions[0]])
+                kept_ids.extend(mids)
+            else:
+                ready.append(prepared[offset])
+                offset += 1
+        descriptor = dict(retained, ids=kept_ids) if kept_ids else None
+        # Stage snapshots the prepared history, never list-valued Prompt.content.
+        original = getattr(request, "messages", None)
+        request.messages = prepared[:len(history)]
+        try:
+            count = self._reply_media.stage(request, ready, event=event, retained=descriptor)
+            if descriptor:
+                request._mdp_retained_ready = dict(descriptor)
+            return count
+        except Exception:
+            request.messages = original
+            raise
+
     def _round_rows(self, sid: str, round_ids) -> list:
         """v4.06（用户 m12879）：这一轮真正新来的那几条 + 紧随其后的决策注记。
 
@@ -1884,61 +2102,36 @@ class DecisionEngine:
 
 
     def _mark_mentions(self, request, sid: str = "") -> int:
-        """消息里喊到机器人时，在 meta 后面插一个 [@你]（用户 m23841）。
-
-        放在 meta（[message_id: …] [user_nickname: …]）后面、正文前面：
-        正文一个字不改，模型一眼能看出「这条是在叫我」。
-
-        - 宽松匹配：正文里出现昵称或外号就算。QQ 侧的「@某人」落下来就是
-          普通文本，没有结构化标记可依；event.is_mentioned 只能覆盖当轮，
-          下一轮它变成历史就没了，那样同一行前后不一致，前缀会从这行断掉。
-        - 历史也标：每轮都按同一份昵称重算，同样的输入产出同样的标记，
-          所以不影响前缀缓存；只有改昵称/外号会断一次。
-        """
-        names = []
+        """Normalize only new message Prompts; never rewrite the already-sent history."""
         try:
-            own = str(self.plugin.bot_name_for(sid) or "").strip()
-            if own:
-                names.append(own)
-            for nick in (self._c("nicknames", sid) or []):
-                nick = str(nick or "").strip()
-                if nick and nick not in names:
-                    names.append(nick)
-        except Exception:
-            logger.exception("[multi-decision] 取唤醒昵称失败（已忽略）")
-            return 0
-        if not names:
-            return 0
-        try:
-            changed = mark_messages(getattr(request, "messages", None) or [], names)
-            for p in getattr(request, "user_prompt", None) or []:
-                if (getattr(p, "name", "") or "") != "message":
+            normalizer = None
+            if self.window is not None and self._c("window_enabled", sid):
+                normalizer = lambda content: self.window.normalize_mentions(sid, content)
+            else:
+                names = [str(self.plugin.bot_name_for(sid) or "").strip()]
+                names.extend(str(n or "").strip() for n in (self._c("nicknames", sid) or []))
+                names = [n for n in names if n]
+                def normalizer(content):
+                    if isinstance(content, str):
+                        return mark_mention(content, names)
+                    if isinstance(content, (list, tuple)):
+                        parts = [dict(p, text=mark_mention(str(p.get("text") or ""), names))
+                                 if isinstance(p, dict) and p.get("type") == "text" else p
+                                 for p in content]
+                        return tuple(parts) if isinstance(content, tuple) else parts
+                    return content
+            changed = 0
+            for prompt in getattr(request, "user_prompt", None) or []:
+                if getattr(prompt, "name", "") != "message":
                     continue
-                content = getattr(p, "content", "")
-                if isinstance(content, str):
-                    new = mark_mention(content, names)
-                    if new != content:
-                        p.content = new
-                        changed += 1
-                elif isinstance(content, (list, tuple)):
-                    parts = list(content)
-                    hit = False
-                    for i, item in enumerate(parts):
-                        if not isinstance(item, dict) or item.get("type") != "text":
-                            continue
-                        text = str(item.get("text") or "")
-                        new = mark_mention(text, names)
-                        if new != text:
-                            parts[i] = dict(item, text=new)
-                            hit = True
-                    if hit:
-                        p.content = parts
-                        changed += 1
-            if changed:
-                logger.debug(f"[multi-decision] {changed} 条消息打了唤醒标记")
+                content = getattr(prompt, "content", "")
+                prepared = normalizer(content)
+                if prepared != content:
+                    prompt.content = prepared
+                    changed += 1
             return changed
         except Exception:
-            logger.exception("[multi-decision] 打唤醒标记失败（已忽略）")
+            logger.exception("[multi-decision] 本轮唤醒标记规范化失败（不改历史）")
             return 0
 
     def _drop_noisy_prompts(self, request) -> int:
@@ -2050,9 +2243,11 @@ class DecisionEngine:
         self._cancel_retry(sid)
         self._retry_status(sid, self._retry_roots.pop(sid, ""), "cancelled")
         self._retry_events.pop(sid, None)
+        self._reply_order_proofs.pop(sid, None)
         st = self._states.get(sid)
         was_busy = bool(st.busy) if st is not None else False
         if st is not None:
+            st.decision_passed = False
             st.retry_at = 0.0
             st.retry_count = 0
             self._drop_pending_round(st)
@@ -2135,7 +2330,7 @@ class DecisionEngine:
                     media[mid] = list(item.get("media_refs") or [])
         for message in getattr(event, "messages", None) or []:
             mid = str(getattr(message, "message_id", "") or "")
-            if mid and mid in incoming:
+            if mid and mid in incoming and not media.get(mid):
                 refs = await self._cache_media(message, sid)
                 if not refs:
                     # 兜底：元素上没带出来也不要紧，消息库里存着归档路径
@@ -2786,6 +2981,7 @@ class DecisionEngine:
         sid = normalize_sid(str(sid or "").strip())
         st = self._states.pop(sid, None)
         self._active_rounds.pop(sid, None)
+        self._reply_order_proofs.pop(sid, None)
         self._cleared_retry_rounds.difference_update({key for key in self._cleared_retry_rounds if key[0] == sid})
         self._retry_events.pop(sid, None)
         self._retry_status(sid, self._retry_roots.pop(sid, ""), "cancelled")
@@ -2821,7 +3017,31 @@ class DecisionEngine:
         """
         return self._persist_data()
 
-    async def handle_exception(self, event, exc) -> None:
+    async def _handle_reply_preparation_failure(self, request, exc) -> None:
+        """Settle our pre-send failure immediately, never a stale/foreign round."""
+        owner = getattr(request, "_mdp_reply_round", None)
+        if (self._closed or not isinstance(owner, tuple) or len(owner) != 4
+                or owner[0] is not self._reply_failure_token):
+            return
+        _, sid, eid, epoch = owner
+        flow = self._input_flows.get(sid)
+        if (not eid or self._active_rounds.get(sid) != eid
+                or (sid, eid) in self._settled_rounds or flow is None
+                or flow.epoch != epoch or flow.phase != "active" or flow.event_id != eid):
+            return
+        logger.warning("[multi-decision] %s 回复发送前准备失败: %s: %s",
+                       sid, type(exc).__name__, str(exc))
+        # Cancellation of the host caller must not interrupt our local settlement.
+        # Track it with normal engine tasks so shutdown still cancels/reaps it.
+        task = asyncio.create_task(self.handle_exception(
+            SimpleNamespace(sid=sid, event_id=eid),
+            SimpleNamespace(name=type(exc).__name__, message=str(exc), stage="reply_preparation"),
+            expected_epoch=epoch))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        await asyncio.shield(task)
+
+    async def handle_exception(self, event, exc, *, expected_epoch=None) -> None:
         """ON_EXCEPTION 入口：记下错误并按次数安排自动重试（v2.71）。
 
         框架在 provider 全挂、工具抛异常时会发这个事件，但异常本身被事件
@@ -2843,6 +3063,11 @@ class DecisionEngine:
             key = (sid, eid)
             if (sid in self._active_rounds and self._active_rounds[sid] != eid) or key in self._settled_rounds:
                 return
+            if expected_epoch is not None:
+                flow = self._input_flows.get(sid)
+                if (self._closed or flow is None or flow.epoch != expected_epoch
+                        or flow.phase != "active" or flow.event_id != eid):
+                    return
             name = str(getattr(exc, "name", "") or "")
             msg = str(getattr(exc, "message", "") or "")
             stage = str(getattr(exc, "stage", "") or "")
@@ -2866,7 +3091,10 @@ class DecisionEngine:
             self._log_failed_round(sid, eid, st, text)
             self._retry_after_fail(sid, st)
             self._settled_rounds[key] = time.time()
-            await self._settle_input(sid)
+            if expected_epoch is None:
+                await self._settle_input(sid)
+            else:
+                await self._settle_input(sid, epoch=expected_epoch, expected_eid=eid)
         except Exception:
             logger.exception("[multi-decision] 异常钩子处理失败（已吞掉）")
 
@@ -2975,8 +3203,14 @@ class DecisionEngine:
     def clear_record_retries(self, sid: str) -> None:
         """Cancel old pending replay without discarding normal input or interrupting publication."""
         sid = normalize_sid(sid)
+        self._reply_order_proofs.pop(sid, None)
         st = self._states.get(sid)
         active = st is not None and st.busy
+        eid = self._active_rounds.get(sid, "")
+        # Do not consume a fresh live decision while merely clearing old records.
+        # A cancelled/rebased retry must never regain first-pass authority.
+        if st is not None and (not active or self._round_roots.get((sid, eid), eid) != eid):
+            st.decision_passed = False
         if active:
             # The scheduler task can already be awaiting publication. Do not cancel it.
             task = self._retries.pop(sid, None)
@@ -4203,6 +4437,7 @@ class DecisionEngine:
             root = link["root_event_id"]
         else:
             # A fresh request is never retrospectively claimed by a previous error.
+            self._reply_order_proofs.pop(sid, None)
             old_root = self._retry_roots.pop(sid, "")
             self._retry_status(sid, old_root, "cancelled")
             st = self.state(sid)
@@ -4404,10 +4639,13 @@ class DecisionEngine:
                 and self._c("session_enabled", sid) is not False):
             await self._drain_input_locked(sid, flow)
 
-    async def _settle_input(self, sid: str, *, epoch=None, **kwargs) -> None:
+    async def _settle_input(self, sid: str, *, epoch=None, expected_eid=None, **kwargs) -> None:
         flow = self._input_flow(sid)
         async with flow.lock:
             if epoch is not None and (flow.epoch != epoch or flow.phase != "active"):
+                return
+            if expected_eid is not None and (self._closed or flow.event_id != expected_eid
+                    or self._active_rounds.get(sid) != expected_eid):
                 return
             await self._settle_input_locked(sid, flow, **kwargs)
 
@@ -4643,7 +4881,7 @@ class DecisionEngine:
         dec_imgs = []
         try:
             if self._c("decision_see_images", sid) is not False:
-                dec_imgs = self.window.decision_images(sid)
+                dec_imgs = self.window.decision_images(sid, messages=msgs)
         except Exception:
             logger.exception("[multi-decision] 决策取图失败（这一轮按纯文字判）")
             dec_imgs = []
@@ -4674,6 +4912,7 @@ class DecisionEngine:
             "tools_used": list(got.get("tools_used") or []),
             "system_parts": list(got.get("system_parts") or []),
             "transcript": str(got.get("transcript") or ""),
+            "chat_comparison": dict(got.get("chat_comparison") or {}),
             # 用户 m06046 图3：真正发出去的那条 user 消息（记录 + 末尾动态段），
             # 快照照它写「本轮输入 / 动态段」，开了系统动态段才看得到注入。
             "user_prompt": str(got.get("user_prompt") or ""),
@@ -5031,6 +5270,7 @@ class DecisionEngine:
 
     async def shutdown(self) -> None:
         self._closed = True
+        self._reply_media.close()
         for flow in self._input_flows.values():
             flow.epoch += 1  # invalidate suspended media/request/decision work first
         current = asyncio.current_task()
@@ -5092,6 +5332,7 @@ class DecisionEngine:
         self._settled_rounds.clear()
         self._retry_events.clear()
         self._retry_roots.clear()
+        self._reply_order_proofs.clear()
         self._cleared_retry_rounds.clear()
         self._round_roots.clear()
         self._round_end_logged.clear()

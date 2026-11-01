@@ -4942,24 +4942,34 @@ var ctxSnapRequest = 0;
     var raw = String((mode === "mixed" ? rawOf(m) : m.text) || "");
     // 图片地址必须趁原文还没洗之前抠出来：tidyBody 会把 ![img …](url) 换成「[图片]」，
     // 链接一丢就点不开了
-    var pics = [], mm, re = /!\[img[^\]]*\]\(\s*([^)\s]+)\s*\)/gi;
-    while((mm = re.exec(raw))){ if(pics.indexOf(mm[1]) < 0) pics.push(mm[1]); }
-    var parts = splitMetaAll(tidyBody(raw));
+    var pics = [], re = /!\[img[^\]]*\]\(\s*([^)\s]+)\s*\)/gi;
+    // 只锚定完整 markdown 命中，别让普通/截断 [图片] 占位把已知图片挪走。
+    // 标记仅在此函数的展示副本中存在，并避开原文本身；同 URL 的每次出现各有槽位。
+    var marker = "\u0000botpic";
+    while(raw.indexOf(marker) >= 0) marker += "_";
+    var marked = raw.replace(re, function(_, u){
+      var n = pics.length; pics.push(u); return marker + n + "\u0000";
+    });
+    var parts = splitMetaAll(tidyBody(marked));
     var p = parts[0] || { meta: {}, body: raw };
     var meta = p.meta || {};
     var body = String(p.body || "")
       // @ 已经在头部做成徽章，正文里那串 At token 不再重复
       .replace(/\[At\s+\d+\(\s*nickname:\s*[^)]*\)\]/g, " ")
-      // 图走下面的缩略图，正文里的占位就别留了
-      .replace(/\[图片\]/g, " ")
+      // 图片占位先保留，等地址和槽位一一对应后再原位换图。
       .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+    var slots = body.split(new RegExp(marker + "(\\d+)\\u0000", "g"));
+    slots = slots.map(function(t, i){
+      return i % 2 ? t : String(t || "").replace(/\[图片\]/g, " ").replace(/[ \t]+\n/g, "\n").trim();
+    });
+    var bodyText = slots.filter(function(_, i){ return i % 2 === 0; }).join("\n").trim();
     // 用户 m13250 第 1 条：机器人卡片跟 user 消息同一版式——组内左列只放时间，
     // 正文在右列，字数气泡贴在正文末尾；@ 谁缩成正文顶上的一行小标签
     // （组头已经写着是哪个机器人，不必再在卡片头部堆一串徽章）。
     var ats = (meta.at || []).map(function(a){
       return "<span class='k at'>@" + esc(a) + "</span>";
     }).join("");
-    var chip = body ? "<span class='chb count'>" + visLen(body) + " 字</span>" : "";
+    var chip = bodyText ? "<span class='chb count'>" + visLen(bodyText) + " 字</span>" : "";
     var hd = "";
     if(!grp){
       hd = "<span class='rq bot'>bot</span>" + (extra || "") + ats;
@@ -4969,19 +4979,25 @@ var ctxSnapRequest = 0;
       hd += "<span class='grow'></span>";
       if(meta.mid) hd += "<span class='id' title='" + esc(meta.mid) + "'>#" + esc(meta.mid.slice(0, 8)) + "</span>";
     }
-    var thumbs = "";
-    if(pics.length){
-      thumbs = "<div class='thumbs botpic'>" + pics.map(function(u){
+    function botThumbs(list){
+      var inner = list.map(function(u){
         var url = safeWebUrl(u);
         if(!url) return "";
         return "<span class='thumb' role='button' tabindex='0' data-img='" + esc(url) + "'" +
                " data-imgt='机器人消息配图' title='点开看大图'>" +
                "<img loading='lazy' decoding='async' src='" + esc(url) + "' alt='图片'" +
                " onerror=\"this.parentNode.classList.add('bad');this.parentNode.removeChild(this);\"></span>";
-      }).join("") + "</div>";
+      }).join("");
+      return inner ? "<div class='thumbs botpic'>" + inner + "</div>" : "";
     }
-    // 正文放不下先折起来（长释义三四百字，塔罗牌那种），点「展开」看全文
-    var bd = chipInto(thumbs, bodyHtml(body, pics.length ? null : "(空)", 0, "bot-txt"), chip);
+    // 正文仍按 bot-txt 折叠；字数气泡留在最后一段文字，不塞进尾随图片里。
+    var bd = "", lastText = -1;
+    slots.forEach(function(t, i){ if(i % 2 === 0 && t) lastText = i; });
+    slots.forEach(function(t, i){
+      if(i % 2) bd += botThumbs([pics[Number(t)]]);
+      else if(t) bd += chipInto("", bodyHtml(t, null, 0, "bot-txt"), i === lastText ? chip : "");
+    });
+    if(!bd) bd = bodyHtml("", pics.length ? null : "(空)", 0, "bot-txt");
     if(grp){
       if(ats) bd = "<div class='segh'>" + ats + "</div>" + bd;
       return "<div class='mc user botcard'><div class='mc-hd'>" +
@@ -5130,19 +5146,21 @@ var ctxSnapRequest = 0;
         var bodyPart = inlPlan
           ? renderInlineMedia(inlPlan)
           : bodyHtml(bodyTxt, hasPart ? null : "(这条只有元数据，正文是空的)");
-        bd2 = chipInto(((fwdIn || inQuote) || inlPlan ? "" : mediaHtml(m, mode)) + partHtml,
-                       bodyPart, chipU);
+        // 无槽位的老附件无法恢复原始坐标：引用/卡片/已知正文优先，附图保守尾随。
+        // 不把附图交给 tailChip，字数/待发标签仍紧贴文字末尾。
+        bd2 = chipInto(partHtml, bodyPart, chipU) +
+              ((fwdIn || inQuote) || inlPlan ? "" : mediaHtml(m, mode));
         }
       } else {
         // 多条拼在一起时，每条各自带一行「时间 昵称」，中间用虚线隔开。
-        // 图默认仍统一排在卡外最前：一段里可能既有转发又有普通消息，
-        // 硬塞给某一张卡会把别人的图挪到那条消息底下。
+        // 归属不明的图不硬塞给某一段；已知各段内容画完后再补一份，
+        // 避免外图抢在引用/@正文前，也不把别人的图塞进引用里。
         // 例外（用户 m01680）：各段里图片占位的总数正好等于这条例消息的图片数时，
         // 说明这些占位就是这些图的出处，可以逐段认领——引用里的进那段的引用块，
         // 正文里的留在那段卡外；多一张少一张就认不准，退回原来的排法。
         var claims = claimMediaBySegs(parts, m.media);
         var segMedia = claims || parts.map(function(){ return { quote: null, own: null }; });
-        bd2 = claims ? "" : mediaHtml(m, mode);
+        bd2 = "";
         parts.forEach(function(q, qi){
           var lab = "";
           if(q.meta.ts) lab += "<span class='k' title='" + esc(q.meta.ts) + "'>" + esc(shortTs(q.meta.ts)) + "</span>";
@@ -5170,14 +5188,15 @@ var ctxSnapRequest = 0;
                               segHasImg || (!claims && m.media && m.media.length) ||
                               (qi === 0 && m.files && m.files.length));
           bd2 += "<div class='seg'>" + (lab ? "<div class='segh'>" + lab + "</div>" : "") +
-                 chipInto((segInl ? "" : mediaHtml({ media: segOut }, mode)) +
-                          quoteHtml(q.meta.reply, segMedia[qi].quote) +
+                 chipInto(quoteHtml(q.meta.reply, segMedia[qi].quote) +
                           fwdHtml(q.meta.fwd, segFwd ? segOwn : null) + cardHtml(q.meta.card) +
                            fileHtml(q.meta.file) + (qi === 0 ? filesHtml(m.files) : ""),
                           (segInl ? renderInlineMedia(segInl)
                                   : bodyHtml(segBody, segHasPart ? null : "(这条只有元数据，正文是空的)")),
-                          segChip) + "</div>";
+                          segChip) + (segInl ? "" : mediaHtml({ media: segOut }, mode)) + "</div>";
         });
+        // 跨段归属不明时仍只画一份，放在已知各段之后，不插进任何引用里。
+        if(!claims) bd2 += mediaHtml(m, mode);
       }
       return "<div class='mc user'><div class='mc-hd'>" + h2 + "</div>" +
              "<div class='mc-bd'>" + bd2 + "</div></div>";
@@ -7320,11 +7339,34 @@ var ctxSnapRequest = 0;
     }
     return s.trim();
   }
-  function sameMsgText(a, b){
+  // 同源注记在 messages 带声明，在 incoming 只存正文。仅在双方都是注记时
+  // 忽略这层展示声明；用户同文、不同判定时间不能因此被吞掉。
+  function decNoteClock(m, text){
+    var head = String(text || "").match(/^\s*\[([^\]]+)\]/);
+    var hm = head && head[1].match(/(?:^|\s|T)(\d{1,2}:\d{2})(?::\d{2})?(?:\s|$)/);
+    if(hm) return hm[1].replace(/^(\d):/, "0$1:");
+    var ts = Number(m && m.ts);
+    if(ts > 0){
+      var d = new Date(ts * 1000);
+      return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+    }
+    return "";
+  }
+  function sameMsgText(a, b, ma, mb){
     var x = String(a == null ? "" : a), y = String(b == null ? "" : b);
-    if(x === y) return true;
     var ix = midOfText(x), iy = midOfText(y);
     if(ix || iy) return !!ix && !!iy && ix === iy;
+    var na = !!ma && ma.role !== "user" && isDecNoteLike(ma);
+    var nb = !!mb && mb.role !== "user" && isDecNoteLike(mb);
+    if(ma && mb && na !== nb) return false;
+    if(na && nb){
+      var ta = Number(ma.ts), tb = Number(mb.ts);
+      if(ta > 0 && tb > 0 && ta !== tb) return false;
+      var ca = decNoteClock(ma, x), cb = decNoteClock(mb, y);
+      if(ca && cb && ca !== cb) return false;
+      return decNoteHead(headlessText(x)).trim() === decNoteHead(headlessText(y)).trim();
+    }
+    if(x === y) return true;
     return headlessText(x) === headlessText(y);
   }
   // v4.36（用户 m19945 图3）：同一轮里 messages 的消息头是「[01:07] [message_id: …]」，
@@ -7361,37 +7403,123 @@ var ctxSnapRequest = 0;
       || hd9.indexOf("判定要回") === 0 || hd9.indexOf("判定不回") === 0;
   }
 
-  // 详情页 ②/③ 的分界：这一轮新来的那批从哪一条开始（返回条数，0 表示整份都算本轮）。
-  // 决策快照与回复快照各用各的锚点，都不看缓存 flags 的 f 位（它从上一条普通回复起就全标 f）。
-  //  - 决策（用户 m26142 第 2 条）：到「上一次决策的注记」为止，含这条注记（它是 ② 里唯一一条未命中）。
-  //    窗口裁过、注记整条被裁走时（用户 m26455）没有判定点，整份算本轮，不再退回去用别的锚点凑。
-  //  - 回复（用户 m26455 图1 / m26535）：到「上一条 bot 的回复」为止，它在 ② 末尾当那唯一一条未命中。
-  //    例外是记录里已经装进了这一轮刚发出去的那条回复（排在最后一条注记之后），不能拿它当边界。
-  //    窗口里根本没有上一条回复时（裁切把更早的消息全切走），整份算本轮。
-  // 以前这里还试过 history_messages 前缀比对与 incoming 尾块匹配（v4.06–v4.33），两种都会被锚点
-  // 无条件覆盖，是死路：22:04 那条 bot 回复明明在第 32 条，② 却画到 37 条。
+  // 本地前缀只作独立对比提示，绝不决定消息所属轮次；上游 token 才是缓存实测。
+  function localPrefixLen(r){
+    var rec=r || {}, msgs=Array.isArray(rec.messages) ? rec.messages : [];
+    if(rec.cache_comparable===false) return -1;
+    if(typeof rec.cache_prefix_len==="number" && Number.isFinite(rec.cache_prefix_len))
+      return Math.max(0,Math.min(Math.floor(rec.cache_prefix_len),msgs.length));
+    var flags=typeof rec.cache_tail_flags==="string" ? rec.cache_tail_flags : "", n=0;
+    if(!flags) return -1;
+    while(n<msgs.length && flags.charAt(n)==="h") n++;
+    return n;
+  }
+
+  // ② 是上轮结束前的历史：决策截至最后注记，回复截至上次实际回复，trim 保全历史。
   function segBoundX(r){
-    var rec = r || {};
-    var msgs = (Array.isArray(rec.messages) ? rec.messages : []);
-    var isDec = (String(rec.outcome || "") === "decision" ||
-                 String(rec.trigger_reason || "") === "decision" ||
-                 rec.decision_only === true);
-    if(isDec){
-      for(var dnx = msgs.length - 1; dnx >= 0; dnx--){
-        if(isDecNoteLike(msgs[dnx])) return dnx + 1;
-      }
+    var rec=r || {}, msgs=Array.isArray(rec.messages) ? rec.messages : [];
+    if(String(rec.outcome || "")==="trim" || String(rec.trigger_reason || "")==="trim" || rec.trim_only===true) return msgs.length;
+    var dec=String(rec.outcome || "")==="decision" || String(rec.trigger_reason || "")==="decision" || rec.decision_only===true;
+    if(dec){
+      for(var di=msgs.length-1;di>=0;di--) if(msgs[di] && msgs[di].role!=="user" && isDecNoteLike(msgs[di])) return di+1;
       return 0;
     }
-    var lastNote = -1;
-    for(var lnx = msgs.length - 1; lnx >= 0; lnx--){
-      if(isDecNoteLike(msgs[lnx])){ lastNote = lnx; break; }
-    }
-    for(var bx = msgs.length - 1; bx >= 0; bx--){
-      if(lastNote >= 0 && bx > lastNote) continue;
-      var bm = msgs[bx] || {};
-      if(String(bm.role || "") === "assistant" && !isDecNoteLike(bm)) return bx + 1;
+    var source=Array.isArray(rec.incoming_messages) ? rec.incoming_messages :
+      (Array.isArray(rec.user_prompt_parts) ? rec.user_prompt_parts : []).map(function(p){return {role:"user",content:p && p.text};});
+    var upper=msgs.length;
+    source.forEach(function(m){
+      if(!m) return;
+      var body=rawContent(m.content), mid=m.role==="user" ? midOfText(body) : "";
+      for(var i=0;i<upper;i++){
+        var old=msgs[i];
+        if(!old || old.role!==m.role) continue;
+        // 只有确切同源本轮消息能排除其后的本轮已发输出，历史最后 note 不是上界。
+        var exactNote=m.role!=="user" && isDecNoteLike(m) && isDecNoteLike(old) && Number(m.ts)>0 && Number(old.ts)===Number(m.ts) &&
+          sameMsgText(rawContent(old.content),body,old,m);
+        if(exactNote || (mid && midOfText(rawContent(old.content))===mid)){upper=i;break;}
+      }
+    });
+    for(var ai=upper-1;ai>=0;ai--){
+      var reply=msgs[ai];
+      if(reply && reply.role==="assistant" && !isDecNoteLike(reply) && String(rawContent(reply.content) || "").trim()) return ai+1;
     }
     return 0;
+  }
+
+  // 三档共用投影，不改快照；history/display 投影不得改变边界、顺序、条数或字符数。
+  function snapshotPartition(r){
+    var rec=r || {}, msgs=Array.isArray(rec.messages) ? rec.messages.slice() : [];
+    var trim=String(rec.outcome || "")==="trim" || String(rec.trigger_reason || "")==="trim" || rec.trim_only===true;
+    var dec=String(rec.outcome || "")==="decision" || String(rec.trigger_reason || "")==="decision" || rec.decision_only===true;
+    var bound=segBoundX(rec), suffix=msgs.slice(bound), source=[], incoming=[], tail=[];
+    if(!trim){
+      if(Array.isArray(rec.incoming_messages)) source=rec.incoming_messages;
+      else {
+        source=(Array.isArray(rec.user_prompt_parts) ? rec.user_prompt_parts : [])
+          .filter(function(p){return p && String(p.text || "").trim();})
+          .map(function(p){return {role:"user",content:p.text};});
+        if(!source.length && dec) source=decTranscriptLines(rec).map(function(p){return {role:p.role,content:p.text};});
+        if(!source.length && rec.user_prompt) source=splitIncoming(rec.user_prompt).map(function(t){return {role:"user",content:t};});
+      }
+    }
+    // 同一条本轮注记的重复投影排到触发消息后；独立存储注记仍全部保留。
+    if(!dec){
+      while(suffix.length && isDecNoteLike(suffix[suffix.length-1])){
+        var last=suffix[suffix.length-1];
+        if(!source.some(function(m){return m && m.role===last.role && Number(last.ts)>0 && Number(m.ts)===Number(last.ts) &&
+          sameMsgText(rawContent(last.content),rawContent(m.content),last,m);})) break;
+        tail.unshift(suffix.pop());
+      }
+    }
+    var used={}, mediaByIndex={};
+    source.forEach(function(m,i){
+      if(!m) return;
+      var vm=(rec.incoming_display_messages || [])[i];
+      // 优先消费③内的一次投影；②同文不是本轮身份，跨界必须有明确 id / exact ts。
+      var match=-1;
+      for(var j=bound;j<msgs.length;j++){
+        if(!used[j] && msgs[j] && String(msgs[j].role || "user")===String(m.role || "user") &&
+           sameMsgText(rawContent(msgs[j].content),rawContent(m.content),msgs[j],m)){match=j;break;}
+      }
+      if(match<0) for(var h=0;h<bound;h++){
+        var old=msgs[h];
+        if(used[h] || !old || String(old.role || "user")!==String(m.role || "user")) continue;
+        var oldId=midOfText(rawContent(old.content)), newId=midOfText(rawContent(m.content));
+        if(((oldId && newId && oldId===newId) || (!oldId && !newId && Number(old.ts)>0 && Number(old.ts)===Number(m.ts))) &&
+           sameMsgText(rawContent(old.content),rawContent(m.content),old,m)){match=h;break;}
+      }
+      if(match>=0){
+        if(vm && Array.isArray(vm.media) && vm.media.length) mediaByIndex[match]=vm.media;
+        used[match]=true;return;
+      }
+      incoming.push(vm && Array.isArray(vm.media) && vm.media.length && !(m.media || []).length
+        ? Object.assign({},m,{media:vm.media}) : m);
+    });
+    var current=trim ? [] : suffix.concat(incoming,tail).map(function(m){
+      var at=msgs.indexOf(m), media=mediaByIndex[at] || ((rec.display_messages || [])[at] || {}).media;
+      return media && media.length && !(m.media || []).length ? Object.assign({},m,{media:media}) : m;
+    });
+    var stat=typeof rec.system_static==="string" ? rec.system_static : (rec.system_prompt || "");
+    var reloc=!trim && typeof rec.system_static==="string" ? (rec.system_relocated || "") : "";
+    if(reloc && current.some(function(m){return m && String(rawContent(m.content) || "").indexOf(reloc)>=0;})) reloc="";
+    function chars(rows){return rows.reduce(function(n,m){
+      if(!m) return n;
+      if(typeof m.content === "string") n+=m.content.length;
+      else if(m.content !== null && m.content !== undefined) n+=JSON.stringify(m.content).length;
+      if(m.tool_calls && m.tool_calls.length) n+=JSON.stringify(m.tool_calls).length;
+      return n;
+    },0);}
+    var hc=chars(msgs.slice(0,bound)), bodyChars=chars(current), cc=bodyChars+reloc.length;
+    var prefix=localPrefixLen(rec);
+    var sections=trim ? [{key:"history",label:"历史消息",chars:hc}] : [
+      {key:"system",label:"系统提示词",chars:String(stat).length},
+      {key:"history",label:"历史消息",chars:hc},
+      {key:"incoming",label:"本轮输入（含重送）",chars:bodyChars},
+      {key:"dynamic",label:"动态段",chars:reloc.length}
+    ];
+    return {messages:msgs,bound:bound,currentRows:current,historyChars:hc,currentChars:cc,
+      currentCount:current.filter(function(m){return !!m;}).length+(reloc?1:0),relocated:reloc,
+      prefixKnown:!trim && prefix>=0,prefixLen:prefix,sections:sections,trim:trim};
   }
 
   function toggleRequestRow(name){
@@ -7424,15 +7552,16 @@ var ctxSnapRequest = 0;
       var isDecSnap = String(r.outcome || "") === "decision" || String(r.trigger_reason || "") === "decision" || r.decision_only === true;
       var h = "";
       // 这一轮上下文的构成：system / 历史 / 本轮消息 / 被挪走的动态段
-      var secs = r.sections || [];
+      var partition = snapshotPartition(r);
+      var secs = partition.sections;
       if(secs.length){
-        var tot = r.total_chars || 0;
+        var tot = 0;
         if(!tot){ secs.forEach(function(s){ tot += (s.chars || 0); }); }
         if(tot > 0){
           // v3.94（用户 m08398 图6）：决策快照的四段是「决策提示词 / 聊天历史 / 本轮消息 / 动态段」，
           // 不是真发出去的一轮上下文，标题得说实话。
-          h += "<div class='hint'>这一轮请求的上下文" +
-               "：共 " + tot + " 字符（按字符数占比，约等于 token 占比）</div>";
+          h += "<div class='hint'>本地快照消息投影" +
+               "：共 " + tot + " 字符（按原始内容字符数占比；非服务商缓存实测）</div>";
           h += "<div class='stack'>";
           secs.forEach(function(s, i){
             if(!s.chars) return;
@@ -7447,49 +7576,20 @@ var ctxSnapRequest = 0;
           h += "</div>";
         }
       }
-      // v3.57（用户 m16357 图4）：分段字数统一取后端 sections 那一份。以前 ① 用
-      // stat.length、② 又把每条 content 自己数一遍（rawContent 给多模态 content 用两空格
-      // 缩进的 JSON，缩进也被数成字数），两处口径不同，标题里「历史消息 16639 字符」就跟
-      // 上面占比条写的 16050 对不上，看着像统计错了。取不到 sections（老记录）才退回前
-      // 端自算，并且按紧凑 JSON 数，不把排版缩进算成字数。
+      // 占比、标题统一取本次 canonical 投影，不依赖旧 sections / total_chars。
       var SEC = {};
       secs.forEach(function(s){ if(s && s.key) SEC[s.key] = Number(s.chars) || 0; });
       function secNum(key, fallback){ return SEC[key] === undefined ? fallback : SEC[key]; }
-      function histCharsOf(){
-        var tot2 = 0;
-        (r.messages || []).forEach(function(m){
-          var cc = m.content, one = 0;
-          if(typeof cc === "string") one = cc.length;
-          else if(cc !== null && cc !== undefined){
-            try { one = JSON.stringify(cc).length; } catch(e3){ one = String(cc).length; }
-          }
-          if(m.tool_calls && m.tool_calls.length){
-            try { one += JSON.stringify(m.tool_calls).length; } catch(e4){}
-          }
-          tot2 += one;
-        });
-        return tot2;
-      }
-      // v4.06（用户 m12879）：这一轮的本轮消息也进了窗口（判要回时先并进、再落
-      // 决策注记）。后端把窗口尾部切出来记成 incoming_messages / history_messages，
-      // 这里据此把 ② 只画真历史、③ 画「本轮 user → 决策理由」，不然 ③ 是空的、
-      // 本轮那几条还混在 ② 的历史里。
-      var incRows = (Array.isArray(r.incoming_messages) && r.incoming_messages.length)
-        ? r.incoming_messages : null;
-      var histRows = (incRows && Array.isArray(r.history_messages)) ? r.history_messages : null;
+      // messages 是唯一顺序/索引源；旧 history_messages 不参与分界。
+      var boundX = partition.bound;
       var hasSplit = (typeof r.system_static === "string");
-      // v4.33（用户 m19120 / m19154）：三档共用同一个边界——「这一轮新来的那批」从哪里开始。
-      // 规则收在模块级 segBoundX()：决策看最后一条决策注记，回复看最后一条 bot 回复；
-      // 缓存 flags 的 f 位不是分区依据（它从上一条普通回复起就全标 f）。
-      var boundX = segBoundX(r);
-      var isDecX = (String(r.outcome || "") === "decision" || String(r.trigger_reason || "") === "decision" || r.decision_only === true);
 
       var stat = "", reloc = "", pos = {};
       var statNames = hasSplit ? (r.system_static_names || []) : (r.system_prompt_names || []);
       var relocNames = hasSplit ? (r.system_relocated_names || []) : [];
       if(hasSplit){
         stat = r.system_static || "";
-        reloc = r.system_relocated || "";
+        reloc = partition.relocated;
         pos = r.prompt_positions || {};
       } else {
         stat = r.system_prompt || "";
@@ -7499,92 +7599,25 @@ var ctxSnapRequest = 0;
         // （用户 m33271 图4）。内容仍是模型收到的那串原文，不加任何装饰性分段
         // 标题；编号跨段连续，和美化档的 ①②③④ 一一对得上。
         // 注意这里必须用 += ：占比条是上面拼好的，用 = 会把它整个吞掉。
-        var allMsgs = r.messages || [];
+        var allMsgs = partition.messages;
         var rh = allMsgs.slice(0, boundX);
         // 用户 m26535：② 的字符数按「真正画出来的那几条」加起来算。以前用的是请求里存的
         // 历史字符总数，边界一挪（37 → 32 条）它还挂在旧数上，标题就成了「32 条 · 4016 字符」。
-        var charsRh = 0;
-        rh.forEach(function(m9){ charsRh += String(rawContent(m9.content) || "").length; });
-        var up = r.user_prompt || "";
-        var lastTxt = "";
-        allMsgs.forEach(function(m, i){
-          if(i === allMsgs.length - 1) lastTxt = rawContent(m.content);
-        });
-        // 老记录里 messages 可能已经含本轮（修去重之前存的），别再打一遍
-        var dup = up && lastTxt && lastTxt.trim() === up.trim();
-
+        var charsRh = partition.historyChars;
         if(!isTrimSnap){
         // v3.90（用户 m05623 第 2 条）：裁切快照没有 system，这一块只留一片空白，整段不画。
           h += rawBlock("① 系统提示词",
                         "· " + secNum("system", stat.length) + " 字符 · " + statNames.length +
-                        " 项 · 每轮不变，这段命中缓存",
+                        " 项 · 固定系统内容；缓存状态以轨迹 token 统计为准",
                         stat || "（这一轮没有 system 内容）", "");
         }
 
         var histRaw = "";
-        // v4.10（用户 m17328 第 2 条）：跟上一份同类请求比，② 里哪几条才真命中。
-        // cache_prefix_len 是后端算的公共前缀条数；老快照没有这个键就不标（-1）。
-        var preLenRaw = (typeof r.cache_prefix_len === "number")
-          ? Math.max(0, Math.min(r.cache_prefix_len, rh.length)) : -1;
-        // v4.14（用户 m19095）：前缀之后分「冷」和「本轮输入」，口径见美化档同段注释。
-        var flagsR = (typeof r.cache_tail_flags === "string") ? r.cache_tail_flags : "";
-        // v4.30（用户 m14924）：同上——比 rh 长就截成前缀，短了才整串丢掉
-        if(flagsR && flagsR.length < rh.length) flagsR = "";
-        else if(flagsR && flagsR.length > rh.length) flagsR = flagsR.slice(0, rh.length);
-        // v4.34（用户 m19401）：未命中一律 = 总条数 − 命中条数，别再吃 cache_cold_len；
-        // 那个字段是别处算的，和这里的行数对不上（同一份记录两个档能差 3 条）。
-        var hitsRaw = flagsR ? (flagsR.split("h").length - 1) : preLenRaw;
-        var coldRaw = flagsR ? Math.max(0, rh.length - hitsRaw)
-                    : (preLenRaw >= 0 ? (rh.length - preLenRaw) : 0);
-        var inRaw = (flagsR && typeof r.cache_input_len === "number") ? r.cache_input_len : 0;
-        var trimBetweenR = (r.cache_trim_between === true);
-        // v3.88（用户 m05012 第 5 条）：这里原来漏了调用括号——把函数本身当默认值
-        // 传进去，没有 sections 的快照（裁切快照就是）直接把这串函数源码打进标题里。
-        var histChars = secNum("history", histCharsOf());
-        // v3.93：n 没声明，原文档一展开就抛「n is not defined」——
-        // 回复记录里切到原文模式整段详情变成「读取失败」（用户 m07570 图5）。
+        // ② 按轮次归属；本地连续前缀仅独立提示，不是服务商 token 缓存实测。
+        var preLenRaw = partition.prefixKnown ? partition.prefixLen : -1;
+        var hitsRaw = Math.max(0,Math.min(boundX,preLenRaw)), coldRaw = boundX-hitsRaw;
         var n = 0;
-        // v4.16（用户 m19499）：本轮输入不属于 ②。窗口里那些「上一次请求之后才
-        // 进来」的消息虽然占着 messages 的位置，但它们属于本轮输入，
-        // 归到 ③ 去画；② 只留真正命中或冷掉的历史。
-        // v4.33：② 之后剩下的就是 ③，不再按 f 位挑；决策快照的 ③ 另有 incoming，不吃这一段。
-        // v4.52（用户 m25902 图2）：决策快照以前把 messages 末尾那几条直接丢掉（③ 只画
-        // incoming），最新那次就永远看不到「上一次注记 / 上一轮 bot 回复」这两条 assistant。
-        // 三档统一：② 之后剩下的都归 ③，incoming 再按 message_id 去重。
-        var rhMoved = allMsgs.slice(boundX);
-        var movedCharsR = 0;
-        rhMoved.forEach(function(m9){ movedCharsR += String(rawContent(m9.content) || "").length; });
-        // v4.36（用户 m19945 图1/图2）：本轮那条判定注记常常已经先落进窗口（messages 末尾），
-        // 被它判的那条消息却还挂在 user_prompt / incoming 里——照原序画就成了「注记 → 被 @ 的消息」，
-        // 看着像决策发生在被 @ 之前。这里把末尾这几条本轮注记先摘出来，等本轮消息画完再补上去。
-        var rhTailNotes = [];
-        var tailNoteRaws = [];
-        if(!isDecX && rhMoved.length){
-          var poolIncR = [];
-          (Array.isArray(r.incoming_messages) ? r.incoming_messages : []).forEach(function(m9){
-            poolIncR.push(String(rawContent(m9.content) || ""));
-          });
-          (Array.isArray(r.user_prompt_parts) ? r.user_prompt_parts : []).forEach(function(x){
-            var t9 = String((x && x.text) || "");
-            if(t9.trim()) poolIncR.push(t9);
-          });
-          for(var tnR = rhMoved.length - 1; tnR >= 0; tnR--){
-            var mnR = rhMoved[tnR];
-            if(!isDecNoteLike(mnR)) break;
-            var rwR = String(rawContent(mnR.content) || "");
-            var dupR0 = false;
-            for(var piR = 0; piR < poolIncR.length; piR++){
-              if(poolIncR[piR] && sameMsgText(poolIncR[piR], rwR)){ dupR0 = true; break; }
-            }
-            if(!dupR0) break;
-            rhTailNotes.unshift(mnR);
-            tailNoteRaws.push(rwR);
-            rhMoved = rhMoved.slice(0, tnR);
-          }
-        }
-        var dropCharsR = 0;
         rh.forEach(function(m, i){
-          var fkR = flagsR ? flagsR.charAt(i) : "";
           // v4.33：原来这里按 f 位把消息搬去 ③，② 会被搬空；现在一条都不搬。
           n += 1;
           // v4.27（用户 m22596）：原文模式只放原文，不再插「-- 下面 N 条不命中缓存 --」
@@ -7612,151 +7645,28 @@ var ctxSnapRequest = 0;
         h += rawBlock("② 历史消息",
                       "· " + rh.length + " 条 · " + charsRh + " 字符" +
                       (preLenRaw >= 0
-                        ? (" · 命中 " + hitsRaw + " 条 · 未命中 " + coldRaw + " 条")
-                        : ""),
+                        ? (" · 本地前缀复用 " + hitsRaw + " 条 · 非前缀 " + coldRaw + " 条" + (r.cache_compare_source === "legacy_record_estimate" ? "；旧记录估算，非缓存实测" : "；非缓存实测"))
+                        : (r.cache_compare_source === "unknown" ? " · 本地前缀未知" : "")),
                       histRaw || "（这一轮没有历史）", "");
 
         if(!isTrimSnap){
-        // v3.90（用户 m05623 第 2 条）：裁切快照没有本轮消息，③ 整段不画。
-          // v3.94（用户 m08398 图4/图5）：标题统一叫「③ 本轮消息」，跟回复记录一致；
-          // 决策快照的内容是一行一条的聊天记录（transcript），也照着一行一条排。
-          var ups = (Array.isArray(r.user_prompt_parts) ? r.user_prompt_parts : [])
-                      .map(function(x){ return (x && x.text) || ""; })
-                      .filter(function(t){ return t.trim(); });
-          if(!ups.length && up) ups = splitIncoming(up);
-          var curRaw = "";
-          // v4.16：搬过来的那些条在窗口里排在 ③ 原有几条之前，编号也跟着走。
-          var movedRaw = "";
-          if(rhMoved.length){
-            rhMoved.forEach(function(m9){
-              if(!m9) return;
-              var rb9 = rawContent(m9.content);
-              if(m9.role === "assistant") rb9 = botRawHead(rb9, noteNameOf(m9), "");
-              n += 1;
-              movedRaw += "[" + n + "] " + String(m9.role || "user") + "\n" + rb9 + "\n\n";
-            });
+          var currentRaw = "";
+          function appendCurrentRaw(m){
+            if(!m) return;
+            var body = rawContent(m.content);
+            if(m.role === "assistant") body = botRawHead(body, noteNameOf(m), "");
+            n += 1;
+            currentRaw += "[" + n + "] " + String(m.role || "user") + "\n" + body + "\n";
+            if(m.tool_calls && m.tool_calls.length) currentRaw += "[tool_calls] " + JSON.stringify(m.tool_calls) + "\n";
+            currentRaw += "\n";
           }
-          var curN = ups.length;
-          // v4.27（用户 m22637）：原文模式 ③ 的说明跟美化档、对照档统一，
-          // 别再写「本轮真正发出去的那几条」。
-          var curHint3 = "本轮新增，这段不命中";
-          var roundInc = incRows;
-          // v4.35（用户 m19642）：动态段在原文档里也要单独画一条，记一下画没画过。
-          var relocDrawn = false;
-          if(roundInc){
-            // v4.06：本轮那几条 + 紧随其后的决策注记，按真消息逐条写
-            curN = roundInc.length;
-            // v4.35（用户 m19642）：本轮那两条常常已经落在 ② 之后那段真消息里（messages 尾部
-            // 就是它们，只是缓存前缀之后的部分），再写一遍 ③ 同一条就出现两次。逐字比一次，
-            // 已经画过的跳过，③ 的条数也只数真正画出来的。
-            var incDrawn = 0;
-            roundInc.forEach(function(m9){
-              var rb9 = rawContent(m9.content);
-              for(var sI = 0; sI < rhMoved.length; sI++){
-                if(!rhMoved[sI]) continue;
-                if(sameMsgText(String(rawContent(rhMoved[sI].content) || ""), rb9)) return;
-              }
-              // v4.36：这条注记已经摘到 ③ 末尾去画了，这里别再画一遍。
-              for(var tI = 0; tI < tailNoteRaws.length; tI++){
-                if(sameMsgText(tailNoteRaws[tI], rb9)) return;
-              }
-              if(m9.role === "assistant"){
-                rb9 = botRawHead(rb9, noteNameOf(m9) || DEC_NOTE_NAME, "");
-              } else {
-                rb9 = tsShortOf(rb9);
-              }
-              n += 1;
-              incDrawn += 1;
-              curRaw += "[" + n + "] " + String(m9.role || "user") + "\n" + rb9 + "\n\n";
-            });
-            curN = incDrawn;
-          } else if(isDecSnap){
-            // v3.97（用户 m09615 图9）：③ 只放这一轮真正新来的（决策时还挂在待发里的），
-            // 以前塞整段 transcript，等于把 ② 又铺了一遍。
-            var incs = (Array.isArray(r.incoming_messages) ? r.incoming_messages : []);
-            curN = incs.length;
-            curHint3 = "本轮新增，这段不命中";
-            if(!incs.length){
-              // 老记录没有 incoming_messages：退回按 transcript 逐行（只是能看，不算数）
-              var dls0 = decTranscriptLines(r);
-              curN = dls0.length;
-              dls0.forEach(function(one){
-                n += 1;
-                curRaw += "[" + n + "] " + one.role + "\n" + one.text + "\n\n";
-              });
-            } else {
-              incs.forEach(function(m9){
-                var rb9 = rawContent(m9.content);
-                if(m9.role === "assistant") rb9 = botRawHead(rb9, noteNameOf(m9), "");
-                n += 1;
-                curRaw += "[" + n + "] " + String(m9.role || "user") + "\n" + rb9 + "\n\n";
-              });
-            }
-          } else if(ups.length && !dup){
-            // v4.35（用户 m19642）：同一条消息在 messages 里是「[00:22] [message_id: X] …」，
-            // 到 user_prompt 里换成「[Oct 30 2026 00:22 Fri] [message_id: X] …」，逐字比不出来，
-            // ③ 就把本轮那几条画了两遍（图4/图5 的红框重复）。这里按 message_id 认人，
-            // 认不出再比去掉时间戳后的正文；只跳过重复的那一遍，② 后面那几条照原序全留着。
-            var upDrawn = 0;
-            ups.forEach(function(one, idx){
-              var rawOneR = String(one == null ? "" : one);
-              for(var sR = 0; sR < rhMoved.length; sR++){
-                if(!rhMoved[sR]) continue;
-                if(sameMsgText(String(rawContent(rhMoved[sR].content) || ""), rawOneR)) return;
-              }
-              // 动态段不再塞进这条消息的正文里（那样三档条数对不上，也看不出
-              // 「最后一条是动态段」），统一放到 ③ 的末尾单独一条，见下面的 relocDrawn。
-              n += 1;
-              upDrawn += 1;
-              curRaw += "[" + n + "] user\n" + one + "\n\n";
-            });
-            curN = upDrawn;
-          } else if(dup){
-            curHint3 = "已并入 ② 末条（老记录）";
-          }
-          // v4.36（用户 m19945 图1/图2）：本轮注记排在「被它判的那条消息」后面——
-          // 先被 @ 才触发决策，画成「注记 → 被 @ 的消息」就像决策发生在触发之前。
-          if(rhTailNotes.length){
-            rhTailNotes.forEach(function(mN){
-              var rbN = botRawHead(rawContent(mN.content), noteNameOf(mN) || DEC_NOTE_NAME, "");
-              n += 1;
-              curRaw += "[" + n + "] " + String(mN.role || "assistant") + "\n" + rbN + "\n\n";
-            });
-            curN += rhTailNotes.length;
-          }
-          // v4.35（用户 m19642）：动态段（时间 / 会话 / 记忆 / 强化格式遵守）在原文档里也画出来，
-          // 位置跟真正发出去时一致：pos.actual 是 tail 就压在本轮最下面，否则贴在最前面。
-          // 老记录把这段拼在 user 正文里过——已经含在同一段里就不再补一条。
-          // 动态段在原文档里也算 ③ 的一条，标题条数才跟行号对得上。
-          var relocInUp = false;
-          ups.forEach(function(t){ if(t && reloc && t.indexOf(reloc) >= 0) relocInUp = true; });
-          if(reloc && !relocDrawn && !relocInUp && isDecSnap === false){
-            var relocBodyR = "<system_reminder>\n" + reloc + "\n</system_reminder>";
-            relocDrawn = true;
-            if(pos.actual === "tail"){
-              n += 1;
-              curRaw += "[" + n + "] user\n" + relocBodyR + "\n\n";
-            } else {
-              curRaw = relocBodyR + "\n\n" + curRaw;
-            }
-          }
-          if(relocDrawn) curN += 1;
-          // v4.16（用户 m19499）：② 里搬过来的本轮输入，接在 ③ 开头逐条画。
-          if(movedRaw){
-            // v4.17（用户 m19717 第 1 条）：位置已经放对，不再挂一行说明。
-            curRaw = movedRaw + curRaw;
-            curN += rhMoved.filter(function(x){ return !!x; }).length;
-          }
-          var curChars2 = secNum("incoming", (function(){
-            var inc = 0;
-            ups.forEach(function(one){ inc += one.length; });
-            return inc;
-          })());
-          // v4.16：secNum 会优先取 sections 里的 incoming，搬过来的条不在里面，补回去。
-          if(rhMoved.length) curChars2 += (movedCharsR - dropCharsR);
-          h += rawBlock("③ 本轮消息", "· " + curN + " 条 · " + curChars2 +
-                        " 字符 · " + curHint3,
-                        curRaw || "（这一轮没有单独的本轮消息）", "");
+          var dynamicRow = reloc ? {role:"user",content:"<system_reminder>\n" + reloc + "\n</system_reminder>"} : null;
+          if(dynamicRow && pos.actual !== "tail") appendCurrentRaw(dynamicRow);
+          partition.currentRows.forEach(appendCurrentRaw);
+          if(dynamicRow && pos.actual === "tail") appendCurrentRaw(dynamicRow);
+          h += rawBlock("③ 本轮消息", "· " + partition.currentCount + " 条 · " + partition.currentChars +
+                        " 字符 · 本轮送入（含重送）；按轮次归属，非缓存实测",
+                        currentRaw || "（这一轮没有单独的本轮消息）", "");
         }
 
         if(!isTrimSnap){
@@ -7785,14 +7695,14 @@ var ctxSnapRequest = 0;
         return;
       }
       // 四段的标题与副标题三档共用一套文案（用户 m33400：说好统一，结果还是有区别）。
-      // ② 要说明它同样命中，③ 要说明它是本轮新增、不命中。
+      // ②③ 按轮次归属，独立说明本地前缀对比；均不等同服务商缓存。
       // v3.88（用户 m05012 第 4 条）：没有 system 内容时不画「展开」按钮。原来无条件
       // 渲染，可下面只有一行「这一轮没有 system 内容」，点开没有 body 就再也关不上。
       if(!isTrimSnap){
       // v3.90（用户 m05623 第 2 条）：裁切快照没有 system，这一块只留一片空白，整段不画。
         h += "<div class='seqh'>① 系统提示词" +
              " <span class='dim'>· " + secNum("system", stat.length) + " 字符 · " +
-             statNames.length + " 项 · 每轮不变，这段命中缓存</span>" +
+             statNames.length + " 项 · 固定系统内容；缓存状态以轨迹 token 统计为准</span>" +
              "<span class='grow'></span>" +
              (stat ? "<span class='mini' data-fold='sys'>展开</span>" : "") + "</div>";
         if(stat){
@@ -7805,150 +7715,15 @@ var ctxSnapRequest = 0;
       if(errs.length){
         h += "<div class='hint' style='color:var(--bad)'>有段渲染失败（已降级为静态文本）：" + esc(errs.join("；")) + "</div>";
       }
-      // 已展开的美化消息保留每段媒体归属；对照始终逐条使用原始 content。
-      var hist;
-      if(histRows){
-        hist = (VIEW === "pretty" && Array.isArray(r.history_display_messages)
-                 && r.history_display_messages.length >= histRows.length)
-          ? r.history_display_messages.slice(0, histRows.length)
-              .map(function(vm){ return Object.assign({}, vm, {content: vm.raw, display: vm}); })
-          : histRows;
-      } else {
-        hist = VIEW === "pretty" && Array.isArray(r.history_display_messages)
-          ? r.history_display_messages.map(function(vm){ return Object.assign({}, vm, {content: vm.raw, display: vm}); })
-          : (r.messages || []);
-      }
-      // 标题统计跟上面占比条同源；美化拆卡不改变分段字数，正文气泡仍使用 visLen（用户 m16357 图4）
-      var histChars = secNum("history", histCharsOf());
-      // v4.10（用户 m17328 第 2 条）：以前这里写死「历史全都命中」，其实跟上一份
-      // 同类请求的公共前缀之后那些条根本不命中（裁切搬过位置、刚进窗口的新消息）。
-      var preLen = (typeof r.cache_prefix_len === "number")
-        ? Math.max(0, Math.min(r.cache_prefix_len, hist.length)) : -1;
-      // v4.14（用户 m19095）：前缀之后要分「冷」和「本轮输入」——上一份回复请求
-      // 之后新进来的群消息与决策注记是这轮要回复的输入，不能算冷条。
-      // 后端给 cache_tail_flags（h/c/f 逐条）；长度对不上就不用它。
-      var flagsN = (typeof r.cache_tail_flags === "string") ? r.cache_tail_flags : "";
-      // 用户 m08158：flags 是按整份 messages 打的（含已被切进 ③ 的那几条尾部行），
-      // hist 只是它的前缀，索引天然对得上。以前要求「长度完全相等」，只要这一轮切出了
-      // 本轮消息就永远不等，整串 flags 被丢掉，② 一条都搬不过去——刚发的图两边都没画上。
-      // v4.30（用户 m14924）：② hist 已经是 messages 的前缀（本轮那几条被切进 ③），
-      // flags 却是按整份 messages 打的——长出来那几位直接截掉，别拿尾部 f 位去套
-      // 已经是历史的位置（回复记录会因此少画 8 条、又在 ③ 多搬 8 条）。
-      if(flagsN && flagsN.length < hist.length) flagsN = "";
-      else if(flagsN && flagsN.length > hist.length) flagsN = flagsN.slice(0, hist.length);
-      var coldN = (flagsN && typeof r.cache_cold_len === "number") ? r.cache_cold_len
-                : (preLen >= 0 ? (hist.length - preLen) : 0);
-      var inN = (flagsN && typeof r.cache_input_len === "number") ? r.cache_input_len : 0;
-      // v4.26（用户 m22251 / m22281）：命中数按逐条标记里 h 的个数算（前缀之内才是真命中，
-      // 前缀之后那些已经被搬去 ③）；不命中是不是裁切造成的，后端写了 cache_trim_between。
-      var hitsN = flagsN ? (flagsN.split("h").length - 1) : preLen;
-      var trimBetween = (r.cache_trim_between === true);
-      // v4.16（用户 m19499）：本轮输入不留在 ②，搬去 ③ 画。标题在循环之前，
-      // 所以这里先按 flags 数一遍 f，不能等 histMoved 填满。
-      var histMoved = [];
-      var nF2 = 0, allF2 = 0, movedChars2 = 0, movedNoteChars2 = 0;
-      // 用户 m07111 图1/图2：f 位（公共前缀之后那几条）以前一律当「本轮输入」搬去 ③，
-      // 连 bot 自己上一轮发的回复也一起搬，于是「我就发了一条」被写成「3 条」
-      // （1 条原文 + 上一轮回复 + 判定注记）。③ 只装这一轮真正新进来的东西：
-      // 群友这轮发的消息（user 行）+ 插件写的判定注记；bot 自己的旧回复留在 ② 里。
-      // v4.36（用户 m19945）：判定抽到模块级的 isDecNoteLike（原文档比这里先跑，认不出就画乱）。
-      var isDecNoteRow = function(m){ return isDecNoteLike(m); };
-      // 用户 m07562 图1：注记只有「这一轮刚写下、就挂在窗口最末一条」那份才算本轮输入。
-      // 上一轮的注记也带 [决策记录] 前缀，以前一律当本轮搬去 ③，于是 ② 里
-      // 「群友发言 → 判定要回 → bot 回复」这三条的顺序被打乱：判定被抽走，
-      // 回复直接顶到上一次决策前面。现在按位置认：只有末条注记进 ③，其余留在 ②。
-      var histAll2 = (histRows || r.messages || []);
-      var isCurF = function(m, i){
-        if(!m) return false;
-        if(String(m.role || "user") === "user") return true;
-        if(!isDecNoteRow(m)) return false;
-        return (typeof i === "number") && (i === histAll2.length - 1);
-      };
-      // 用户 m08439 图1/图2：② 该跳过哪几条，改由「③ 的起点」决定——起点是本轮最后一条
-      // user 之前最近的一条 assistant。以前按 flags 的 f 位抽，会把上一轮注记单独留下（图2
-      // 看着像被挪到本轮前面），或者被 tailRows9 压到 ③ 最后（图1）。注记落在起点之前就
-      // 照原样留在 ②；起点之后整段交给 ③，两区不重复。
-      var upPre9 = (Array.isArray(r.user_prompt_parts) ? r.user_prompt_parts : [])
-                     .map(function(x){ return (x && x.text) || ""; })
-                     .filter(function(t){ return t.trim(); });
-      if(!upPre9.length && r.user_prompt) upPre9 = splitIncoming(r.user_prompt);
-      var msgsPre9 = (r.messages || []);
-      var upIdsPre9 = {};
-      upPre9.forEach(function(t){
-        String(t).replace(/message_id:\s*(-?\d+)/g, function(_w, id){ upIdsPre9[id] = 1; return _w; });
-      });
-      var idxPre9 = -1;
-      msgsPre9.forEach(function(m, i){
-        String(rawContent(m.content) || "").replace(/message_id:\s*(-?\d+)/g, function(_w, id){
-          if(upIdsPre9[id] && i > idxPre9) idxPre9 = i;
-          return _w;
-        });
-      });
-      var lastA2 = -1;
-      if(idxPre9 >= 0){
-        for(var li2 = idxPre9; li2 >= 0; li2--){
-          if(String((msgsPre9[li2] || {}).role || "") === "assistant"){ lastA2 = li2; break; }
-        }
-      }
-      var skipN2 = 0, skipChars2 = 0, skipF2 = 0;
-      if(lastA2 >= 0){
-        for(var si2 = lastA2 + 1; si2 < msgsPre9.length; si2++){
-          var sm2 = msgsPre9[si2];
-          skipN2++;
-          skipChars2 += sm2 ? String(rawContent(sm2.content) || "").length : 0;
-          if(flagsN && flagsN.charAt(si2) === "f") skipF2++;
-        }
-      }
-      if(flagsN && preLen >= 0){
-        for(var qi2 = preLen; qi2 < flagsN.length; qi2++){
-          if(flagsN.charAt(qi2) === "f") allF2++;
-        }
-      }
-      // 用户 m08439 收尾：② 的「命中 / 未命中」必须和它自己写出来的条数对得上。
-      // coldN 是后端给的冷启动条数、allF2 是前缀之后的 f 条数，两者会重叠（整段都冷时
-      // cold 与 f 指同一批），相加就闹出「24 条却未命中 26 条」。改成只数这一区真正会画的
-      // 那几行：命中数到 lastA2 为止，未命中＝显示条数 − 命中数。
-      var shownN2 = histAll2.length - skipN2;
-      var hits2 = 0;
-      if(flagsN){
-        var hiEnd2 = (lastA2 >= 0 ? Math.min(lastA2, flagsN.length - 1) : flagsN.length - 1);
-        for(var hi2 = 0; hi2 <= hiEnd2; hi2++){
-          if(flagsN.charAt(hi2) === "h") hits2++;
-        }
-      } else if(preLen >= 0){
-        hits2 = Math.min(preLen, shownN2);
-      }
-      var miss2 = Math.max(0, shownN2 - hits2);
-      // v4.35（用户 m19642）：美化/对照的 ②③ 边界直接沿用原文那一份（boundX）——
-      // 三档同一处切分，不再各算一套。以前这里按 history_messages 的逐项前缀自己重算，
-      // 原文把 32~50 放进 ③、美化却把同一批留在 ②，同一份记录两种顺序（图1 图2）。
-      var bound2 = (boundX >= 0) ? boundX : histAll2.length;
-      if(bound2 > histAll2.length) bound2 = histAll2.length;
-      hist = histAll2.slice(0, bound2);
-      skipN2 = histAll2.length - bound2;
-      skipChars2 = 0;
-      for(var si2b = bound2; si2b < histAll2.length; si2b++){
-        skipChars2 += String(rawContent((histAll2[si2b] || {}).content) || "").length;
-      }
-      shownN2 = bound2;
-      hits2 = 0;
-      if(flagsN){
-        for(var hi2b = 0; hi2b < Math.min(bound2, flagsN.length); hi2b++){
-          if(flagsN.charAt(hi2b) === "h") hits2++;
-        }
-      } else if(preLen >= 0){
-        hits2 = Math.min(preLen, shownN2);
-      }
-      miss2 = Math.max(0, shownN2 - hits2);
-      // 用户 m26443：窗口裁过、② 空着的时候这里会写出负数（3452 - 4092 = -640），
-      // 标题跟正文（「这一轮没有历史」）自相矛盾，一律按真正画出来的条数/字符数报。
-      var chars2 = 0;
-      for(var c2X = 0; c2X < hist.length; c2X++){
-        chars2 += String(rawContent((hist[c2X] || {}).content) || "").length;
-      }
+      // 三档共享 canonical 消息数组及轮次边界；显示投影只提供媒体/装饰。
+      var bound2 = boundX;
+      var hist = partition.messages.slice(0, bound2);
+      var preLen = partition.prefixKnown ? partition.prefixLen : -1;
+      var hits2 = Math.max(0,Math.min(bound2,preLen)), miss2 = bound2-hits2;
+      var chars2 = partition.historyChars;
       h += "<div class='seqh'>② 历史消息" +
              " <span class='dim' data-histhead='1'>· " + hist.length + " 条 · " + chars2 +
-           " 字符" + (preLen >= 0 ? (" · 命中 " + hits2 + " 条 · 未命中 " + miss2 + " 条") : "") + "</span>" +
+           " 字符" + (preLen >= 0 ? (" · 本地前缀复用 " + hits2 + " 条 · 非前缀 " + miss2 + " 条" + (r.cache_compare_source === "legacy_record_estimate" ? "；旧记录估算，非缓存实测" : "；非缓存实测")) : (r.cache_compare_source === "unknown" ? " · 本地前缀未知" : "")) + "</span>" +
            "<span class='grow'></span><span class='mini' data-fold='hist'>展开</span></div>";
       h += "<div class='scroll' data-foldbody='hist' style='display:none'>";
       if(!hist.length) h += "<div class='empty'>这一轮没有历史</div>";
@@ -7968,19 +7743,7 @@ var ctxSnapRequest = 0;
       };
       var kKeep = 0;
       hist.forEach(function(m, i){
-        var fk = flagsN ? flagsN.charAt(i) : "";
-        // 用户 m08439 图1/图2：② 不再把本轮输入抽走。抽走的结果是「上一次决策的注记」
-        // 单独留在 ② 末尾（图2），或者被搬到 ③ 的最后（图1），两种都把时间顺序弄反了。
-        // ③ 的起点改由下面「最后一条 assistant 之后」重新算，② 照原样画全。
-        // v4.30（用户 m14924）：本轮输入一律不在 ② 画。以前只有「定位得到本轮那条」
-        // （lastA2 >= 0）才跳过；决策快照的 user_prompt 是整段 transcript、里面没有
-        // message_id，定位不到就让这批留在 ② 末尾——原文档（raw 档）把它们搬进 ③，
-        // 美化/对照不搬，三档对不上，正是「红框两条跑到 ② 后面」。
-        // v4.33（用户 m19120）：② 一条都不跳过。f 是缓存口径（从上一轮最后一条普通回复起就全标 f），
-        // 不是「本轮输入」的意思；以前照它把历史搬走，数组明明非空却画成空白。
-        // v4.28（用户 m22895）：这里以前会插一行「下面 N 条不命中缓存」，插在标记
-        // 从 f 切回 c 的位置，看着像凭空多出一行；② 的标题里已经写了
-        // 「命中 X 条 · 未命中 Y 条」，中间再插一条只是噪音，整段删掉。
+        // 历史只画 canonical 轮次边界内消息，不按缓存前缀挪动。
         var dm = m.display || (r.display_messages || [])[i] || {};
         var c = typeof dm.text === "string" ? dm.text : contentText(m.content);
         if(m.role !== "user") c = tidyBody(c);
@@ -8012,286 +7775,41 @@ var ctxSnapRequest = 0;
       });
       flushGrp2();
       h += "</div>";
-      // v4.33（用户 m19120）：② 的标题直接用真实条数，不再重写一遍去凑数字。
       if(!isTrimSnap){
-      // v3.90（用户 m05623 第 2 条）：裁切快照没有本轮消息，③ 整段不画。
-        // v3.93（用户 m07570 图7）：决策快照也画 ③，标题叫「③ 本轮输入」。
-        // v3.94（用户 m08398 图4/图5）：标题跟回复记录一致（③ 本轮消息），决策快照的
-        // 差别只在提示语和内容来源。
-        var curLabel = "③ 本轮消息";
-        var curHint = "本轮新增，这段不命中";
-        h += "<div class='seqh'>" + curLabel + " <span class='dim' data-curhead='1'>· " + curHint + "</span>" +
+        var curHint = "本轮送入（含重送）；按轮次归属，非缓存实测";
+        h += "<div class='seqh'>③ 本轮消息 <span class='dim'>· " + partition.currentCount +
+             " 条 · " + partition.currentChars + " 字符 · " + curHint + "</span>" +
              "<span class='grow'></span><span class='mini' data-fold='final'>展开</span></div>";
         h += "<div class='scroll' data-foldbody='final' style='display:none'>";
-        var atTail = (pos.actual === "tail");
-        var relocBlock = "";
+        var atTail = (pos.actual === "tail"), relocBlock = "";
         if(reloc.length){
-          // 美化只保留字数；对照仍逐字展示实际的 reminder 包裹内容。
           var relocRaw = "<system_reminder>\n" + reloc + "\n</system_reminder>";
           relocBlock = systemCardHtml(VIEW === "mixed" ? relocRaw : reloc, VIEW);
         }
-        var msgBlock = "";
-        // ③ 的「本轮消息」原文：user_prompt_parts 里一段就是一条；老记录没有它才退回整条拆。
-        var upList = (Array.isArray(r.user_prompt_parts) ? r.user_prompt_parts : [])
-                       .map(function(x){ return (x && x.text) || ""; })
-                       .filter(function(t){ return t.trim(); });
-        if(!upList.length && r.user_prompt) upList = splitIncoming(r.user_prompt);
-        var sourceUpList = upList.slice(); // 标题用实际原文，不能用 vm.text（美化正文）。
-        // 用户 m06721 图3：③ 还是多出一条重复的 @。② 尾按 cache_tail_flags 搬过来的那几条里
-        // 就有本轮这条 @（快照的 messages 是装配前的全长，f 位标的正是它），③ 又按
-        // user_prompt_parts 画了一遍。这里按 message_id 认领：③ 已经画过的那条，搬运列表跳过；
-        // 判定注记这类 ③ 里没有的行照旧搬过来。
-        var upIds = {};
-        upList.forEach(function(t){
-          String(t).replace(/message_id:\s*(-?\d+)/g, function(_w, id){ upIds[id] = 1; return _w; });
-        });
-        // v4.16（用户 m19499）：② 里搬过来的本轮输入，在时间上排在 ③ 原有几条之前。
-        // v4.17（用户 m19717 第 1、3 条）：搬过来的那几条不再挂说明条，也不再是裸卡片——
-        // 位置已经放对了，再解释一遍是废话；裸 msgCards 没有组头，看着像另贴的标签。
-        // 这里只备数据，真正画的时候走 ③ 自己的分组（grpKey3/grpBuf3），跟别的消息一个长相。
-        var movedRows = [];
-        // 用户 m07562 第 1 条：判定注记的时间在本轮消息之后，落点也得在消息之后。
-        var movedNotes = [];
-        // 用户 m06428 图5：③ 已经有本轮真消息（incRows）时，搬过来的就是同一批东西。
-        // 用户 m06721 图3：incRows 为空时也不能盲搬——先按 message_id 跟 ③ 对一遍。
-        // 用户 m08439：③ 的起点改成「本轮最后一条 user 之前那条 assistant 之后」，
-        // 不再看 ② 里哪个位置被标了 f。以前从 ② 抽走标 f 的那几条，会把「上一次决策的注记」
-        // 单独留在 ② 末尾（图2 看着像被挪到本轮前面），或者干脆压到 ③ 的最后（图1）。
-        // 现在 ② 照原样画全，③ 只装「上一次决策/回复之后新到的消息」+ 本轮那条注记。
-        var msgsAll9 = (r.messages || []);
-        var idx9 = -1, lastA9 = -1, note9 = -1;
-        var upIdSeq9 = [];
-        upList.forEach(function(t){
-          String(t).replace(/message_id:\s*(-?\d+)/g, function(_w, id){ upIdSeq9.push(id); return _w; });
-        });
-        var idMap9 = {};
-        msgsAll9.forEach(function(m, i){
-          String(rawContent(m.content) || "").replace(/message_id:\s*(-?\d+)/g, function(_w, id){
-            if(!(id in idMap9)) idMap9[id] = i;
-            return _w;
-          });
-        });
-        upIdSeq9.forEach(function(id){ if((id in idMap9) && idMap9[id] > idx9) idx9 = idMap9[id]; });
-        if(idx9 >= 0){
-          // 本轮注记：紧跟在本轮最后一条 user 之后的那条判定注记；中间的 user 一断就不算
-          for(var ni9 = idx9 + 1; ni9 < msgsAll9.length; ni9++){
-            var n9 = msgsAll9[ni9];
-            if(!n9) continue;
-            if(String(n9.role || "") === "user") break;
-            if(isDecNoteRow(n9)){ note9 = ni9; break; }
-          }
-          // 本轮起点：本轮最后一条 user 之前最近的一条 assistant（普通回复或上一轮注记）
-          for(var li9 = idx9; li9 >= 0; li9--){
-            if(String((msgsAll9[li9] || {}).role || "") === "assistant"){ lastA9 = li9; break; }
-          }
-        }
-        // v4.30（用户 m14924）：③ 搬哪几条，跟 ② 共用同一个来源——cache_tail_flags 里
-        // 标 f 的那几条（histMoved），不再用「按 message_id 在 msgs 里定位」那一套。
-        // 决策快照的 user_prompt 是整段 transcript、没有 message_id，定位永远失败，
-        // 以前只能靠 f 位兜底，而兜底只收 user 行、还要被 upIds 挡一道；回复快照里
-        // 本轮那几条 id 认不出来时又会在 ③ 再画一遍（图4/图5 的红框重复）。
-        // 现在统一按内容去重：跟 ③ 正文里已有的真消息（incRows）同一条只出现一次。
-        // v4.33（用户 m19120）：不再按正文指纹去重——两条内容相同的消息在请求里出现几次就画几张，
-        // 前 300 字相同、后文不同的两条也不会再被吞成一条。
-        var pushRow9 = function(mm9, asNote){
-          var isA9 = String(mm9.role || "") === "assistant";
-          // v4.36（用户 m19945 图3）：③ 里那些来自 incoming / user_prompt 的条目带着框架原样的
-          // 长日期头（[Oct 30 2026 01:07 Fri] …），跟别的条目一条一个样；统一压成 [01:07] 再画。
-          var txt9 = tsShortOf(contentText(mm9.content));
-          var body9 = isA9 ? tidyBody(txt9) : txt9;
-          var row9 = {role: isA9 ? "assistant" : "user",
-                      who: mm9.who || mm9.name || "", name: mm9.name || "",
-                      text: body9, raw: tsShortOf(rawContent(mm9.content)), media: mm9.media || [],
-                      chars: body9.length, tools: (mm9.tool_calls || []).length,
-                      tool_call_id: mm9.tool_call_id || "", tc: tcOf(mm9)};
-          if(asNote) movedNotes.push(row9); else movedRows.push(row9);
-          return row9;
-        };
-        // v4.33（用户 m19120 / m19154）：③ 就是 ② 之后剩下的那几条——原序、一条不落、不搬不排。
-        // v4.36（用户 m19945 图1/图2）：末尾那条本轮注记要排在它判的那条消息之后。
-        // 注记先落进窗口（messages 末尾），被它判的那条还在 user_prompt / incoming 里，
-        // 按原序画就成了「决策 → 被 @ 的消息」——先被 @ 才触发决策，顺序反了。
-        var suffixRows9 = [];
-        // v4.52（用户 m25902 图2）：决策快照的 ③ 以前只画 incoming，messages 末尾那几条
-        // （上一次注记 / 上一轮 bot 回复 / 这次那条 user）一条都不画。现在跟回复快照同一套。
-        for(var qi9 = bound2; qi9 < msgsAll9.length; qi9++){
-          if(msgsAll9[qi9]) suffixRows9.push(msgsAll9[qi9]);
-        }
-        var tailNotes9 = [];
-        if(isDecSnap === false && suffixRows9.length){
-          var poolUp9 = (Array.isArray(r.incoming_messages) ? r.incoming_messages : [])
-                          .map(function(m9){ return String(rawContent(m9.content) || ""); });
-          (Array.isArray(r.user_prompt_parts) ? r.user_prompt_parts : []).forEach(function(x){
-            var t9 = String((x && x.text) || "");
-            if(t9.trim()) poolUp9.push(t9);
-          });
-          for(var sn9 = suffixRows9.length - 1; sn9 >= 0; sn9--){
-            var snRow9 = suffixRows9[sn9];
-            if(!isDecNoteLike(snRow9)) break;
-            var snRaw9 = String(rawContent(snRow9.content) || ""), snDup9 = false;
-            for(var sp9 = 0; sp9 < poolUp9.length; sp9++){
-              if(poolUp9[sp9] && sameMsgText(poolUp9[sp9], snRaw9)){ snDup9 = true; break; }
-            }
-            if(!snDup9) break;
-            tailNotes9.unshift(snRow9);
-            suffixRows9 = suffixRows9.slice(0, sn9);
-          }
-        }
-        var suffixRaw9 = [];
-        suffixRows9.forEach(function(mq9){
-          suffixRaw9.push(String(rawContent(mq9.content) || ""));
-          pushRow9(mq9, false);
-        });
-        // v4.36（用户 m19945）：摘出来的本轮注记照旧排在 ③ 的最后（先本轮消息、再判定注记）。
-        var tailRowObjs9 = [];
-        var tailNoteRaw9 = [];
-        tailNotes9.forEach(function(m9){
-          tailRowObjs9.push(pushRow9(m9, true));
-          tailNoteRaw9.push(String(rawContent(m9.content) || ""));
-        });
-        var incomingDisplay = VIEW === "pretty" && Array.isArray(r.incoming_display_messages) ? r.incoming_display_messages : null;
-        if(incomingDisplay) upList = incomingDisplay.map(function(vm){ return typeof vm.text === "string" ? vm.text : contentText(vm.raw); });
-        // v3.94（用户 m08398 图4/图5/图6）：决策快照的 ③ 是它读到的那段聊天记录，一行一条；
-        // 换掉「本轮输入」那一整串，按消息逐条画成卡片（bot 自己说过的话走 assistant 卡）。
-        // v3.97（用户 m09615 图9）：③ 拿这一轮新来的真消息渲染，跟 ② 完全同一套分组卡片；
-        // 老记录没有 incoming_messages 才退回 transcript 逐行。
-        var decInc = incRows;
-        // v4.12（用户 m18246/m18275 第 2 条）：③ 用真消息画的时候，media 得从
-        // incoming_display_messages 取——incoming_messages 是原始窗口消息，转发
-        // 消息在那边只有一段纯文本（内层图没有 message_id），media 永远是空的。
-        var decIncDisp = (decInc && Array.isArray(r.incoming_display_messages)
-                          && r.incoming_display_messages.length >= decInc.length)
-                         ? r.incoming_display_messages : null;
-        var decLines3 = (isDecSnap && !decInc) ? decTranscriptLines(r) : null;
-        if(decInc){
-          // v4.36（用户 m19945 图3）：incoming 里的条目带框架原样的长日期头，
-          // 跟 ③ 里别的行一条一个样；统一压成 [HH:MM] 再画。
-          upList = decInc.map(function(m9){
-            var t9 = tsShortOf(contentText(m9.content));
-            return (m9.role || "user") === "user" ? t9 : tidyBody(t9);
-          });
-          sourceUpList = decInc.map(function(m9){ return tsShortOf(String(contentText(m9.content) || "")); });
-          incomingDisplay = null;
-        } else if(decLines3){
-          upList = decLines3.map(function(o){ return o.text; });
-          sourceUpList = upList.slice();
-          incomingDisplay = null;
-        }
-        // ③ 以前直接用 mcHtml 单条画，跟 ② 的「分组头 + 卡片」两套长相
-        // （用户 m32956 图4：③ 展开和 ② 不是同一种美化，③ 比较落后）。改成同一套。
-        var grpKey3 = null, grpRole3 = null, grpBuf3 = "", grpHead3 = "";
+        var msgBlock = "", grpKey3 = null, grpRole3 = null, grpBuf3 = "", grpHead3 = "";
         var flushGrp3 = function(){
           if(!grpBuf3) return;
           msgBlock += "<div class='mgrp " + esc(grpRole3 || "user") + "'>" + grpHead3 + grpBuf3 + "</div>";
           grpBuf3 = ""; grpHead3 = "";
         };
-        // v4.17：搬过来的几条按 ③ 的分组画（带头像、名字、时间），编号仍是 1..N，
-        // 后面 upList 从 N+1 接着排。
-        movedRows.forEach(function(mm4, k){
-          var gk4 = groupKeyOf(mm4, "m" + k);
-          if(gk4 !== grpKey3){
-            flushGrp3();
-            grpKey3 = gk4; grpRole3 = mm4.role;
-            var multi4 = multiOf(mm4);
-            grpHead3 = grpHeadHtml(mm4.role, multi4 ? "" : whoOf(mm4), multi4 ? "" : uidOf(mm4), multi4 ? false : youOf(mm4), VIEW === "mixed" ? mixNoteOf(mm4) : "");
-          }
-          grpBuf3 += msgCards(mm4, k + 1, VIEW, "", true);
-        });
-        var skipUp9 = 0, skipUpChars9 = 0;
-        upList.forEach(function(one, idx){
-          // v4.35（用户 m19642）：本轮实际发出去的 user 段，后面那串真消息里已经有同一条就不再画。
-          // 以前是逐字比，可 messages 里的时间戳只到分钟、user_prompt 里带完整日期，永远比不上，
-          // 同一条就成了两张卡（红框重复）。现在按 message_id 认，认不出再比去掉时间戳的正文。
-          {
-            var rawOne9 = String(one == null ? "" : one);
-            var hitS9 = false;
-            for(var s9 = 0; s9 < suffixRaw9.length; s9++){
-              if(sameMsgText(suffixRaw9[s9], rawOne9)){ suffixRaw9[s9] = "@@used"; hitS9 = true; break; }
-            }
-            if(!hitS9){
-              // v4.36：这条注记已经排到 ③ 末尾去了，别在中间再画一张。
-              for(var s9b = 0; s9b < tailNoteRaw9.length; s9b++){
-                if(sameMsgText(tailNoteRaw9[s9b], rawOne9)){ hitS9 = true; break; }
-              }
-            }
-            if(hitS9){ skipUp9 += 1; skipUpChars9 += rawOne9.length; return; }
-          }
-          one = tsShortOf(one);
-          var displayPart = (incomingDisplay || r.display_user_prompt_parts || [])[idx] || {};
-          var dm3 = decInc ? decInc[idx] : null;
-          var d3 = decLines3 ? decLines3[idx] : null;
-          var r3 = dm3 ? String(dm3.role || "user") : (d3 ? d3.role : "user");
-          var mm3;
-          if(dm3){
-            // 真消息：角色、昵称、工具调用照原样，渲染跟 ② 一模一样
-            var dm3d = (decIncDisp && decIncDisp[idx]) || null;
-            mm3 = {role: r3, who: dm3.who || dm3.name || "", name: dm3.name || "",
-                   text: one, raw: tsShortOf(rawContent(dm3.content)),
-                   media: (dm3d && dm3d.media && dm3d.media.length) ? dm3d.media : (dm3.media || []),
-                   chars: one.length, tools: (dm3.tool_calls || []).length,
-                   tool_call_id: dm3.tool_call_id || "", tc: tcOf(dm3)};
-          } else {
-            mm3 = {role: r3, who: (r3 === "assistant" ? "我" : ""),
-                   text: d3 ? one : (typeof displayPart.text === "string" ? displayPart.text : one),
-                   raw: d3 ? one : (incomingDisplay ? rawContent(displayPart.raw) : one),
-                   media: d3 ? [] : (displayPart.media || []), chars: one.length, tools: 0, tool_call_id: ""};
-          }
+        partition.currentRows.forEach(function(m, idx){
+          if(!m) return;
+          var role3 = String(m.role || "user"), text3 = tsShortOf(contentText(m.content));
+          if(role3 !== "user") text3 = tidyBody(text3);
+          var mm3 = {role:role3,who:m.who || m.name || "",name:m.name || "",text:text3,
+            raw:tsShortOf(rawContent(m.content)),media:m.media || [],chars:text3.length,
+            tools:(m.tool_calls || []).length,tool_call_id:m.tool_call_id || "",tc:tcOf(m)};
           var gk3 = groupKeyOf(mm3, "f" + idx);
           if(gk3 !== grpKey3){
-            flushGrp3();
-            grpKey3 = gk3; grpRole3 = r3;
+            flushGrp3(); grpKey3 = gk3; grpRole3 = role3;
             var multi3 = multiOf(mm3);
-            grpHead3 = grpHeadHtml(r3, multi3 ? "" : whoOf(mm3), multi3 ? "" : uidOf(mm3), multi3 ? false : youOf(mm3), VIEW === "mixed" ? mixNoteOf(mm3) : "");
+            grpHead3 = grpHeadHtml(role3,multi3?"":whoOf(mm3),multi3?"":uidOf(mm3),multi3?false:youOf(mm3),VIEW==="mixed"?mixNoteOf(mm3):"");
           }
-          // 编号接着前面搬过来的那几张排（搬过来的按 movedRows 算，不是 histMoved——
-          // ③ 已经画过的那些被 upIds 挡掉了，两者条数可能不一样）。
-          grpBuf3 += msgCards(mm3, movedRows.length + idx + 1, VIEW, "", true);
+          grpBuf3 += msgCards(mm3, idx + 1, VIEW, "", true);
         });
-        // 用户 m07562 第 1 条：注记排在本轮消息后面。
-        if(movedNotes.length){
-          movedNotes.forEach(function(nn4, j4){
-            var gk5 = groupKeyOf(nn4, "n" + j4);
-            if(gk5 !== grpKey3){
-              flushGrp3();
-              grpKey3 = gk5; grpRole3 = nn4.role;
-              var multi5 = multiOf(nn4);
-              grpHead3 = grpHeadHtml(nn4.role, multi5 ? "" : whoOf(nn4), multi5 ? "" : uidOf(nn4), multi5 ? false : youOf(nn4), VIEW === "mixed" ? mixNoteOf(nn4) : "");
-            }
-            grpBuf3 += msgCards(nn4, movedRows.length + upList.length + j4 + 1, VIEW, "", true);
-          });
-        }
         flushGrp3();
-        // v3.98（用户 m10169 图2）：三档统一走 sections 里的数值——概览条用的就是它，
-        // 以前这里自己把各段长度加起来，比概览少几十字（真机 1865 vs 1944）。
-        // v4.16（用户 m19499）：搬过来的那些条不再算在 sections 的 incoming 里，
-        // 字符数要自己补上，否则「42 条 · 193 字符」自相矛盾。
-        var curChars = secNum("incoming", (function(){
-          var c = 0;
-          sourceUpList.forEach(function(one){ c += one.length; });
-          return c;
-        })()) - skipUpChars9;
-        // 用户 m08158：以前只要 histMoved 非空就把 movedChars2 整块加进来，可搬过来的
-        // 那几条里有的已经在 ③ 画过（被 message_id 认领掉），字数就重复算了一遍。
-        // 现在只补真搬进 ③ 的那几条。
-        var movedRowChars3 = 0, movedNoteChars3 = 0;
-        movedRows.forEach(function(o9){ movedRowChars3 += o9.chars; });
-        movedNotes.forEach(function(o9){ movedNoteChars3 += o9.chars; });
-        curChars += movedRowChars3 + movedNoteChars3;
-        // 用户 m07111 图1/图2：判定注记不是群友发的消息，标题不该把它算进「条」。
-        // 标题只数这一轮真正收到的几条，注记在末尾单独说一句。
-        // v4.36（用户 m19945）：摘出来的本轮注记不是「另附」，它就是这一轮的一条消息，
-        // 算回「N 条」里（原文档那边一直这么数），不然三档条数对不上。
-        var tailNoteChars9 = 0;
-        tailRowObjs9.forEach(function(o9){ tailNoteChars9 += o9.chars; });
-        var noteRows3 = movedNotes.length - tailRowObjs9.length;
-        var realRows3 = sourceUpList.length - skipUp9 + movedRows.length + tailRowObjs9.length + (reloc.length ? 1 : 0);
-        var realChars3 = curChars - (movedNoteChars3 - tailNoteChars9);
-        h = h.replace("<span class='dim' data-curhead='1'>· " + curHint + "</span>",
-                      "<span class='dim'>· " + realRows3 + " 条 · " + realChars3 +
-                      " 字符 · " + curHint +
-                      (noteRows3 ? (" · 另附判定注记 " + noteRows3 + " 条") : "") + "</span>");
         h += atTail ? (msgBlock + relocBlock) : (relocBlock + msgBlock);
-        if(!reloc.length && !r.user_prompt) h += "<div class='empty'>这一轮没有用户消息</div>";
+        if(!partition.currentCount) h += "<div class='empty'>这一轮没有单独的本轮消息</div>";
         h += "</div>";
       }
       if(!isTrimSnap){

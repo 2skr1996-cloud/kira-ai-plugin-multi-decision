@@ -6,6 +6,7 @@ system 段有哪些、历史多长、尾部动态块写了什么、本批怎么�
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import mimetypes
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from core.logging_manager import get_logger
+
+from .prefix_projection import comparison_pair, legacy_record_estimate, valid_fingerprints
 
 try:  # 同包内的计数口径，测试桩里没有就退回「数组长度」
     from ..window.trim import count_messages as _count_messages
@@ -569,9 +572,8 @@ class RequestLog:
         # 这里按目录指纹（文件数 + 最新修改时间）缓存摘要行，新落一轮或裁掉旧文件
         # 才会重建；重建本身由调用方丢进线程，不占事件循环。
         self._rounds_cache: dict[str, tuple] = {}
-        # v4.10（用户 m17328）：缓存命中只看「跟上一份同类请求的公共前缀」。
-        # 决策走 fast 模型、回复走主模型，两边的缓存不共享，所以必须按 kind 分开记：
-        # (sid, "decision") 只跟上一次决策比，(sid, "reply") 只跟上一次真回复比。
+        # prefix-v2 按同类请求的记录投影比较连续前缀，不跨模型推断缓存共享。
+        # (sid, "decision") 只跟上一次决策比，(sid, "reply") 只跟上一次回复请求比。
         self._prev_cache: dict[tuple[str, str], tuple] = {}
 
     # ------------------------------------------------------------------ 采集
@@ -610,76 +612,21 @@ class RequestLog:
         return False
 
     def _tail_split(self, prev_series: list, messages: list, prefix_len: int) -> tuple:
-        """前缀之后那一段再分「冷」和「本轮输入」（v4.14 用户 m19095）。
+        """prefix-v2：② 是连续一致前缀，③ 是其后的全部非复用后缀。
 
-        用户口径：回复只有连着的时候才有历史可复用。上一份回复请求之后新进来的
-        群消息与决策注记，是这一轮要回复的输入，不算冷；真正冷的是
-        ① 上一份请求里就有、被裁切搬走位置的老消息，
-        ② bot 自己上一次的回复（上一份请求的输出，这轮才第一次进前缀）。
-        返回 (冷条数, 本轮输入条数, 逐条标记串)；标记串与 messages 一一对应，
-        h=命中 / c=冷 / f=本轮输入，system 这类不参与统计的记 h。
+        保留旧返回结构及与 messages 一一对应的标记串：h=前缀，f=后缀，
+        cold 固定为 0。f 不表示「首次出现」，也包括上轮产出、裁切重送与变投影。
+        这里只描述记录投影的分区，不是上游 KV 缓存命中证明。
         """
-        # prev_series 只用来区分「冷条是否在上一份请求里出现过」，而两种情况的标记
-        # 都是 c（冷就是冷，命中与否由前缀决定），所以不再为它算指纹集合。
         msgs = list(messages or [])
         n = max(0, min(int(prefix_len or 0), len(msgs)))
-        # v4.26（用户 m22251）：本轮输入的起点改成「上一次回复的位置」，不再是
-        # 「基准花名册里没有的」。裁切之后窗口里保留下来的老消息对不上前缀，
-        # 但它们仍然是历史（上一轮已经请求过、只是被裁掉了），不能算这一轮新增；
-        # bot 上一次的回复连同它之后的一切，才是这一轮要送进去的输入。
-        last_reply = -1
-        for i, m in enumerate(msgs):
-            if self._role_of(m) != "assistant":
-                continue
-            if self._is_note(m):
-                continue
-            last_reply = i
-        start = last_reply
-        if start > 0:
-            # 同一次回复常常是几条连着的 assistant（多气泡），往前一并算本轮。
-            j = start - 1
-            while j >= 0 and self._role_of(msgs[j]) == "assistant":
-                start = j
-                j -= 1
-        # v4.29（用户 m23262）：没有真回复可参照时，边界取公共前缀的末端。
-        # 上一段全部命中（n>0）说明那些消息上一轮已经发过，紧跟其后的这条
-        # （典型是上一次决策刚落的注记）就是这一轮第一次发出去的东西，该算本轮输入；
-        # 裁切后整段不命中（n==0）时保持老口径，全部算冷。
-        if start < 0 and n > 0:
-            start = n
-        cold = 0
-        fresh = 0
-        flags = []
-        for i, m in enumerate(msgs):
-            role = self._role_of(m)
-            if role not in ("user", "assistant"):
-                flags.append("h")
-                continue
-            if i < n:
-                # 公共前缀之内：上游缓存真的能复用，命中优先。
-                flags.append("h")
-                continue
-            # v4.28（用户 m22895）：注记不再强行算本轮输入。v4.27 那版把它标成 f，
-            # 前端就把注记整段搬到 ③ 开头，看着像决策结论被挪进了本轮消息里，
-            # 上下文顺序被破坏。注记按它在 messages 里的真实位置判：落在上一次
-            # 真回复之后才是本轮输入，落在前面就跟别的历史一样算冷。
-            if start >= 0 and i >= start:
-                # 上一次回复与它之后的群消息、决策注记：这一轮的输入。
-                fresh += 1
-                flags.append("f")
-                continue
-            # 上一次回复之前、又落不进公共前缀的：被裁切搬过位置的历史，算冷。
-            # 上一份请求里就没有的（裁切后重建、从没进过 prompt）同样不命中，也记冷。
-            cold += 1
-            flags.append("c")
-        return cold, fresh, "".join(flags)
+        return 0, len(msgs) - n, "h" * n + "f" * (len(msgs) - n)
 
     @staticmethod
     def _msg_sig(msg) -> str:
-        """一条消息在缓存里的身份：角色 + 整段正文（v4.10，A4 于 m26791 改全文）。
+        """一条记录投影的指纹：角色 + 整段正文，不是 wire/KV 身份证明。
 
-        以前只比正文前 400 字：两条长消息前半段一样就被当成同一条，公共前缀会
-        虚长、「命中 N 条」跟着虚高。改成整段比，跟 stage 切尾部的口径也一致。
+        不截断长正文，否则中段改变仍会被当成一致前缀。
         """
         return _msg_sig_of(msg)
 
@@ -705,15 +652,10 @@ class RequestLog:
         return True
 
     def _series_of(self, data: dict, kind: str = "") -> list:
-        """一份快照真正发出去的整条序列（v4.13 / v4.15）。
+        """一份快照用于分区比较的完整记录投影，不等同于真实 wire payload。
 
-        用户 m18728 第 2 条：决策请求实际发的是「窗口 + 待发」，但以前只用
-        messages 做前缀比较——待发没并进窗口时那几条在下一轮就变成「冷」，
-        明明上一轮刚请求过。决策系列把待发补到尾部再比。
-
-        v4.15（用户 m19439）：基准换成「最近一次任意真实请求」之后，这里要按
-        **这份快照自己的 outcome** 判断补不补待发，不能再听调用方的 kind——
-        拿一份决策快照当回复轮的基准时，它同样带着待发。
+        决策补齐未并进窗口的待发；尾部已经包含待发时不再追加。
+        按记录自身 outcome 决定是否补齐，kind 只兼容缺少 outcome 的调用。
         """
         arr = list(data.get("messages") or [])
         oc = str(data.get("outcome") or "") or str(kind or "")
@@ -724,18 +666,16 @@ class RequestLog:
         return arr
 
     def _prev_series(self, sid: str, kind: str) -> tuple:
-        """上一份请求真正发出去的 messages 指纹（v4.10 / v4.15）。
+        """上一份同类请求的记录投影指纹；没有可比基准返回 ("", [])。
 
-        返回 (文件名, [指纹...])；没有快照就返回 ("", [])。
-        kind = "any"（v4.15 起 _prefix_of 用的就是它）认最近一次任意真实请求，
-        决策与回复都算——上游 KV 缓存只认最后一次 prompt，上一轮是决策请求时
-        它同样把整段缓存住了，只按「上一份同类」比会把刚请求过的消息重新算成
-        冷（用户 m19439）。
-        kind = "decision" 只认 outcome == "decision"；"reply" 跳过 decision
-        与 trim —— 裁切快照没有模型调用，拿它当前缀会把整段都算成命中。
+        decision 只认决策，reply 排除 decision/trim，不以另一类请求兜底。
+        已删失的内存基准不可继续复用。
         """
-        key = (sid, str(kind or "reply"))
+        key = (sid, "decision" if str(kind or "") == "decision" else "reply")
         if key in self._prev_cache:
+            cached = self._prev_cache[key]
+            if cached[0] and not (self.dir / _safe_sid(sid) / cached[0]).is_file():
+                self._prev_cache[key] = ("", [])
             return self._prev_cache[key]
         out: tuple = ("", [])
         folder = self.dir / _safe_sid(sid)
@@ -743,7 +683,7 @@ class RequestLog:
             files = sorted(folder.glob("*.json"), reverse=True)
         except Exception:
             files = []
-        for f in files[:60]:
+        for f in files:
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
             except Exception:
@@ -752,17 +692,13 @@ class RequestLog:
             if key[1] == "decision":
                 if oc != "decision":
                     continue
-            elif key[1] == "any":
-                # 只排除裁切快照：它没有模型调用。空 outcome 的老快照是正常请求，
-                # 不能当坏文件跳过，否则基准会退到更早的一份（v4.15）。
-                if oc == "trim":
-                    continue
             elif oc in ("decision", "trim"):
                 continue
             arr = self._series_of(data)
-            if not isinstance(arr, list) or not arr:
+            if not isinstance(arr, list):
                 continue
-            out = (f.name, [self._msg_sig(m) for m in arr])
+            out = (f.name, copy.deepcopy(data) if key[1] == "decision"
+                   else [self._msg_sig(m) for m in arr])
             break
         self._prev_cache[key] = out
         return out
@@ -770,8 +706,8 @@ class RequestLog:
     def _trim_between(self, sid: str, prev_name: str, upper_name: str = "") -> bool:
         """基准快照之后、这一份之前有没有发生过裁切（v4.26 用户 m22281）。
 
-        裁切会把窗口里的消息重排/搬位置，公共前缀必然从某一处断掉。页面上那条
-        黄色说明要能说清「这是裁切造成的」，说不清就只写「不命中缓存」。
+        裁切可能搬动或重建记录投影；prefix-v2 保留裁切使前缀失效的契约。
+        此字段只说明分区原因，不代表 provider 实测缓存用量。
 
         M04：查看历史详情时传 upper_name（这一份自己的文件名），只看
         (prev_name, upper_name) 之间——后来才发生的裁切不能算到旧快照头上，
@@ -802,67 +738,51 @@ class RequestLog:
         return False
 
     def recalc_cache(self, sid: str, name: str, data: dict) -> dict:
-        """按当前口径重算一份快照的「命中 / 不命中 / 本轮输入」边界（v4.26 用户 m22251）。
+        """只读重算 prefix-v2 分区；与写入共用严格同类基准及裁切上界。
 
-        老快照里存的 cache_cold_len / cache_tail_flags 是旧规则算出来的，页面直接读
-        就一直显示旧边界。详情返回前用与落盘同一套基准重算，历史行也跟着对。
+        无更早同类基准也返回显式零前缀，覆盖旧记录可能残留的跨模型估计。
+        messages / incoming / assembled 等原文均不修改。
         """
         oc = _outcome_of(data)
         if oc == "trim":
             return {}
-        # M03：挑基准与落盘同一套（回复先认上一份回复、再退任意请求），
-        # 而且只看比这一份更早的快照——以前第二遍会从头再扫，把后来的请求
-        # 当成基准，老记录的命中数会随着后面继续聊天而变化。
-        prev_pair = self._basis_before(sid, oc, name)
-        if not prev_pair[0]:
-            return {}
-        prev_msgs = self._series_of(prev_pair[1])
+        prev_name, prev_data = self._basis_before(sid, oc, name)
+        if oc == "decision":
+            return self._decision_prefix(sid, data, prev_name, prev_data, name)
+        prev_msgs = self._series_of(prev_data) if prev_data is not None else []
         cur_msgs = list(data.get("messages") or [])
-        if not cur_msgs or not prev_msgs:
-            return {}
-        # 前缀比的是指纹（跟落盘时一致），_tail_split 要原始消息自己取指纹。
         prev_ser = [self._msg_sig(m) for m in prev_msgs]
-        # 决策快照真正发出去的是「窗口 + 待发」，跟落盘时一样把待发补到尾部。
+        # 决策记录投影由窗口 + 待发组成；尾部已含待发时不重复追加。
         tail = None
         if oc == "decision":
             inc = data.get("incoming_messages") or []
             if isinstance(inc, list) and inc:
                 tail = list(inc)
-        return self._prefix_info(sid, cur_msgs, tail, prev_pair[0], prev_ser, name)
+        return self._prefix_info(sid, cur_msgs, tail, prev_name, prev_ser, name, oc)
 
     def _basis_before(self, sid: str, kind: str, name: str) -> tuple:
-        """详情重算挑基准：只看比 name 更早的快照，规则与 _basis_of 一致（M03）。
-
-        落盘时 _basis_of 认「上一份回复请求，找不到再退任意真实请求」；以前详情
-        从最新往回扫，回复轮第一遍先接受任意请求、第二遍又没重置「只看更早」的
-        边界，同一份快照的保存值与详情会算出两个不同的基准。返回 (文件名, 快照)；
-        没有可用基准返回 ("", None)。
-        """
+        """只看 name 之前的上一份同类记录；无可比基准返回 ("", None)。"""
         folder = self.dir / _safe_sid(sid)
         try:
             files = sorted(folder.glob("*.json"), reverse=True)
         except Exception:
             return ("", None)
-        passes = ["any"] if str(kind or "") == "decision" else ["reply", "any"]
-        for use in passes:
-            seen_self = False
-            for f in files:
-                if f.name == name:
-                    seen_self = True
-                    continue
-                if not seen_self:
-                    continue  # 只看比这一份更早的
-                try:
-                    pd = json.loads(f.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                o = _outcome_of(pd)
-                if use == "any":
-                    if o == "trim":
-                        continue
-                elif o in ("decision", "trim"):
-                    continue
-                return (f.name, pd)
+        use_kind = "decision" if str(kind or "") == "decision" else "reply"
+        seen_self = False
+        for f in files:
+            if f.name == name:
+                seen_self = True
+                continue
+            if not seen_self:
+                continue  # 只看比这一份更早的，不借未来请求补基准。
+            try:
+                pd = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            o = _outcome_of(pd)
+            if o == "trim" or (o == "decision") != (use_kind == "decision"):
+                continue
+            return (f.name, pd)
         return ("", None)
 
     @staticmethod
@@ -875,82 +795,135 @@ class RequestLog:
             n += 1
         return n
 
-    def _prefix_of(self, sid: str, kind: str, messages: list, tail: list = None) -> dict:
-        """这一份快照跟上一份同类快照的公共前缀，落盘用（v4.10）。
+    def _prefix_of(self, sid: str, kind: str, messages: list, tail: list = None,
+                   record: dict = None, upper_name: str = "") -> dict:
+        """写入 prefix-v2：只比上一份同类记录投影，无基准时显式返回零前缀。
 
-        v4.13（用户 m18728 第 2 条）：tail 是本轮待发。跟 _series_of 同一口径，
-        待发没并进 messages 时补到尾部再比，否则刚请求过的那几条会被算成冷。
+        tail 是决策待发，未并进 messages 时按 _series_of 的口径补到尾部。
         """
-        # v4.15（用户 m19439）：基准换成「最近一次任意真实请求」。上一轮是决策
-        # 请求时，那些消息同样已经被上游缓存，只跟「上一份同类」比会把它们全
-        # 算成没请求过。kind 只留给 _series_of 兜底，不再决定基准是谁。
-        # v4.23（用户 m21976）：回复轮的基准退回「上一份回复请求」。
-        # 上一轮若是决策请求，那批消息只发给了决策模型，主模型的缓存里没有；
-        # 拿决策快照当基准会把它们算成冷（用户看到「上一份同类请求里没有这些」）。
-        # 决策轮仍用 any，保持 v4.15 的修复（用户 m19439）。
         prev_name, prev_series = self._basis_of(sid, kind)
-        if not prev_series:
-            return {}
-        return self._prefix_info(sid, messages, tail, prev_name, prev_series)
+        if str(kind or "") == "decision":
+            data = dict(record or {})
+            data.update(outcome="decision", messages=list(messages or []),
+                        incoming_messages=list(data.get("incoming_messages") or [])
+                        if tail is None else list(tail))
+            if upper_name:
+                # A write may be out of order. Never use a future cached record.
+                prev_name, prev_series = self._decision_basis_before(sid, upper_name)
+            return self._decision_prefix(sid, data, prev_name, prev_series, upper_name)
+        return self._prefix_info(sid, messages, tail, prev_name, prev_series, kind=kind)
+
+    def _decision_basis_before(self, sid: str, name: str) -> tuple:
+        """Decision writes also honor the strictly-earlier upper bound."""
+        folder = self.dir / _safe_sid(sid)
+        for path in sorted(folder.glob("*.json"), reverse=True):
+            if path.name >= name:
+                continue
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if _outcome_of(record) == "decision":
+                return path.name, record
+        return "", None
+
+    def _decision_trim_between(self, sid: str, previous: str, upper: str = "") -> bool:
+        if not previous:
+            return False
+        for path in (self.dir / _safe_sid(sid)).glob("*.json"):
+            if path.name <= previous or (upper and path.name >= upper):
+                continue
+            try:
+                if _outcome_of(json.loads(path.read_text(encoding="utf-8"))) == "trim":
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _decision_prefix(self, sid: str, record: dict, previous_name: str,
+                         previous: dict, upper_name: str = "") -> dict:
+        """One decision-only comparison policy for writes, cache and read-only recalc."""
+        series = self._series_of(record, "decision")
+        previous_series = self._series_of(previous, "decision") if isinstance(previous, dict) else []
+        if previous_name and isinstance(previous, dict):
+            a, b, source, reasons = comparison_pair(previous, record, previous_series, series)
+            comparable = source != "unknown"
+        else:
+            a = []
+            b = valid_fingerprints(record, len(series))
+            if b is not None:
+                source, reasons = "base_chat_pre_dynamic", []
+            else:
+                estimated = legacy_record_estimate(record, series)
+                b, reasons = estimated["hashes"], estimated["reasons"]
+                source = "legacy_record_estimate" if estimated["comparable"] else "unknown"
+            comparable = False
+            reasons = list(reasons) + ["no_previous_same_kind"]
+        info = self._prefix_info(sid, record.get("messages") or [],
+                                 record.get("incoming_messages") or [], previous_name, a,
+                                 upper_name, "decision", current_hashes=b,
+                                 compare_source=source, evidence_reason=reasons,
+                                 comparable_override=comparable)
+        info["cache_prefix_base"] = len(previous_series)
+        return info
 
     def _basis_of(self, sid: str, kind: str) -> tuple:
-        """落盘时挑基准：回复轮认上一份回复请求，找不到再退到任意真实请求。
-
-        v4.23（用户 m21976）：回复轮的基准是「上一份回复请求」——上一轮若是决策
-        请求，那批消息只发给了决策模型，主模型的缓存里没有。决策轮仍认任意真实
-        请求（v4.15 用户 m19439）。
-
-        A2（用户 m26791）：详情重算（recalc_cache）以前没有这条兜底，找不到上一份
-        同类就整段放弃、退回页面自己猜，于是列表上的命中数和详情里的对不上。
-        现在两边都从这里挑基准。
-        """
-        use_kind = "reply" if str(kind or "") == "reply" else "any"
-        prev_name, prev_series = self._prev_series(sid, use_kind)
-        if not prev_series and use_kind != "any":
-            prev_name, prev_series = self._prev_series(sid, "any")
-        return prev_name, prev_series
+        """严格同类：decision → decision，reply → reply，不跨模型兜底。"""
+        use_kind = "decision" if str(kind or "") == "decision" else "reply"
+        return self._prev_series(sid, use_kind)
 
     def _prefix_info(self, sid: str, messages: list, tail: list,
                      prev_name: str, prev_series: list,
-                     upper_name: str = "") -> dict:
-        """给定基准，算这份快照的公共前缀与逐条标记（A2 用户 m26791 抽出来的）。
+                     upper_name: str = "", kind: str = "reply",
+                     current_hashes: list = None, compare_source: str = "",
+                     evidence_reason: list = None, comparable_override=None) -> dict:
+        """共用的记录投影分区估计，不表示上游真实 KV 缓存命中。
 
-        落盘（_prefix_of）与详情重算（recalc_cache）都走这一条，算出来的
-        「命中 / 未命中 / 本轮输入」才是同一个数。
+        prefix/series_* 针对补齐待发的完整序列；旧 input_len/tail_flags 仍只对应
+        原 messages，兼容现有消费者，避免把外置 pending 再叠加一次。
         """
         cur_msgs = list(messages or [])
         if tail and not self._tail_equal(cur_msgs, tail):
             cur_msgs = cur_msgs + list(tail)
-        cur = [self._msg_sig(m) for m in cur_msgs]
+        cur = ([self._msg_sig(m) for m in cur_msgs]
+               if current_hashes is None else current_hashes)
+        comparable = bool(prev_name) if comparable_override is None else bool(comparable_override)
+        if not comparable:
+            prev_series = []
         prefix_len = self._common_prefix(prev_series, cur)
         # v4.26（用户 m22281）：不命中是不是裁切造成的，写进快照供页面说明。
         try:
-            trim_btw = self._trim_between(sid, prev_name, upper_name)
+            trim_btw = (self._decision_trim_between(sid, prev_name, upper_name)
+                        if str(kind or "") == "decision"
+                        else self._trim_between(sid, prev_name, upper_name))
         except Exception:
             trim_btw = False
-        # 用户 m26142 第 4 条：中间裁过窗口的，整份都算未命中（裁切本来就把前缀打断了）。
-        # v4.56（A2）：以前这里只把 cache_prefix_len 置零，逐条标记又用原来的
-        # prefix_len 重算了一遍，覆盖回「命中」——页面上的命中数和前缀对不上。
+        # 保留既有裁切失效契约：发生过裁切就不把重建投影视为可复用前缀。
+        # trim_between 仅覆盖基准与本份之间，未来裁切不改变历史详情。
         if trim_btw and prefix_len:
             prefix_len = 0
         info = {
+            "cache_partition": "prefix-v2",
+            "cache_basis_kind": "decision" if str(kind or "") == "decision" else "reply",
+            "cache_comparable": comparable,
             "cache_prefix_len": prefix_len,
             "cache_prefix_of": prev_name,
             "cache_prefix_base": len(prev_series),
             "cache_trim_between": trim_btw,
+            "cache_series_len": len(cur_msgs),
+            "cache_series_input_len": len(cur_msgs) - prefix_len,
         }
-        # v4.14（用户 m19095）：前缀之后那段还要再分一次——上一次请求之后新进来
-        # 的群消息与决策注记，是这一轮要送进去的输入，不能算冷。
-        # v4.15（用户 m19439）：决策轮也走这一套。上一轮请求过、这轮却对不上前缀
-        # 的才是冷；从没请求过的算本轮输入。两边口径统一，页面才不会出现
-        # 「决策把上次的输入当冷」。
+        if compare_source:
+            info["cache_compare_source"] = compare_source
+            info["cache_compare_evidence_reason"] = list(evidence_reason or [])
+        # 分区只依赖连续前缀，不再以最后一条 bot 回复或注记位置猜测后缀起点。
         try:
             cold, fresh, flags = self._tail_split(prev_series, list(messages or []), prefix_len)
             info["cache_cold_len"] = cold
             info["cache_input_len"] = fresh
             info["cache_tail_flags"] = flags
         except Exception:
-            # 记账出错不能拖累真实请求：这三个键不写，前端自动退回 v4.10 的二分。
+            # 记账出错不能拖累真实请求；仍保留上面的显式前缀分界与版本信息。
             pass
         return info
 
@@ -1252,8 +1225,8 @@ class RequestLog:
                 history_chars += _msg_chars(m)
             except Exception:
                 pass
-        # v4.10（用户 m17328 第 2 条）：历史消息不是全都命中。跟上一份真回复比，
-        # 从头能对上多少条才是命中的；裁切把消息搬走了，那之后的一条都对不上。
+        # prefix-v2 只比上一份回复记录投影，从首条连续一致到哪里就在哪里分区。
+        # 这是展示分界估计，不替代 provider 返回的 cached_tokens。
         prefix_info = self._prefix_of(sid, "reply", messages)
         sections = [
             {"key": "system", "label": "系统提示词", "chars": len(static_text)},
@@ -1284,6 +1257,26 @@ class RequestLog:
                 assembled.append(_d)
             else:
                 assembled.insert(_at, _d)
+        # The retained-round adapter keeps canonical user -> note in history and
+        # suppresses only duplicate Prompt bodies at the provider boundary. Forecast
+        # that narrow, already-staged branch without rewriting old records or anchors.
+        retained_ready = getattr(request, "_mdp_retained_ready", None)
+        if isinstance(retained_ready, dict) and retained_ready.get("ids"):
+            from ..window.buffer import ids_of
+            retained_ids = set(retained_ready["ids"])
+            forecast_seq = []
+            for prompt in getattr(request, "user_prompt", None) or []:
+                nm = getattr(prompt, "name", "") or ""
+                text = prompt.to_string()
+                original = getattr(prompt, "content", "")
+                mids = ids_of([{"role": "user", "content": original}]) if nm == "message" else set()
+                if mids and mids <= retained_ids:
+                    if not isinstance(original, str) or not text.startswith(original):
+                        raise ValueError("retained forecast prompt changed after staging")
+                    text = text[len(original):]
+                forecast_seq.append((nm, text))
+            assembled = self._assemble(static_text, messages, relocated_text, [],
+                                       tail_dynamic, forecast_seq)
         # 这一轮真正发出去的东西有多大（文本 JSON 的 UTF-8 字节数）。
         # 页面原来只有 token 和字符数，用户想直接看到体积（用户 m32956 图7）。
         # 注意：图片在发送前才被框架换成 base64，这里算的是文本部分。
@@ -1407,6 +1400,7 @@ class RequestLog:
                 )
             ),
             "assembled": assembled,
+            **({"reply_projection": "retained_round_forecast"} if retained_ready else {}),
             **({"assembled_with_native": assembled_with_native,
                 "native_projection": native_projection,
                 "incoming_with_native": incoming_with_native,
@@ -1473,6 +1467,9 @@ class RequestLog:
             if path.exists():
                 suffix = hashlib.sha256(str(record.get("event_id") or "").encode()).hexdigest()[:12]
                 path = folder / f"{int(record['ts'] * 1000)}_{suffix}.json"
+            if _outcome_of(record) == "decision":
+                previous_name, previous = self._decision_basis_before(sid, path.name)
+                record.update(self._decision_prefix(sid, record, previous_name, previous, path.name))
             # H03：写进临时文件再替换；这一步失败才算「没写成」。
             _atomic_write_text(path, json.dumps(record, ensure_ascii=False, indent=2))
         except Exception:
@@ -1488,12 +1485,13 @@ class RequestLog:
             if oc != "trim":
                 kind = "decision" if oc == "decision" else "reply"
                 arr = self._series_of(record)
-                if isinstance(arr, list) and arr:
+                if isinstance(arr, list):
                     sigs = [self._msg_sig(m) for m in arr]
-                    self._prev_cache[(sid, kind)] = (path.name, sigs)
-                    # v4.15：前缀基准改成「最近一次任意真实请求」，这里要一起刷新，
-                    # 否则本轮 stage 时缓存下来的空值会让下一轮永远拿不到基准。
-                    self._prev_cache[(sid, "any")] = (path.name, sigs)
+                    if kind == "decision":
+                        # An out-of-order import must not replace the newest cached baseline.
+                        self._prev_cache[(sid, kind)] = self._decision_basis_before(sid, "~")
+                    else:
+                        self._prev_cache[(sid, kind)] = (path.name, sigs)
         except Exception:
             logger.exception("[multi-decision] 刷新请求前缀基准失败（快照已落盘）")
         try:
@@ -1696,8 +1694,8 @@ class RequestLog:
                 hist_msgs = msgs[:len(msgs) - k]
                 hist_disp = disp[:len(disp) - k]
                 dec_split = True
-        # 决策是 fast 模型、回复是主模型，缓存不共享，所以这里只跟上一次决策比。
-        dec_prefix = self._prefix_of(sid, "decision", msgs, inc)
+        # 分区只跟上一份决策记录投影比；不以回复请求代替可比基准。
+        dec_prefix = {}  # Compute from the completed record below, not display rows alone.
         parts = [str(x) for x in (data.get("system_parts") or []) if str(x).strip()]
         names = []
         for part in parts:
@@ -1866,6 +1864,10 @@ class RequestLog:
             # 页面 traceChips / traceHtml / traceRawText 都认这套键。
             "trace": dec_trace,
         }
+        if "chat_comparison" in data:
+            record["chat_comparison"] = copy.deepcopy(data["chat_comparison"])
+        record.update(self._prefix_of(sid, "decision", msgs, inc, record=record,
+                                      upper_name=f"{int(now * 1000)}.json"))
         return self._save_round(sid, record, ledger=False) or ""
 
     # ---------------------------------------------- 调用轨迹合并（v3.64，用户 m18870）
