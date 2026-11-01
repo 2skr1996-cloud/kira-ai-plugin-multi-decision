@@ -29,7 +29,8 @@ from core.logging_manager import get_logger
 from ..state.sids import normalize_sid
 from .buffer import (WindowState, clone_message, ids_of, merge_framework_messages,
                      merge_trusted_messages, split_emoji_marks)
-from .split import expand_packed_messages, regroup_images, with_owned_images
+from .split import (expand_packed_messages, regroup_images, with_owned_images,
+                    mention_results, normalize_mention_content)
 from .summary import body_of, build_lines, drop_overlap, merge_summary
 from .trim import (
     count_messages,
@@ -2644,7 +2645,7 @@ def _src_digest(path: Path) -> str:
         st = path.stat()
     except OSError:
         return ""
-    key = (str(path), int(st.st_size), int(st.st_mtime))
+    key = (str(path), int(st.st_size), int(st.st_mtime_ns))
     hit = _DERIVE_SHA_CACHE.get(key)
     if hit:
         return hit
@@ -2732,7 +2733,43 @@ def _prune_derived(root: Path) -> None:
             pass
 
 
-def _derive_media(rel: str, gif_mode: str = "grid") -> Optional[dict]:
+def _valid_derived_file(target: Path, source_size=None) -> bool:
+    """只验证已有 JPEG；不依赖源图，不抽帧/重编码。"""
+    try:
+        size = target.stat().st_size
+        if size <= 4 or (source_size is not None and size >= source_size):
+            return False
+        # 同名不等于有效；拒绝空文件、截断和同大小坏文件，再从源图重建。
+        with target.open("rb") as fh:
+            if fh.read(2) != b"\xff\xd8":
+                return False
+            fh.seek(-2, 2)
+            if fh.read(2) != b"\xff\xd9":
+                return False
+        from PIL import Image
+        with Image.open(target) as ready:
+            if ready.format != "JPEG":
+                return False
+            ready.verify()
+    except Exception:
+        return False
+    return True
+
+
+def _read_derived_hit(droot: Path, digest: str, tag: str, note: str = "", source_size=None) -> Optional[dict]:
+    """内存缓存失效/热重载后先复用完整 JPEG，不再次抽帧或编码。"""
+    name = "mdp_%s_%s.jpg" % (digest[:32], tag)
+    target = droot / name
+    if not _valid_derived_file(target, source_size):
+        return None
+    try:
+        os.utime(target, None)
+    except OSError:
+        pass
+    return {"path": _DERIVE_DIR + "/" + name, "note": note}
+
+
+def _derive_media(rel: str, gif_mode: str = "grid", *, _noop=None) -> Optional[dict]:
     """把一张历史图做成「便宜又看得懂」的一份，返回 {path, note}；不需要或不支持就 None。
 
     动图按 gif_mode 分三档（v4.45，用户 m22611）：grid → 九宫格 + 一句说明；
@@ -2763,6 +2800,9 @@ def _derive_media(rel: str, gif_mode: str = "grid") -> Optional[dict]:
         return None
     if src_size <= 0:
         return None
+    digest = _src_digest(src)
+    if not digest:
+        return None
     try:
         from PIL import Image
     except Exception:
@@ -2772,56 +2812,72 @@ def _derive_media(rel: str, gif_mode: str = "grid") -> Optional[dict]:
     except Exception:
         return None
     try:
-        frames = int(getattr(im, "n_frames", 1) or 1)
-    except Exception:
-        frames = 1
-    note = ""
-    if frames > 1:
-        mode = str(gif_mode or "grid").strip().lower()
-        if mode == "original":
-            return None
-        if mode == "skip":
-            # 三个开关全关：这张动图不发，正文里那条 [图片] 就留着当占位
-            return {"skip": True,
-                    "note": "（这张是动图，按设置没有发给模型）"}
-        if mode == "first":
+        try:
+            frames = int(getattr(im, "n_frames", 1) or 1)
+        except Exception:
+            frames = 1
+        note = ""
+        if frames > 1:
+            mode = str(gif_mode or "grid").strip().lower()
+            if mode == "original":
+                if _noop is not None:
+                    _noop.append(True)
+                return None
+            if mode == "skip":
+                # 三个开关全关：这张动图不发，正文里那条 [图片] 就留着当占位
+                return {"skip": True,
+                        "note": "（这张是动图，按设置没有发给模型）"}
+            if mode == "first":
+                tag = "f%d_%d" % (_DERIVE_STATIC_SIDE, _DERIVE_STATIC_Q)
+                note = "（动图 · 共 %d 帧，只发了第 1 帧，后面的帧没发）" % frames
+                hit = _read_derived_hit(droot, digest, tag, note)
+                if hit:
+                    return hit
+                try:
+                    blob = _shrink_jpeg(im)
+                except Exception:
+                    return None
+            else:
+                k = max(1, min(_DERIVE_MAX_FRAMES, frames))
+                cols = 1 if k == 1 else (2 if k <= 4 else 3)
+                rows = int(math.ceil(k / float(cols)))
+                tag = "g%d_%d_%d" % (k, _DERIVE_TILE, _DERIVE_GRID_Q)
+                note = "（动图 · 共 %d 帧，上面是等距抽的 %d 帧拼图，%d×%d，从左到右、从上到下）" % (
+                    frames, k, cols, rows)
+                hit = _read_derived_hit(droot, digest, tag, note)
+                if hit:
+                    return hit
+                try:
+                    blob, cols, rows, k = _grid_jpeg(im, frames)
+                except Exception:
+                    return None
+        else:
+            if src_size <= _DERIVE_STATIC_MIN:
+                if _noop is not None:
+                    _noop.append(True)
+                return None
+            tag = "s%d_%d" % (_DERIVE_STATIC_SIDE, _DERIVE_STATIC_Q)
+            hit = _read_derived_hit(droot, digest, tag, note, source_size=src_size)
+            if hit:
+                return hit
             try:
                 blob = _shrink_jpeg(im)
             except Exception:
                 return None
-            tag = "f%d_%d" % (_DERIVE_STATIC_SIDE, _DERIVE_STATIC_Q)
-            note = "（动图 · 共 %d 帧，只发了第 1 帧，后面的帧没发）" % frames
-        else:
-            try:
-                blob, cols, rows, k = _grid_jpeg(im, frames)
-            except Exception:
+            if not blob or len(blob) >= src_size:
+                if _noop is not None:
+                    _noop.append(True)
                 return None
-            tag = "g%d_%d_%d" % (k, _DERIVE_TILE, _DERIVE_GRID_Q)
-            note = "（动图 · 共 %d 帧，上面是等距抽的 %d 帧拼图，%d×%d，从左到右、从上到下）" % (
-                frames, k, cols, rows)
-    else:
-        if src_size <= _DERIVE_STATIC_MIN:
-            return None
-        try:
-            blob = _shrink_jpeg(im)
-        except Exception:
-            return None
-        if not blob or len(blob) >= src_size:
-            return None
-        tag = "s%d_%d" % (_DERIVE_STATIC_SIDE, _DERIVE_STATIC_Q)
-    digest = _src_digest(src)
-    if not digest:
-        return None
+    finally:
+        im.close()
     name = "mdp_%s_%s.jpg" % (digest[:32], tag)
     try:
         droot.mkdir(parents=True, exist_ok=True)
         target = droot / name
-        if target.is_file() and target.stat().st_size == len(blob):
-            os.utime(target, None)
-        else:
-            tmp = droot / (name + ".tmp")
-            tmp.write_bytes(blob)
-            os.replace(tmp, target)
+        # 走到编码说明旧派生不存在或已损坏，不能只因同大小便保留坏文件。
+        tmp = droot / (name + ".tmp")
+        tmp.write_bytes(blob)
+        os.replace(tmp, target)
         _prune_derived(droot)
         return {"path": _DERIVE_DIR + "/" + name, "note": note}
     except Exception:
@@ -2839,14 +2895,22 @@ def _derive_cached(rel: str, gif_mode: str = "grid"):
         if root is not None and rel:
             src = (root / str(rel).replace("\\", "/"))
             st = src.stat()
-            key = (str(rel), int(st.st_size), int(st.st_mtime),
+            key = (str(rel), int(st.st_size), int(st.st_mtime_ns),
                    str(gif_mode or "grid"))
     except Exception:
         key = None
+    if str(rel or "").replace("\\", "/").startswith(_DERIVE_DIR + "/"):
+        return None  # 派生 JPEG 绝不能再压一遍
     if key is not None and key in _DERIVE_MEMO:
-        return _DERIVE_MEMO[key]
-    res = _derive_media(rel, gif_mode)
-    if key is not None:
+        hit = _DERIVE_MEMO[key]
+        target = str((hit or {}).get("path") or "")
+        if not target or _valid_derived_file(root / target):
+            return hit
+        _DERIVE_MEMO.pop(key, None)  # 缺失/损坏的 JPEG 都必须重建，不能把坏字节发出去
+    noop = []
+    res = _derive_media(rel, gif_mode, _noop=noop)
+    # 缓存正常“不需衍生”，但不能把暂时解码/读写失败永久冻成原图。
+    if key is not None and (res is not None or noop):
         if len(_DERIVE_MEMO) > 4096:
             _DERIVE_MEMO.clear()
         _DERIVE_MEMO[key] = res
@@ -2908,83 +2972,218 @@ def _apply_derived(messages, gif_mode: str = "grid") -> List[Any]:
     return out
 
 
+def _pin_model_refs(refs, text: str, raw_sid: str) -> list:
+    """把首次有效原图固定成内容寻址副本；不改页面/窗口里的原件。"""
+    mid = _mid_of_text(text)
+    root = _data_root()
+    if not mid or not raw_sid or root is None:
+        return []
+    out, seen = [], set()
+    for ref in refs or []:
+        if not isinstance(ref, dict):
+            continue
+        rel = str(ref.get("path") or "").replace("\\", "/")
+        if not rel or rel.startswith(_DERIVE_DIR + "/"):
+            continue
+        # media_map 是接收时自留的副本，框架只接受 owned session_media 路径。
+        if not rel.startswith(_MEDIA_ROOT + "/"):
+            rel = _materialize_session_media(rel, raw_sid, mid)
+        owned = with_owned_images(text, [{**ref, "path": rel}], raw_sid)
+        parts = [p for p in owned if isinstance(p, dict) and _part_type(p) in IMAGE_TYPES] if isinstance(owned, list) else []
+        if not parts:
+            continue
+        part = parts[-1]
+        if not ensure_media_file(rel):
+            continue
+        # 固定文件内容而不只固定路径；框架后来即使覆盖同名文件也不换编码。
+        cached = _cache_media_file(root / rel, rel, raw_sid)
+        pinned = _materialize_session_media(cached, raw_sid, mid) if cached else rel
+        if not pinned or pinned in seen:
+            continue
+        # materialize 只复制文件，不登记新 owned 路径；恢复必须有精确别名。
+        if cached and _cache_media_file(root / pinned, pinned, raw_sid):
+            cache = _media_cache_root()
+            if cache is not None:
+                _index_save(cache, force=True)  # 首次固定成功才落盘，跨模块重建也能恢复
+        seen.add(pinned)
+        out.append({**part, "path": pinned})
+    return out
+
+
+def _restore_model_projection(parts) -> bool:
+    """验证完整成功投影，必要时从既有媒体备份恢复；绝不读取源 GIF。"""
+    root = _data_root()
+    if root is None:
+        return False
+    for part in parts:
+        if not isinstance(part, dict) or _part_type(part) not in IMAGE_TYPES:
+            continue
+        rel = str(part.get("path") or "")
+        try:
+            if rel.startswith(_DERIVE_DIR + "/"):
+                target = root / rel
+                if _valid_derived_file(target):
+                    _touch_cache_file(target)
+                    continue
+                # ensure_media_file 接受非空文件；先移除已证实损坏的派生图再恢复。
+                target.unlink(missing_ok=True)
+                ensure_media_file(rel)
+                if not _valid_derived_file(target):
+                    target.unlink(missing_ok=True)
+                    return False
+            elif not rel or not ensure_media_file(rel):
+                return False
+        except Exception:
+            return False
+    return True
+
+
 def attach_window_images(messages, raw_sid: str, keep: int = 128,
-                         gif_mode: str = "grid", media_map=None) -> List[Any]:
-    """给窗口里的历史消息真正挂上图片（v4.41，用户 m21746）。
+                         gif_mode: str = "grid", media_map=None, sources=None) -> List[Any]:
+    """统一模型媒体投影：首次 owned 原图固定，按模式派生，最后统一限图。
 
-    以前只有「本轮新发的那条」带图，历史里的图一律退化成 [图片] 文本——模型
-    压根不知道那张图长什么样，有人回头问「刚那张图里是什么」，它只能瞎编。
-    这里按 message_id 去 session_media 反查，把最近 keep 张真图重新挂回各自的
-    消息上，张数与决策链路同一个口径（history_images）。
-
-    形态固定：只要这条消息里有图片占位，content 一律是数组——能挂上就是
-    [text, ref...]，超出张数就是 [text]。不这么做，同一条历史消息会随「图还在
-    不在」在字符串与数组之间来回变，上游 token 序列跟着变、字符前缀整段断掉
-    （v4.25，用户 m22166 那次命中直接掉到 0.1%）。
-
-    不设体积上限（v4.44，用户 m22319）：真机 14:04/14:05 两轮各带 16.7 MB 原图，
-    上游照收；张数由 history_images 管，够不够发得出去交给压缩与上游判断，别提前替它砍图。
-
-    v4.45（用户 m22856）：带文字的图根本没有 [图片] 占位，按占位反查永远挂不上，
-    所以改成「有 message_id 就查」，查不到就原样放回去——没图的行绝不变形态。
-
-    只改发出去的那一份，窗口本体一行不动，页面上照旧看得到原图。
+    sources 是会话内按 message_id 留的固定源与成功投影（含相邻说明），绝不写回窗口/页面。
+    未准备的历史/待发/本轮都走这里；已准备的 parts 也可幂等重入、切模式。
     """
     out = list(messages or [])
-    if not raw_sid:
-        return _apply_derived(out, gif_mode)
-    # v4.46（用户 m22856）：整窗的图一次查完（目录 / 插件索引 / 消息库各走一遍），
-    # 不能一条消息查一次库——真机上那是 1.2 秒 × 条数。
+    sources = sources if sources is not None else {}
     try:
-        bulk = _media_bulk([_get(m, "content") for m in out], raw_sid)
+        bulk = _media_bulk([_get(m, "content") for m in out], raw_sid) if raw_sid else {}
     except Exception:
         bulk = {}
-    kept = 0
-    for i in range(len(out) - 1, -1, -1):
-        content = _get(out[i], "content")
-        # 已经是数组、里面就有图：只算张数，不再重复挂
-        if _has_image(content):
-            kept += sum(1 for p in content if _part_type(p) in IMAGE_TYPES)
-            continue
-        text = content if isinstance(content, str) else text_of_content(content)
-        if not text:
-            continue
+    for i, msg in enumerate(out):
+        content = _get(msg, "content")
+        text = text_of_content(content)
         mid = _mid_of_text(text)
-        extra = list((media_map or {}).get(mid) or []) if mid else []
-        # v4.45（用户 m22856）：带文字的动图/图片，正文里没有 [图片] 占位，
-        # 只看占位永远挂不上。这里不再要求「有占位」：有 message_id 就去反查，
-        # 反查到就挂（_media_by_ids 自己会走窗口索引与归档库兜底），查不到就
-        # 原样放回去——没图的行绝不变形态、不断前缀。
-        if not mid and not _PIC_TEXT_RE.search(text):
+        if not mid:
+            # 没有编号的兼容消息不做跨轮认领，仍处理其已有图片。
+            out[i] = _apply_derived([msg], gif_mode)[0]
             continue
-        refs = []
-        if keep < 0 or kept < keep:
-            refs = list(bulk.get(mid) or []) if mid else []
-            if not refs and extra:
-                for _r in extra:
-                    _p = _materialize_session_media(str(_r.get("path") or ""), raw_sid, mid)
-                    if not _p:
-                        continue
-                    refs.append({"path": _p,
-                                 "mime": str(_r.get("mime") or "")
-                                 or (mimetypes.guess_type(_p)[0] or "")})
-            if keep >= 0:
-                refs = refs[:max(0, keep - kept)]
-        if not refs and not _PIC_TEXT_RE.search(text):
-            # 没有占位的行：挂不上图就别把形态从字符串改成数组，免得白断一次前缀
+        record = sources.get(mid)
+        if record is None:
+            direct = [p for p in content if isinstance(p, dict) and _part_type(p) in IMAGE_TYPES] if isinstance(content, list) else []
+            # 接收时留的源优先于框架重新落盘的图；反查只补没有自留源的消息。
+            candidates = (media_map or {}).get(mid) or direct or bulk.get(mid) or []
+            slots, seen = [], set()
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                path = str(candidate.get("path") or "")
+                if not path or path in seen:
+                    continue
+                seen.add(path)
+                pinned = _pin_model_refs([candidate], text, raw_sid)
+                slots.append({"source": dict(candidate), "ref": pinned[0] if pinned else None})
+            refs = [slot["ref"] for slot in slots if slot["ref"] is not None]
+            if refs:
+                record = {"refs": refs, "slots": slots, "notes": set()}
+                sources[mid] = record
+        elif record.get("slots"):
+            # 同一消息的第二张图可能晚于第一张落盘；只补失败槽，不换已固定的源。
+            for slot in record["slots"]:
+                if slot["ref"] is None:
+                    pinned = _pin_model_refs([slot["source"]], text, raw_sid)
+                    if pinned:
+                        slot["ref"] = pinned[0]
+            record["refs"] = [slot["ref"] for slot in record["slots"] if slot["ref"] is not None]
+        if record is None:
+            if _PIC_TEXT_RE.search(text) and not isinstance(content, list):
+                out[i] = _with_content(msg, [{"type": "text", "text": text}])
+            else:
+                out[i] = _apply_derived([msg], gif_mode)[0]
             continue
-        try:
-            new = with_owned_images(content, refs, raw_sid, force_list=True)
-        except Exception:
-            new = content
-        if isinstance(new, list) and new != content:
-            try:
-                new = swap_derived_parts(new, gif_mode)
-            except Exception:
-                pass
-            out[i] = _with_content(out[i], new)
-            kept += sum(1 for p in new if isinstance(p, dict) and _part_type(p) in IMAGE_TYPES)
-    return _apply_derived(out, gif_mode)
+        # 来源路径可能是同张图片的原件/缓存别名，固定后才知道它们是同一份内容。
+        # 对最终 owned 路径去重，也修复热重载前已经认领出重复 refs 的记录；
+        # 范围仅限这一个 message_id，其他消息再次发同图仍各自保留。
+        refs, seen_refs = [], set()
+        for ref in record["refs"]:
+            path = str(ref.get("path") or "")
+            if path and path not in seen_refs:
+                seen_refs.add(path)
+                refs.append(ref)
+        record["refs"] = refs
+        notes = record.setdefault("notes", set())
+        parts = list(content) if isinstance(content, list) else [{"type": "text", "text": text}]
+        prepared, used = [], 0
+
+        def emit(ref):
+            # 准备成功后绑定固定源+模式，不再因一次源 stat/解码失败退回原 GIF。
+            # 保存在同一个 mid record，随 forget/trim/shutdown 回收；先准备再限图。
+            projections = record.setdefault("prepared", {})
+            key = (str(ref.get("path") or ""), str(gif_mode or "grid"))
+            ready = projections.get(key)
+            if ready is not None and _restore_model_projection(ready):
+                derived = [dict(p) for p in ready]
+            else:
+                try:
+                    if not ensure_media_file(key[0]):
+                        # 升级前已pin的存活slot可能缺新别名索引；只修复同一固定路径，
+                        # 不能把后来换内容的原framework文件当成这条消息的新源。
+                        for slot in record.get("slots", []):
+                            if str((slot.get("ref") or {}).get("path") or "") == key[0]:
+                                healed = _pin_model_refs([slot.get("source")], text, raw_sid)
+                                if healed and healed[0].get("path") == key[0]:
+                                    break
+                    derived = swap_derived_parts([dict(ref)], gif_mode)
+                except Exception:
+                    derived = [dict(ref)]
+                if derived != [ref] and _restore_model_projection(derived):
+                    projections[key] = [dict(p) for p in derived]
+                    _backup_media(derived, raw_sid)
+                    cache = _media_cache_root()
+                    if cache is not None:
+                        _index_save(cache, force=True)  # 每份成功投影仅首次/重建落盘
+                elif ready is not None or not _restore_model_projection([ref]):
+                    # 成功件暂不可恢复时也不能伪称稳定/退回 GIF；保留记录下轮重试。
+                    derived = []
+                else:
+                    derived = [dict(ref)]  # 首次失败不缓存，原图可用时兼容回退
+            for p in derived:
+                if isinstance(p, dict) and _part_type(p) == "text" and p.get("text"):
+                    notes.add(str(p["text"]))
+            prepared.extend(derived)
+
+        for j, part in enumerate(parts):
+            typ = _part_type(part)
+            note = str(part.get("text") or "") if isinstance(part, dict) and typ == "text" else ""
+            is_note = bool(note and note in notes)
+            # skip 的说明占原图位置；被限掉的单独占位也占原图位置，避免重入多一份占位。
+            is_slot = (typ in IMAGE_TYPES or
+                       (is_note and note == "（这张是动图，按设置没有发给模型）") or
+                       (j > 0 and note == IMAGE_PLACEHOLDER))
+            if is_slot:
+                if used < len(refs):
+                    emit(refs[used])
+                    used += 1
+                continue
+            if not is_note:
+                prepared.append(part)
+        for ref in refs[used:]:
+            emit(ref)
+        out[i] = _with_content(msg, prepared)
+    # 先全部准备、再从后往前按张裁；不把每条内部的多图反序。
+    limited = strip_old_images(out, keep)
+    for i, (before, after) in enumerate(zip(out, limited)):
+        original = _get(before, "content")
+        content = _get(after, "content")
+        if content is original or not isinstance(original, list) or not isinstance(content, list):
+            continue
+        mid = _mid_of_text(text_of_content(original))
+        notes = (sources.get(mid) or {}).get("notes", set())
+        already_marked = any(isinstance(p, dict) and _part_type(p) == "text"
+                             and p.get("text") != IMAGE_PLACEHOLDER
+                             and _PIC_TEXT_RE.search(str(p.get("text") or "")) for p in original)
+        drop = set()
+        for j, part in enumerate(original):
+            if _part_type(part) in IMAGE_TYPES and _part_type(content[j]) == "text":
+                # 正文已经有 [图片]，无需限图再凭空多一份独立占位；被撤掉的图也不留“上面”说明。
+                if already_marked:
+                    drop.add(j)
+                if j + 1 < len(content) and isinstance(content[j + 1], dict) and content[j + 1].get("text") in notes:
+                    drop.add(j + 1)
+        if drop:
+            limited[i] = _with_content(after, [p for j, p in enumerate(content) if j not in drop])
+    return limited
 
 
 def strip_observe(messages) -> List[Any]:
@@ -3021,8 +3220,14 @@ class WindowManager:
         # 归一 sid → 框架原始 sid（带人格前缀）。图片按 message_id 反查要用它
         self._raw_sids: dict[str, str] = {}
         self._llm_warned = False
+        # 仅保留首次提及的mid→bool，接住collect清pending到commit的短间隙。
+        # 不持有正文/媒体；每会话4096个mid、最多128个会话，清窗/退出即清。
+        self._mention_results: dict[str, dict[str, bool]] = {}
         # 热重载后把上一次实例留下的窗口接回来（同一个进程才有）
         self._keep = _keep()
+        # 模型专用原图身份随进程保活；不混进原始窗口/页面/私聊存档。
+        self._model_sources = getattr(self._keep, "model_sources", {})
+        self._keep.model_sources = self._model_sources
         # 图片缓存上限来自插件配置（用户 m10749 第 5 条），热重载后重新生效
         set_media_cache_limit(getattr(plugin, "media_cache_limit", 0))
         # 用户 m11091 第 11 条：天数 / 容量两条保留线，同样跟着配置走
@@ -3197,7 +3402,10 @@ class WindowManager:
 
     def forget(self, sid: str) -> bool:
         """丢掉某个会话的内存窗口（删会话记录时用）。"""
-        return self._states.pop(str(sid or "").strip(), None) is not None
+        sid = str(sid or "").strip()
+        self._model_sources.pop(self.raw_sid(sid), None)
+        self._mention_results.pop(sid, None)
+        return self._states.pop(sid, None) is not None
 
     def size(self, sid: str) -> int:
         st = self._states.get(sid)
@@ -3596,7 +3804,7 @@ class WindowManager:
             "text": str(text or "").strip(),
             # 框架格式化好的那一行（带 [message_id: …] 和时间戳）。下一轮采集时
             # 直接拿它当窗口消息用，格式和框架记忆里的一模一样，去重才对得上。
-            "raw": str(raw or ""),
+            "raw": self.normalize_mentions(sid, str(raw or "")),
             "media": str(media or ""),
             # 图片/表情在本地缓存好的引用（[{path, mime}]），页面拿它出缩略图
             "media_refs": [dict(r) for r in (media_refs or []) if isinstance(r, dict)],
@@ -3725,6 +3933,8 @@ class WindowManager:
         for m in framework_messages or []:
             _backup_media(_get(m, "content"))
         st = self.state(sid)
+        # 旧pending（含无标记负例）也是已固定的首次来源；清队列前保留bool。
+        self.normalize_mentions(sid, "")
         if skip_history is None:
             skip_history = sid.startswith("gm:")
         # v3.85（用户 m04418 第 2 条）：撤掉「重启后回填条数」这条设置。群聊冷启动
@@ -3763,6 +3973,7 @@ class WindowManager:
             st, clean, seed_limit=0, anchor_msg=anchor,
             require_anchor=sid.startswith("gm:"), trusted_messages=extra,
             mention_names=self.mention_names(sid),
+            mention_normalizer=lambda content: self.normalize_mentions(sid, content),
         )
         # 框架 assemble 会把整批图片都挂到最后一条 user 上（用户 m26465），
         # 入窗后按 path 里的 message_id 哈希把图挪回原主。只修被改到的消息。
@@ -3840,6 +4051,7 @@ class WindowManager:
             content = getattr(p, "content", "")
             if content in ("", None):
                 continue
+            content = self.normalize_mentions(sid, content)
             refs = [r for mid in ids_of([{"role": "user", "content": content}])
                     for r in (media_by_id or {}).get(mid, [])]
             content = with_owned_images(content, refs, self.raw_sid(sid))
@@ -3857,6 +4069,34 @@ class WindowManager:
         self.settle_decision_notes(sid)
         return len(out)
 
+    def prepare_messages(self, sid: str, messages, keep=None, media_by_id=None) -> List[Any]:
+        """只读的模型媒体出口，供决策/历史/本轮回复共用。
+
+        不清理正文/时间戳，不改原状态；无媒体的 str 保持 str。keep=None 读取
+        history_images，-1 不限张数。外部传入的 refs 只是缺源兜底，不能换掉首次源。
+        """
+        msgs = list(messages or [])
+        raw_sid = self.raw_sid(sid)
+        sources = self._model_sources.setdefault(raw_sid, {})
+        state = self._states.get(sid)
+        extra = media_map_of(_state_messages(state))
+        active = ids_of(_state_messages(state)) | ids_of(msgs)
+        for item in list(getattr(state, "pending", []) or []):
+            text = str(item.get("raw") or item.get("text") or "") if isinstance(item, dict) else ""
+            mid = _mid_of_text(text)
+            if mid:
+                active.add(mid)
+                if item.get("media_refs"):
+                    extra[mid] = list(item["media_refs"])
+        for mid, refs in (media_by_id or {}).items():
+            extra.setdefault(str(mid), refs)
+        # 窗口被裁/清理后不保留过期消息的源，也不能借缓存把它们复活。
+        for mid in list(sources):
+            if mid not in active:
+                sources.pop(mid, None)
+        want = self._int_eff("history_images", sid, 128) if keep is None else int(keep)
+        return attach_window_images(msgs, raw_sid, want, self._gif_mode(sid), extra, sources)
+
     def normalize(self, messages, sid: str = "") -> List[Any]:
         """窗口还没接管时，按窗口的格式把框架历史整理一遍（v2.32）。
 
@@ -3873,12 +4113,7 @@ class WindowManager:
         # 拆包会把整包图片都挂到最后一条，按 message_id 哈希挪回原主（v2.54）
         msgs = regroup_images(msgs)
         msgs = shrink_timestamps(msgs)
-        msgs = strip_old_images(msgs, self._int_eff("history_images", sid, 128))
-        # v4.41（用户 m21746）：历史里的图也要真发给模型，不能只留一个 [图片]。
-        msgs = attach_window_images(msgs, self.raw_sid(sid),
-                                    self._int_eff("history_images", sid, 128),
-                                    self._gif_mode(sid),
-                                    media_map_of(_state_messages(self._states.get(sid))))
+        msgs = self.prepare_messages(sid, msgs)
         # bot 自己说的话也要带时间与名字（用户 m30009 / m32754）：框架存的
         # assistant 只有 <msg message_id="…">，既没时间也没名字，模型分不清谁说的。
         # 顺序不能反：名字要落在 <msg ...> 之后，时间要落在最前面。
@@ -3886,7 +4121,7 @@ class WindowManager:
         msgs = stamp_assistant_time(msgs)
         return msgs
 
-    def snapshot(self, sid: str) -> List[Any]:
+    def snapshot(self, sid: str, *, prepare: bool = True) -> List[Any]:
         """给 agent 看的窗口快照：当前全部内容，只读不裁。
 
         中期摘要（如果启用且有内容）作为最前面的一条 user 消息插进去，
@@ -3908,12 +4143,8 @@ class WindowManager:
         # 拆包会把整包图片都挂到最后一条，按 message_id 哈希挪回原主（v2.54）
         msgs = regroup_images(msgs)
         msgs = shrink_timestamps(msgs)
-        msgs = strip_old_images(msgs, self._int_eff("history_images", sid, 128))
-        # v4.41（用户 m21746）：历史里的图也要真发给模型，不能只留一个 [图片]。
-        msgs = attach_window_images(msgs, self.raw_sid(sid),
-                                    self._int_eff("history_images", sid, 128),
-                                    self._gif_mode(sid),
-                                    media_map_of(_state_messages(self._states.get(sid))))
+        if prepare:
+            msgs = self.prepare_messages(sid, msgs)
         # bot 自己说的话也要带时间与名字（用户 m32754）：这两个函数原来只挂在
         # messages_of / normalize 上，真正发出去的 snapshot 漏了，请求原文里
         # assistant 既没有 [HH:MM] 也没有 [桃华]。
@@ -3935,7 +4166,7 @@ class WindowManager:
         本体也还没并进来；以前只给 snapshot，窗口一空就读到空记录，于是判出
         「没人说话」。这里按 collect 时同一套格式把待发接在窗口后面。
         """
-        base = self.snapshot(sid)
+        base = self.snapshot(sid, prepare=False)
         st = self._states.get(sid)
         if st is None:
             return base
@@ -3945,14 +4176,14 @@ class WindowManager:
             logger.exception("[multi-decision] 取待发失败（决策按窗口判）")
             return base
         if not pend:
-            return base
+            return self.prepare_messages(sid, base)
         pend = shrink_timestamps(pend)
         pend = self._prefix_assistant(pend, sid)
         pend = stamp_assistant_time(pend)
         out = list(base)
         for m in pend:
             out.append(self._as_openai(m))
-        return out
+        return self.prepare_messages(sid, out)
 
     def decision_incoming(self, sid: str) -> list:
         """决策这一轮真正新来的那批：还挂在「待发」里的消息（v3.97，用户 m09615 图9）。
@@ -4014,106 +4245,37 @@ class WindowManager:
             out.append(item)
         return out
 
-    def decision_images(self, sid: str, limit: Optional[int] = None) -> List[dict]:
-        """这一轮决策该看的图片（v4.39，用户 m20816）。
+    def decision_images(self, sid: str, limit=None, messages=None) -> list:
+        """按消息/part 正序提取实际模型图；绝不反查原图或跨消息按路径去重。
 
-        决策那条链是自己拼 LLMRequest 的，user 消息永远是纯文本，transcript 里的
-        图片只剩「[图片]」四个字——模型压根不知道有图。这里把窗口里的图捞出来
-        交给决策那边编成 data URL。
-
-        v4.40（用户 m21305）：不再自己定张数。跟回复那条同一个口径——窗口里留
-        几张原图（history_images，默认 128）就带几张，要少带去调那个设置。
-        显式传 limit 就按它截（0 = 不带图）。
+        messages 可传 engine 已准备的 decision_snapshot，避免重复投影/读盘。
+        skip、限图、关闭后的图不会被原始 media_list 再补回。
         """
-        st = self._states.get(sid)
-        if st is None:
+        want = self._int_eff("history_images", sid, 128) if limit is None else int(limit)
+        if want == 0:
             return []
-        if limit is None:
-            try:
-                want = int(self._int_eff("history_images", sid, 128))
-            except Exception:
-                want = 128
-        else:
-            want = int(limit or 0)
-        want = max(0, want)
-        if want <= 0:
-            return []
-        raw_sid = self._raw_sids.get(sid) or ""
-
-        def one(path, mime, text="", mid=""):
-            rel = str(path or "").strip().replace("\\", "/")
-            if not rel:
-                return None
-            ts, who = img_meta(text)
-            return {"path": rel, "mime": str(mime or ""), "ts": ts, "who": who,
-                    "mid": mid_of(text, mid)}
-
-        def mid_of(text, given=""):
-            """这张图是哪条消息发的——决策那边要按号把图挂回自己那条里（v4.64）。"""
-            key = str(given or "").strip()
-            if key:
-                return key
-            mm = _MID_RE.search(str(text or ""))
-            if mm:
-                return str(mm.group(1) or "").strip()
-            mm = _MID_ATTR_RE.search(str(text or ""))
-            return str(mm.group(1) or "").strip() if mm else ""
-
-        # ① 窗口：从尾部往前把图收齐，够 want 张就停（顺序最后再翻回正序）。
-        win_rows: List[dict] = []
-        try:
-            for msg in reversed(list(getattr(st, "messages", None) or [])):
-                if len(win_rows) >= want:
-                    break
-                role = str(_get(msg, "role") or "")
-                if role != "user":
-                    continue
-                content = _get(msg, "content")
-                # 正文和三处图片都得试：窗口里有些消息 content 是 None（只剩
-                # text / media 两个键），有些是 list parts，还有些只有 media。
-                text = text_of_content(content)
-                if not str(text or "").strip():
-                    text = str(_get(msg, "text") or _get(msg, "raw") or "")
-                found = []
-                try:
-                    found = media_list(content, raw_sid) or []
-                except Exception:
-                    found = []
-                if not found:
-                    found = [x for x in list(_get(msg, "media") or []) if isinstance(x, dict)]
-                for m in found:
-                    if m.get("missing"):
-                        continue
-                    row = one(m.get("path"), m.get("mime"), text)
-                    if row:
-                        win_rows.append(row)
-        except Exception:
-            logger.exception("[multi-decision] 取窗口图片失败（决策只看待发里的图）")
-        win_rows.reverse()
-        # ② 待发：还没并进窗口的那批，就是这一轮真正新来的。
-        pend_rows: List[dict] = []
-        try:
-            for it in list(getattr(st, "pending", []) or []):
-                if not isinstance(it, dict) or str(it.get("mark") or "") == "bot":
-                    continue
-                text = str(it.get("raw") or it.get("text") or "")
-                for m in refs_media(it.get("media_refs") or [], raw_sid):
-                    if m.get("missing"):
-                        continue
-                    row = one(m.get("path"), m.get("mime"), text, str(it.get("mid") or ""))
-                    if row:
-                        pend_rows.append(row)
-        except Exception:
-            logger.exception("[multi-decision] 取待发图片失败（决策按窗口里的图判）")
-        out: List[dict] = []
-        seen = set()
-        for row in win_rows + pend_rows:
-            key = row["path"]
-            if key in seen:
+        msgs = self.decision_snapshot(sid) if messages is None else list(messages)
+        out = []
+        for msg in msgs:
+            if str(_get(msg, "role") or "") != "user":
                 continue
-            seen.add(key)
-            out.append(row)
-        return out[-want:]
+            content = _get(msg, "content")
+            if not isinstance(content, list):
+                continue
+            text = text_of_content(content)
+            ts, who = img_meta(text)
+            mid = _mid_of_text(text)
+            for part in content:
+                if not isinstance(part, dict) or _part_type(part) != "kira_image_ref":
+                    continue
+                path = str(part.get("path") or "")
+                if path:
+                    out.append({"path": path,
+                                "mime": str(part.get("mime_type") or part.get("mime") or ""),
+                                "detail": str(part.get("detail") or "high"),
+                                "ts": ts, "who": who, "mid": mid})
+        return out if want < 0 else out[-want:]
+
 
     @staticmethod
     def _as_openai(msg):
@@ -4244,6 +4406,40 @@ class WindowManager:
         except Exception:
             pass
         return names
+
+    def normalize_mentions(self, sid: str, content):
+        """仅供首次入窗/本轮新Prompt：冻结每个mid的正负标记，不重写历史。
+
+        已有窗口和pending.raw是首次来源（旧无标记也明确为False），昵称改变
+        不追补。缓存只桥接collect→Prompt→commit，正文/媒体始终使用本次输入。
+        str/list/tuple形态和无meta内容由helper原样保留。
+        """
+        cached = self._mention_results.pop(sid, {})
+        first = {}
+        pending_ids = []
+        state = self._states.get(sid)
+        for msg in getattr(state, "messages", []) or []:
+            if (_get(msg, "role") or "") == "user":
+                for mid, marked in mention_results(_get(msg, "content")).items():
+                    first.setdefault(mid, marked)
+        for item in getattr(state, "pending", []) or []:
+            if isinstance(item, dict) and item.get("mark") != "bot":
+                for mid, marked in mention_results(str(item.get("raw") or "")).items():
+                    first.setdefault(mid, marked)
+                    pending_ids.append(mid)
+        results = dict(cached)
+        results.update(first)
+        normalized = normalize_mention_content(content, self.mention_names(sid), results)
+        # 旧窗口可随时读取，不让全窗扫描挤掉collect后仅存于缓存的pending结果。
+        for mid in cached.keys() & first.keys():
+            cached[mid] = first[mid]
+        for mid in pending_ids + list(mention_results(normalized)):
+            cached.pop(mid, None)
+            cached[mid] = results[mid]
+        self._mention_results[sid] = dict(list(cached.items())[-4096:])
+        while len(self._mention_results) > 128:
+            self._mention_results.pop(next(iter(self._mention_results)))
+        return normalized
 
     def _prefix_assistant(self, messages: List[Any], sid: str = "") -> List[Any]:
         """给机器人自己的历史消息前面加上「【名字】」。
@@ -5012,6 +5208,8 @@ class WindowManager:
     # ------------------------------------------------------------------ 收尾
 
     def clear(self, sid: str) -> None:
+        self._model_sources.pop(self.raw_sid(sid), None)
+        self._mention_results.pop(sid, None)
         self._states.pop(sid, None)
 
     def shutdown(self) -> None:
@@ -5021,6 +5219,8 @@ class WindowManager:
         except Exception:
             logger.debug("[multi-decision] 退出前私聊窗口落盘失败（已吞掉）", exc_info=True)
         self._states.clear()
+        self._model_sources.clear()
+        self._mention_results.clear()
         # 退出前把媒体索引强制落盘：不然刚备份的副本重启后找不回来
         cache = _media_cache_root()
         if cache is not None:

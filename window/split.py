@@ -181,6 +181,82 @@ def mark_block(text: str, names) -> str:
     return "\n".join(lines) if changed else text
 
 
+_MENTION_HEAD_RE = re.compile(
+    r"^\[[^\]\n]{1,32}\]\s*\[message_id:\s*([^\]]{1,200})\]"
+)
+
+
+def _map_mention_text(content, transform):
+    """只复制改动的文本part；媒体、正文与str/list/tuple形态不另行规范化。"""
+    if isinstance(content, str):
+        return transform(content)
+    if not isinstance(content, (list, tuple)):
+        return content
+    parts = list(content)
+    changed = False
+    for i, part in enumerate(parts):
+        if not isinstance(part, dict) or part.get("type") != "text":
+            continue
+        text = str(part.get("text") or "")
+        new = transform(text)
+        if new != text:
+            parts[i] = dict(part, text=new)
+            changed = True
+    if not changed:
+        return content
+    return tuple(parts) if isinstance(content, tuple) else parts
+
+
+def mention_results(content) -> dict:
+    """读取每个mid的现有标记槽（含False），不重新按昵称判断旧内容。"""
+    results = {}
+
+    def read(text):
+        for line in text.split("\n"):
+            head = _MENTION_HEAD_RE.match(line)
+            if head:
+                meta = _META_RE.match(line)
+                results.setdefault(head.group(1).strip(),
+                                   bool(meta and line[meta.end("meta"):].startswith(MARK)))
+        return text
+
+    _map_mention_text(content, read)
+    return results
+
+
+def normalize_mention_content(content, names, results):
+    """首次出现才判昵称；已知mid只复用正/负结果，不冻结整条正文或媒体。
+
+    results是调用方持有的mid→bool；只把真正新增mid的结果写回。无meta不改写，
+    昵称/正文里原有的[@你]不作为可删除的插件槽位。
+    """
+    def normalize(text):
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            head = _MENTION_HEAD_RE.match(line)
+            if not head:
+                lines[i] = mark_mention(line, names)
+                continue
+            mid = head.group(1).strip()
+            meta = _META_RE.match(line)
+            if mid not in results:
+                new = mark_mention(line, names)
+                results[mid] = bool(meta and new[meta.end("meta"):].startswith(MARK))
+                lines[i] = new
+                continue
+            if not meta:
+                continue
+            suffix = line[meta.end("meta"):]
+            marked = suffix.startswith(MARK)
+            if results[mid] and not marked:
+                lines[i] = meta.group("meta") + MARK + suffix
+            elif not results[mid] and marked:
+                lines[i] = meta.group("meta") + suffix[len(MARK):]
+        return "\n".join(lines)
+
+    return _map_mention_text(content, normalize)
+
+
 def _set_content(msg, content) -> None:
     if isinstance(msg, dict):
         msg["content"] = content
@@ -223,7 +299,7 @@ def mark_messages(messages, names) -> int:
     return changed
 
 
-def mark_copies(messages, names):
+def mark_copies(messages, names, normalizer=None):
     """给一批消息打唤醒标记，返回新列表：改过的复制一份，不动调用方手里的对象。
 
     框架给过来的消息对象是它自己的记忆条目，就地改会把标记写回框架那边，
@@ -235,23 +311,8 @@ def mark_copies(messages, names):
             out.append(msg)
             continue
         content = _get(msg, "content")
-        if isinstance(content, str):
-            new = mark_block(content, names)
-        elif isinstance(content, (list, tuple)):
-            parts = list(content)
-            hit = False
-            for i, item in enumerate(parts):
-                if not isinstance(item, dict) or item.get("type") != "text":
-                    continue
-                text = str(item.get("text") or "")
-                one = mark_block(text, names)
-                if one != text:
-                    parts[i] = dict(item, text=one)
-                    hit = True
-            new = parts if hit else content
-        else:
-            out.append(msg)
-            continue
+        new = (normalizer(content) if normalizer is not None else
+               _map_mention_text(content, lambda text: mark_block(text, names)))
         if new == content:
             out.append(msg)
             continue

@@ -47,6 +47,16 @@ except Exception:  # pragma: no cover - 只在真机上有
     LLMRequest = None  # type: ignore
 
 
+def _comparison_snapshot(messages, dynamic: str = "") -> dict:
+    """只旁路观察基础聊天；记录失败不得影响模型发送。"""
+    try:
+        from .prefix_projection import build_fingerprints
+        return build_fingerprints(messages, dynamic)
+    except Exception:
+        logger.debug("[multi-decision] 聊天比较签名不可用，退回记录估算", exc_info=True)
+        return {}
+
+
 # 决策提示词默认稿。用户 m05902 要「可以预填充一些简单通用的」，所以这里写的是一份
 # 能直接用的判断规则，不是空壳；设置页首次打开时把这段当默认值显示。
 # 用户 m01209（图2/图3）要求：决策词写成通用、偏「节奏控制」的版本——群里本来就是
@@ -1010,6 +1020,8 @@ class DecisionPhase:
         payload = [{"role": "system", "content": system_text}] + payload_msgs
         if len(payload) < 2:
             payload.append({"role": "user", "content": user_text})
+        # 只存逐条摘要，不保存 data URL；动态段与工具续轮不属于基础聊天前缀。
+        chat_comparison = _comparison_snapshot(payload[1:], dyn)
         tool_cache: dict = {}
         got = await self._chain(payload, tools, opt, tool_cache)
         parsed = got.get("parsed")
@@ -1030,6 +1042,7 @@ class DecisionPhase:
             payload = [{"role": "system", "content": system_text}] + no_img
             if len(payload) < 2:
                 payload.append({"role": "user", "content": user_text})
+            chat_comparison = _comparison_snapshot(payload[1:], dyn)
             got = await self._chain(payload, tools, opt, tool_cache)
             parsed = got.get("parsed")
             img_rows = []
@@ -1050,6 +1063,7 @@ class DecisionPhase:
             "tools_used": [str(getattr(t, "name", "")) for t in tools],
             "system_parts": system_parts,
             "transcript": body,
+            "chat_comparison": chat_comparison,
             # 用户 m06046 图3：记录页以前只拿 transcript 拼快照，动态段注没注入看不出来。
             # 这里把「真正发给模型的那条 user 消息」和它末尾追加的动态段一并交出去。
             "user_prompt": user_text,
@@ -1123,21 +1137,63 @@ class DecisionPhase:
             else:
                 loose.append(r)
         msgs = []
+        used = []
+        image_types = ("kira_image_ref", "image_url", "image", "input_image")
         for m in messages or []:
             role = str(_field(m, "role") or "").strip().lower()
             if role == "system":
                 continue
-            raw = _text_of(_field(m, "content")).strip()
+            content = _field(m, "content")
+            raw = _text_of(content).strip()
             body = "\n".join(_clean_bot(raw)) if role == "assistant" else _clean_user(raw)
             got = by_mid.pop(_mid_of_text(raw), []) if rows else []
-            if not body and not got:
-                continue
-            if got:
+            inline = isinstance(content, (list, tuple)) and any(
+                isinstance(p, dict) and p.get("type") in image_types for p in content)
+            if inline and got:
+                # 窗口已准备好 [正文, 图, 图后说明]，严格按原 part 逐项发。
+                # images 只是本轮允许带图的白名单，不能用其中的旧原图覆盖派生图。
+                parts = []
+                selected = []
+                head_cleaned = False
+                for p in content:
+                    if not isinstance(p, dict):
+                        if isinstance(p, str) and p:
+                            parts.append({"type": "text", "text": p})
+                        continue
+                    typ = p.get("type")
+                    if typ == "text" or (not typ and "text" in p):
+                        text = str(p.get("text") or "")
+                        if not head_cleaned and text.strip():
+                            text = "\n".join(_clean_bot(text)) if role == "assistant" else _clean_user(text)
+                            head_cleaned = True
+                        if text:
+                            parts.append({"type": "text", "text": text})
+                    elif typ in image_types:
+                        value = p.get("image_url")
+                        path = str(p.get("path") or p.get("url") or
+                                   (value.get("url") if isinstance(value, dict) else value) or "")
+                        row = next((r for r in got if r["path"] == path and id(r) not in selected), None)
+                        if row is not None:
+                            image = {"url": row["url"]}
+                            detail = p.get("detail") or (value.get("detail") if isinstance(value, dict) else None)
+                            if detail:
+                                image["detail"] = detail
+                            parts.append({"type": "image_url", "image_url": image})
+                            selected.append(id(row))
+                            used.append(row)
+                if selected:
+                    msgs.append({"role": role or "user", "content": parts})
+                elif body:
+                    msgs.append({"role": role or "user", "content": body})
+            elif got and not inline:
+                # 旧记录只有正文时仍按编号兜底；有 prepared refs 的消息不得补回旧图。
                 parts = [{"type": "text", "text": body or "[图片]"}]
                 for r in got:
                     parts.append({"type": "image_url", "image_url": {"url": r["url"]}})
+                    used.append(r)
                 msgs.append({"role": role or "user", "content": parts})
-            else:
+            elif body:
+                # images=None/[]（包括视觉失败后的纯文字降级）不发送 content 内图片。
                 msgs.append({"role": role or "user", "content": body})
         # 对不上号的图（老记录里没带 message_id）不丢：单独一条 user 摆在最后。
         if by_mid:
@@ -1152,6 +1208,7 @@ class DecisionPhase:
                                                "看清楚再决定要不要接话：")}]
             for r in loose:
                 parts.append({"type": "image_url", "image_url": {"url": r["url"]}})
+                used.append(r)
             msgs.append({"role": "user", "content": parts})
         if dyn:
             for i in range(len(msgs) - 1, -1, -1):
@@ -1161,16 +1218,12 @@ class DecisionPhase:
                 if isinstance(c, str):
                     msgs[i]["content"] = (c + "\n\n" + dyn) if c else dyn
                 else:
-                    for part in c:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            part["text"] = (str(part.get("text") or "") + "\n\n" + dyn).strip()
-                            break
-                    else:
-                        c.append({"type": "text", "text": dyn})
+                    # 动态内容在整条消息最末尾，不插到图和固定说明之前。
+                    c.append({"type": "text", "text": dyn})
                 break
             else:
                 msgs.append({"role": "user", "content": dyn})
-        return msgs, [dict((k, v) for k, v in r.items() if k != "url") for r in rows]
+        return msgs, [dict((k, v) for k, v in r.items() if k != "url") for r in used]
 
     def status(self) -> dict:
         return {

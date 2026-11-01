@@ -475,7 +475,8 @@ def patch_forward_shells(messages) -> List[Any]:
 
 def merge_framework_messages(state: WindowState, framework_messages, seed_limit: int = 0,
                              anchor_msg=None, require_anchor: bool = False,
-                             trusted_messages=None, mention_names=None) -> int:
+                             trusted_messages=None, mention_names=None,
+                             mention_normalizer=None) -> int:
     """把框架这次给的历史增量并进窗口缓冲，返回新增条数。
 
     - 先拆包：框架常把一批群消息拼成一条 user，窗口里一条一条存
@@ -488,11 +489,10 @@ def merge_framework_messages(state: WindowState, framework_messages, seed_limit:
     自己写进窗口的，框架历史里没有它，拿它当锚点必然对不上，于是每轮都退化成
     「只补最后一条」，中间新增的消息全丢。调用方要把最后一条非注记消息传进来。
 
-    mention_names：唤醒标记用的名字（主名 + 外号）。给了就把窗口里所有用户消息
-    重扫一遍：标记落在窗口本体上，页面、决策记录、回复请求三处看到的是同一份，
-    不会出现「刚收到那条有、被框架历史覆盖之后就没了」（用户 m12833）。
+    mention_names：只给新增incoming/trusted副本打标，绝不追改已发送的窗口旧行。
+    mention_normalizer：复用首次pending/入窗的正负结果，避免改昵称后同mid重判。
     """
-    from .split import expand_packed_messages, mark_copies, mark_messages
+    from .split import expand_packed_messages, mark_copies
 
     # 老窗口里还留着「一条 assistant 塞好几段 <msg>」的形态（v2.57 之前只拆 user）。
     # 每次 collect 顺手迁移一次，条数和页面当场就对了，不用等窗口重来。
@@ -519,13 +519,6 @@ def merge_framework_messages(state: WindowState, framework_messages, seed_limit:
         if empty_gone:
             state.messages = kept
             logger.debug("[multi-decision] 窗口清掉空回复 %d 条", empty_gone)
-        # 存量补标记：老窗口里那些行本来没标，也不会自己长出来，每轮顺手扫一次
-        # （幂等，已经带标记的行原样跳过）。用户 m12833：@你 只在刚收到那一阵显示，
-        # 被框架历史覆盖之后就没了。
-        if mention_names:
-            marked = mark_messages(state.messages, mention_names)
-            if marked:
-                logger.debug("[multi-decision] 窗口补唤醒标记 %d 条", marked)
 
     incoming = expand_packed_messages([
         m for m in (framework_messages or [])
@@ -538,9 +531,9 @@ def merge_framework_messages(state: WindowState, framework_messages, seed_limit:
     incoming, _gone_in = drop_empty_bot_replies(incoming)
     trusted, _gone_tr = drop_empty_bot_replies(trusted)
     # 打标走副本：框架给的消息对象是它自己的记忆条目，就地改会把 [@你] 写回框架那边
-    if mention_names:
-        incoming = mark_copies(incoming, mention_names)
-        trusted = mark_copies(trusted, mention_names)
+    if mention_names or mention_normalizer is not None:
+        incoming = mark_copies(incoming, mention_names, mention_normalizer)
+        trusted = mark_copies(trusted, mention_names, mention_normalizer)
     seen_before = set(state.framework_seen_ids)
     # 记录框架确实回传过的身份，而不是仅记当前保留的窗口。去重表有界、无正文。
     seen_order = dict.fromkeys(state.framework_seen_ids)
