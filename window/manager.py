@@ -3108,7 +3108,7 @@ def attach_window_images(messages, raw_sid: str, keep: int = 128,
 
         def emit(ref):
             # 准备成功后绑定固定源+模式，不再因一次源 stat/解码失败退回原 GIF。
-            # 保存在同一个 mid record，随 forget/trim/shutdown 回收；先准备再限图。
+            # 保存在同一个 mid record，同进程热重载保留；随 clear/forget/trim 回收，先准备再限图。
             projections = record.setdefault("prepared", {})
             key = (str(ref.get("path") or ""), str(gif_mode or "grid"))
             ready = projections.get(key)
@@ -4096,6 +4096,22 @@ class WindowManager:
                 sources.pop(mid, None)
         want = self._int_eff("history_images", sid, 128) if keep is None else int(keep)
         return attach_window_images(msgs, raw_sid, want, self._gif_mode(sid), extra, sources)
+
+    def prepared_media_counts(self, sid: str, messages) -> dict:
+        """Fixed source coverage for these prepared messages, before GIF/quota policy.
+
+        A text-only placeholder or a legacy refs-only record is not evidence.
+        Every known source slot must be pinned; aliases count only once.
+        """
+        sources = self._model_sources.get(self.raw_sid(sid), {})
+        counts = {}
+        for mid in ids_of(messages):
+            slots = (sources.get(mid) or {}).get("slots") or []
+            refs = [slot.get("ref") for slot in slots]
+            if not refs or any(not isinstance(ref, dict) or not ref.get("path") for ref in refs):
+                continue
+            counts[mid] = len({str(ref["path"]) for ref in refs})
+        return counts
 
     def normalize(self, messages, sid: str = "") -> List[Any]:
         """窗口还没接管时，按窗口的格式把框架历史整理一遍（v2.32）。
@@ -5219,7 +5235,7 @@ class WindowManager:
         except Exception:
             logger.debug("[multi-decision] 退出前私聊窗口落盘失败（已吞掉）", exc_info=True)
         self._states.clear()
-        self._model_sources.clear()
+        self._model_sources = {}  # 仅断开旧实例引用，不清空热重载寄存处
         self._mention_results.clear()
         # 退出前把媒体索引强制落盘：不然刚备份的副本重启后找不回来
         cache = _media_cache_root()

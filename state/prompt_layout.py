@@ -340,7 +340,18 @@ class PromptLayouts:
         mods = doc.get("modules")
         if not isinstance(mods, list):
             return doc
-        if any(str(m.get("type") or "") == "persona" for m in mods if isinstance(m, dict)):
+        def has_persona(m):
+            if not isinstance(m, dict):
+                return False
+            if str(m.get("type") or "") == "persona":
+                return True
+            # 旧布局的 persona 可能是文本覆盖，或框架原段里的 persona。
+            if str(m.get("id") or "") == "reply-persona-text":
+                return True
+            return (str(m.get("type") or "") == "framework"
+                    and seg_key(m.get("key")) == "persona")
+
+        if any(has_persona(m) for m in mods):
             return doc
         insert_at = 0
         if kind == "reply":

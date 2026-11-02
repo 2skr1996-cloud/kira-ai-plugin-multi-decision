@@ -368,6 +368,65 @@ def _fw_items(element) -> list:
     return []
 
 
+def _media_targets(chain) -> Optional[list]:
+    """Enumerate the complete image source, or None when it cannot be proven.
+
+    Cache and coverage share host-order traversal of Reply.chain and Forward
+    message chains. Do not deduplicate or apply GIF/quota policy here; an unknown,
+    cyclic or over-deep container must never authorize dropping native media.
+    """
+    targets, active = [], set()
+
+    def visit(chain, depth):
+        if depth > 64 or id(chain) in active:
+            return False
+        if _fw_is_chain(chain):
+            elements = chain.message_list
+        elif isinstance(chain, (list, tuple)):
+            elements = chain
+        else:
+            return False
+        active.add(id(chain))
+        try:
+            for element in elements:
+                if isinstance(element, (Image, Sticker)):
+                    targets.append(element)
+                elif _looks_forward(element):
+                    items = _fw_items(element)
+                    if not items:
+                        return False
+                    for item in items:
+                        if _fw_is_chain(item):
+                            subchain = item
+                        else:
+                            subchain = None
+                            for attr in ("chain", "message_chain", "message_list"):
+                                value = (item.get(attr) if isinstance(item, dict)
+                                         else getattr(item, attr, None))
+                                if value is not None:
+                                    subchain = value
+                                    break
+                        if not visit(subchain, depth + 1):
+                            return False
+                elif type(element).__name__ == "Reply":
+                    subchain = getattr(element, "chain")
+                    if subchain is not None and not visit(subchain, depth + 1):
+                        return False
+                elif isinstance(element, (list, tuple, dict)) or any(
+                    hasattr(element, attr)
+                    for attr in ("chain", "chains", "message_chain", "message_list")
+                ):
+                    return False
+            return True
+        finally:
+            active.remove(id(chain))
+
+    try:
+        return targets if visit(chain, 0) else None
+    except Exception:
+        return None
+
+
 def _fw_body(item, depth: int = 0) -> str:
     if _fw_is_chain(item):
         # MessageChain：message_list 第一段就是「[时间] 昵称: 」，正文直接带上它，
@@ -1326,12 +1385,19 @@ class DecisionEngine:
             if now - logged_at > 900:
                 self._round_end_logged.pop(key, None)
 
+        # A retry reusing the host Request needs a new successful ownership proof.
+        # Clear only our marker before any await/collection that may fail.
+        self._reply_media.unstage(request)
+        request._mdp_reply_projection = None
+        if hasattr(request, "_mdp_retained_ready"):
+            delattr(request, "_mdp_retained_ready")
         epoch = flow.epoch
         media_by_id = await self._incoming_media(event, request, sid)
         if (self._closed or flow.epoch != epoch or flow.phase != "active"
                 or self._active_rounds.get(sid) != eid or (sid, eid) in self._settled_rounds):
             return
         framework = list(getattr(request, "messages", None) or [])
+        window_owned = False
         if self._c("window_enabled", sid) and self.window is not None:
             is_group = sid.startswith("gm:")
             added = self.window.collect(
@@ -1379,6 +1445,9 @@ class DecisionEngine:
                 # 私聊窗口还没接到消息时，仍按窗口的格式整理框架历史，
                 # 否则这轮发长格式时间戳、下轮接管后发短格式，前缀整段作废（v2.32）
                 request.messages = self.window.normalize(framework, sid)
+            # Authorization comes from this successful collect/snapshot takeover,
+            # never from matching text, an old decision note or a request attribute.
+            window_owned = True
 
         # 原生图片引用必须指向真实存在的文件（用户 m05205）：框架的
         # resolve_media_references 遇到被清理掉的图会抛 ValueError，而这一抛
@@ -1423,7 +1492,7 @@ class DecisionEngine:
 
         # 原始本轮先入窗；模型侧再统一投影，别把派生图与说明写回页面/存档。
         try:
-            self._prepare_reply_media(request, sid, media_by_id, event=event)
+            self._prepare_reply_media(request, sid, media_by_id, event=event, window_owned=window_owned)
         except Exception:
             logger.exception(f"[multi-decision] {sid} 本轮图片准备失败（保留原请求）")
             if getattr(request, "_mdp_retained_round", None):
@@ -1435,7 +1504,7 @@ class DecisionEngine:
                     delattr(request, "_mdp_retained_ready")
                 self._drop_incoming(request)
                 try:
-                    self._prepare_reply_media(request, sid, media_by_id, event=event)
+                    self._prepare_reply_media(request, sid, media_by_id, event=event, window_owned=window_owned)
                 except Exception:
                     self._reply_media.unstage(request)
                     logger.exception(f"[multi-decision] {sid} 本轮顺序降级准备失败（原生路径不重复正文）")
@@ -1459,6 +1528,17 @@ class DecisionEngine:
                     or (sid, eid) in self._settled_rounds):
                 return
             reply_prompt.apply(request, sid)
+
+        # Layout/dynamic relocation is final: forecast with the exact staged wire
+        # renderer, on clones, before the host appends native parts for the batch.
+        request._mdp_reply_projection = None
+        try:
+            request._mdp_reply_projection = self._reply_media.project_messages(
+                request, dynamic_position=getattr(plugin, "dynamic_prompt_position", "latest_user"),
+                memory_position=getattr(plugin, "memory_prompt_position", "system"))
+        except Exception:
+            # No false managed forecast; keep the staged send guard fail-closed.
+            logger.exception(f"[multi-decision] {sid} 回复媒体预测失败（不记录受控投影）")
 
         st = self._states.get(sid)
         decision_passed = bool(getattr(st, "decision_passed", False))
@@ -1766,16 +1846,27 @@ class DecisionEngine:
                     content = "".join(str(p.get("text") or "") for p in content
                                       if isinstance(p, dict) and p.get("type") == "text")
                 return shrink_timestamp(strip_group_tags(str(content or ""))).strip()
-            def native_at_text(content, mid):
-                # Pending text uses @nickname; host formatting may differ from At.repr.
+            def native_protocol_text(content, mid):
+                # Pending labels and host formatting differ only at proven native slots.
                 # Only this message's real top-level elements can prove equivalence.
                 batch = [m for m in getattr(event, "messages", None) or []
                          if str(getattr(m, "message_id", "") or "") == mid]
                 if len(batch) != 1:
                     return None
                 chain = list(getattr(batch[0], "chain", None) or [])
-                slots, tokens = [], set()
+                slots, tokens, media_tokens = [], set(), set()
                 for element in chain:
+                    if isinstance(element, (Image, Sticker)):
+                        event_sid = (getattr(getattr(event, "session", None), "sid", None)
+                                     or getattr(event, "sid", ""))
+                        if normalize_sid(str(event_sid or "")) != sid:
+                            return None
+                        host, pending = (("[Sticker attached]", "[表情]") if isinstance(element, Sticker)
+                                         else ("[Image attached]", "[图片]"))
+                        slots.append(({host}, pending))
+                        tokens.add(host)
+                        media_tokens.update((host, pending))
+                        continue
                     if type(element).__name__ != "At":
                         continue
                     pid = str(getattr(element, "pid", "") or "")
@@ -1795,6 +1886,9 @@ class DecisionEngine:
                 if not slots:
                     return None
                 text = original_text(content)
+                if any(token in str(getattr(e, "text", "") or "")
+                       for e in chain for token in media_tokens):
+                    return None
                 # Match every proved slot once, in native element order. Extra/literal
                 # labels, swapped targets and all other text differences still fail.
                 pattern = "|".join(re.escape(t) for t in sorted(tokens, key=len, reverse=True))
@@ -1804,6 +1898,33 @@ class DecisionEngine:
                 pieces, cursor = [], 0
                 for match, (variants, replacement) in zip(found, slots):
                     token = match.group(0)
+                    # A quoted/replied/forwarded label is not a top-level native slot.
+                    prefix = text[:match.start()]
+                    if token in media_tokens and prefix.count("[") != prefix.count("]"):
+                        # Credit only exact top-level Text proved before this native slot.
+                        prefix_parts, literal_balance, native_index = [], 0, 0
+                        slot_index = found.index(match)
+                        for element in chain:
+                            if isinstance(element, Text):
+                                literal = getattr(element, "text", None)
+                                if not isinstance(literal, str):
+                                    return None
+                                prefix_parts.append(re.escape(literal))
+                                literal_balance += literal.count("[") - literal.count("]")
+                            elif isinstance(element, (Image, Sticker)) or type(element).__name__ == "At":
+                                if native_index == slot_index:
+                                    break
+                                prefix_parts.append("(?:" + "|".join(
+                                    re.escape(t) for t in slots[native_index][0]) + ")")
+                                native_index += 1
+                            else:
+                                return None
+                        else:
+                            return None
+                        _, delimiter, body_prefix = prefix.partition(" | ")
+                        if (not delimiter or prefix.count("[") - prefix.count("]") != literal_balance
+                                or re.fullmatch("".join(prefix_parts), body_prefix) is None):
+                            return None
                     if token not in variants or any(
                             token in str(getattr(e, "text", "") or "")
                             for e in chain if type(e).__name__ != "At"):
@@ -1826,7 +1947,7 @@ class DecisionEngine:
                 if mid in ordered or len(raw_matches) != 1 or len(positions) != 1:
                     return False
                 source_text = original_text(get(raw_matches[0], "content"))
-                if source_text != original_text(part) and source_text != native_at_text(part, mid):
+                if source_text != original_text(part) and source_text != native_protocol_text(part, mid):
                     return False
                 ordered.append(mid)
                 message_hashes.append(hashlib.sha256(source_text.encode("utf-8")).hexdigest())
@@ -1960,8 +2081,34 @@ class DecisionEngine:
             logger.debug(f"[multi-decision] 本轮消息拆成 {changed} 条")
         return changed
 
-    def _prepare_reply_media(self, request, sid: str, media_by_id=None, *, event=None) -> int:
+    def _plain_reply_media_covered(self, sid: str, prepared, event) -> bool:
+        """Authorize a plain anchor only for fully covered original attachments."""
+        required = {}
+        try:
+            for message in getattr(event, "messages", None) or []:
+                targets = _media_targets(getattr(message, "chain", None))
+                if targets is None:
+                    return False
+                total = len(targets)
+                if total:
+                    mid = str(getattr(message, "message_id", "") or "")
+                    if not mid:
+                        return False
+                    required[mid] = required.get(mid, 0) + total
+        except Exception:
+            return False
+        if not required:
+            return True
+        coverage = getattr(self.window, "prepared_media_counts", None)
+        counts = coverage(sid, prepared) if callable(coverage) else {}
+        return all(counts.get(mid, 0) >= total for mid, total in required.items())
+
+    def _prepare_reply_media(self, request, sid: str, media_by_id=None, *, event=None, window_owned=False) -> int:
         """模型历史/本轮共用一次限图；宿主原始 Prompt 始终保持字符串。"""
+        self._reply_media.unstage(request)
+        request._mdp_reply_projection = None
+        if hasattr(request, "_mdp_retained_ready"):
+            delattr(request, "_mdp_retained_ready")
         if self.window is None:
             return 0
         prompts = getattr(request, "user_prompt", None)
@@ -1993,15 +2140,22 @@ class DecisionEngine:
                 ready.append(prepared[offset])
                 offset += 1
         descriptor = dict(retained, ids=kept_ids) if kept_ids else None
+        controlled = bool(window_owned)
+        if controlled:
+            # Source coverage, not output shape/count: quota zero and GIF skip are
+            # still managed, but missing/partial sources must leave native media alone.
+            controlled = self._plain_reply_media_covered(sid, prepared, event)
         # Stage snapshots the prepared history, never list-valued Prompt.content.
         original = getattr(request, "messages", None)
         request.messages = prepared[:len(history)]
         try:
-            count = self._reply_media.stage(request, ready, event=event, retained=descriptor)
+            count = self._reply_media.stage(
+                request, ready, event=event, retained=descriptor, controlled=controlled)
             if descriptor:
                 request._mdp_retained_ready = dict(descriptor)
             return count
         except Exception:
+            self._reply_media.unstage(request)
             request.messages = original
             raise
 
@@ -2253,6 +2407,10 @@ class DecisionEngine:
             self._drop_pending_round(st)
         flow = self._input_flow(sid)
         async with flow.lock:
+            # Explicit reset invalidates the old final as well as its decision epoch.
+            for eid in (flow.event_id, self._active_rounds.get(sid, "")):
+                if eid:
+                    self._settled_rounds[(sid, eid)] = time.time()
             flow.epoch += 1
             flow.ready.clear()
             flow.active.clear()
@@ -2261,6 +2419,8 @@ class DecisionEngine:
             flow.event_id = ""
             flow.sent_ids.clear()
             if st is not None:
+                st.last_error = ""
+                st.last_error_at = 0.0
                 st.busy = False
                 st.busy_since = 0.0
                 st.queued = False
@@ -2395,7 +2555,7 @@ class DecisionEngine:
                 return bot
         return None
 
-    async def _hydrate_forwards(self, message) -> int:
+    async def _hydrate_forwards(self, message, *, raw_sid=None) -> int:
         """把空壳转发补成真内容（框架 im.py 把 message_id 当成 res_id 传给 get_forward_msg，
         取不到就 Forward(chains=[])）。必须在 _admit_message 取正文之前做。"""
         try:
@@ -2435,7 +2595,7 @@ class DecisionEngine:
         try:
             if not need and media_for_mid(mid):
                 return 0
-            items = await fetch_forward_items(bot, mid)
+            items = await fetch_forward_items(bot, mid, raw_sid=raw_sid)
         except Exception as exc:
             logger.info("[multi-decision] 空转发补取异常 mid=%s：%s: %s" % (mid, type(exc).__name__, exc))
             return 0
@@ -2444,7 +2604,9 @@ class DecisionEngine:
             return 0
         for el in need:
             try:
-                setattr(el, "chains", list(items))
+                from core.chat.message_utils import MessageChain
+
+                setattr(el, "chains", [MessageChain([Text(item["message_str"])]) for item in items])
             except Exception:
                 continue
         try:
@@ -2520,7 +2682,7 @@ class DecisionEngine:
         # 空壳合并转发：框架只留了 {"type":"forward"}，这里自己问 NapCat 要回内容
         # （用户 m12494）。失败就保持原样，前端照旧画「内容未获取」，不编内容。
         try:
-            await self._hydrate_forwards(message)
+            await self._hydrate_forwards(message, raw_sid=getattr(getattr(event, "session", None), "sid", None))
         except Exception:
             logger.exception("[multi-decision] 转发补取失败（已忽略）")
 
@@ -2804,28 +2966,9 @@ class DecisionEngine:
         这里收到消息就存，返回 [{path, mime}]，路径相对 data 目录。
         """
         try:
-            chain = getattr(message, "chain", None) or []
+            targets = _media_targets(getattr(message, "chain", None))
         except Exception:
             return []
-        targets = []
-        for el in chain:
-            if isinstance(el, (Image, Sticker)):
-                targets.append(el)
-                continue
-            # v4.20（用户 m21435）：合并转发里的图也要一起存。框架把子消息挂在
-            # Forward.chains 的 MessageChain 里，只取顶层等于把整段转发的图丢掉，
-            # 页面上那条「合并转发 · N 条」的弹层就只能显示「[图片]」占位。
-            if _looks_forward(el):
-                for item in _fw_items(el):
-                    if _fw_is_chain(item):
-                        subs = getattr(item, "message_list", None) or []
-                    elif isinstance(item, dict):
-                        subs = item.get("chain") or item.get("message_chain") or []
-                    else:
-                        subs = [item]
-                    for one in subs:
-                        if isinstance(one, (Image, Sticker)):
-                            targets.append(one)
         if not targets:
             return []
         try:
@@ -3227,6 +3370,7 @@ class DecisionEngine:
             if eid and (sid in self._retry_roots or (st is not None and st.retry_at > 0)):
                 # An exception hook may have scheduled retry before its late final arrives.
                 self._cleared_retry_rounds.add((sid, eid))
+                self._settled_rounds[(sid, eid)] = time.time()
         self._retry_roots.pop(sid, None)
         self._retry_events.pop(sid, None)
         if st is not None:
@@ -3351,6 +3495,7 @@ class DecisionEngine:
                 self.retry_history.finish(sid, eid, failed=False)
             self._retry_roots.pop(sid, None)
             st.last_error = ""
+            st.last_error_at = 0.0
             st.retry_at = 0.0
             st.retry_count = 0
             self._cancel_retry(sid)
@@ -4661,6 +4806,8 @@ class DecisionEngine:
             self._retry_events.pop(sid, None)
             st.retry_at = 0.0
             st.retry_count = 0
+            st.last_error = ""
+            st.last_error_at = 0.0
             if disabled:
                 self._drop_pending_round(st)
             return
@@ -5045,6 +5192,9 @@ class DecisionEngine:
         if rec["failed"] and rec["error"]:
             st.last_error = str(rec["error"])[:500]
             st.last_error_at = time.time()
+        elif not rec["failed"]:
+            st.last_error = ""
+            st.last_error_at = 0.0
         logger.info(
             "[multi-decision] %s 进阶决策判定不回：%s（%.1fs）",
             sid, rec["reason"][:60], rec["elapsed"],

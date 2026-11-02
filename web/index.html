@@ -602,6 +602,27 @@ html[data-theme="dark"] .mc-bd .fcard .fico{background:rgba(59,130,246,.22);}
     border:1px solid var(--line);border-radius:6px;background:var(--soft);font-size:11px;line-height:16px;}
   .mc-bd .fwd-sub .fwb{color:var(--accent);flex:none;}
   .mc-bd .fwd-sub .fwp{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* Native no-URL video cards also live in the detached Forward popup. */
+:is(.mc-bd,.fwd-pop) .qcard.video{display:flex;flex-direction:column;max-width:420px;min-width:0;
+  margin:0 0 7px;border:1px solid var(--line);border-radius:11px;background:var(--card);color:var(--text);
+  overflow:hidden;box-shadow:0 1px 2px rgba(16,24,40,.04);cursor:default;text-decoration:none;}
+:is(.mc-bd,.fwd-pop) .qcard.video .qc-row{display:flex;align-items:flex-start;gap:9px;padding:9px 11px;min-width:0;}
+:is(.mc-bd,.fwd-pop) .qcard.video .qc-logo{display:inline-flex;align-items:center;justify-content:center;
+  width:34px;height:34px;flex:none;border-radius:9px;background:var(--soft);border:1px solid var(--line);}
+:is(.mc-bd,.fwd-pop) .qcard.video .qc-main{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1;}
+:is(.mc-bd,.fwd-pop) .qcard.video .qc-t{font-size:13px;font-weight:600;line-height:1.45;
+  white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+:is(.mc-bd,.fwd-pop) .qcard.video .qc-ft{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  border-top:1px solid var(--line);background:var(--soft);padding:5px 11px 6px;}
+:is(.mc-bd,.fwd-pop) .qcard.video :is(.video-kind,.video-reason,.video-state){font-size:11px;line-height:16px;color:var(--muted);}
+:is(.mc-bd,.fwd-pop) .qcard.video .video-state{margin-left:auto;white-space:nowrap;}
+/* Only the video itself is compact; unrelated Forward rows keep their height. */
+:is(.mc-bd,.fwd-pop) .qcard.video.video-compact{display:inline-flex;flex-direction:row;align-items:center;gap:5px;
+  max-width:100%;padding:1px 6px;margin:0;vertical-align:middle;border-radius:6px;box-shadow:none;}
+:is(.mc-bd,.fwd-pop) .qcard.video.video-compact .qc-t{display:block;max-width:180px;min-width:0;
+  font-size:11px;line-height:16px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;}
+:is(.mc-bd,.fwd-pop) .qcard.video.video-compact :is(.video-icon,.video-state){flex:none;margin:0;}
+:is(.mc-bd,.fwd-pop) .qcard.video.video-compact .video-kind{display:none;}
 .mc-bd .at{display:inline-block;white-space:nowrap;padding:0 5px;margin:0 1px;border-radius:8px;background:rgba(59,130,246,.14);color:#1d4ed8;font-weight:600;font-size:.94em;line-height:16px;vertical-align:1px;}
 html[data-theme="dark"] .mc-bd .at{background:rgba(59,130,246,.26);color:#93c5fd;}
     /* 分享卡（v3.22 用户 m42531 图4/图5）：左图标、右标题+描述、脚下来源与「打开」，
@@ -2535,7 +2556,45 @@ var ctxSnapRequest = 0;
     // 后端 emoji_repr 拿不到 id/名字时只写个 [Emoji]，别让它以字面量露在正文里
     return out.replace(/\[Emoji\]/g, "<span class='emoji'>[表情]</span>");
   }
+  // Display-only native video tokens. Never infer a playable URL or claim image slots.
+  function nativeVideoCard(name, reason, compact){
+    var title = esc(name || "视频"), why = reason ? "<span class='video-reason'>" + esc(reason) + "</span>" : "";
+    var state = "<span class='video-state'>暂不可播放</span>";
+    if(compact) return "<span class='qcard video video-compact'><span class='video-icon' aria-hidden='true'>🎬</span>" +
+      "<span class='qc-t'>" + title + "</span><span class='video-kind'>原生视频附件</span>" + why + state + "</span>";
+    return "<div class='qcard video'><div class='qc-row'><span class='qc-logo' aria-hidden='true'>🎬</span>" +
+      "<div class='qc-main'><div class='qc-t'>" + title + "</div><div class='video-kind'>原生视频附件</div></div></div>" +
+      "<div class='qc-ft'>" + why + state + "</div></div>";
+  }
+  function nativeVideoHtml(text, renderText, compact, allowChinese){
+    var t = String(text == null ? "" : text);
+    // Only an entire protocol-only node can authorize Chinese video tokens.
+    if(allowChinese !== false && /^(?:\[视频\]\s*)+$/.test(t.trim())){
+      return (t.match(/\[视频\]/g) || []).map(function(){ return nativeVideoCard("", "", compact); }).join("");
+    }
+    if(!/\[Video (?:name:|attached\])/i.test(t)) return null;
+    // Consume code spans/fences before tokens so examples remain literal, including
+    // an unclosed fenced block. Keep the source unchanged for raw/mixed and speech.
+    var re = /(^|\n)[ \t]{0,3}(\`{3,}|~{3,})[^\n]*(?:\n|$)[\s\S]*?(?:\n[ \t]{0,3}\2[ \t]*(?=\n|$)|$)|(\`+)[\s\S]*?\3(?!\`)|\[Video name:[ \t]*([^\]\r\n]*)\]|\[Video attached\]/gi;
+    var out = "", at = 0, found = false, m;
+    while((m = re.exec(t))){
+      if(m[2] || m[3]) continue;
+      var before = t.slice(at, m.index), name = String(m[4] || "").trim(), reason = "";
+      // Only this exact historical suffix is a known cache state; filename
+      // parentheses (and any unknown suffix) are part of the actual title.
+      var known = /\s*\(Video size over 10MB, not cached\)\s*$/i;
+      if(known.test(name)){ name = name.replace(known, "").trim(); reason = "大于10MB未缓存"; }
+      if(before.trim()) out += renderText(before);
+      out += nativeVideoCard(name, reason, compact);
+      at = re.lastIndex; found = true;
+    }
+    if(!found) return null;
+    var rest = t.slice(at);
+    return out + (rest.trim() ? renderText(rest) : "");
+  }
   function richText(t){
+    var video = nativeVideoHtml(t, richText, false);
+    if(video !== null) return video;
     // 用户第 12 条：正文这条路不经过 tidyBody，QQ markdown mention / 冗余 "@昵称"
     // 前缀得自己先规整一遍，否则群里一个 @ 到窗口里变成两个（图7）
     t = mentionNorm(t);
@@ -2663,9 +2722,11 @@ var ctxSnapRequest = 0;
     // empty 传 null 表示「这条本来就没有正文，别补 (空)」——文件卡、分享卡自己
     // 就是正文，底下再挂个 (空) 很怪（用户 m29392 图4）
     if(!t) return empty === null ? "" :
-      "<div class='mono" + (cls ? " " + cls : "") + "'>" + esc(empty || "(空)") + "</div>";
+      "<div class='mono body-empty" + (cls ? " " + cls : "") + "'>" + esc(empty || "(空)") + "</div>";
     // 抖音分享口令画成分享卡（用户 m16357 图1）；原文档（rawtxt）必须保持模型收到的原样
     if(cls !== "rawtxt"){
+      var video = nativeVideoHtml(t, function(part){ return bodyHtml(part, "", foldAt, cls, noFold); }, false);
+      if(video !== null) return video;
       var dyc = douyinCard(t);
       if(dyc) return dyc.html + (dyc.rest ? bodyHtml(dyc.rest, "", foldAt, cls, noFold) : "");
     }
@@ -2732,6 +2793,10 @@ var ctxSnapRequest = 0;
   function tailChip(html, chip){
     if(!chip) return html;
     if(!html) return chip;
+    // A final native video is an inert attachment card, not the last speech div.
+    var vi = html.lastIndexOf("<div class='qcard video'");
+    if(vi >= 0 && cardOnlyHtml(html.slice(vi)))
+      return html.slice(0, vi) + "<div class='chip-line'>" + html.slice(vi) + chip + "</div>";
     // 气泡始终留在正文内；折叠时由 CSS 隐藏重复字数，展开后仍紧贴末尾。
     var i = html.lastIndexOf("</div>");
     if(i < 0){
@@ -2976,11 +3041,13 @@ var ctxSnapRequest = 0;
     var bd = card.querySelector(".mc-bd");
     if(!bd) return "";
     var c = bd.cloneNode(true);
-    Array.prototype.forEach.call(c.querySelectorAll(".quote,.more,.chb,.mixnote,.qcard,.qfile"), function(x){
+    Array.prototype.forEach.call(c.querySelectorAll(".quote,.more,.chb,.mixnote,.qcard,.qfile,.unassigned-media,.rawtxt,.body-empty,.thumbs,.mc-blk"), function(x){
       if(x.parentNode) x.parentNode.removeChild(x);
     });
-    var t = c.textContent || "";
-    t = t.replace(/\[图片\]|\[表情\]|\[语音\]|\[视频\]|\[文件\]/g, " ");
+    var bodies = c.querySelectorAll(".mono");
+    var t = bodies.length ? Array.prototype.map.call(bodies, function(x){ return x.textContent || ""; }).join(" ") : (c.textContent || "");
+    // 只拒绝整段媒体占位；人话中讨论 [图片]、[重点] 等字样必须原样保留。
+    if(mediaOnlyBody(t)) return "";
     return t.replace(/[\s\u00a0]+/g, " ").trim();
   }
   function markBlockBtn(card){
@@ -3328,7 +3395,7 @@ var ctxSnapRequest = 0;
       .replace(/\[Sticker\]/g, "[表情]")
       .replace(/\[Sticker attached\]/gi, "[表情]")
       .replace(/\[Voice attached\]/gi, "[语音]")
-      .replace(/\[Video attached\]/gi, "[视频]")
+      // Video tokens retain their identity until the code-aware card renderer.
       .replace(/\[File attached\]/gi, "[文件]")
       .replace(/\[kira_image_ref\]/g, "[图片]")
       .replace(/\[input_image\]/g, "[图片]")
@@ -3387,12 +3454,15 @@ var ctxSnapRequest = 0;
   function stripMediaTags(t, n){
     var s = String(t == null ? "" : t), left = Math.max(0, Number(n) || 0);
     if(!left) return s;
-    s = s.replace(/[ \t]*\[(?:Image attached|图片|表情|image)\][ \t]*/gi, function(m){
+    s = s.replace(/\[(?:Image attached|Sticker(?: attached|:[^\]\r\n]*)?|图片|表情|image)\]/gi, function(m){
       if(left <= 0) return m;
       left -= 1;
       return "";
     });
     return s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/^\s+|\s+$/g, "");
+  }
+  function mediaOnlyBody(t){
+    return /^(?:\s*\[(?:Image attached|Sticker(?::[^\]\r\n]*)?|image|图片|表情|语音|视频|文件)\]\s*)+$/i.test(String(t || ""));
   }
   function tidyBody2(t, hasMedia){
     var s = tidyBody(t);
@@ -3769,105 +3839,147 @@ var ctxSnapRequest = 0;
   // 用户 m02993 图10：被引用的那条明明就在本窗口里，却显示「引用了更早的一条消息」——
   // 框架给的引用只有 id（[Reply ID: -252821101]），原话得自己按 id 去窗口里查。
   // 渲染前先把每条 user 消息的 message_id → 昵称 / 时间 / 原话 建成索引。
+  // 展示投影不改发送合同：聚合 media 不能证明图片属于当前消息或引用目标。
+  function uniqueOwnerMedia(refs){
+    refs = Array.isArray(refs) ? refs : [];
+    // 仅同一 owner 池内按精确 path / url 证明别名；不猜文件名、内容或跨消息归属。
+    var aliases = Object.create(null), parents = [], seen = Object.create(null);
+    function root(i){
+      while(parents[i] !== i){ parents[i] = parents[parents[i]]; i = parents[i]; }
+      return i;
+    }
+    refs.forEach(function(it, i){
+      parents[i] = i;
+      var keys = [];
+      if(typeof it === "string") keys.push("path:" + it);
+      else if(it){
+        if(it.path) keys.push("path:" + it.path);
+        if(it.url) keys.push("url:" + it.url);
+      }
+      keys.forEach(function(key){
+        if(aliases[key] !== undefined) parents[root(i)] = root(aliases[key]);
+        else aliases[key] = i;
+      });
+    });
+    // 先连完别名再保留首项：后到的 path+url 也可能证明前两项其实是同一张图。
+    return refs.filter(function(it, i){
+      var key = root(i);
+      if(seen[key]) return false;
+      seen[key] = 1; return true;
+    });
+  }
+  function displayOf(m, legacyMedia){
+    var d = m && m.display, known = !!(d && d.own_media_known === true);
+    var legacy = Array.isArray(legacyMedia) ? legacyMedia
+      : (m && Array.isArray(m.media_refs) ? m.media_refs : (m && Array.isArray(m.media) ? m.media : []));
+    // 完整投影数组（包括 []）是权威结果；仅旧数据缺少该数组时回退 legacy。
+    var unassigned = d && Array.isArray(d.unassigned_media) ? d.unassigned_media : (known ? [] : legacy);
+    // 已按原转发条目证明的数组表示图片槽位；不同条目可有意重复同一张图。
+    var orderedSlots = known && d.source === "forward_cache_aligned" && Array.isArray(d.own_media);
+    return { known: known, own: known ? (orderedSlots ? d.own_media.slice() : uniqueOwnerMedia(d.own_media)) : [],
+      unassigned: uniqueOwnerMedia(unassigned),
+      reply: d && d.direct_reply && d.direct_reply.id !== undefined ? { id: String(d.direct_reply.id) } : null,
+      body: d && typeof d.own_body === "string" ? d.own_body : "",
+      hasBody: !!(d && typeof d.own_body === "string") };
+  }
+  function displayTextOf(m){
+    if(!m) return "";
+    // 只提取文本段，绝不能把 JSON.stringify(raw content) 当成引用正文。
+    if(Array.isArray(m.raw)) return m.raw.filter(function(p){ return p && p.type === "text"; })
+      .map(function(p){ return String(p.text || ""); }).join("\n");
+    if(typeof m.raw === "string" && m.raw) return m.raw;
+    return typeof m.text === "string" ? m.text : (typeof m.body === "string" ? m.body : "");
+  }
+  function stripReplyTokens(text){
+    var s = String(text == null ? "" : text), out = "";
+    for(var i = 0; i < s.length; i++){
+      if(s.charAt(i) === "["){
+        var end = bracketEnd(s, i);
+        if(end >= 0){
+          var token = s.slice(i + 1, end);
+          if(/^Reply(?:\s+ID:|\s+-?\d)/i.test(token)){ i = end; continue; }
+          // Forward 是自有内容，内部结构仍交给原转发卡。
+          if(/^Forward\b/.test(token)){ out += s.slice(i, end + 1); i = end; continue; }
+        }
+      }
+      out += s.charAt(i);
+    }
+    return out.replace(/^\s+|\s+$/g, "");
+  }
+  function ownBodyOf(m, fallback){
+    var d = displayOf(m);
+    return stripReplyTokens(d.hasBody ? d.body : (typeof fallback === "string" ? fallback : displayTextOf(m)));
+  }
+  function quoteEntryOf(m, fallback){
+    m = m || {};
+    var d = displayOf(m), body = ownBodyOf(m, fallback);
+    var projected = { own_media_known: d.known, own_media: d.own, unassigned_media: [],
+      direct_reply: d.reply, source: d.known ? (m.display && m.display.source === "forward_cache_aligned" ? "forward_cache_aligned" : "native_chain") : "unknown" };
+    if(d.hasBody) projected.own_body = body;
+    return { body: body, name: String(m.name || m.who || ""), who: String(m.who || m.name || ""),
+      ts: String(m.ts || ""), media: d.own, display: projected };
+  }
+  function unassignedMediaHtml(refs, mode){
+    if(mode === "mixed" || mode === "raw") return "";
+    var html = thumbsHtml(uniqueOwnerMedia(refs));
+    return html ? "<div class='unassigned-media' data-media-owner='unknown'><span class='dim'>归属未确认的附件</span>" + html + "</div>" : "";
+  }
   var QUOTE_IDX = {};
   // 用户 m02993 图10：窗口里查不到时，再由后端翻历史记录补一遍；补到的放这儿，
   // 重画时不用再问一次。QUOTE_SID 跟着当前会话走。
   var QUOTE_FAR = {};
-  // 用户 m12256：占位块问过一次还是没图就记下来，别每次重画都再问一遍后端。
+  // 每次窗口 GET 内按 id 限次，unknown/空回查留标记供下一次 GET 重试。
   var QUOTE_PIC_TRIED = Object.create(null);
   var QUOTE_SID = "";
   var quoteFarBusy = false;
-  // 节点被重画丢弃时补一次的上限，防止和轮询互相追着跑。
-  var QUOTE_RETRY = 0;
   function fillQuoteMiss(){
-    // 用户 m02993 图10：引用块不只长在实时窗（#ctx-window）里——回复记录、快照详情
-    // 里的 .quote[data-qmiss] 同样是「引用了更早的一条消息」。以前只扫实时窗，别的
-    // 位置永远补不上，看上去就像引用被按时间排到了更早的地方。整篇扫一遍。
-    // 用户 m28299 图3：以前只扫 #ctx-window。回复记录 / 决策记录的详情是另一块 DOM，
-    // 那里的「引用了更早的一条消息」和「图片」占位永远补不上，看着就是引用错位、图不显示。
-    // 三块（实时窗、记录详情、快照）长得一样，整页扫一遍最省事。
     var box = document.body;
     if(!box || !QUOTE_SID || quoteFarBusy) return;
-    var nodes = [].slice.call(box.querySelectorAll(".quote[data-qmiss]"));
-    // 用户 m12256：只有「图片」占位块的引用同样要补真图——跨窗口时被引用那条早
-    // 滑出窗口，QUOTE_IDX 里没有它的 media，只能等这里回查回来再把占位换掉。
-    var pics = [].slice.call(box.querySelectorAll(".quote[data-qpic]"));
-    if(!nodes.length && !pics.length) return;
-    var ids = [], seen = Object.create(null);
+    var nodes = [].slice.call(box.querySelectorAll(".quote[data-qmiss], .quote[data-qpic]"));
+    var ids = [], seen = Object.create(null), sid = QUOTE_SID;
+    function keyOf(n){ return String(n.getAttribute("data-qmiss") || n.getAttribute("data-qpic") || ""); }
+    function replaceNode(n, k, hit){
+      if(!document.contains(n) || !n.parentNode) return false;
+      var q = { id: k, text: hit.body, who: hit.name || hit.who, ts: hit.ts, display: hit.display };
+      var html = quoteHtml(q, []);
+      if(!html) return false;
+      n.insertAdjacentHTML("beforebegin", html); n.parentNode.removeChild(n); return true;
+    }
     nodes.forEach(function(n){
-      var k = String(n.getAttribute("data-qmiss") || "");
-      if(k && !seen[k]){ seen[k] = 1; ids.push(k); }
-    });
-    pics.forEach(function(n){
-      var k = String(n.getAttribute("data-qpic") || "");
-      if(k && !seen[k] && !QUOTE_PIC_TRIED[k]){ seen[k] = 1; ids.push(k); }
+      var k = keyOf(n), cached = QUOTE_IDX[k];
+      if(!displayOf(cached).known) cached = QUOTE_FAR[k];
+      if(displayOf(cached).known){ replaceNode(n, k, cached); return; }
+      if(k && !seen[k] && (QUOTE_PIC_TRIED[k] || 0) < 3){ seen[k] = 1; ids.push(k); }
     });
     if(!ids.length) return;
+    ids = ids.slice(0, 12);
+    ids.forEach(function(k){ QUOTE_PIC_TRIED[k] = (QUOTE_PIC_TRIED[k] || 0) + 1; });
     quoteFarBusy = true;
-    fetch(API + "/quote-lookup?sid=" + encodeURIComponent(QUOTE_SID) +
-          "&ids=" + encodeURIComponent(ids.slice(0, 12).join(",")), { cache: "no-store" })
+    function retry(){
+      quoteFarBusy = false;
+      if(QUOTE_SID === sid) setTimeout(fillQuoteMiss, 150);
+    }
+    fetch(API + "/quote-lookup?sid=" + encodeURIComponent(sid) +
+          "&ids=" + encodeURIComponent(ids.join(",")), { cache: "no-store" })
       .then(function(r){ return r.ok ? r.json() : null; })
       .then(function(j){
         quoteFarBusy = false;
-        var items = (j && j.items) || {};
-        // 用户 m14555：这一趟 fetch 只要几百毫秒，期间窗口可能被整块重画（5 秒轮询 /
-        // 强制刷新），手里这批节点就成了被丢弃的旧树——往里插图页面上看不见，看上去
-        // 就是「图明明回查到了却没显示」。认一下节点还在不在文档里，不在就交给下一轮。
-        var stale = 0;
-        nodes.forEach(function(n){
-          if(!document.contains(n)){ stale++; return; }
-          var k = String(n.getAttribute("data-qmiss") || "");
-          var hit = items[k];
-          if(!hit || !n.parentNode) return;
-          QUOTE_FAR[k] = hit;
-          var who = String(hit.who || "").trim(), ts = String(hit.ts || "").trim();
-          var body = String(hit.body || "");
-            // 用户 m12256：回查命中的那条自己也带图时，同样要把图交给引用块
-          var hasMed = !!(hit.media && hit.media.length);
-          var q2 = { id: k, text: hasMed ? "" : (body || "（这条没有正文，可能只发了图片）"),
-                     who: who, ts: ts, media: hasMed ? hit.media : null };
-          var html = "";
-          try { html = quoteHtml(q2, []); } catch(e){ html = ""; }
-          if(!html) return;
-          n.insertAdjacentHTML("beforebegin", html);
-          n.parentNode.removeChild(n);
+        if(QUOTE_SID !== sid) return;
+        var items = (j && j.items) || {}, entries = Object.create(null);
+        ids.forEach(function(k){
+          if(!items[k]) return;
+          var hit = quoteEntryOf(items[k], items[k].body);
+          entries[k] = hit;
+          // unknown 不固化成确定无图，下次窗口 GET 仍可重试。
+          if(displayOf(hit).known) QUOTE_FAR[k] = hit;
         });
-        // 用户 m12256：只有「图片」占位的引用块——回查到图就把占位换成真缩略图，
-        // 没查到就先记一笔，等下一轮（图可能稍后才下载完）也不再追问。
-        pics.forEach(function(n){
-          if(!document.contains(n)){ stale++; return; }
-          var k = String(n.getAttribute("data-qpic") || "");
-          n.removeAttribute("data-qpic");
-          var hit = items[k];
-          if(!hit || !hit.media || !hit.media.length){ QUOTE_PIC_TRIED[k] = 1; return; }
-          // 用户 m14505：一条纯图消息里连发好几张（[Image] [Image] [Image]）会摆出好几个
-          // 占位块，以前只换掉第一个、剩下的「图片」字样还留在块里。整排一起换掉。
-          var phs = [].slice.call(n.querySelectorAll(".qpic-ph"));
-          if(phs.length){
-            try { phs[0].insertAdjacentHTML("beforebegin", thumbsHtml(hit.media)); } catch(e){ return; }
-            phs.forEach(function(p){ if(p.parentNode) p.parentNode.removeChild(p); });
-            return;
-          }
-          // 用户 m13766：引用里原话已经在了、只是图没补上（没有「图片」占位块可换）。
-          // 缩略图插在原话前面，跟 QQ 引用「上面图、下面是话」一个样。
-          var qtx = n.querySelector(".qtx");
-          try {
-            if(qtx) qtx.insertAdjacentHTML("beforebegin", thumbsHtml(hit.media));
-            else n.insertAdjacentHTML("beforeend", thumbsHtml(hit.media));
-            // 用户 m28299 图2：图已经摆在引用块里了，原话那句「[图片]」占位别再留一行。
-            // 只在纯文本节点上改写（里面有表情图/徽章时不动，免得把它们洗掉）。
-            if(qtx && !qtx.children.length){
-              var keep = String(qtx.textContent || "")
-                .replace(/\[(?:Image attached|图片|表情|image)\]/gi, " ")
-                .replace(/[\s ]+/g, " ").trim();
-              if(!keep){ if(qtx.parentNode) qtx.parentNode.removeChild(qtx); }
-              else if(keep !== String(qtx.textContent || "")) qtx.textContent = keep;
-            }
-          } catch(e){}
+        // 查询期间 DOM 可能被轮询替换，重新找当前节点；空回查保留标记。
+        [].slice.call(box.querySelectorAll(".quote[data-qmiss], .quote[data-qpic]")).forEach(function(n){
+          var k = keyOf(n);
+          if(entries[k]) replaceNode(n, k, entries[k]);
         });
-        if(stale && QUOTE_RETRY < 4){ QUOTE_RETRY++; setTimeout(fillQuoteMiss, 150); }
-      })
-      .catch(function(){ quoteFarBusy = false; });
+        retry();
+      }).catch(retry);
   }
   // 排查入口：控制台 / 自动化里手动补一次引用块（正常流程由 swapWinBody 调用）
   window.__mdpQuoteRepair = fillQuoteMiss;
@@ -3885,160 +3997,80 @@ var ctxSnapRequest = 0;
   }
   function buildQuoteIdx(msgs, pend){
     var idx = {};
-    // 用户 m27528 图3：待发条目没有 role 字段，以前一律当成 assistant 走 <msg> 分支，
-    // 待发里的消息因此根本没进索引——引用它们只能画「引用了更早的一条消息 #id」。
     function take(m, isPend){
       if(!m) return;
-      var role = String(m.role || "").toLowerCase();
-      if(!role) role = isPend ? "user" : "assistant";
-      // 待发的图在 media_refs 里（media 只是 "image"/"sticker" 这种类型名），历史条目在 media 里。
-      var pool = Array.isArray(m.media) ? m.media
-               : (Array.isArray(m.media_refs) ? m.media_refs : null);
+      var role = String(m.role || (isPend ? "user" : "assistant")).toLowerCase();
+      var src = displayTextOf(m);
       if(role !== "user"){
-        // bot 自己发的话在窗口里是 XML，一条一行：<msg message_id="X">[昵称] <text>正文</text></msg>。
-        // 用户 m11986：被引用的正是 bot 上一条（「那我大概已经超越完了」），这条以前根本不进
-        // 索引（这里只收 user），于是页面只能画成「引用了更早的一条消息」。
-        // 一轮可能连着发好几条，所以一段内容里要全部收进来。
-        var src = "";
-        try { src = String(rawOf(m) || ""); } catch(e){ src = ""; }
-        if(!src) src = String(m.text || "");
-        var re = /<msg\s+message_id="(-?\d+)"[^>]*>\s*\[([^\]]*)\]\s*<text>([\s\S]*?)<\/text>/gi, mm;
-        // bot 自己也可能发图（图片回复），被引用时同样要把那张图带出来
-        var amed = (pool && pool.length) ? pool : null;
+        var re = /<msg\s+message_id="(-?\d+)"[^>]*>\s*\[([^\]]*)\]\s*<text>([\s\S]*?)<\/text>/gi, mm, rows = [], previousEnd = 0;
         while((mm = re.exec(src))){
-          var xid = String(mm[1] || "").trim();
-          if(!xid || idx[xid]) continue;
-          // 时间就是这条 <msg> 前面那个「[17:37]」
-          var tm2 = /\[([^\]]{2,20})\]\s*$/.exec(src.slice(0, mm.index));
-          idx[xid] = {
-            name: String(mm[2] || "").replace(/\s+/g, " ").trim(),
-            ts: tm2 ? String(tm2[1]).trim() : "",
-            body: String(mm[3] || "").replace(/\s+$/, ""),
-            media: amed
-          };
+          rows.push({ id: mm[1], name: mm[2], body: mm[3], offset: mm.index, previousEnd: previousEnd });
+          previousEnd = re.lastIndex;
         }
+        rows.forEach(function(row){
+          if(idx[row.id]) return;
+          var tm = /\[([^\]]{2,20})\]\s*$/.exec(src.slice(row.previousEnd, row.offset));
+          var vm = { name: row.name, ts: tm ? tm[1] : "", display: rows.length === 1 ? m.display : null };
+          idx[row.id] = quoteEntryOf(vm, row.body);
+        });
         return;
       }
-      // 用户 m02993 图10：多模态消息的 raw 是数组，rawOf → rawContent 会把它
-      // JSON.stringify 成一整段 JSON；splitMeta 抢到的第一个 "[" 会把后面全吃掉，
-      // [message_id: …] 也就取不到 —— 这条消息进不了索引，别处引用它时只能退化成
-      // 「引用了更早的一条消息」。raw 不是字符串时改用 text（快照里那份是正常文本，
-      // 形如「[19:34] [message_id: 1612754008] [user_nickname: x] | [Sticker attached]」）。
-      var parts = splitMetaAll(tidyBody(rawOf(m)));
-      if(!parts.some(function(p){ return String((p && p.meta && p.meta.mid) || "").trim(); }) &&
-         m.raw !== undefined && m.raw !== null && typeof m.raw !== "string"){
-        var alt = String(m.text || "");
-        if(alt && alt !== rawOf(m)) parts = splitMetaAll(tidyBody(alt));
+      var parts = splitMetaAll(tidyBody(src));
+      if(!parts.some(function(p){ return p.meta && p.meta.mid; }) && typeof m.text === "string"){
+        parts = splitMetaAll(tidyBody(m.text));
       }
-      var segMed = segMediaOf(parts, pool);
-      parts.forEach(function(p, pi){
-        var meta = p.meta || {};
-        var mid = String(meta.mid || "").trim();
-        if(!mid || idx[mid]) return;   // 同一条被重复收进时，保留第一份
-        // 待发的 raw 是长格式 [Oct 31 2026 01:12 Sat]，splitMeta 认不出时间，退回行上的 ts
+      parts.forEach(function(p){
+        var meta = p.meta || {}, mid = String(meta.mid || (parts.length === 1 ? (m.message_id || m.mid || "") : "")).trim();
+        if(!mid || idx[mid]) return;
         var mts = String(meta.ts || "").trim();
         if(!mts && m.ts) mts = fmtTime(m.ts).slice(6, 11);
-        idx[mid] = {
-          name: String(meta.name || "").replace(/\s+/g, " ").trim(),
-          ts: mts,
-          body: String(p.body || meta.fwd || "").replace(/\s+$/, ""),
-          // 用户 m12256：被引用那条自己带的图，引用块里要画出来
-          media: segMed[pi] || null
-        };
+        var fallback = (meta.fwd || "") + (meta.card ? "[Json card " + JSON.stringify(meta.card) + "]" : "") + (meta.file ? "[File name: " + meta.file.name + (meta.file.path ? ", file_path: " + meta.file.path : "") + "]" : "") + String(p.body || "");
+        idx[mid] = quoteEntryOf({ name: String(meta.name || m.name || "").replace(/\s+/g, " ").trim(),
+          ts: mts, display: parts.length === 1 ? m.display : null }, fallback);
       });
     }
-    (msgs || []).forEach(take);
+    (msgs || []).forEach(function(m){ take(m, false); });
     (pend || []).forEach(function(m){ take(m, true); });
     return idx;
   }
 
   function quoteHtml(q, media){
-    // v4.19（用户 m21126 图1/图3）：框架现在只给被引用消息的 id（[Reply 1050111951]），
-    // 原话本地查得到就补上；查不到时也得把引用框画出来，不能整条吞掉。
     if(!q || (!q.text && !q.id)) return "";
-    if(!q.text){
-      // 用户 m02993 图10：先按 id 回查本窗口，查到了就把原话补上。
-      var hit = QUOTE_IDX[String(q.id)] || QUOTE_FAR[String(q.id)];
-      if(hit && (hit.body || hit.name)){
-        // 用户 m12256：回查到的原话同样带着它自己的图，别在这一步丢掉
-        q = { id: q.id, text: hit.body || "", who: hit.name, ts: hit.ts,
-              media: (hit.media && hit.media.length) ? hit.media : (q.media || null) };
-      } else {
-        return "<div class='quote' data-qmiss='" + esc(String(q.id)) + "'><span class='qwho'>引用了更早的一条消息</span>" +
-          "<div class='qmiss'>#" + esc(String(q.id)) + "</div></div>";
-      }
+    var id = q.id === undefined || q.id === null ? "" : String(q.id);
+    var hit = QUOTE_IDX[id], far = QUOTE_FAR[id];
+    if(!displayOf(hit).known && far) hit = far;
+    // 保留第二参数签名，但不再认领调用方聚合 media 或 q.media。
+    if(q.display) hit = quoteEntryOf(q, String(q.text || ""));
+    var d = displayOf(hit || q), t;
+    if(hit) t = ownBodyOf(hit, hit.body);
+    else t = ownBodyOf(q, String(q.text || ""));
+    if(!t && !d.known && q.text) t = stripReplyTokens(q.text);
+    if(!t && !d.known && !hit){
+      return "<div class='quote' data-qmiss='" + esc(id) + "'><span class='qwho'>引用了更早的一条消息</span>" +
+        "<div class='qmiss'>#" + esc(id) + "</div></div>";
     }
-    // 用户 m12256：Reply 里自带原话时（[Reply ID: X content: … 大椰果: [Image]]）以前
-    // 根本不查索引，被引用那条自己的图也就拿不到，只能画一个「图片」占位——文本有了，
-    // 图还得照索引补一次。
-    if(!(q.media && q.media.length) && q.id){
-      var hitM = QUOTE_IDX[String(q.id)] || QUOTE_FAR[String(q.id)];
-      if(hitM && hitM.media && hitM.media.length){
-        q = { id: q.id, text: q.text, who: q.who, ts: q.ts, media: hitM.media };
-      }
-    }
-    var t = String(q.text);
-    // 引用内容里自己又带一层「[时间] 昵称:」，剥掉只看人话
-    var m = t.match(/^\[([^\]]{4,40})\]\s*([^:：]{1,40})[:：]\s*([\s\S]*)$/);
-    // 索引里查到的原话没带「[时间] 昵称:」这层壳，名字和时间由 who / ts 单独给。
-    var who = q.who ? String(q.who) : (m ? m[2] : "");
-    var when = q.ts ? shortTs(String(q.ts)) : (m ? shortTs(m[1]) : "");
-    var body = m ? m[3] : t;
-    // 用户 m01522 图1/图5：被引用的是图片消息时，那张图属于引用块；以前画在引用块上面，
-    // 看着像「引用里没内容、卡片外凭空多一张图」。media 由调用方判断归属后传进来。
-    // 用户 m12256：那张图本来就不属于「本条消息」，而是被引用那条自己的——大椰果 18:21
-    // 发了一张图，哦豁 18:37 引用它，本条 media 是空的，光凭上面那条老规则只能画一个
-    // 「图片」占位。索引里已经存了被引用那条的媒体，优先用它。
-    // 2026-11-01（用户 m06138 图1）：引用里的转发常常只剩一个空壳 [Forward]，
-    // 但原消息就在本窗口索引里。能按 id 查到原正文时把正文接回来，别一边把图
-    // 漏在引用块外、一边又写「内容未获取」。
-    if(/^\[Forward\s*\]$/.test(String(body).trim()) && q.id){
-      var fwdHit = QUOTE_IDX[String(q.id)] || QUOTE_FAR[String(q.id)];
-      if(fwdHit && /^\[Forward/.test(String(fwdHit.body || "").trim())){
-        body = String(fwdHit.body || "");
-        if(!(q.media && q.media.length) && fwdHit.media && fwdHit.media.length){
-          q = { id: q.id, text: q.text, who: q.who, ts: q.ts, media: fwdHit.media };
-        }
-      }
-    }
-    var qIsFwd = String(body).trim().indexOf("[Forward") === 0;
-    var qsrc = (q.media && q.media.length) ? q.media : ((media && media.length) ? media : null);
-    // 转发图片只跟转发卡走：空壳 [Forward] 没有卡片可放图，更不能把图单独漏在引用块里。
-    var qm = (qIsFwd || !qsrc) ? "" : thumbsHtml(qsrc);
-    if(qm){
-      // 图就在块里摆着了，原话里那句「[图片]」占位别再来一行，跟 QQ 的引用不一样就露馅
-      body = tidyBody(body).replace(/\[(?:Image attached|图片|表情|image)\]/gi, " ")
-                 .replace(/[\s\u00a0]+/g, " ").trim();
-    }
+    var m = t.match(/^\[(?!Forward\b)([^\]]{4,40})\]\s*([^:：]{1,40})[:：]\s*([\s\S]*)$/);
+    var who = String((hit && (hit.name || hit.who)) || q.who || (m ? m[2] : ""));
+    var when = shortTs(String((hit && hit.ts) || q.ts || (m ? m[1] : "")));
+    var body = stripReplyTokens(m ? m[3] : t);
+    var qsrc = d.known ? d.own : [];
+    var qIsFwd = body.trim().indexOf("[Forward") === 0;
+    var qm = qIsFwd ? "" : thumbsHtml(qsrc);
+    // known [] 是确定无图；图文并存时不因没有 Image 占位而清掉图或文字。
+    if(qm || (d.known && !qsrc.length)) body = tidyBody(body)
+      .replace(/\[(?:Image attached|图片|表情|image)\]/gi, " ").replace(/^[\s\u00a0]+|[\s\u00a0]+$/g, "");
+    var mark = (!d.known && id) ? " data-qpic='" + esc(id) + "'" : "";
     var qh = "<span class='qwho'>" + (who ? esc(who) : "引用") +
-             (when ? "<span class='dim'> · " + esc(when) + "</span>" : "") + "</span>";
-    // 用户 m03014 第 1 条：被引用的是合并转发时，图片属于转发内容——塞进转发卡里
-    // 跟着一起折叠，不再画在引用块里（用户说的「引用转发时图片外漏」就是这一处）。
+      (when ? "<span class='dim'> · " + esc(when) + "</span>" : "") + "</span>";
     var fw = forwardHtml(body, qsrc);
-    if(fw) return "<div class='quote'>" + qh + fw + "</div>";
-    // v3.76（用户本轮图4/图5）：被引用的是一条纯图片消息、而这一轮没留下图时
-    //（窗口快照根本不存媒体），以前会把 [Image attached] 洗成一行「[图片]」正文，
-    // 看着像他引用了一句叫「图片」的话。画个占位块，一眼能看出这里原本是张图。
-    // 用户 m14505：一条消息连发几张图时，框架给的是「[Image] [Image] [Image]」，
-    // 旧正则只认「整段正好一个占位」，三个连写直接掉到下面按正文铺开，块里就剩一行
-    // 英文方括号。这里放宽成「整段全由占位组成」（一个或多个），并按个数摆占位块。
-    var phOnly = String(body).trim();
-    var phN = (phOnly.match(/\[(?:Image attached|图片|表情|image)\]/gi) || []).length;
-    if(!qm && phN && new RegExp("^(?:\\s*\\[(?:Image attached|图片|表情|image)\\])+\\s*$", "i").test(phOnly)){
-      // 用户 m12256：占位块留个 id 记号，跨窗口回查到图后由 fillQuoteMiss 换成真图
-      var qidTxt = q.id ? String(q.id) : "";
+    if(fw) return "<div class='quote'" + mark + ">" + qh + fw + "</div>";
+    var phOnly = body.trim(), phN = (phOnly.match(/\[(?:Image attached|图片|表情|image)\]/gi) || []).length;
+    if(!qm && phN && /^(?:\s*\[(?:Image attached|图片|表情|image)\])+\s*$/i.test(phOnly)){
       var phRow = "";
       for(var pi = 0; pi < Math.min(phN, 9); pi++) phRow += "<div class='qpic-ph'>图片</div>";
-      return "<div class='quote'" + (qidTxt ? " data-qpic='" + esc(qidTxt) + "'" : "") +
-             ">" + qh + phRow + "</div>";
+      return "<div class='quote'" + mark + ">" + qh + phRow + "</div>";
     }
-    // 纯图片的引用：只有图没有字，别再走 quoteBodyHtml 的「原话原样铺出来」兜底
-    if(!body && qm) return "<div class='quote'>" + qh + qm + "</div>";
-    // 用户 m13766 图：被引用的是一条「文字 + 图」的消息时，原话有了、图还在被引用那条自己身上
-    //（跨窗口时 QUOTE_IDX 里没有它），以前这个分支画出来就只有文字。
-    // 跟纯图片那条一样留个 id 记号，fillQuoteMiss 回查到了再把缩略图插进引用块。
-    var picMark = (q.id && !qm) ? " data-qpic='" + esc(String(q.id)) + "'" : "";
-    return "<div class='quote'" + picMark + ">" + qh + qm + quoteBodyHtml(body, !!who) + "</div>";
+    return "<div class='quote'" + mark + ">" + qh + qm + quoteBodyHtml(body, !!who, qIsFwd ? qsrc : null) + "</div>";
   }
   // 引用原话的正文：按「一条消息」的规则渲染，跟正文同一个长相（用户第 2 条）。
   // 单独拆出来是因为原话可能自带多条（换行）、自带 [Json card …] / [File name: …] /
@@ -4055,8 +4087,8 @@ var ctxSnapRequest = 0;
            "<span class='qmini-d'>" + esc(kind) + " · 分享</span></div></div>";
   }
 
-  function quoteBodyHtml(body, hasHead){
-    var t = String(body == null ? "" : body);
+  function quoteBodyHtml(body, hasHead, fwdMedia){
+    var t = stripReplyTokens(body);
     // 用户第 1 条（引用里的艾特没美化）+ 第 12 条（双 @）：QQ 的 markdown mention
     // 和冗余 "@昵称" 前缀都交给 mentionNorm 洗（tidyBody 里已经调过），这里不再重复一遍
     var parts = splitMetaAll(tidyBody(t));
@@ -4064,9 +4096,8 @@ var ctxSnapRequest = 0;
     var out = "";
     parts.forEach(function(p, pi){
       var mt = p.meta || {};
-      var pre = cardHtml(mt.card) + fileHtml(mt.file) + fwdHtml(mt.fwd);
-      // 引用里再套一层引用（真实数据里还没见过，但不能把原话静默吞掉）
-      if(mt.reply && (mt.reply.text || mt.reply.id)) pre = quoteHtml(mt.reply) + pre;
+      var pre = cardHtml(mt.card) + fileHtml(mt.file) + fwdHtml(mt.fwd, pi === 0 ? fwdMedia : null);
+      // 只画目标自己的正文/卡片，不递归渲染目标的 Reply。
       var head = "";
       // 多段原话（拼了好几条）或者外层没解析出「昵称:」时，把这段自己的时间/昵称
       // 用小字标一行；否则 ISO 时间戳会混进正文，看着像他说的原话
@@ -4090,8 +4121,7 @@ var ctxSnapRequest = 0;
       out += head + (pre ? "<div class='qtx'>" + pre + "</div>" : "") +
              (txt ? "<div class='qtx'>" + richText(txt) + "</div>" : "");
     });
-    // 兜底：拆完什么都不剩（只有元数据）时，至少把原话原样铺出来，不能变成空块
-    if(!out) out = "<div class='qtx'>" + esc(t) + "</div>";
+    // 剥掉 Reply 后为空就保持空，不能把祖先原文重新兜回。
     return out;
   }
   // 转发的聊天记录（QQ 那张「群聊的聊天记录」卡片）框架是一行一条转成
@@ -4140,14 +4170,13 @@ var ctxSnapRequest = 0;
       var when = mm ? shortTs(mm[1]) : "", who = mm ? mm[2] : "";
       if(/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(when)) when = when.replace(/^\d{4}-\d{2}-\d{2}[ T]/, "").slice(0, 5);
       var tx = (mm ? mm[3] : it).trim();
-      tx = tx.replace(/\[Video name:\s*([^\]]*?)\]/g, function(_, n){ return "[视频] " + n.replace(/\s*\(.*$/, ""); });
       // 用户第 2 条：转发条目里的 [Image attached] 以前原样露英文标记，
       // 现在跟正文一样洗成 [图片]，连续多张压成「[图片] ×8」免得一行糊满
       tx = tidyBody(tx);
       // 转发条目里带的 [Reply 672919715] / [Reply ID: …] 是框架的内部引用标记，
       // 卡片里既画不出引用块，留着就是一串数字噪声（m24522 ④ 一类）。
       tx = tx.replace(/\[Reply(?:\s+ID)?[:：]?\s*\d+[^\]]*\]/g, "").replace(/\s{2,}/g, " ").trim();
-      tx = tx.replace(/(\[(?:图片|表情|语音|视频)\])(?:\1)+/g, function(one, all){
+      tx = tx.replace(/(\[(?:图片|表情|语音)\])(?:\1)+/g, function(one, all){
         return one + " ×" + (all.length / one.length);
       });
       // 空正文不是「只有图」，而是框架把嵌套 Forward 从链里剔掉了（见上面 CSS 注释）：
@@ -4224,10 +4253,12 @@ var ctxSnapRequest = 0;
       return (need > 0 && shown >= need) ? stripFwdPics(t) : t;
     }
     // m24522 ④⑥：占位不再当字面文字铺出来，统一换成小图标（卡片预览与弹层共用）
-    function fwdPicChip(t){
-      var ico = { "图片": "🖼", "表情": "🙂", "语音": "🎙", "视频": "🎬" };
+    function fwdPicChip(t, compact, allowChinese){
+      var video = nativeVideoHtml(t, function(part){ return fwdPicChip(part, compact, false); }, compact, allowChinese);
+      if(video !== null) return video;
+      var ico = { "图片": "🖼", "表情": "🙂", "语音": "🎙" };
       // 用户 m27528 图1：转发条目的表情也要转，跟正文同一套（以前这里只 esc）
-      return emojiFaces(esc(t)).replace(/\[(图片|表情|语音|视频)\](?:\s*×\s*(\d+))?/g, function(all, k, n){
+      return emojiFaces(esc(t)).replace(/\[(图片|表情|语音)\](?:\s*×\s*(\d+))?/g, function(all, k, n){
         return "<span class='fw-pic' title='" + k + (n ? " ×" + n : "") + "'>" +
                (ico[k] || k) + (n ? "×" + n : "") + "</span>";
       });
@@ -4235,7 +4266,7 @@ var ctxSnapRequest = 0;
     var lis = merged.map(function(r, idx){
       var got = claims[idx] || [];
       var pre = r.sub ? "" : fwdPreviewText(r, got);
-      var body = r.sub ? fwdSubChip(r.sub) : fwdPicChip(pre) + (r.n > 1 && pre ? " ×" + r.n : "");
+      var body = r.sub ? fwdSubChip(r.sub) : fwdPicChip(pre, true, /^(?:\[视频\]\s*)+$/.test(String(r.text || "").trim())) + (r.n > 1 && pre ? " ×" + r.n : "");
       return "<div class='fwd-it'><span class='fw-w'>" + esc(r.who || "某人") + "</span>" +
              (r.when ? "<span class='fw-t'>" + esc(r.when) + "</span>" : "") +
              "<span class='fw-c'>" + body + fwdMini(got) + "</span></div>";
@@ -4250,8 +4281,11 @@ var ctxSnapRequest = 0;
         // 有剩余的图（被清理/没下发）就不再写死字面 [图片]，同样交给 chip
         // 用户 m28299 图1（转发的 emoji 没显示）：图都认领完了的那一支原来只 esc，
         // 弹层里 [Emoji 344] 就成了一行方括号。表情与正文同一套，一律过 emojiFaces。
-        var txt = left > 0 ? fwdPicChip((r.text || "") + (r.n > 1 ? " ×" + r.n : ""))
-                           : emojiFaces(esc(stripFwdPics(r.text || "")));
+        var video = nativeVideoHtml(r.text || "", function(part){ return emojiFaces(esc(stripFwdPics(part))); }, false);
+        if(video !== null && r.n > 1) video = video.repeat(r.n);
+        var txt = left > 0 ? (video !== null && r.n > 1 ? fwdPicChip(r.text || "", false).repeat(r.n)
+                           : fwdPicChip(r.text || "", false) + (r.n > 1 ? " ×" + r.n : ""))
+                           : (video !== null ? video : emojiFaces(esc(stripFwdPics(r.text || ""))));
         body = (txt ? "<div class='fp-tx'>" + txt + "</div>" : "") + thumbsHtml(got);
       }
       return "<div class='fp-it'><div class='fp-meta'><span class='fw-w'>" + esc(r.who || "某人") + "</span>" +
@@ -4264,12 +4298,8 @@ var ctxSnapRequest = 0;
     // 卡里只留前 3 条预览（.fwd-b）；完整条目与图片藏在 <template class="fwd-full"> 里，
     // 点开时才搬进弹层——template 里的图片不会提前加载，也不用在卡内留一条可见的图行。
     // 用户 2026-10-24 图6：卡下面不再写「点击查看内容」，整张卡就是入口，悬停标题变蓝并带提示
-    // v4.48：标题行右侧也挂最多 4 张真图——卡默认只露前 3 行，图常在第 4、5 条上，
-    // 不挂这儿的话折起来完全看不出「里面到底有图没图」。
-    var allGot = [];
-    claims.forEach(function(g){ allGot = allGot.concat(g || []); });
     return "<div class='fwd' data-fwd='1'>" +
-           "<div class='fwd-hd' title='点击查看完整内容'>合并转发 · " + rows.length + " 条" + fwdMini(allGot) + "</div>" +
+           "<div class='fwd-hd' title='点击查看完整内容'>合并转发 · " + rows.length + " 条</div>" +
            "<div class='fwd-b'>" + lis.join("") + "</div>" +
            "<template class='fwd-full'>" + full.join("") + "</template></div>";
   }
@@ -4572,6 +4602,13 @@ var ctxSnapRequest = 0;
   // 缩略图行：转发卡内部和正文外面都复用它。后端现在给三种形状——
   //   {path} 走插件的 /media；{url} 是 http 链接或 data URL，直接当 src；
   //   {missing:1} 说明原图已被框架清理、插件也没留到副本，画占位，别画裂图。
+  // 与 thumbsHtml 一致：缺失图会画占位，无地址且未标缺失的空项不算已显示。
+  function renderedThumbCount(list){
+    return (Array.isArray(list) ? list : []).filter(function(it){
+      var obj = (typeof it === "string") ? { path: it } : (it || {});
+      return !!(obj.missing || obj.path || obj.url);
+    }).length;
+  }
   function thumbsHtml(list){
     if(!list || !list.length) return "";
     var out = "";
@@ -5050,7 +5087,10 @@ var ctxSnapRequest = 0;
       return "<div class='mc " + esc(role) + "'><div class='mc-hd'>" + hd + "</div>" +
              "<div class='mc-bd'>" + bodyHtml(raw, "(空)", 0, "rawtxt", (role === "assistant" || role === "system")) + "</div></div>";
     }
-    m = Object.assign({}, m, {chars: displayCharCount(m, preMeta)});
+    var ownerDisplay = displayOf(m, m.media);
+    var neutralMedia = ownerDisplay.unassigned;
+    // 只改视图副本；真实发送用的 legacy m.media 不动。
+    m = Object.assign({}, m, { chars: displayCharCount(m, preMeta), media: ownerDisplay.own });
     if(role === "user"){
       // 用户 m11091 第 3 条：官方机器人的 markdown 消息整条折成一张机器人卡片
       if(isBotMarkdown(raw)) return botCardHtml(m, idx, mode, ts, ex, grp);
@@ -5058,6 +5098,23 @@ var ctxSnapRequest = 0;
       var parts = preMeta ? [{ meta: preMeta, body: raw }]
                           : splitMetaAll(tidyBody(raw));
       if(!parts.length) parts = [{ meta: { ts: "", mid: "", name: "", uid: "", at: [] }, body: raw }];
+      if(parts.length === 1){
+        var p0 = parts[0], pm = Object.assign({}, p0.meta);
+        if(ownerDisplay.known){
+          var oldReply = pm.reply;
+          pm.reply = ownerDisplay.reply ? Object.assign({}, oldReply && String(oldReply.id) === ownerDisplay.reply.id ? oldReply : {}, ownerDisplay.reply) : null;
+          if(ownerDisplay.hasBody){
+            var ownPart = splitMeta(tidyBody(ownBodyOf(m, p0.body)));
+            pm.fwd = ownPart.meta.fwd; pm.card = ownPart.meta.card; pm.file = ownPart.meta.file;
+            p0 = { meta: pm, body: ownPart.body };
+          } else p0 = { meta: pm, body: stripReplyTokens(p0.body) };
+        }
+        parts = [p0];
+      } else {
+        // 一个聚合条目没有 per-mid 证据，不能把整份 own_media 认领到某一段。
+        neutralMedia = uniqueOwnerMedia(ownerDisplay.own.concat(neutralMedia));
+        m = Object.assign({}, m, { media: [] });
+      }
       var p = parts[0];
       var h2 = "";
       // 组内（grp）：头像/名字/@ 已经在组头，这里只留时间（放正文左边）
@@ -5095,18 +5152,13 @@ var ctxSnapRequest = 0;
         // 转发卡里的图片归卡片，折叠时一起被裁掉；卡外不再重复画一遍
         // （用户 m01011 图2：缩略图露在卡片上面）。
         var fwdIn = isFwdBody(p.meta.fwd);
-        // 引用里带图、本条正文自己没有图时，那张图是被引用的那条消息的：
-        // 归进引用块内部，卡外不再重复画（用户 m01522 图1/图3/图5）。
-        var repImgN = p.meta.reply ? imgTagCount(p.meta.reply.text) : 0;
-        var ownImg = imgTagCount(p.body) > 0;
-        var inQuote = (repImgN > 0 && !ownImg && m.media && m.media.length) ? m.media : null;
-        // 同一条既有引用又有转发时，图先归引用（占位在原话里），剩下才给转发卡，
-        // 同一张图不能画两遍（用户 m03014 第 1 条）。
-        var fwdMedia = (fwdIn && !inQuote) ? m.media : null;
-        var partHtml = quoteHtml(p.meta.reply, inQuote) + fwdHtml(p.meta.fwd, fwdMedia) +
+        // 引用只使用目标投影；本条已知自有图只进自己的 Forward/正文。
+        var inQuote = null;
+        var fwdMedia = fwdIn ? m.media : null;
+        var partHtml = quoteHtml(p.meta.reply) + fwdHtml(p.meta.fwd, fwdMedia) +
                        cardHtml(p.meta.card) + fileHtml(p.meta.file) + filesHtml(m.files);
         var hasPart = !!(p.meta.card || p.meta.fwd || p.meta.file ||
-                         (m.files && m.files.length) || (m.media && m.media.length));
+                         (m.files && m.files.length) || (m.media && m.media.length) || neutralMedia.length);
         var bodyTxt = tidyBody2(p.body, m.media && m.media.length);
         // 用户本轮图1/图2：图片原来统一堆在正文前面，看着像「引用 → @ → 图 → 文字」。
         // 占位数和图片数正好对得上时，改成按占位在原文里的位置逐张插回去，
@@ -5115,8 +5167,9 @@ var ctxSnapRequest = 0;
         // v3.62（用户 m18059 第 2 条）：这段的媒体块已经画出来了（缩略图或「已清理」占位），
         // 正文里的 [图片]/[表情] 占位按画出的张数吃掉，不再多一行纯文本。
         // 已经决定内联的那份不动占位，交给 renderInlineMedia 原位换图。
-        bodyTxt = stripMediaTags(bodyTxt,
-          (!(fwdIn || inQuote) && m.media && !inlPlan) ? m.media.length : 0);
+        // 中立附件仍不认领 owner；只抵消实际画出的占位，多出的和无附件人话保留。
+        bodyTxt = stripMediaTags(bodyTxt, !inlPlan ?
+          (!(fwdIn || inQuote) ? renderedThumbCount(m.media) : 0) + renderedThumbCount(neutralMedia) : 0);
         // v4.22（用户 m21783）：文件卡已经画出来了，正文里那行 [文件] 不再重复
         if(m.files && m.files.length) bodyTxt = bodyTxt.replace(/\[(?:文件|File attached)\]/gi, " ");
         // 卡片已经画出来了，正文里那段分享模板（【闲鱼】链接…标题…点击链接直接打开）
@@ -5158,8 +5211,8 @@ var ctxSnapRequest = 0;
         // 例外（用户 m01680）：各段里图片占位的总数正好等于这条例消息的图片数时，
         // 说明这些占位就是这些图的出处，可以逐段认领——引用里的进那段的引用块，
         // 正文里的留在那段卡外；多一张少一张就认不准，退回原来的排法。
-        var claims = claimMediaBySegs(parts, m.media);
-        var segMedia = claims || parts.map(function(){ return { quote: null, own: null }; });
+        var claims = null; // 无 per-mid 原生投影时，不能按 Reply/占位数认领媒体。
+        var segMedia = parts.map(function(){ return { quote: null, own: null }; });
         bd2 = "";
         parts.forEach(function(q, qi){
           var lab = "";
@@ -5198,6 +5251,7 @@ var ctxSnapRequest = 0;
         // 跨段归属不明时仍只画一份，放在已知各段之后，不插进任何引用里。
         if(!claims) bd2 += mediaHtml(m, mode);
       }
+      bd2 += unassignedMediaHtml(neutralMedia, mode);
       return "<div class='mc user'><div class='mc-hd'>" + h2 + "</div>" +
              "<div class='mc-bd'>" + bd2 + "</div></div>";
     }
@@ -5252,6 +5306,7 @@ var ctxSnapRequest = 0;
         : bodyHtml(body, "(空)", 0, "", true);
       if(grp && !segs.length) bd = tailChip(bd, chipA);
       if(tcl.length) bd += "<div class='tcall-wrap'>" + toolCallList(tcl) + "</div>";
+      bd += unassignedMediaHtml(neutralMedia, mode);
       if(grp){
         // 组内：名字在组头，左列只放时间；时间从正文里剥出来了（ts 变量）
         // v3.60（用户 m17581 第 5 条）：这一条只有工具调用、没有正文时打上 callonly，
@@ -5499,25 +5554,21 @@ var ctxSnapRequest = 0;
       // v4.32：先拆原始各段；markdown 图片地址留给该段 botCard 提取。
       var parts = splitMetaAll(String(m.text || "").replace(/\\n/g, "\n"));
       if(parts.length > 1){
-        // 每段一张卡：图按各段占位认领，别让每张卡都带全部图，
-        // 也别把引用里的图甩到卡外（用户 m01680）。认不准就维持原样。
-        var claims = claimMediaBySegs(parts, m.media);
+        // 整条聚合媒体无 per-mid 证明：不按图片占位猜 owner，不跨 owner 去重。
+        var d = displayOf(m), neutral = uniqueOwnerMedia(d.own.concat(d.unassigned));
         var h = "";
         parts.forEach(function(q, qi){
-          // 认不准（占位数和图片数对不上）时不重复挂：图只放第一段卡上，别每张卡都来一份
-          var segMedia = claims ? claims[qi]
-                                : { quote: null, own: (qi === 0 ? (m.media || []) : []) };
-          // 本段该有的图：引用那张 + 正文自己的。交给单段分支判断归引用块还是卡外。
-          var segAll = (segMedia.quote || []).concat(segMedia.own || []);
           var body = String(q.body || "").replace(/\s+$/, "");
-          if(!body && !q.meta.reply && !q.meta.card && !q.meta.file && !segAll.length &&
+          if(!body && !q.meta.reply && !q.meta.fwd && !q.meta.card && !q.meta.file &&
              !(qi === 0 && m.files && m.files.length)) return;
-          h += mcHtml({ role: "user", text: body, raw: body, media: segAll,
+          h += mcHtml({ role: "user", text: body, raw: body, media: [],
+                        display: { own_media_known: false, own_media: [], unassigned_media: [], direct_reply: null, source: "unknown" },
                         files: (qi === 0 ? (m.files || null) : null),
-                        chars: visLen(tidyBody2(body, segAll.length > 0)), tools: 0, tool_call_id: "" },
+                        chars: visLen(tidyBody2(body, false)), tools: 0, tool_call_id: "" },
                       idx, mode, "", q.meta, shortTs(q.meta.ts || ""), grp,
                       (qi === parts.length - 1 ? (tail || "") : ""));
         });
+        h += unassignedMediaHtml(neutral, mode);
         return h;
       }
     }
@@ -5552,7 +5603,7 @@ var ctxSnapRequest = 0;
     // 后端 push_pending 已经 strip 过，但热重载前推进来的老条目还带框架残留空格，
     // 前端再兜一层，不然字数会多算 1（用户 m32956 图1：显示 6 字其实 5 字）
     var t = (m.text === undefined || m.text === null) ? "" : String(m.text).trim();
-    var raw = rawOf({ raw: m.raw, text: t });
+    var raw = mode === "pretty" ? displayTextOf({ raw: m.raw, text: t }) : rawOf({ raw: m.raw, text: t });
     // 待发的正文优先用带 meta 段的那份：历史卡能显示「时间 昵称 #id」是因为
     // text 里带着 [HH:MM] [message_id: …] [user_nickname: …]，待发的 text
     // 是洗过的正文，只有 raw 里才有这些，不用 raw 就少一头（用户 m27043）
@@ -5589,6 +5640,7 @@ var ctxSnapRequest = 0;
     // 原文档（raw 档）走的是 vm.text，不再读 raw：这里也要补上同一个占位，否则还是只剩一个时间
     var vmText = (mode === "raw" && noBody && mrefs.length) ? mediaTag : shown;
     var vm = { role: isBot ? "assistant" : "user", text: vmText, raw: rawShown, media: mrefs,
+               display: m.display,
                who: isBot ? (m.name || m.sender || "") : "",
                chars: visLen(t), tools: 0, tool_call_id: "" };
     var tags = (isBot ? "<span class='chb'>刚发出</span>"
@@ -5933,14 +5985,16 @@ var ctxSnapRequest = 0;
     // 而决策记录是另一次请求（比窗口晚一点点到），不写进指纹就永远是「还没到」的那一版。
     var trendSig = JSON.stringify([ctxRounds, ctxTrims,
                                    ctxDecTrend.map(function(r){ return r.name; })]);
-    if(!force && sig === lastWinSig && trendSig === lastTrendSig) return;
+    // 每次窗口 GET 都重新给 unknown 有限回查机会，指纹不变也不能永久丢图。
+    QUOTE_PIC_TRIED = Object.create(null);
+    if(!force && sig === lastWinSig && trendSig === lastTrendSig){ fillQuoteMiss(); return; }
     // 用户 m11091 第 8 条：正在滚动就先别重画。5 秒轮询一落地就整块 innerHTML
     // 重建（70 条消息几百个节点），恰好压在滚轮/拖动滚动条那一帧上就会卡一下；
     // 数据不丢，等滚动停下再画。
     if(!force && isScrolling()){ deferWin = { d: d, force: false }; return; }
     var bodyUnchanged = !force && sig === lastWinSig;
     // 用户 m02993 图10：引用只有 id 时要回查窗口，索引跟着这批消息一起换。
-    QUOTE_IDX = buildQuoteIdx(msgs, pend);
+    if(!bodyUnchanged) QUOTE_IDX = buildQuoteIdx(msgs, pend);
     var _newSid = String(d.sid || "");
     if(_newSid !== QUOTE_SID){
       // 换了会话：上一会话回查到的原话、以及「问过但没图」的记录都不能再用
@@ -6037,6 +6091,7 @@ var ctxSnapRequest = 0;
       trendBox.innerHTML = trendHtml;
       revealTrendSel(trendBox.querySelector(".trend"));
       restoreWinScroll(keepWinY);
+      fillQuoteMiss();
       return;
     }
     html += "<div data-ctx-trend>" + trendHtml + "</div>";
@@ -6363,10 +6418,11 @@ var ctxSnapRequest = 0;
       var snapshot = r.window_snapshot;
       var hasSnapshot = snapshot && Array.isArray(snapshot.messages);
       var vmsgs = hasSnapshot ? snapshot.messages : (r.messages || []).map(function(m, i){
-        var dm = (r.display_messages || [])[i] || {};
+        var projected = snapshotDisplay(m, (r.display_messages || [])[i]);
+        var dm = projected.view;
         var t = typeof dm.text === "string" ? dm.text : contentText(m.content);
         return { role: m.role || "user", text: t, raw: rawContent(m.content), chars: t.length, media: dm.media || m.media || [],
-                 name: m.name || "",
+                 display: projected.display, name: m.name || "",
                  tools: (m.tool_calls || []).length, tool_call_id: m.tool_call_id || "",
                  // v3.89（用户 m05321 第 1 条）：裁切快照里带「待发」标记的项要一眼认出
                  pending: !!dm.pending,
@@ -7446,6 +7502,29 @@ var ctxSnapRequest = 0;
     return 0;
   }
 
+  // VM 的 text/media 与 ownership projection 是两层，绝不从 VM.media 猜归属。
+  // m.display 也可能是旧的完整 VM；显式空数组必须一路保留到 displayOf。
+  function snapshotDisplay(m, vm){
+    function projection(d){
+      return d && typeof d === "object" && !Array.isArray(d) &&
+        (typeof d.own_media_known === "boolean" || Array.isArray(d.own_media) ||
+         Array.isArray(d.unassigned_media) || typeof d.own_body === "string" ||
+         Object.prototype.hasOwnProperty.call(d, "direct_reply")) ? d : null;
+    }
+    var md = m && m.display;
+    var view = md && !projection(md) ? md : (vm || {});
+    return {view:view, display:projection(md) || projection(view.display) || undefined};
+  }
+  function carrySnapshotDisplay(m, vm){
+    var d = snapshotDisplay(m, vm), media = d.view.media;
+    if(d.display || (Array.isArray(media) && media.length && !(m.media || []).length)){
+      var out = Object.assign({}, m);
+      if(d.display) out.display = d.display;
+      if(Array.isArray(media) && media.length && !(m.media || []).length) out.media = media;
+      return out;
+    }
+    return m;
+  }
   // 三档共用投影，不改快照；history/display 投影不得改变边界、顺序、条数或字符数。
   function snapshotPartition(r){
     var rec=r || {}, msgs=Array.isArray(rec.messages) ? rec.messages.slice() : [];
@@ -7471,7 +7550,7 @@ var ctxSnapRequest = 0;
         tail.unshift(suffix.pop());
       }
     }
-    var used={}, mediaByIndex={};
+    var used={}, viewByIndex={};
     source.forEach(function(m,i){
       if(!m) return;
       var vm=(rec.incoming_display_messages || [])[i];
@@ -7489,15 +7568,14 @@ var ctxSnapRequest = 0;
            sameMsgText(rawContent(old.content),rawContent(m.content),old,m)){match=h;break;}
       }
       if(match>=0){
-        if(vm && Array.isArray(vm.media) && vm.media.length) mediaByIndex[match]=vm.media;
+        viewByIndex[match]=carrySnapshotDisplay(m,vm);
         used[match]=true;return;
       }
-      incoming.push(vm && Array.isArray(vm.media) && vm.media.length && !(m.media || []).length
-        ? Object.assign({},m,{media:vm.media}) : m);
+      incoming.push(carrySnapshotDisplay(m,vm));
     });
     var current=trim ? [] : suffix.concat(incoming,tail).map(function(m){
-      var at=msgs.indexOf(m), media=mediaByIndex[at] || ((rec.display_messages || [])[at] || {}).media;
-      return media && media.length && !(m.media || []).length ? Object.assign({},m,{media:media}) : m;
+      var at=msgs.indexOf(m), canonical=carrySnapshotDisplay(m,(rec.display_messages || [])[at]);
+      return carrySnapshotDisplay(canonical,viewByIndex[at]);
     });
     var stat=typeof rec.system_static==="string" ? rec.system_static : (rec.system_prompt || "");
     var reloc=!trim && typeof rec.system_static==="string" ? (rec.system_relocated || "") : "";
@@ -7744,7 +7822,8 @@ var ctxSnapRequest = 0;
       var kKeep = 0;
       hist.forEach(function(m, i){
         // 历史只画 canonical 轮次边界内消息，不按缓存前缀挪动。
-        var dm = m.display || (r.display_messages || [])[i] || {};
+        var projected = snapshotDisplay(m, (r.display_messages || [])[i]);
+        var dm = projected.view;
         var c = typeof dm.text === "string" ? dm.text : contentText(m.content);
         if(m.role !== "user") c = tidyBody(c);
         if(m.role === "user"){
@@ -7752,7 +7831,7 @@ var ctxSnapRequest = 0;
           if(q0 && q0.meta && q0.meta.ts) lastTs2 = shortTs(q0.meta.ts);
         }
         var mm = {role: m.role, text: c, raw: rawContent(m.content), chars: c.length, media: dm.media || m.media || [],
-                  who: m.who || "", name: m.name || "",
+                  display: projected.display, who: m.who || "", name: m.name || "",
                   tools: dm.tools === undefined ? (m.tool_calls || []).length : dm.tools, tool_call_id: m.tool_call_id || "",
                   tc: dm.tc || tcOf(m)};
         var gk = groupKeyOf(mm, i);
@@ -7797,7 +7876,7 @@ var ctxSnapRequest = 0;
           var role3 = String(m.role || "user"), text3 = tsShortOf(contentText(m.content));
           if(role3 !== "user") text3 = tidyBody(text3);
           var mm3 = {role:role3,who:m.who || m.name || "",name:m.name || "",text:text3,
-            raw:tsShortOf(rawContent(m.content)),media:m.media || [],chars:text3.length,
+            raw:tsShortOf(rawContent(m.content)),media:m.media || [],display:snapshotDisplay(m).display,chars:text3.length,
             tools:(m.tool_calls || []).length,tool_call_id:m.tool_call_id || "",tc:tcOf(m)};
           var gk3 = groupKeyOf(mm3, "f" + idx);
           if(gk3 !== grpKey3){
