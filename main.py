@@ -11,6 +11,7 @@ WebUI 页面挂在左侧边栏「多样决策」：群聊 / 私聊 / 上下文�
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import ctypes
 import os
@@ -37,6 +38,17 @@ from .state.decision_phase import (
     options_from_config,
 )
 from .state.decision_log import DecisionLog
+from .decision.forward_fetch import (
+    display_proof_for_mid as forward_display_proof_for_mid,
+    fetch_forward_items,
+)
+from .state.display_projection import (
+    content_text,
+    message_id as display_message_id,
+    project_items,
+    raw_forward_proof_items,
+    read_native_rows,
+)
 from .state.hidden import Hidden
 from .state.overrides import Overrides
 from .state.pricing import PRICE_UNIT, Pricing
@@ -109,7 +121,7 @@ def _forward_media_attach(messages, raw_sid: str = "") -> list:
         try:
             if isinstance(m, dict) and not (m.get("media") or []) and "[Forward" in str(m.get("text") or ""):
                 med = []
-                for ref in (_fwd_media_of(str(m.get("text") or "")) or [])[:6]:
+                for ref in (_fwd_media_of(str(m.get("text") or "")) or [])[:4096]:
                     try:
                         got = public_media(str(ref.get("path") or ""), str(ref.get("mime") or ""), raw_sid)
                     except Exception:
@@ -3128,132 +3140,225 @@ class MultiDecisionPlugin(BasePlugin):
             "keep": keep,
         }
 
+    async def _refresh_forward_display_proofs(self, raw_sid, native_rows):
+        """Bounded display-only proof refresh; never hydrate model/window messages."""
+        if not isinstance(raw_sid, str) or not isinstance(native_rows, dict):
+            return
+        parts = raw_sid.rsplit(":", 2)
+        if len(parts) != 3 or not parts[0] or parts[1] not in ("gm", "dm") or not parts[2]:
+            return
+        manager = getattr(getattr(self, "ctx", None), "adapter_mgr", None)
+        if manager is None:
+            return
+        deadline = time.monotonic() + 3.0
+        # None marks in-flight; numbers are short failure deadlines only. Never
+        # evict an in-flight operation or retain a permanent negative result.
+        now = time.monotonic()
+        attempts = getattr(self, "_forward_display_attempts", None)
+        if attempts is None:
+            attempts = self._forward_display_attempts = {}
+        for key, until in list(attempts.items()):
+            if until is not None and until <= now:
+                attempts.pop(key, None)
+        candidates = []
+        for mid, row in native_rows.items():
+            if (not isinstance(mid, str) or not mid or not isinstance(row, dict)
+                    or row.get("session_id") != raw_sid or str(row.get("platform_message_id")) != mid
+                    or row.get("chain") != [{"type": "forward"}]):
+                continue
+            try:
+                proof = forward_display_proof_for_mid(raw_sid, mid)
+            except Exception:
+                proof = None
+            key = (raw_sid, mid)
+            if proof is not None:
+                if attempts.get(key) is not None:
+                    attempts.pop(key, None)
+                continue
+            if key not in attempts:
+                candidates.append(mid)
+                if len(candidates) == 2:
+                    break
+        if not candidates:
+            return
+        try:
+            adapters = manager.get_adapters()
+            adapter = adapters.get(parts[0]) if isinstance(adapters, dict) else None
+            bot = getattr(adapter, "bot", None) if type(adapter).__name__ == "QQAdapter" else None
+            if not callable(getattr(bot, "send_action", None)):
+                return
+        except Exception:
+            return
+        for mid in candidates:
+            key = (raw_sid, mid)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or key in attempts:
+                continue
+            # Full means conservatively skip, not evict active or cooled keys.
+            if len(attempts) >= 128:
+                break
+            attempts[key] = None
+            try:
+                await asyncio.wait_for(fetch_forward_items(
+                    bot, mid, timeout=remaining, raw_sid=raw_sid, refresh_display_proof=True,
+                ), timeout=remaining)
+            except Exception:
+                pass
+            finally:
+                try:
+                    succeeded = forward_display_proof_for_mid(raw_sid, mid) is not None
+                except Exception:
+                    succeeded = False
+                if succeeded:
+                    attempts.pop(key, None)
+                else:
+                    attempts[key] = time.monotonic() + 30.0
+
+
     @_api("GET", "/quote-lookup")
     async def api_quote_lookup(self, sid: str = "", ids: str = ""):
-        """按 message_id 回查更早的原话（用户 m02993 图10）。
-
-        窗口只留最近几十条，被引用的那条经常已经滑出去了——以前前端只能写
-        「引用了更早的一条消息」。请求记录里每一轮都存着当轮的完整消息，翻最近
-        几十轮就能把原话捞回来；同一个 id 只扫一次，结果进缓存。
-        """
+        """One-level Web quote projection, preferring the target's native own chain."""
         out: dict = {}
-        if not sid or not ids or self.request_log is None:
+        if not sid or not ids:
             return {"ok": True, "items": out}
-        cache = getattr(self, "_quote_cache", None)
-        if cache is None:
-            cache = self._quote_cache = {}
-        want: list = []
-        for x in str(ids).split(","):
-            k = x.strip()
-            if k and k not in want:
-                want.append(k)
-        want = want[:12]
+        want = list(dict.fromkeys(x.strip() for x in str(ids).split(",") if x.strip()))[:12]
         try:
-            _rsid = self.window.raw_sid(sid) if self.window is not None else ""
+            raw_sid = self.window.raw_sid(sid) if self.window is not None else ""
         except Exception:
-            _rsid = ""
-        missing = [k for k in want if (sid, k) not in cache]
-        if missing:
-            left = set(missing)
-            # 两种形态：用户行「[17:46] [message_id: -357681150] [user_nickname: 田野, …] | 正文」
-            # 与 bot 行「[17:37] <msg message_id="1888530223">[昵称] <text>正文</text></msg>」。
-            # 以前只认前者，引用 bot 自己的话就永远查不回来（用户 m11986）。
-            pat = re.compile(r'\[message_id:\s*([-\d]+)\]|<msg\s+message_id="(-?\d+)"', re.I)
-            xml_pat = re.compile(
-                r'<msg\s+message_id="(-?\d+)"[^>]*>\s*\[([^\]]*)\]\s*<text>([\s\S]*?)</text>',
-                re.I,
-            )
-            try:
-                rounds = self.request_log.list_rounds(sid, limit=80) or []
-            except Exception:
-                rounds = []
-            for row in rounds:
-                if not left:
-                    break
-                name = str((row or {}).get("name") or "")
-                if not name:
-                    continue
+            raw_sid = ""
+        # Request-local only: one transient failure cannot become ready halfway through
+        # this same response. The next GET always retries every media path.
+        media_projection = {}
+
+        def quote_public_media(path, mime, owner_sid):
+            key = (path, mime, owner_sid)
+            if key not in media_projection:
                 try:
-                    rec = self.request_log.read_round(sid, name) or {}
+                    media_projection[key] = public_media(path, mime, owner_sid)
                 except Exception:
+                    media_projection[key] = {}
+            got = media_projection[key]
+            return dict(got) if isinstance(got, dict) else {}
+
+        # No negative cache: a not-yet-written native record is retried next GET.
+        native_rows = await asyncio.to_thread(read_native_rows, raw_sid, want)
+        await self._refresh_forward_display_proofs(raw_sid, native_rows)
+        projected = project_items(
+            [{"message_id": mid} for mid in want], raw_sid, native_rows,
+            public_media=quote_public_media, text_of_content=content_text,
+        )
+        native_display = {mid: item["display"] for mid, item in zip(want, projected)}
+
+        def native_meta(mid):
+            row = native_rows.get(mid) or {}
+            try:
+                stamp = float(row.get("timestamp") or 0)
+                if stamp > 100_000_000_000:
+                    stamp /= 1000
+                ts = time.strftime("%H:%M", time.localtime(stamp)) if stamp else ""
+            except (ValueError, TypeError, OSError, OverflowError):
+                ts = ""
+            return str(row.get("sender_name") or ""), ts
+
+        for mid in want:
+            display = native_display[mid]
+            if display["own_media_known"] and "own_body" in display:
+                who, ts = native_meta(mid)
+                out[mid] = {"who": who, "ts": ts, "body": display.get("own_body", ""),
+                            "media": display["own_media"], "display": display}
+        left = set(want) - set(out)
+        try:
+            rounds = self.request_log.list_rounds(sid, limit=80) if left and self.request_log is not None else []
+        except Exception:
+            rounds = []
+        xml_pat = re.compile(
+            r'<msg\s+message_id=["\']([^"\']+)["\'][^>]*>\s*\[([^\]]*)\]\s*<text>([\s\S]*?)</text>',
+            re.I,
+        )
+        for row in rounds or []:
+            if not left:
+                break
+            name = str((row or {}).get("name") or "")
+            if not name:
+                continue
+            try:
+                rec = self.request_log.read_round(sid, name) or {}
+            except Exception:
+                continue
+            for original in rec.get("messages") or []:
+                item = original if isinstance(original, dict) else {"content": getattr(original, "content", "")}
+                # Only the explicit/outer owner may match; a nested quoted id never does.
+                mid = display_message_id(item, text_of_content=content_text)
+                if mid not in left:
                     continue
-                for m in rec.get("messages") or []:
-                    if isinstance(m, dict):
-                        txt = str(m.get("text") or m.get("content") or m.get("raw") or "")
-                    else:
-                        txt = str(getattr(m, "content", "") or "")
-                    if "message_id" not in txt:
+                txt = ""
+                for key in ("text", "content", "raw"):
+                    txt = content_text(item.get(key))
+                    if txt:
+                        break
+                nm = re.search(r"\[user_nickname:\s*([^,\]]+)", txt)
+                tm = re.match(r"\s*\[(\d{1,2}:\d{2})\]", txt)
+                xm = xml_pat.search(txt)
+                if xm and xm.group(1) == mid:
+                    who, body = xm.group(2).strip(), xm.group(3).strip()
+                else:
+                    who = nm.group(1).strip() if nm else ""
+                    split = re.split(r"\]\s*\|\s*", txt, maxsplit=1)
+                    body = split[1] if len(split) == 2 else txt
+                med = []
+                refs = item.get("media") or []
+                for ref in refs[:4096] if isinstance(refs, list) else []:
+                    if not isinstance(ref, dict):
                         continue
-                    hit = ""
-                    for mm in pat.finditer(txt):
-                        mid = mm.group(1) or mm.group(2)
-                        if mid in left:
-                            hit = mid
-                            break
-                    if not hit:
-                        continue
-                    nm = re.search(r"\[user_nickname:\s*([^,\]]+)", txt)
-                    tm = re.match(r"\s*\[(\d{1,2}:\d{2})\]", txt)
-                    xm = xml_pat.search(txt)
-                    if xm and xm.group(1) == hit:
-                        # bot 自己发的那行进不了上面那套切法：它没有「 | 」，
-                        # 昵称在方括号里、正文包在 <text> 里（用户 m11986）。
-                        who = xm.group(2).strip()
-                        body = xm.group(3).strip()
-                    else:
-                        who = nm.group(1).strip() if nm else ""
-                        body = txt
-                        sp = re.split(r"\]\s*\|\s*", txt, 1)
-                        if len(sp) > 1:
-                            body = sp[1]
-                    # 用户 m12256：被引用那条自己也带图时（大椰果 18:21 发图、哦豁 18:37 引用），
-                    # 引用块里要画出那张图，不能只画一个「图片」占位。请求快照的行里带着 media
-                    # （request_log._decorate_rows 按 message_id 补的），这里顺手过一遍
-                    # public_media：副本落进插件缓存，框架之后清理 session_media 也不丢。
-                    med: list = []
-                    if isinstance(m, dict):
-                        refs = m.get("media") or []
-                        for ref in (refs[:6] if isinstance(refs, list) else []):
-                            if not isinstance(ref, dict):
-                                continue
-                            try:
-                                got = public_media(
-                                    str(ref.get("path") or ""),
-                                    str(ref.get("mime") or ""),
-                                    _rsid,
-                                )
-                            except Exception:
-                                got = {}
-                            if got and (got.get("path") or got.get("url")):
-                                med.append(got)
-                    cache[(sid, hit)] = {
-                        "who": who,
-                        "ts": tm.group(1) if tm else "",
-                        "body": body.strip(),
-                        "media": med,
-                    }
-                    left.discard(hit)
-            if len(cache) > 4000:
-                cache.clear()
-        for k in want:
-            got = cache.get((sid, k))
-            if got:
-                # 快照那行没带图（图片是更早一轮发的，或者框架没补上），
-                # 再按 message_id 去 session_media / 插件索引 / 归档库认一次。
-                if not got.get("media"):
-                    refound = _quote_media_by_mid(k, _rsid)
-                    if refound:
-                        got = dict(got)
-                        got["media"] = refound
-                out[k] = got
+                    path = str(ref.get("path") or ref.get("url") or "")
+                    try:
+                        got = quote_public_media(path, str(ref.get("mime") or ""), raw_sid) if path else dict(ref)
+                    except Exception:
+                        got = {"missing": 1, "path": path, "mime": str(ref.get("mime") or "")}
+                    if got and (got.get("path") or got.get("url") or got.get("missing")):
+                        med.append(got)
+                fallback = dict(item, message_id=mid, media=med)
+                display = project_items(
+                    [fallback], raw_sid, native_rows, public_media=quote_public_media,
+                    text_of_content=content_text, forward_display_proof_for_mid=forward_display_proof_for_mid,
+                    forward_proof_items=[item],
+                )[0]["display"]
+                # Without native proof these aggregate refs are neutral attachments only.
+                ts = tm.group(1) if tm else ""
+                if display["own_media_known"]:
+                    who, ts = native_meta(mid)
+                    body = display.get("own_body", body)
+                    med = display["own_media"]
+                out[mid] = {"who": who, "ts": ts, "body": body.strip(),
+                            "media": med, "display": display}
+                left.discard(mid)
+        for mid in want:
+            if mid not in out and mid in native_rows:
+                who, ts = native_meta(mid)
+                display = native_display[mid]
+                row = native_rows[mid]
+                if (row.get("session_id") == raw_sid and str(row.get("platform_message_id")) == mid
+                        and row.get("chain") == [{"type": "forward"}]):
+                    # No original log body exists for this id. Supply only the exact
+                    # native owner header/shell; strict projection still validates proof.
+                    shell = {"message_id": mid, "text": f"[message_id: {mid}] | [Forward]"}
+                    display = project_items(
+                        [shell], raw_sid, native_rows, public_media=quote_public_media,
+                        text_of_content=content_text, forward_display_proof_for_mid=forward_display_proof_for_mid,
+                    )[0]["display"]
+                out[mid] = {"who": who, "ts": ts, "body": display.get("own_body", ""),
+                            "media": display["own_media"] if display["own_media_known"] else [],
+                            "display": display}
         return {"ok": True, "items": out}
 
 
     @_api("GET", "/window")
     async def api_window(self, sid: str = ""):
-        """某个会话当前的上下文窗口（观察窗，只读）。"""
+        """只读窗口事实；可有界补取独立的 Forward 展示凭证，不回填上下文。"""
         if not sid or self.window is None:
             return {"ok": False, "detail": "没有这个会话的窗口"}
+        # Cache-filled compatibility attachments must never corroborate themselves.
+        original_messages = raw_forward_proof_items(self.window.snapshot(sid, prepare=False))
         messages = _forward_media_attach(self.window.messages_of(sid), self.window.raw_sid(sid))
         source = "live"
         last_ts = 0.0
@@ -3269,6 +3374,7 @@ class MultiDecisionPlugin(BasePlugin):
             last = self.request_log.last_snapshot(sid)
             if last:
                 raw = last.get("messages") or []
+                original_messages = raw
                 messages = view_of(
                     raw,
                     raw_sid=self.window.raw_sid(sid)
@@ -3289,6 +3395,26 @@ class MultiDecisionPlugin(BasePlugin):
                 )
                 last_ts = last.get("ts") or 0.0
                 source = "last_request"
+        # A single read-only batch supplies display-only ownership for both lists.
+        raw_sid = self.window.raw_sid(sid)
+        pending = self.window.pending_of(sid)
+        mids = []
+        seen_mids = set()
+        for item in [*messages, *pending]:
+            mid = display_message_id(item, text_of_content=content_text)
+            if mid and mid not in seen_mids:
+                mids.append(mid)
+                seen_mids.add(mid)
+            if len(mids) >= 900:
+                break
+        native_rows = await asyncio.to_thread(read_native_rows, raw_sid, mids)
+        await self._refresh_forward_display_proofs(raw_sid, native_rows)
+        messages = project_items(messages, raw_sid, native_rows, public_media=public_media,
+                                 text_of_content=content_text, forward_display_proof_for_mid=forward_display_proof_for_mid,
+                                 forward_proof_items=original_messages)
+        pending = project_items(pending, raw_sid, native_rows, public_media=public_media,
+                                text_of_content=content_text, forward_display_proof_for_mid=forward_display_proof_for_mid,
+                                forward_proof_items=pending)
         return {
             "ok": True,
             "sid": sid,
@@ -3304,7 +3430,7 @@ class MultiDecisionPlugin(BasePlugin):
             "messages": messages,
             "source": source,
             "last_ts": last_ts,
-            "pending": self.window.pending_of(sid),
+            "pending": pending,
             "summary": self.window.summary_info(sid),
             "bot_qq": self.bot_qq,
             # v3.91（用户 m05749）：当前窗口顶上那条「最近一次判定」直接吃这个，
@@ -4551,7 +4677,9 @@ class MultiDecisionPlugin(BasePlugin):
         if act not in ("add", "remove"):
             return {"ok": False, "detail": "action 只能是 add 或 remove"}
         word = _norm_phrase(text)
-        if not word:
+        # 图片等占位不是文字；只拦添加，历史垃圾项仍须允许解除。
+        text_only = re.sub(r"\[(?:图片|表情|语音|视频|文件|image(?:\s+attached)?|sticker(?:\s+attached)?|kira_image_ref|input_image)\]", "", str(text or ""), flags=re.I)
+        if not word or (act == "add" and not _norm_phrase(text_only)):
             return {"ok": False, "detail": "这条消息没有可拉黑的文字"}
         items = list(self._phrase_block_payload(sid)["items"])
         if act == "add":
@@ -5309,7 +5437,16 @@ class MultiDecisionPlugin(BasePlugin):
                 rec["retry_of"]["attempt_index"] = self._retry_attempt_index(rec, _rows)
             # 这一轮如果是「出错原轮」，把后来那次重试的结果与回复挂到下面（只读拼接）
             rec["retry_outcome"] = self._retry_outcome_of(rec, _rows)
-            raw_sid = self.window.raw_sid(sid) if self.window is not None else ""
+            # A normalized SID cannot identify a bot. Use only an original raw SID
+            # for this session, preferring the live window; never reverse-guess one.
+            raw_sid = ""
+            for candidate in ([self.window.raw_sid(sid)] if self.window is not None else []) + [
+                    data.get("raw_sid"), data.get("session_id"), data.get("sid")]:
+                if (isinstance(candidate, str) and len(candidate.split(":")) >= 3
+                        and candidate.split(":")[-2] in ("gm", "dm")
+                        and normalize_sid(candidate) == normalize_sid(sid)):
+                    raw_sid = candidate
+                    break
             who = self.window._bot_name(sid) if self.window is not None else ""
             # 用户本轮第 3 条：② 历史消息只画历史那段。老写法取完整 messages，
             # 本轮那条（stage 已切进 incoming_messages）会在这里再画一遍，
@@ -5322,6 +5459,8 @@ class MultiDecisionPlugin(BasePlugin):
             if not isinstance(history_source, list):
                 history_source = []
             history_source = copy.deepcopy(history_source)
+            # Proof must precede regroup/split and view_of's compatibility cache fill.
+            history_proof = raw_forward_proof_items(history_source)
             try:
                 history_source = regroup_images(history_source)
             except Exception as exc:
@@ -5335,6 +5474,8 @@ class MultiDecisionPlugin(BasePlugin):
                     # 存的是框架消息（{role, content}），老版本可能是裸字符串，两种都收
                     _txt = ((line.get("content") or line.get("text") or "")
                             if isinstance(line, dict) else line)
+                    if isinstance(_txt, list):
+                        _txt = content_text(_txt)
                     if isinstance(_txt, str) and _txt.strip():
                         incoming.append({"text": _txt})
             else:
@@ -5343,6 +5484,11 @@ class MultiDecisionPlugin(BasePlugin):
                 if not incoming and rec.get("user_prompt"):
                     incoming = [{"text": rec["user_prompt"]}]
             new_msgs = [{"role": "user", "content": p.get("text") or ""} for p in incoming]
+            incoming_proof = (raw_forward_proof_items(data.get("incoming_messages") or [])
+                              if rec.get("decision_only") else
+                              [dict(p, content=p.get("text") or "") for p in incoming])
+            prompt_proof = [dict(p, content=p.get("text") or "") if isinstance(p, dict)
+                            else {"content": p or ""} for p in data.get("user_prompt_parts") or []]
             history = expand_packed_messages(history_source)
             new_msgs = expand_packed_messages(new_msgs)
             rec["history_display_messages"] = view_of(history, bot_name=who, raw_sid=raw_sid)
@@ -5371,6 +5517,36 @@ class MultiDecisionPlugin(BasePlugin):
                         raw = item.get("raw")
                         item["media"] = copy.deepcopy(projected_media.get(raw, [])) if isinstance(raw, str) else []
                         item["media_source"] = "native_projection"
+            # Project after native_projection's aggregate overlay and before either
+            # snapshot captures these aliases. Each source has its own original proof;
+            # a cache-filled view (or another alias with the same mid) proves nothing.
+            owner_proofs = {
+                "history_display_messages": history_proof,
+                "incoming_display_messages": incoming_proof,
+                "display_messages": raw_forward_proof_items(data.get("messages") or []),
+                "display_user_prompt_parts": prompt_proof,
+            }
+            owner_ids, owner_seen = [], set()
+            owner_items = [item for field in owner_proofs for item in rec[field]]
+            owner_items += [{"content": item.get("raw") or item.get("full_text") or item.get("text") or ""}
+                            for item in (trace or {}).get("sent") or [] if isinstance(item, dict)]
+            for item in owner_items:
+                mid = display_message_id(item, text_of_content=content_text)
+                if mid and mid not in owner_seen:
+                    owner_seen.add(mid)
+                    owner_ids.append(mid)
+                if len(owner_ids) >= 900:
+                    break
+            owner_rows = await asyncio.to_thread(read_native_rows, raw_sid, owner_ids)
+            await self._refresh_forward_display_proofs(raw_sid, owner_rows)
+
+            def project_request_view(items, proof):
+                return project_items(items, raw_sid, owner_rows, public_media=public_media,
+                                     text_of_content=content_text, forward_proof_items=proof,
+                                     forward_display_proof_for_mid=forward_display_proof_for_mid)
+
+            for field, proof in owner_proofs.items():
+                rec[field] = project_request_view(rec[field], proof)
             # Compatibility fields retain full content; reverse-resolved media is display only.
             rec["messages"] = [dict(m, media=media_list(m.get("content"), raw_sid),
                                     **({"who": who} if m.get("role") == "assistant" and who else {}))
@@ -5443,6 +5619,7 @@ class MultiDecisionPlugin(BasePlugin):
                     display["raw_original"] = original_raw
                 if sent_ts is not None:
                     display["ts"] = sent_ts
+            rec["sent_display_messages"] = project_request_view(rec["sent_display_messages"], sent_msgs)
             # 用户 m35137：点柱子看的是「这一轮的窗口快照」，以前不分回复轮 / 决策轮，
             # 一律拿 request_snapshot（history + 打包成一整段的 user_prompt）来拼。
             # 回复轮那 11 条待发在 user_prompt 里就是一段文本，拼进快照只剩 1 条；
@@ -5482,7 +5659,7 @@ class MultiDecisionPlugin(BasePlugin):
                         _body += "；打算说：" + _say
                     _note = {"role": "assistant", "name": "对当前聊天消息的决策建议",
                              "content": _body}
-                    _shown = view_of([_note], bot_name=who, raw_sid=raw_sid)
+                    _shown = project_request_view(view_of([_note], bot_name=who, raw_sid=raw_sid), [_note])
                     if _shown:
                         item0 = dict(_shown[0])
                         item0["decnote"] = True

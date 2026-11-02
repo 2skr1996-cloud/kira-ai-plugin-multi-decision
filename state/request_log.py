@@ -1028,7 +1028,7 @@ class RequestLog:
         if not self.enabled or request is None:
             return
         try:
-            messages = [_to_dict(m) for m in (getattr(request, "messages", None) or [])]
+            messages = [copy.deepcopy(_to_dict(m)) for m in (getattr(request, "messages", None) or [])]
         except Exception:
             messages = []
 
@@ -1043,7 +1043,10 @@ class RequestLog:
             except Exception:
                 continue
             if isinstance(_d, dict) and str(_d.get("content") or "").strip():
-                round_rows.append(_d)
+                round_rows.append(copy.deepcopy(_d))
+        # 展示兜底可能用去重后的纯文字 anchor 重建 round_rows；保留调用方给出的
+        # 轮次身份，prepared 投影的本轮筛选不能反过来借展示候选认人。
+        request_round_rows = round_rows
         hist_messages = messages
         if round_rows and len(messages) >= len(round_rows):
             k = len(round_rows)
@@ -1234,29 +1237,12 @@ class RequestLog:
             {"key": "incoming", "label": "本轮消息", "chars": incoming_chars},
             {"key": "relocated", "label": "动态段（时间/会话/记忆）", "chars": len(relocated_text)},
         ]
-        # 用户本轮第 3 条（回复记录里同一条 @ 画两遍）：assembled 只该画历史那段。
-        # 原来传的是完整 messages，而 hist_messages 已经从尾部切掉了本轮那条，
-        # 于是同一 message_id 在 assembled 里出现两次（history + incoming）。
-        # 缓存口径全在 _prefix_of(完整 messages) 里另算，这里换掉不影响命中。
+        # ②/③ 的展示切分不改变发送集合：本轮可能已经以带图消息留在
+        # request.messages，user_prompt 去重后只剩文字 anchor。用 hist_messages
+        # 装配会把本轮真实图片删掉；完整 prepared messages 才是请求基底。
         assembled = self._assemble(
-            static_text, hist_messages, relocated_text, up_parts, tail_dynamic, up_seq
+            static_text, messages, relocated_text, up_parts, tail_dynamic, up_seq
         )
-        # 决策注记插到「本轮那条」前面（用户 m14812 图3：原文里它就在 ③ 开头）。
-        for _n in tail_notes:
-            try:
-                _d = dict(_n)
-            except Exception:
-                continue
-            _d["tag"] = "incoming"
-            _at = None
-            for _i in range(len(assembled) - 1, -1, -1):
-                if isinstance(assembled[_i], dict) and assembled[_i].get("tag") == "incoming":
-                    _at = _i
-                    break
-            if _at is None:
-                assembled.append(_d)
-            else:
-                assembled.insert(_at, _d)
         # The retained-round adapter keeps canonical user -> note in history and
         # suppresses only duplicate Prompt bodies at the provider boundary. Forecast
         # that narrow, already-staged branch without rewriting old records or anchors.
@@ -1277,6 +1263,12 @@ class RequestLog:
                 forecast_seq.append((nm, text))
             assembled = self._assemble(static_text, messages, relocated_text, [],
                                        tail_dynamic, forecast_seq)
+        # Adapter 与 provider 共用的完整预测，含 system/历史/本轮/动态段；
+        # [] 也表示明确接管（零图片/零消息），只有 None/缺失才回退原生预测。
+        reply_projection = getattr(request, "_mdp_reply_projection", None)
+        has_prepared_projection = isinstance(reply_projection, list)
+        if has_prepared_projection:
+            assembled = [copy.deepcopy(_to_dict(m)) for m in reply_projection]
         # 这一轮真正发出去的东西有多大（文本 JSON 的 UTF-8 字节数）。
         # 页面原来只有 token 和字符数，用户想直接看到体积（用户 m32956 图7）。
         # 注意：图片在发送前才被框架换成 base64，这里算的是文本部分。
@@ -1303,39 +1295,64 @@ class RequestLog:
             logger.debug("[multi-decision] 快照行补标记失败", exc_info=True)
         native_projection = []
         incoming_with_native = []
-        refs = []
-        # v4.41（用户 m21746）：按正文配对，谁发的图挂回谁身上。
-        native_by_text = {}
-        for nm, text in up_parts:
-            if nm != "message":
-                continue
-            owned = [r for mid in ids_of([{"role": "user", "content": text}])
-                     for r in media_by_id.get(mid, [])]
-            content = with_owned_images(text, owned, media_sid)
-            incoming_with_native.append({"role": "user", "content": content, "name": nm})
-            if isinstance(content, list):
-                native_by_text[str(text)] = content
-                typed = [p for p in content if isinstance(p, dict) and p.get("type") == "kira_image_ref"]
-                if typed:
-                    native_projection.append({"text": text, "refs": typed})
-                    refs.extend(typed)
-        assembled_with_native = [dict(item) for item in assembled]
-        # v4.41（用户 m21746）：refs 原来是「这一轮所有图」的无差别并集，贴给每一条
-        # tag=incoming 的行——决策注记那一行也被贴了一张，记录里就成了「图2」，其实
-        # 真实只发了 1 张，体积还多算半张。现在按正文认领：只有正文跟真正发出去的
-        # 那条一模一样的行才换成带图版本，注记保持纯文本。
-        if native_by_text:
-            for item in assembled_with_native:
-                if item.get("tag") != "incoming":
+        assembled_with_native = copy.deepcopy(assembled)
+        if has_prepared_projection:
+            # 只引用已准备的发送集合，不按缓存映射回填原图：限额为零时也不能补图。
+            def direct_ids(rows):
+                out = set()
+                for row in rows:
+                    if row.get("role") != "user":
+                        continue
+                    content = row.get("content")
+                    text = content if isinstance(content, str) else "\n".join(
+                        str(p.get("text") or "") for p in (content or []) if isinstance(p, dict))
+                    # 引用正文里的 message_id 不能把历史行归成本轮；只认行首消息头。
+                    out.update(re.findall(
+                        r"(?m)^[ \t]*(?:\[[^\]\r\n]{1,100}\][ \t]*)?"
+                        r"\[message_id:[ \t]*([^\]\r\n]{1,200})\]", text))
+                return {mid.strip() for mid in out}
+
+            current_ids = direct_ids(request_round_rows) or direct_ids([
+                {"role": "user", "content": text} for nm, text in up_parts if nm == "message"])
+            incoming_with_native = [copy.deepcopy(item) for item in assembled
+                                    if item.get("role") == "user" and direct_ids([item]) & current_ids]
+        else:
+            refs = []
+            for nm, text in up_parts:
+                if nm != "message":
                     continue
-                body = native_by_text.get(str(item.get("content") or ""))
-                if body is not None:
-                    item["content"] = body
-        has_native_context = hasattr(request, "_mdp_incoming_media")
+                owned = [r for mid in ids_of([{"role": "user", "content": text}])
+                         for r in media_by_id.get(mid, [])]
+                content = with_owned_images(text, owned, media_sid)
+                incoming_with_native.append({"role": "user", "content": content, "name": nm})
+                if isinstance(content, list):
+                    typed = [p for p in content if isinstance(p, dict) and p.get("type") == "kira_image_ref"]
+                    if typed:
+                        native_projection.append({"text": text, "refs": typed})
+                        refs.extend(typed)
+            # 原生路径最后一条 user 可能混有动态段/多个正文；整条保留后按所有权
+            # 放回引用，而不是仅在正文恰好等于一个 Prompt 时才把图片计入。
+            if refs:
+                for item in assembled_with_native:
+                    if item.get("tag") == "incoming" and item.get("role") == "user":
+                        content = item.get("content")
+                        parts = list(content) if isinstance(content, (list, tuple)) else [
+                            {"type": "text", "text": str(content or "")}]
+                        have = {p.get("path") for p in parts if isinstance(p, dict)}
+                        # refs 已逐 Prompt 验证所有权；合并后的动态正文可能没有换行，
+                        # 不能再当作单条消息重验而丢掉后续 Prompt 的图片。
+                        for ref in refs:
+                            if ref.get("path") not in have:
+                                parts.append(copy.deepcopy(ref))
+                                have.add(ref.get("path"))
+                        item["content"] = parts
+        has_native_context = has_prepared_projection or hasattr(request, "_mdp_incoming_media")
         metrics = payload_metrics({"assembled_with_native": assembled_with_native} if has_native_context
                                   else {"assembled": assembled})
-        metrics["payload_estimate_source"] = ("request_time_native_projection_reference_files"
-                                              if has_native_context else "request_time_reference_files")
+        metrics["payload_estimate_source"] = (
+            "request_time_prepared_reply_projection_reference_files" if has_prepared_projection else
+            "request_time_native_projection_reference_files" if has_native_context else
+            "request_time_reference_files")
         # Identity is captured at request time, never borrowed from a later final.
         now = time.time()
         for key, pending in list(self._pending.items()):
@@ -1400,11 +1417,13 @@ class RequestLog:
                 )
             ),
             "assembled": assembled,
-            **({"reply_projection": "retained_round_forecast"} if retained_ready else {}),
+            **({"reply_projection": "prepared_reply_forecast"} if has_prepared_projection else
+               {"reply_projection": "retained_round_forecast"} if retained_ready else {}),
             **({"assembled_with_native": assembled_with_native,
                 "native_projection": native_projection,
                 "incoming_with_native": incoming_with_native,
-                "metric_stage": "native_projection"} if has_native_context else {}),
+                "metric_stage": ("prepared_reply_projection" if has_prepared_projection
+                                 else "native_projection")} if has_native_context else {}),
             **({"incoming_messages": round_rows,
                 "history_messages": hist_messages} if tail_split else {}),
             **prefix_info,

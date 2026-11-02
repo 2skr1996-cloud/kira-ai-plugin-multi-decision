@@ -218,7 +218,7 @@ class ReplyMediaAdapter:
         finally:
             state["running"] = False
 
-    def stage(self, request, prepared_incoming, *, event=None, retained=None) -> int:
+    def stage(self, request, prepared_incoming, *, event=None, retained=None, controlled=False) -> int:
         if self._closed:
             raise ReplyMediaPreparationError("reply media adapter is closed")
         rows = list(prepared_incoming or [])
@@ -227,11 +227,11 @@ class ReplyMediaAdapter:
         if len(rows) != len(prompts):
             raise ReplyMediaPreparationError("prepared incoming count differs from message prompts")
         kept = None
+        history = list(getattr(request, "messages", None) or [])
         if retained is not None:
             if not isinstance(retained, dict):
                 raise ReplyMediaPreparationError("retained reply requires an explicit round descriptor")
             ids, note_index = retained.get("ids"), retained.get("note_index")
-            history = list(getattr(request, "messages", None) or [])
             if (not isinstance(ids, list) or not ids
                     or any(not isinstance(mid, str) or not mid or mid != mid.strip() for mid in ids)
                     or len(set(ids)) != len(ids) or type(note_index) is not int
@@ -251,10 +251,16 @@ class ReplyMediaAdapter:
                 message = history[position]
                 snapshots.append(deepcopy(_signature(message)))
             snapshots.append(deepcopy(_signature(note)))
+            kept = {"ids": tuple(ids), "protected": snapshots}
+        if kept is not None or controlled:
+            # Only the engine's successful window takeover can authorize a plain anchor.
+            # Reuse the retained branch's exact ordered history, never infer ownership
+            # from an old note, similar text or media that happens to be in history.
+            if kept is None:
+                kept = {"ids": (), "protected": []}
             leading = bool(history and _get(history[0], "role") == "system")
-            kept = {"ids": tuple(ids), "protected": snapshots,
-                    "history": deepcopy(tuple(_signature(m) for m in history[int(leading):])),
-                    "leading_system": deepcopy(_signature(history[0])) if leading else None}
+            kept.update(history=deepcopy(tuple(_signature(m) for m in history[int(leading):])),
+                        leading_system=deepcopy(_signature(history[0])) if leading else None)
         # Ordinary plain str requests stay exactly on the native path, even with old notes.
         if kept is None and not any(isinstance(_get(row, "content"), list) for row in rows):
             return 0
@@ -370,10 +376,34 @@ class ReplyMediaAdapter:
                 item.content = content
             replacement.append(item)
         wire = copy(request)
-        wire.messages = messages[:position] + replacement + messages[position + 1:]
+        wire.messages = deepcopy(messages[:position] + replacement + messages[position + 1:])
         # Prevent reprocessing if base chat_stream delegates to wrapped chat.
         setattr(wire, _MARK, None)
         return wire
+
+    def project_messages(self, request, *, dynamic_position="latest_user", memory_position="system"):
+        """Forecast a staged request before host assembly, using the same wire projection.
+
+        None means native/unmanaged; an empty or zero-image list is still managed.
+        Clone only request data: never instantiate a provider or modify host Prompts.
+        """
+        mark = getattr(request, _MARK, None)
+        if not isinstance(mark, dict) or mark.get("token") is not self._token:
+            return None
+        assembled = copy(request)
+        assembled.messages = deepcopy(list(getattr(request, "messages", None) or []))
+        assembled.user_prompt = deepcopy(list(getattr(request, "user_prompt", None) or []))
+        if hasattr(request, "system_prompt"):
+            assembled.system_prompt = deepcopy(request.system_prompt)
+        assemble = getattr(assembled, "assemble_prompt", None)
+        if callable(assemble):
+            assemble(dynamic_position=dynamic_position, memory_position=memory_position)
+        else:
+            # Minimal offline/legacy request objects have no assembler. All rendering
+            # and source validation still goes through _wire_request below.
+            assembled.messages.append({"role": "user", "content": "".join(
+                prompt.to_string() for prompt in assembled.user_prompt)})
+        return self._wire_request(assembled).messages
 
     def unstage(self, request):
         """Remove only this adapter's own request marker after a failed preparation."""

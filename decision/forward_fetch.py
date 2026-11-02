@@ -477,11 +477,296 @@ async def _forward_raw(bot, res_id: str, timeout: float):
     return fwd.get("messages") or fwd.get("message") or []
 
 
-async def fetch_forward_items(bot, message_id: str, timeout: float = 5.0) -> list:
-    """按外层消息 id 反查转发内容；拿不到就返回 []（调用方保持原样）。"""
+# Display-only evidence is deliberately separate from the legacy flat media cache.
+# Readers never fetch, mutate either cache, or write. Only this fetch's raw nodes may
+# establish slot ownership; old text/media entries are not provenance.
+_DISPLAY_PROOF_MAX = 128
+_DISPLAY_NODE_MAX = 128
+_DISPLAY_SLOT_MAX = 256
+_DISPLAY_TEXT_MAX = 65536
+_DISPLAY_FILE_MAX = 8 * 1024 * 1024
+_DISPLAY_FAKE_SLOT_RE = re.compile(r"\[图片\]|\[image(?: attached)?\]|\[CQ:image[^\]]*\]", re.I)
+
+
+def _display_proof_path():
+    folder = _media_cache_dir()
+    return folder.parent / "forward_display_proof.json" if folder is not None else None
+
+
+def _display_key(raw_sid, mid):
+    import json
+    # Preserve the framework's raw sid, including its prefix; never invent one.
+    if not isinstance(raw_sid, str) or not raw_sid.strip() or len(raw_sid) > 512:
+        return None
+    key = str(mid or "").strip()
+    if not key or len(key) > 512:
+        return None
+    return json.dumps([raw_sid, key], ensure_ascii=False, separators=(",", ":"))
+
+
+def _display_ref_ok(ref) -> bool:
+    if not isinstance(ref, dict):
+        return False
+    path = ref.get("path")
+    if not isinstance(path, str) or not path or len(path) > 2048:
+        return False
+    parts = path.replace("\\", "/").split("/")
+    return (not path.startswith(("/", "\\")) and ":" not in path
+            and not any(p in ("", ".", "..") for p in parts)
+            and ref.get("mime") in ("image/png", "image/jpeg", "image/gif", "image/webp"))
+
+
+def _display_proof_ok(proof, raw_sid, mid) -> bool:
+    if not isinstance(proof, dict) or type(proof.get("version")) is not int or proof["version"] != 1:
+        return False
+    if proof.get("raw_sid") != raw_sid or proof.get("outer_mid") != str(mid or "").strip():
+        return False
+    rid, nodes = proof.get("res_id"), proof.get("nodes")
+    if not isinstance(rid, str) or not rid or len(rid) > 2048:
+        return False
+    if not isinstance(nodes, list) or not 0 < len(nodes) <= _DISPLAY_NODE_MAX:
+        return False
+    lines, slots = [], 0
+    for node in nodes:
+        if not isinstance(node, dict):
+            return False
+        text, media = node.get("text"), node.get("media")
+        if not isinstance(text, str) or not text or len(text) > _DISPLAY_TEXT_MAX:
+            return False
+        if not isinstance(media, list) or not all(_display_ref_ok(ref) for ref in media):
+            return False
+        if len(_DISPLAY_FAKE_SLOT_RE.findall(text)) != len(media) or text.count("[图片]") != len(media):
+            return False
+        lines.append(text)
+        slots += len(media)
+    body = proof.get("body")
+    return (slots <= _DISPLAY_SLOT_MAX and isinstance(body, str)
+            and len(body) <= _DISPLAY_TEXT_MAX and body == block_of(lines))
+
+
+def _display_proofs_read():
+    import json
+    path = _display_proof_path()
+    if path is None:
+        return None
+    try:
+        if not path.exists():
+            return {}
+        if path.stat().st_size > _DISPLAY_FILE_MAX:
+            return None
+        blob = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(blob, dict) or len(blob) > _DISPLAY_PROOF_MAX:
+            return None
+        return {key: value for key, value in blob.items()
+                if isinstance(value, dict)
+                and key == _display_key(value.get("raw_sid"), value.get("outer_mid"))
+                and _display_proof_ok(value, value.get("raw_sid"), value.get("outer_mid"))}
+    except Exception:
+        return None
+
+
+def _display_proof_denied(key, *, reject=False, clear=False) -> bool:
+    """Keep bounded, path-scoped revocations across module reload/re-exec."""
+    import os
+    import sys
+    import types
+    path = _display_proof_path()
+    if path is None:
+        return True
+    try:
+        scope = os.path.normcase(str(path.resolve()))
+    except Exception:
+        return True
+    name = "_kira_forward_display_proof_denials_v1"
+    registry = sys.modules.get(name)
+    if registry is None:
+        registry = types.ModuleType(name)
+        registry.paths, registry.count = {}, 0
+        sys.modules[name] = registry
+    bucket = registry.paths.get(scope)
+    if bucket is None:
+        # Never evict known revocations under pressure and accidentally revive them.
+        if len(registry.paths) >= _DISPLAY_PROOF_MAX:
+            return True
+        if not reject:
+            return False
+        bucket = {"keys": set(), "closed": False}
+        registry.paths[scope] = bucket
+    if reject and key not in bucket["keys"]:
+        if registry.count >= _DISPLAY_PROOF_MAX:
+            bucket["closed"] = True
+        else:
+            bucket["keys"].add(key)
+            registry.count += 1
+    if clear and key in bucket["keys"]:
+        bucket["keys"].remove(key)
+        registry.count -= 1
+    # A saturated path stays closed; a single successful write cannot reopen others.
+    return bucket["closed"] or key in bucket["keys"]
+
+
+def display_proof_for_mid(raw_sid, mid) -> dict | None:
+    """Read independent v1 node/slot provenance; no I/O except bounded metadata read."""
+    import copy
+    key = _display_key(raw_sid, mid)
+    if key is None or _display_proof_denied(key):
+        return None
+    got = (_display_proofs_read() or {}).get(key)
+    return copy.deepcopy(got) if got is not None else None
+
+
+def _display_proof_save(raw_sid, mid, proof) -> None:
+    import json
+    import os
+    import uuid
+    key, path = _display_key(raw_sid, mid), _display_proof_path()
+    if key is None or path is None:
+        return
+    records = _display_proofs_read()
+    # Never overwrite an unreadable file. A failed atomic replace leaves all old bytes.
+    if records is None or (proof is not None and not _display_proof_ok(proof, raw_sid, mid)):
+        return
+    if proof is None and key not in records:
+        return
+    if proof is None:
+        # A known-invalid old entry must not survive a failed atomic revocation.
+        _display_proof_denied(key, reject=True)
+    records.pop(key, None)
+    if proof is not None:
+        records[key] = proof
+    tmp = None
+    try:
+        while len(records) > _DISPLAY_PROOF_MAX:
+            records.pop(next(iter(records)))
+        blob = json.dumps(records, ensure_ascii=False).encode("utf-8")
+        while len(blob) > _DISPLAY_FILE_MAX and len(records) > 1:
+            records.pop(next(iter(records)))
+            blob = json.dumps(records, ensure_ascii=False).encode("utf-8")
+        if len(blob) > _DISPLAY_FILE_MAX:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
+        with open(tmp, "xb") as fp:
+            fp.write(blob)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(tmp, path)
+        tmp = None
+        if proof is not None:
+            _display_proof_denied(key, clear=True)
+    except Exception as exc:
+        logger.info("[multi-decision] 转发显示证据没写成 %s: %s", type(exc).__name__, exc)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _display_fetch_identity_ok(data, raw_sid, mid) -> bool:
+    if _display_key(raw_sid, mid) is None or not isinstance(data, dict):
+        return False
+    if "message_id" in data and str(data["message_id"]) != mid:
+        return False
+    # Only compare explicit OneBot identities; absence is not a made-up identity.
+    match = re.fullmatch(r"[^:]+:(gm|dm):([^:]+)", raw_sid)
+    if not match:
+        return False
+    kind, peer = match.groups()
+    if kind == "gm":
+        if "group_id" in data and str(data["group_id"]) != peer:
+            return False
+        if "message_type" in data and str(data["message_type"]) != "group":
+            return False
+    else:
+        if "user_id" in data and str(data["user_id"]) != peer:
+            return False
+        if "message_type" in data and str(data["message_type"]) != "private":
+            return False
+        sender = data.get("sender")
+        if isinstance(sender, dict) and "user_id" in sender and str(sender["user_id"]) != peer:
+            return False
+    return True
+
+
+def _display_proof_from_raw(raw_sid, mid, res_id, raw_nodes, refs):
+    if _display_key(raw_sid, mid) is None or not isinstance(raw_nodes, list):
+        return None
+    if not 0 < len(raw_nodes) <= _DISPLAY_NODE_MAX or not isinstance(refs, list):
+        return None
+    nodes, counts = [], []
+    for raw in raw_nodes:
+        if not isinstance(raw, dict):
+            return None
+        segs = raw.get("message")
+        if not isinstance(segs, list) or len(segs) > _DISPLAY_SLOT_MAX:
+            return None
+        count = 0
+        for seg in segs:
+            if not isinstance(seg, dict) or not isinstance(seg.get("data"), dict):
+                return None
+            kind, data = seg.get("type"), seg["data"]
+            if kind == "image":
+                url = data.get("url") or data.get("file")
+                if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+                    return None
+                count += 1
+            elif kind not in ("text", "at", "face", "mface", "marketface", "video"):
+                # Known video renders [视频] with zero image slots; never traverse its data/cover.
+                # Reply/nested/unknown media cannot prove direct image ownership.
+                return None
+            elif _DISPLAY_FAKE_SLOT_RE.search(_seg_text(seg)):
+                return None
+        line = _line_of(raw)
+        nodes.append({"text": line, "media": []})
+        counts.append(count)
+    # media_of omits failed downloads: equality proves that every direct slot succeeded.
+    # Keep occurrences, not unique paths (A/B/A must remain A/B/A).
+    if sum(counts) != len(refs) or sum(counts) > _DISPLAY_SLOT_MAX:
+        return None
+    offset = 0
+    for node, count in zip(nodes, counts):
+        node["media"] = refs[offset:offset + count]
+        offset += count
+    lines = [item["message_str"] for item in items_of(raw_nodes)]
+    proof = {"version": 1, "raw_sid": raw_sid, "outer_mid": mid, "res_id": res_id,
+             "body": block_of(lines), "nodes": nodes}
+    return proof if _display_proof_ok(proof, raw_sid, mid) else None
+
+
+async def fetch_forward_items(bot, message_id: str, timeout: float = 5.0, *,
+                              raw_sid=None, refresh_display_proof=False) -> list:
+    """按外层消息 id 反查转发内容；显式刷新只补显示证据，不改旧文字/媒体索引。"""
     mid = str(message_id or "").strip()
     if not mid or bot is None:
         return []
+    if refresh_display_proof is True:
+        # Display-only repair: legacy text/flat media are neither provenance nor write targets.
+        if not _display_fetch_identity_ok({}, raw_sid, mid):
+            return []
+        existing = display_proof_for_mid(raw_sid, mid)
+        if existing is not None:
+            return list(_CACHE.get(existing["res_id"], []))
+        data = await _call(bot, "get_msg", {"message_id": mid}, timeout)
+        if not isinstance(data, dict) and mid.lstrip("-").isdigit():
+            data = await _call(bot, "get_msg", {"message_id": int(mid)}, timeout)
+        res_id = _res_id_of(data)
+        cached = list(_CACHE.get(res_id, []))
+        if not res_id or not _display_fetch_identity_ok(data, raw_sid, mid):
+            return cached
+        raw_nodes = await _forward_raw(bot, res_id, timeout)
+        if raw_nodes is None:
+            return cached
+        lines = cached if res_id in _CACHE else items_of(raw_nodes)
+        try:
+            refs = await asyncio.to_thread(media_of, raw_nodes)
+        except Exception:
+            return lines
+        proof = _display_proof_from_raw(raw_sid, mid, res_id, raw_nodes, refs)
+        if proof is not None:
+            _display_proof_save(raw_sid, mid, proof)
+        return lines
     data = await _call(bot, "get_msg", {"message_id": mid}, timeout)
     if not isinstance(data, dict) and mid.lstrip("-").isdigit():
         # 少数实现只认 int
@@ -489,6 +774,10 @@ async def fetch_forward_items(bot, message_id: str, timeout: float = 5.0) -> lis
     res_id = _res_id_of(data)
     if not res_id:
         return []
+    identity_ok = _display_fetch_identity_ok(data, raw_sid, mid)
+    existing = display_proof_for_mid(raw_sid, mid)
+    if existing is not None and (not identity_ok or existing["res_id"] != res_id):
+        _display_proof_save(raw_sid, mid, None)
     if res_id in _CACHE:
         # 文字命中了缓存，图却可能还没存过（早先只有取文字的那版代码）——补存一次。
         if not media_for_mid(mid):
@@ -499,6 +788,10 @@ async def fetch_forward_items(bot, message_id: str, timeout: float = 5.0) -> lis
                 refs_again = []
             if refs_again:
                 remember_media_by_mid(mid, refs_again)
+            if _display_key(raw_sid, mid) is not None:
+                proof = (_display_proof_from_raw(raw_sid, mid, res_id, raw_again, refs_again)
+                         if identity_ok else None)
+                _display_proof_save(raw_sid, mid, proof)
         return list(_CACHE[res_id])
     raw_msgs = await _forward_raw(bot, res_id, timeout)
     if raw_msgs is None:
@@ -511,4 +804,8 @@ async def fetch_forward_items(bot, message_id: str, timeout: float = 5.0) -> lis
         refs = []
     if refs:
         remember_media_by_mid(mid, refs)
+    if _display_key(raw_sid, mid) is not None:
+        proof = (_display_proof_from_raw(raw_sid, mid, res_id, raw_msgs, refs)
+                 if identity_ok else None)
+        _display_proof_save(raw_sid, mid, proof)
     return lines
