@@ -14,8 +14,11 @@ v3.44（用户本轮第 3 条）起价目页每行左侧有删除按钮：删掉
 
 from __future__ import annotations
 
+import copy
 import json
+import math
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -54,6 +57,86 @@ def _clean_hidden(value: Any) -> List[str]:
             if name and name not in out:
                 out.append(name)
     return out
+
+
+def _clean_peak(value: Any) -> dict:
+    """峰价显式扩展；多段列表权威，空价继承，0 是免费。"""
+    if not isinstance(value, dict):
+        raise ValueError("高峰设置必须是一组完整设置")
+    out = {"enabled": False, "in": None, "out": None, "cache": None,
+           "start": "", "end": "", "weekends": False}
+    for key in ("enabled", "weekends"):
+        item = value.get(key, False)
+        if not isinstance(item, bool):
+            raise ValueError("高峰与周末开关必须是开启或关闭")
+        out[key] = item
+    def clock(item):
+        if not isinstance(item, str):
+            raise ValueError("高峰时间请填写 00:00–23:59")
+        item = item.strip()
+        if item and not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", item):
+            raise ValueError("高峰时间请填写 00:00–23:59")
+        return item
+    if "periods" in value:
+        periods = value["periods"]
+        if not isinstance(periods, list):
+            raise ValueError("高峰时段必须是起止时间列表")
+        out["periods"] = []
+        for period in periods:
+            if not isinstance(period, dict):
+                raise ValueError("每个高峰时段都要填写开始和结束时间")
+            start, end = clock(period.get("start", "")), clock(period.get("end", ""))
+            # 用户 m00153：起止都没填的那一段等于不存在（前端固定画两行，空行直接丢掉）。
+            if not start and not end:
+                continue
+            if not start or not end or start == end:
+                raise ValueError("每个高峰时段请填写不同的开始和结束时间")
+            out["periods"].append({"start": start, "end": end})
+        # 用户 m00153：一行最多两段，多出来的截掉（老客户端也不会越界）。
+        out["periods"] = out["periods"][:2]
+        if out["enabled"] and not out["periods"]:
+            raise ValueError("开启高峰后请至少填写一个完整时段")
+        if out["periods"]:
+            out.update(out["periods"][0])  # 仅供旧客户端显示首段，不另计一次
+    else:
+        for key in ("start", "end"):
+            out[key] = clock(value.get(key, ""))
+        if out["enabled"] and (not out["start"] or not out["end"] or out["start"] == out["end"]):
+            raise ValueError("开启高峰后请填写不同的开始和结束时间")
+    for key in ("in", "out", "cache"):
+        item = value.get(key)
+        if item is None or (isinstance(item, str) and not item.strip()):
+            continue
+        try:
+            number = float(item)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("高峰单价必须是非负数字，留空表示沿用普通价格") from None
+        if isinstance(item, bool) or not math.isfinite(number) or number < 0:
+            raise ValueError("高峰单价必须是非负数字，留空表示沿用普通价格")
+        out[key] = round(number, 6)
+    return out
+
+
+def _event_period(peak: dict, timestamp: Any) -> tuple:
+    """只看这次调用的记录时刻；多个时段取并集，不重复计峰。"""
+    try:
+        stamp = float(timestamp)
+        if isinstance(timestamp, bool) or not math.isfinite(stamp) or stamp <= 0:
+            return False, True
+        local = time.localtime(stamp)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return False, True
+    if not peak.get("enabled") or (local.tm_wday >= 5 and not peak.get("weekends")):
+        return False, False
+    periods = peak["periods"] if "periods" in peak else [peak]
+    minute = local.tm_hour * 60 + local.tm_min
+    for period in periods:
+        start, end = period["start"], period["end"]
+        a = int(start[:2]) * 60 + int(start[3:])
+        b = int(end[:2]) * 60 + int(end[3:])
+        if a <= minute < b if a < b else minute >= a or minute < b:
+            return True, False
+    return False, False
 
 
 class Pricing:
@@ -101,6 +184,11 @@ class Pricing:
                             # 旧价目文件没有 cache 字段：当 0，等于「没填缓存价」
                             "cache": _as_price(item.get("cache")),
                         }
+                        if item.get("peak") is not None:
+                            try:
+                                models[key]["peak"] = _clean_peak(item["peak"])
+                            except ValueError:
+                                pass  # 旧文件中损坏的扩展不抹掉其他模型和普通三价
         except Exception:
             models = {}
             hidden = []
@@ -113,23 +201,22 @@ class Pricing:
         return self._read()
 
     def _write(self, models: Dict[str, dict], hidden: List[str]) -> None:
-        """整表落盘：tmp 写完再 os.replace，中途断电不会留下半截价目。"""
-        self._cache = models
-        self._hidden_cache = list(hidden)
+        """原子替换成功后才发布缓存；失败必须通知调用方，不能假报已保存。"""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(
-                json.dumps(
-                    {"models": models, "hidden": list(hidden), "updated": int(time.time())},
-                    ensure_ascii=False,
-                    indent=1,
-                ),
-                encoding="utf-8",
-            )
+            tmp.write_text(json.dumps(
+                {"models": models, "hidden": list(hidden), "updated": int(time.time())},
+                ensure_ascii=False, indent=1), encoding="utf-8")
             os.replace(tmp, self.path)
         except Exception:
-            pass
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        self._cache = copy.deepcopy(models)
+        self._hidden_cache = list(hidden)
 
     def hidden(self) -> List[str]:
         """价目页删掉的模型名（按删除先后），返回副本。"""
@@ -145,7 +232,7 @@ class Pricing:
         with self._lock:
             models = self._read()
             gone = set(self._hidden_cache or [])
-            return {k: dict(v) for k, v in models.items() if k not in gone}
+            return {k: copy.deepcopy(v) for k, v in models.items() if k not in gone}
 
     def hide(self, name: Any) -> List[str]:
         """删掉一个模型的价目：单价清空、模型名记进 hidden。返回最新的 hidden 列表。
@@ -165,104 +252,135 @@ class Pricing:
             return list(hidden)
 
     def save(self, models: Any) -> Dict[str, dict]:
-        """整表覆盖保存。传进来不是 dict 就当空表（等于清空价目）。
-
-        hidden 保留原样：删除是单独的接口，不能被设置页的一次整表保存顺手复活。
-        """
+        """整表保存；旧客户端省略 peak 时保留扩展，显式 null 才清除。"""
         clean: Dict[str, dict] = {}
+        provided = set()
         if isinstance(models, dict):
             for name, item in models.items():
                 key = str(name or "").strip()[:120]
                 if not key:
                     continue
-                if isinstance(item, dict):
-                    clean[key] = {
-                        "in": _as_price(item.get("in")),
-                        "out": _as_price(item.get("out")),
-                        "cache": _as_price(item.get("cache")),
-                    }
-                else:
-                    clean[key] = {"in": 0.0, "out": 0.0, "cache": 0.0}
+                row = item if isinstance(item, dict) else {}
+                clean[key] = {"in": _as_price(row.get("in")),
+                              "out": _as_price(row.get("out")),
+                              "cache": _as_price(row.get("cache"))}
+                if "peak" in row:
+                    provided.add(key)
+                    if row["peak"] is not None:
+                        clean[key]["peak"] = _clean_peak(row["peak"])
         with self._lock:
-            self._read()                       # 先把盘上的 hidden 读进来
+            previous = self._read()
+            for key in clean:
+                old_peak = previous.get(key, {}).get("peak")
+                if key not in provided and old_peak is not None:
+                    clean[key]["peak"] = copy.deepcopy(old_peak)
+                elif ("peak" in clean[key] and "periods" not in clean[key]["peak"]
+                      and isinstance(old_peak, dict) and "periods" in old_peak):
+                    # 旧单段客户端只编辑首段；只有显式 periods 才能删除后续段。
+                    peak = clean[key]["peak"]
+                    first = [{"start": peak["start"], "end": peak["end"]}] if (peak["start"] or peak["end"]) else []
+                    # 禁用且空端点的旧表单没有表达删段；重复保存也必须保全列表。
+                    remaining = old_peak["periods"][1:] if first else old_peak["periods"]
+                    peak["periods"] = first + copy.deepcopy(remaining)
+                    clean[key]["peak"] = _clean_peak(peak)
             hidden = list(self._hidden_cache or [])
             self._write(clean, hidden)
-            return {k: dict(v) for k, v in clean.items()}
+            return copy.deepcopy(clean)
 
     # ------------------------------------------------------------ 算钱
 
     def summarize(self, totals: Any) -> Dict[str, Any]:
-        """按模型算最近这段时间的金额。
-
-        totals 是 Tracer.recent_totals() 的结果（里面有 models 分桶）。
-
-        v3.45（用户 2026-10-24 第 5 条）：价目表里**有这一项**就算已定价，值是 0
-        也算（免费/送量模型很常见，不能把用户的 0 当成「没填」）；价目表里没有的
-        模型默认按 0 元算，不再进 unpriced（用户原话：「识别到了新的也默认成0元」），
-        只在 parts 里留一个软标记 `unset`，前端想提示「这个模型还没设价」时用得上。
-        价目页删掉的（hidden）既不算钱也不进明细：用户的意思就是「别管它」。
-
-        cache（缓存命中单价）只在填了 > 0 时才参与计算：命中那部分 token 按
-        cache 价算、其余按 in 价算；没填就整段按 in 价算——命中本来就该便宜，
-        但用户没给数就不能替他猜一个更低的价（用户 m03616 第 2 条）。
-        """
+        """逐调用计价；业务轮汇总不再次叠加，旧记录只作近似估算。"""
         prices = self.all()
         gone = set(self.hidden())
         stats = (totals or {}).get("models") if isinstance(totals, dict) else {}
         stats = stats if isinstance(stats, dict) else {}
-        parts = []
-        total = 0.0
-        unset = []
+        parts, unset = [], []
+        total = normal_total = peak_total = 0.0
+        any_approximate = any_unknown = False
+        # v4.68（用户 m02472）：花费卡片要把「回复 / 决策」分开显示，逐事件按 kind 再记一份。
+        by_kind: Dict[str, Dict[str, Any]] = {}
+
+        def _kind_bucket(kind: str) -> Dict[str, Any]:
+            return by_kind.setdefault(str(kind or "reply"), {
+                "cost": 0.0, "input": 0, "output": 0, "cached": 0, "calls": 0})
         for name, bucket in stats.items():
-            if str(name) in gone:
-                # 价目页删掉的模型：既不算钱，也不进「未定价」（用户本轮第 3 条）
+            if str(name) in gone or not isinstance(bucket, dict):
                 continue
-            if not isinstance(bucket, dict):
-                continue
-            inp = _as_int(bucket.get("input"))
-            outp = _as_int(bucket.get("output"))
-            if not (inp or outp):
-                continue
-            # 命中数不能超过输入总量（脏数据/旧记录 clamp 一下，否则会算出负数金额）
-            c = min(max(0, _as_int(bucket.get("cached"))), inp)
             price = prices.get(str(name)) or {}
             pin = float(price.get("in") or 0)
             pout = float(price.get("out") or 0)
             pcache = float(price.get("cache") or 0)
-            if pcache > 0:
-                cost = ((inp - c) * pin + c * pcache + outp * pout) / 1000000.0
-            else:
-                # 没填缓存价：维持老算法，命中部分按普通输入价算（不偷偷少算钱）
-                cost = (inp * pin + outp * pout) / 1000000.0
-            # 「已定价」= 价目表里有这个模型的条目（值为 0 也算）；没有条目就按 0 元记。
-            # 所以这里一律 priced=True，进 unpriced 的情况已经不存在了；没进价目表的
-            # 用 unset 软标记提示一下（不影响算钱）。
-            priced = True
+            peak = price.get("peak") or {}
+            usage = bucket.get("usage")
+            events = usage if isinstance(usage, list) else [dict(bucket, timestamp_source="legacy_round")]
+            # 这个模型填没填价，事件循环里就要用（分 kind 的花费要标出「未定价」）
             is_unset = str(name) not in prices
+            inp = outp = cached = 0
+            normal_cost = peak_cost = 0.0
+            approximate = unknown_time = False
+            part_kinds: Dict[str, float] = {}
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                a = max(0, _as_int(event.get("input")))
+                b = max(0, _as_int(event.get("output")))
+                c = min(a, max(0, _as_int(event.get("cached"))))
+                inp += a
+                outp += b
+                cached += c
+                is_peak, missing_time = _event_period(peak, event.get("ts"))
+                unknown_time = unknown_time or missing_time
+                approximate = approximate or missing_time or event.get("timestamp_source") != "request_start"
+                rate_in, rate_out = pin, pout
+                rate_cache = pcache if pcache > 0 else pin
+                if is_peak:
+                    if peak.get("in") is not None:
+                        rate_in = peak["in"]
+                    if peak.get("out") is not None:
+                        rate_out = peak["out"]
+                    # 普通 cache=0 保留旧「未填」语义，继承时跟随实际输入价。
+                    rate_cache = pcache if pcache > 0 else rate_in
+                    if peak.get("cache") is not None:
+                        rate_cache = peak["cache"]
+                cost = ((a - c) * rate_in + c * rate_cache + b * rate_out) / 1000000.0
+                kb = _kind_bucket(str(event.get("kind") or "reply"))
+                kb["priced"] = bool(kb.get("priced")) or not is_unset
+                kb["cost"] += cost
+                kb["input"] += a
+                kb["output"] += b
+                kb["cached"] += c
+                kb["calls"] += 1
+                part_kinds[str(event.get("kind") or "reply")] = part_kinds.get(str(event.get("kind") or "reply"), 0.0) + cost
+                if is_peak:
+                    peak_cost += cost
+                else:
+                    normal_cost += cost
+            if not (inp or outp):
+                continue
+            cost = normal_cost + peak_cost
             total += cost
+            normal_total += normal_cost
+            peak_total += peak_cost
+            any_approximate = any_approximate or approximate
+            any_unknown = any_unknown or unknown_time
             if is_unset:
                 unset.append(str(name))
-            parts.append(
-                {
-                    "model": str(name),
-                    "input": inp,
-                    "output": outp,
-                    "cached": c,
-                    "cost": round(cost, 4),
-                    "priced": priced,
-                    "unset": is_unset,
-                }
-            )
+            parts.append({"model": str(name), "input": inp, "output": outp,
+                          "cached": cached, "cost": round(cost, 4), "priced": True,
+                          "unset": is_unset, "normal_cost": round(normal_cost, 4),
+                          "peak_cost": round(peak_cost, 4), "approximate": bool(approximate),
+                          "unknown_time": bool(unknown_time),
+                          "reply_cost": round(part_kinds.get("reply", 0.0), 4),
+                          "decision_cost": round(part_kinds.get("decision", 0.0), 4)})
         parts.sort(key=lambda x: (-x["cost"], x["model"]))
-        return {
-            "total": round(total, 4),
-            "currency": _CURRENCY,
-            "unit": PRICE_UNIT,
-            "priced": any(p["priced"] for p in parts),
-            "parts": parts,
-            # 兼容旧前端：新语义下每个模型都按价目表（或默认 0 元）算得出钱，
-            # 不再有「算不出价」的模型，所以这个清单恒为空。
-            "unpriced": [],
-            # 软标记：这些模型没在价目表里，是按默认 0 元记的（只做提示，不算钱）
-            "unset": unset,
-        }
+        kinds_out = {k: {"total": round(v["cost"], 4), "input": v["input"], "output": v["output"],
+                        "cached": v["cached"], "calls": v["calls"],
+                        "priced": bool(v.get("priced"))} for k, v in by_kind.items()}
+        return {"total": round(total, 4), "currency": _CURRENCY, "unit": PRICE_UNIT,
+                "priced": any(p["priced"] for p in parts), "parts": parts,
+                "by_kind": kinds_out,
+                "unpriced": [], "unset": unset, "normal_cost": round(normal_total, 4),
+                "peak_cost": round(peak_total, 4), "approximate": bool(any_approximate),
+                "unknown_time": bool(any_unknown)}
+

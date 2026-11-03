@@ -22,6 +22,7 @@ from typing import Any, Optional
 from core.logging_manager import get_logger
 
 from .prefix_projection import comparison_pair, legacy_record_estimate, valid_fingerprints
+from .tracer import usage_event
 
 try:  # 同包内的计数口径，测试桩里没有就退回「数组长度」
     from ..window.trim import count_messages as _count_messages
@@ -1470,6 +1471,60 @@ class RequestLog:
             self._pending.pop(key, None)
         return saved
 
+    def mark_delivery_failed(
+        self,
+        sid: str,
+        error: str,
+        extra: Optional[dict] = None,
+        window: float = 900.0,
+    ) -> Optional[str]:
+        """把这一轮已经落盘的决策快照补成「失败」（用户 m00954）。
+
+        决策快照是在投递之前写的，那一份记不到后面的投递失败：2026-11-03
+        20:14:55 那轮记录里 failed=false、error 空、outcome=decision，看着像
+        「正常但没回」。这里只补 failed / error / delivery_failed 三个字段，
+        outcome 保持 decision（这份快照本身确实是决策轮的），统计口径那边
+        failed 是显式标记，会照常算进失败。
+        """
+        sid = str(sid or "")
+        folder = self.dir / _safe_sid(sid)
+        if not folder.is_dir():
+            return None
+        try:
+            files = sorted(folder.glob("*.json"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+        except Exception:
+            return None
+        now = time.time()
+        for path in files[:8]:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if _outcome_of(data) != "decision" or data.get("delivery_failed"):
+                continue
+            try:
+                ts = float(data.get("ts") or 0.0)
+            except Exception:
+                ts = 0.0
+            if window and now - ts > window:
+                continue
+            data["failed"] = True
+            data["error"] = str(error or "投递失败")
+            data["delivery_failed"] = 1
+            data["delivery_failed_at"] = now
+            if extra:
+                data.update(extra)
+            try:
+                _atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
+            except Exception:
+                logger.exception("[multi-decision] 回填投递失败字段写盘失败")
+                return None
+            return path.name
+        return None
+
     def _save_round(self, sid: str, record: dict, ledger: bool = True) -> Optional[str]:
         """把一份快照记录落盘。flush 与「裁切快照」（write_trim_snapshot）共用。
 
@@ -1736,9 +1791,11 @@ class RequestLog:
         # v3.93（用户 m07570 图7）：决策记录换成回复记录同款模板——① 决策提示词
         # ② 聊天历史 ③ 本轮输入 ④ agent 轨迹。以前 sections 给空数组，页面只能拿
         # 兜底字数，③④ 也被 isDecSnap 整段跳过，看起来就只有两块。
-        in_tok = int(data.get("input_tokens") or 0)
-        out_tok = int(data.get("output_tokens") or 0)
-        cached = int(data.get("cached_tokens") or 0)
+        stats_usage = ([usage_event(item) for item in data["usage"] if isinstance(item, dict)]
+                       if isinstance(data.get("usage"), list) else [usage_event(data, ts=now)])
+        in_tok = sum(item["input"] for item in stats_usage)
+        out_tok = sum(item["output"] for item in stats_usage)
+        cached = sum(item["cached"] for item in stats_usage)
         elapsed = float(data.get("elapsed") or 0.0)
         cache_hit = round(cached * 100.0 / in_tok, 1) if (in_tok and cached) else None
         dec_trace = {
@@ -1756,10 +1813,20 @@ class RequestLog:
                 "text": str(data.get("raw") or ""),
             }],
             "totals": {"input_tokens": in_tok, "output_tokens": out_tok,
-                       "cache_hit": cache_hit},
+                       "cached_tokens": cached, "cache_hit": cache_hit},
             "tools": list(data.get("tools_used") or []),
             "elapsed": (round(elapsed, 3) if elapsed else 0),
         }
+        dec_trace.update(sid=sid, event_id="dec-%d" % int(now * 1000), kind="decision",
+                         started=now, ended=now, model=str(data.get("model") or ""),
+                         usage=copy.deepcopy(stats_usage))
+        step_template = dec_trace["steps"][0]
+        dec_trace["steps"] = [{**step_template, **copy.deepcopy(item), "index": index,
+                               "ts": item["ts"], "usage_ts": item["ts"],
+                               "input_tokens": item["input"], "output_tokens": item["output"],
+                               "cached_tokens": item["cached"],
+                               "text": step_template["text"] if index == len(stats_usage) else ""}
+                              for index, item in enumerate(stats_usage, 1)]
         # v4.41（用户 m21541）：决策的体积估算以前只算 system + 本轮文字，图上花的
         # 体积完全没进账。这里跟回复记录用同一套键（payload_metrics 认这 8 个），
         # 页面的「体积估算」立刻能写成「文 X · 图 Y」，本页合计也把图算上。
@@ -1868,6 +1935,7 @@ class RequestLog:
             "decision_image_count": int(data.get("image_count") or 0),
             "decision_images_fallback": bool(data.get("images_fallback")),
             "decision_images_fallback_error": str(data.get("images_fallback_error") or "")[:300],
+            "decision_upstream_busy": bool(data.get("upstream_busy")),
             "decision_images_fallback_attempts": int(data.get("images_fallback_attempts") or 0),
             "decision_elapsed": float(data.get("elapsed") or 0.0),
             # 用户 m05124 第 8 条：决策轮也把「触发 → 真正开始判」的防抖等待存下来，
@@ -1876,9 +1944,10 @@ class RequestLog:
             "decision_tools": list(data.get("tools_used") or []),
             "decision_system_names": names,
             "decision_transcript": transcript,
-            "input_tokens": int(data.get("input_tokens") or 0),
-            "output_tokens": int(data.get("output_tokens") or 0),
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
             "cached_tokens": cached,
+            "usage": copy.deepcopy(stats_usage),
             # ④ agent 轨迹（决策模型那一次调用）。模板跟回复记录一样，
             # 页面 traceChips / traceHtml / traceRawText 都认这套键。
             "trace": dec_trace,
@@ -2475,6 +2544,7 @@ class RequestLog:
                 "decision_image_count": int(data.get("decision_image_count") or 0),
                 "decision_images_fallback": bool(data.get("decision_images_fallback")),
                 "decision_images_fallback_error": str(data.get("decision_images_fallback_error") or "")[:300],
+                "decision_upstream_busy": bool(data.get("decision_upstream_busy")),
                 "decision_images_fallback_attempts": int(data.get("decision_images_fallback_attempts") or 0),
                 # v3.94（用户 m08398 图7/图8）：决策行也要跟回复记录一样给出
                 # token（入/出）与缓存命中，决策表才能照抄回复表的列。

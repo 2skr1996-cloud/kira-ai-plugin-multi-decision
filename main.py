@@ -1357,6 +1357,12 @@ class MultiDecisionPlugin(BasePlugin):
             self.engine.load_states()
         except Exception:
             logger.exception("[multi-decision] 恢复会话状态失败（已忽略）")
+        # 用户 m00954：触发器模板寄存在 core 包上（进程级，重载不丢），重载后先接回内存，
+        # 免得重载后的第一次静默轮因为内存里没有「上一条」而白等一条新消息。
+        try:
+            self.engine.rehydrate_triggers()
+        except Exception:
+            logger.exception("[multi-decision] 接回触发器模板失败（已忽略）")
 
         self._takeover_builtin_chat()
         try:
@@ -3905,9 +3911,24 @@ class MultiDecisionPlugin(BasePlugin):
                     "output": int(stat.get("output") or 0),
                     "cached": int(stat.get("cached") or 0),
                     "rounds": int(stat.get("rounds") or 0),
+                    "decision_rounds": int(stat.get("decision_rounds") or 0),
+                    "reply_rounds": int(stat.get("reply_rounds") or 0),
+                    "calls": int(stat.get("calls") or 0),
+                    "model_name": str(stat.get("model_name") or
+                                      ("快速决策模型" if name == "fast" else name)),
+                    "provider_id": str(stat.get("provider_id") or ""),
+                    "provider_name": str(stat.get("provider_name") or ""),
+                    "model_id": str(stat.get("model_id") or ""),
+                    "identity_source": str(stat.get("identity_source") or "legacy_unknown"),
+                    "peak": price.get("peak") or {
+                        "enabled": False, "in": None, "out": None, "cache": None,
+                        "start": "", "end": "", "weekends": False,
+                    },
                 }
             )
-        return {"ok": True, "unit": PRICE_UNIT, "hours": span, "rows": rows, "cost": cost}
+        zone = time.tzname[1 if time.daylight and time.localtime().tm_isdst > 0 else 0]
+        return {"ok": True, "unit": PRICE_UNIT, "hours": span, "rows": rows, "cost": cost,
+                "timezone": zone}
 
     @_api("POST", "/pricing")
     async def api_pricing_set(self, values: str = ""):
@@ -3921,6 +3942,8 @@ class MultiDecisionPlugin(BasePlugin):
         models = data.get("models") if isinstance(data, dict) else data
         try:
             saved = self.pricing.save(models)
+        except ValueError as exc:
+            return {"ok": False, "detail": str(exc)}
         except Exception:
             logger.exception("[multi-decision] 保存价目失败")
             return {"ok": False, "detail": "保存失败，详情看日志"}

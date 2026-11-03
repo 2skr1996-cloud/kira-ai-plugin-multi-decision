@@ -40,6 +40,13 @@ from ..window.split import _looks_image, mark_mention, mark_messages, split_user
 # 所有带「好」的话都会被吞掉。
 _PHRASE_STRIP = ' \t\r\n，。！？!?~～、,.;；:：…·•—-_*#@\'"“”‘’'
 
+#: 定时轮（没有新消息也能跑一轮）的触发原因。这些轮次 flush 选不中任何事件，
+#: 只能拿「上一条事件」伪造一次投递；模板丢了就等于这一轮发不出去。
+_TIMER_REASONS = ("silent", "buffer", "curve", "adaptive", "probability", "count")
+
+#: 其中连缓冲里也没有事件的（buffer 轮本身来自缓冲，不在此列）。
+_TIMER_NO_EVENT_REASONS = ("silent", "curve", "adaptive", "probability", "count")
+
 
 def _is_dm_sid(sid: str) -> bool:
     """这个 sid 是不是私聊（认 dm:1 / dm_1 / 桃华:dm:1 三种写法）。
@@ -2769,15 +2776,10 @@ class DecisionEngine:
         epoch = flow.epoch
         sender = sender_id_of(message)
         self._last_events[sid] = event
+        self._stash_trigger(sid, event)
         flow.ready.append(event)
         flow.admitting = (event, now)
         text = extract_text(message)
-
-        # 用户 m11091 第 1 条：来了新消息就把上一轮的「静默 / 休兜已冒泡」勾撤掉，
-        # 倒计时从头算。否则勾会一直挂着，看不出这一轮到底触发过没有。
-        if st.silent_fired_ts or st.rest_fired_ts:
-            st.silent_fired_ts = 0.0
-            st.rest_fired_ts = 0.0
 
         # 上下文页要「一直能看到下一轮会送给 agent 什么」，这里挂进窗口的待发列表
         pend = None
@@ -2848,6 +2850,19 @@ class DecisionEngine:
             if not self._c("rest_wake_trigger", sid):
                 direct = ""
 
+        # 普通纯文字整句命中拉黑短语时，各触发模式统一早退；上下文和收到量已保留。
+        # 媒体、必回和主动唤醒仍按原优先级处理，不消费概率、节奏或休息掷骰。
+        media = media_kind(message)
+        if not (must or direct or media) and self._phrase_hit(text, sid):
+            self._mark(sid, pend, "short")
+            self._write_log(sid, "phrase_skip")
+            return
+
+        # 只有未被短语过滤的消息，才撤掉上一轮「静默 / 休兜已冒泡」标记。
+        if st.silent_fired_ts or st.rest_fired_ts:
+            st.silent_fired_ts = 0.0
+            st.rest_fired_ts = 0.0
+
         if must:
             st.last_sender_id = sender
             st.last_msg_ts = now
@@ -2889,18 +2904,8 @@ class DecisionEngine:
             self._trigger(sid, "rest", st, prob=float(probability))
             return
 
-        # v3.16（用户 m40583）：概率模式要「每条消息独立掷骰」。短消息过滤和
-        # 连发合并都是计数模式攒条数的配套规则，套在概率模式上会让实际触发率
-        # 明显低于设定值（「哈哈」直接被过滤掉、同一个人连发只算一条，都不掷骰）。
+        # 概率模式对每条未过滤消息独立掷骰，仍不合并同一人的连发。
         prob_mode = (self._c("trigger_mode", sid) == "probability")
-
-        # v3.33（用户 m51068 第 11 条）：字数阈值下线，改成「整条就是清单里的短语」
-        # 才不计入触发。带媒体的消息照常计数。
-        media = media_kind(message)
-        if not prob_mode and not media and self._phrase_hit(text, sid):
-            self._mark(sid, pend, "short")
-            self._write_log(sid, "phrase_skip")
-            return
 
         # 连发合并：同一个人短时间内连续发，只算 1 条。
         # v3.44（用户本轮第 2 条）：加开关，默认关——关着时每条都照常计数，
@@ -4623,6 +4628,95 @@ class DecisionEngine:
             events.append(replay)
         self._retry_events[sid] = events
 
+    #: 触发器模板寄存在 core 包上（用户 m00954）。_last_events 只活在插件实例里，
+    #: 一次热重载就清空；定时轮没有新消息，全靠这个模板伪造一次「有事件」的投递。
+    #: 2026-11-03 20:14:55 那轮就是重载后模板丢了：判了要回、投递失败、
+    #: 5 秒后的重试也没有事件，静默取消。
+    #: 一开始是挂在会话缓冲上的，实测热重载会换一批 SessionBuffer 实例，
+    #: 挂上去的属性跟着没了；core 包是进程级的，插件重载不会重新 import 它。
+    _BAG_ATTR = "_md_trigger_bag"
+
+    def _trigger_bag(self):
+        """进程级的模板寄存处：core 包上的一个 dict，插件重载后还在。"""
+        try:
+            import core
+        except Exception:
+            return None
+        bag = getattr(core, self._BAG_ATTR, None)
+        if isinstance(bag, dict):
+            return bag
+        bag = {}
+        try:
+            setattr(core, self._BAG_ATTR, bag)
+        except Exception:
+            return None
+        return bag
+
+    def _stash_trigger(self, sid: str, event) -> None:
+        """把这一轮的事件寄存起来，热重载之后 _trigger_event 还能取回来。"""
+        bag = self._trigger_bag()
+        if bag is None:
+            return
+        bag[sid] = event
+        if len(bag) > 200:
+            for key in list(bag)[:len(bag) - 200]:
+                bag.pop(key, None)
+        # 每个会话每个进程记一次；重载后取回来会另打一条
+        logged = getattr(self, "_stash_logged", None)
+        if not isinstance(logged, set):
+            logged = self._stash_logged = set()
+        if sid not in logged:
+            logged.add(sid)
+            logger.info("[multi-decision] %s 触发器模板已寄存（%s）",
+                        sid, type(event).__name__)
+
+    def _trigger_event(self, sid: str):
+        """定时轮拿来伪造投递的「上一条事件」：先看内存，再看进程级寄存处。"""
+        event = self._last_events.get(sid)
+        if event is not None:
+            return event
+        bag = self._trigger_bag()
+        event = bag.get(sid) if bag else None
+        if event is None or getattr(event, "session", None) is None:
+            return None
+        # 取回来的模板还绑着框架的会话，内存里补一份，后面几轮不用再翻寄存处
+        self._last_events[sid] = event
+        logger.info("[multi-decision] %s 触发器模板从寄存处取回（插件重载过）", sid)
+        return event
+
+    def rehydrate_triggers(self) -> int:
+        """插件重载后，把寄存处里的触发器模板接回内存（用户 m00954）。
+
+        不接也能自愈——第一轮真消息进来就会重新寄存一份；接上的好处是重载后
+        紧接着的静默轮也有触发器可用，不必等有新消息才回。
+        """
+        back = 0
+        for sid in list(self._states or ()):
+            try:
+                if self._last_events.get(sid) is not None:
+                    continue
+                if self._trigger_event(sid) is not None:
+                    back += 1
+            except Exception:
+                logger.debug("[multi-decision] %s 接回触发器模板失败", sid, exc_info=True)
+        if back:
+            logger.info("[multi-decision] 从寄存处接回 %s 个会话的触发器模板（插件重载过）", back)
+        return back
+
+    def _note_delivery_failed(self, sid: str, error: str) -> None:
+        """投递失败要落进请求记录里（用户 m00954）。
+
+        决策快照在投递之前就写好了，那一份记不到后面的投递失败——20:14:55
+        的记录 failed=false、error 空，看着像「正常但没回」。这里把它补成失败。
+        """
+        marker = getattr(self.request_log, "mark_delivery_failed", None)
+        if not callable(marker):
+            return
+        try:
+            marker(sid, error)
+        except Exception:
+            logger.exception("[multi-decision] 投递失败回填请求记录异常（已吞掉）")
+
     async def _flush_guarded(self, raw_sid: str, filter_fn, sid: str) -> bool:
         """把「交给框架跑 agent」这一步加上上限（v4.63，用户 m36670）。
 
@@ -4873,6 +4967,21 @@ class DecisionEngine:
         try:
             if not retry and not await self._wait_input_buffered(sid, flow, epoch):
                 return
+            # v4.6x（用户 m00954）：定时轮没有新消息，全靠「上一条事件」伪造投递。
+            # 模板没有（典型是刚热重载过）就别再往下判「要回」了——判了也发不出去。
+            # 2026-11-03 20:14:55 就是这么丢的：判要回 → 投递失败 → 重试静默取消。
+            if not retry and not flow.active:
+                reason_now = str(getattr(st, "last_trigger_reason", "") or "")
+                if (reason_now in _TIMER_NO_EVENT_REASONS
+                        and self._trigger_event(sid) is None):
+                    logger.warning(
+                        "[multi-decision] %s 定时轮没有触发器（reason=%s，"
+                        "插件重载后上一条已丢），这一轮跳过，等下一条消息再回",
+                        sid, reason_now)
+                    st.last_error = "定时冒泡没有触发器（插件重载后上一条已丢），这一轮跳过"
+                    st.last_error_at = time.time()
+                    await self._settle_input(sid, epoch=epoch)
+                    return
             if not retry and self._c("advanced_enabled", sid):
                 try:
                     if await self._decision_gate(sid, st):
@@ -4883,11 +4992,18 @@ class DecisionEngine:
             if self._closed or flow.epoch != epoch or flow.phase != "active":
                 return
             if retry:
-                events = self._retry_events.get(sid) or [self._last_events.get(sid)]
+                events = self._retry_events.get(sid) or [self._trigger_event(sid)]
                 events = [ev for ev in events if ev is not None]
                 if not events:
                     st.retry_at = 0.0
                     self._retry_status(sid, root, "cancelled")
+                    # v4.6x（用户 m00954）：这里以前一声不响地取消，日志里一行都不留，
+                    # 事后只能靠「之后什么都没有」倒推。
+                    logger.warning(
+                        "[multi-decision] %s 重试没有可重放的事件"
+                        "（插件重载后上一条也丢了），这一轮放弃并结算", sid)
+                    self._note_delivery_failed(
+                        sid, "重试时没有可重放的事件（插件重载后丢失）")
                     await self._settle_input(sid, epoch=epoch)
                     return
                 token = uuid.uuid4().hex
@@ -4910,9 +5026,9 @@ class DecisionEngine:
                 # Preserve explicit no-new-input timer rounds, but never replay a
                 # normal/deferred batch after a failed/empty publication.
                 reason = str(getattr(st, "last_trigger_reason", "") or "")
-                last = self._last_events.get(sid)
+                last = self._trigger_event(sid)
                 if (not ok and last is not None
-                        and reason in ("silent", "buffer", "curve", "adaptive", "probability", "count")):
+                        and reason in _TIMER_REASONS):
                     # v4.63（用户 m36670）：定时轮（静默兜底 / 曲线 / 概率 / 计数…）本来
                     # 就没有新消息，filter 一个事件都选不中，flush 必然返回空。以前只有
                     # not flow.deferred 时才补一次「拿上一条当触发器」的重投；决策那十几秒里
@@ -4943,7 +5059,8 @@ class DecisionEngine:
                     "（reason=%s，本轮 %d 条，排到下一轮 %d 条，上一条=%s，retry=%s）",
                     sid, str(getattr(st, "last_trigger_reason", "") or ""),
                     len(flow.active), len(flow.deferred),
-                    "有" if self._last_events.get(sid) is not None else "无", retry)
+                    "有" if self._trigger_event(sid) is not None else "无", retry)
+                self._note_delivery_failed(sid, st.last_error)
                 self._retry_after_fail(sid, st)
                 await self._settle_input(sid, epoch=epoch)
                 return
@@ -5072,9 +5189,13 @@ class DecisionEngine:
             # v4.65（用户 m36234）：带图那次的报错与尝试次数，页面 tooltip 直接显示。
             "images_fallback_error": str(got.get("images_fallback_error") or "")[:300],
             "images_fallback_attempts": int(got.get("images_fallback_attempts") or 0),
+            # v4.67（用户 m02347）：失败原因是不是上游临时过载（5xx/429/超时），
+            # 记录页据此区分「图有问题」和「上游太忙」。
+            "upstream_busy": bool(got.get("upstream_busy")),
             "input_tokens": int(got.get("input_tokens") or 0),
             "output_tokens": int(got.get("output_tokens") or 0),
             "cached_tokens": int(got.get("cached_tokens") or 0),
+            "usage": copy.deepcopy(got.get("usage") or []),
             "failed": bool(got.get("failed")),
             "error": str(got.get("error") or ""),
             "messages": list(hist or []),
@@ -5114,6 +5235,12 @@ class DecisionEngine:
             self.window.push_decision(sid, rec)
         except Exception:
             logger.exception("[multi-decision] 决策记录进窗口失败（已忽略）")
+        try:
+            decision_trace = getattr(getattr(self.plugin, "tracer", None), "decision", None)
+            if callable(decision_trace):
+                decision_trace(sid, rec)
+        except Exception:
+            logger.exception("[multi-decision] 决策用量记账失败（已忽略）")
         self.health["last_decision"] = {
             "ts": float(rec["ts"]),
             "sid": sid,
