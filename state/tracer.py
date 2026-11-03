@@ -13,6 +13,7 @@ json 里，出问题能直接摊开看，不用再靠猜。
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -44,15 +45,36 @@ LEDGER_KEEP_DAYS = 30
 def _as_int(value) -> int:
     try:
         return int(value or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
 def _clone_totals(out: dict) -> dict:
-    """浅拷贝 + 单独拷 models 那一层：缓存里的嵌套 dict 不能被调用方改掉。"""
-    d = dict(out)
-    d["models"] = {k: dict(v) for k, v in (out.get("models") or {}).items()}
-    return d
+    """Usage lists are nested; callers must not mutate cached evidence."""
+    return copy.deepcopy(out)
+
+
+def _blank_kind() -> dict:
+    """单个 kind（回复 / 决策）的同一批数字（v4.68，用户 m02472）。"""
+    return {"rounds": 0, "calls": 0, "input": 0, "output": 0, "cached": 0,
+            "cache_hit": None, "elapsed_sum": 0.0, "elapsed_rounds": 0, "avg_elapsed": None}
+
+
+def _finish_kinds(out: dict) -> None:
+    """算分 kind 的命中率与平均用时；elapsed_sum 是中间量，不往外抛。"""
+    kinds = out.get("kinds")
+    if not isinstance(kinds, dict):
+        return
+    for bucket in kinds.values():
+        if not isinstance(bucket, dict):
+            continue
+        # cached 全是 0 时不要写成「命中 0%」：回复这一路框架回的 LLMResponse 不带
+        # cached_tokens（决策是我们自己发的请求，所以有数），0 表示「没记录」不是「没命中」。
+        if bucket.get("input") and bucket.get("cached"):
+            bucket["cache_hit"] = round(bucket["cached"] * 100.0 / bucket["input"], 1)
+        if bucket.get("elapsed_rounds"):
+            bucket["avg_elapsed"] = round(bucket["elapsed_sum"] / bucket["elapsed_rounds"], 1)
+        bucket.pop("elapsed_sum", None)
 
 _BAD = re.compile(r"[^0-9A-Za-z_.-]+")
 
@@ -119,6 +141,42 @@ def _model_of(obj: Any) -> str:
         if val:
             return str(val)[:80]
     return ""
+
+
+def _number(value: Any) -> float:
+    try:
+        result = float(value or 0)
+        return result if math.isfinite(result) and result > 0 else 0.0
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def usage_identity(obj: Any) -> dict:
+    """Keep recorded identity; a display name is never provider evidence."""
+    pid = str(_attr(obj, "provider_id", "") or "").strip()
+    mid = str(_attr(obj, "model_id", "") or "").strip()
+    ref = str(_attr(obj, "model_ref", "") or "").strip()
+    if ref and ":" in ref and not (pid and mid):
+        pid, mid = ref.split(":", 1)
+    raw = _attr(obj, "model", "")
+    raw = raw.strip() if isinstance(raw, str) else ""
+    name = str(_attr(obj, "model_name", "") or "").strip()
+    known = bool(pid and mid)
+    # A bare internal ID can be resolved by Tracer only with a unique exact key.
+    model = (pid + ":" + mid) if known else raw if raw else name if not mid else ""
+    return {"model": model, "model_name": name or raw or mid,
+            "provider_id": pid if known else "", "provider_name": str(_attr(obj, "provider_name", "") or "") if known else "",
+            "model_id": mid, "identity_source": str(_attr(obj, "identity_source", "") or "recorded") if known else "unknown"}
+
+
+def usage_event(obj: Any, ts: float = 0.0, timestamp_source: str = "legacy_round") -> dict:
+    """Normalize evidence without inventing tokens or a request timestamp."""
+    inp = max(0, _as_int(_attr(obj, "input", _attr(obj, "input_tokens", 0))))
+    outp = max(0, _as_int(_attr(obj, "output", _attr(obj, "output_tokens", 0))))
+    cached = min(inp, max(0, _as_int(_attr(obj, "cached", _attr(obj, "cached_tokens", 0)))))
+    return {**usage_identity(obj), "ts": _number(_attr(obj, "ts", ts)),
+            "timestamp_source": str(_attr(obj, "timestamp_source", "") or timestamp_source),
+            "input": inp, "output": outp, "cached": cached}
 
 
 def _default_model_of(path: Any) -> str:
@@ -362,6 +420,30 @@ class Tracer:
         self._refs[key] = []
         return rec
 
+    def _identity(self, obj: Any) -> dict:
+        """Resolve internal IDs only through an exact, unique config key."""
+        identity = usage_identity(obj)
+        mid = identity["model_id"]
+        if not mid or identity["provider_id"]:
+            return identity
+        try:
+            path = self._config_path()
+            raw = json.loads(path.read_text(encoding="utf-8")) if path else {}
+            hits = []
+            for pid, provider in (raw.get("providers") or {}).items():
+                models = (provider.get("model_config") or {}).get("llm") or {}
+                if mid in models and isinstance(models[mid], dict):
+                    hits.append((str(pid), provider, models[mid]))
+            if len(hits) == 1:
+                pid, provider, model = hits[0]
+                identity.update(model=pid + ":" + mid, provider_id=pid,
+                                provider_name=str(provider.get("name") or provider.get("provider_name") or ""),
+                                model_name=identity["model_name"] or str(model.get("model_name") or mid),
+                                identity_source="config_unique_id")
+        except Exception:
+            pass
+        return identity
+
     def step(self, event: Any, llm_resp: Any) -> None:
         if not self.enabled:
             return
@@ -374,22 +456,24 @@ class Tracer:
         calls = list(_attr(llm_resp, "tool_calls", None) or [])
         inp = _attr(llm_resp, "input_tokens", None)
         cached = _attr(llm_resp, "cached_tokens", None)
-        # 框架 LLMResponse 没有 model 字段，_model_of 读不到就用框架配置里的默认模型
-        # 兜底，否则轨迹 model 一直是空串、花费卡片只能显示「未记录模型」
-        # （用户 m03616 第 1 条）
-        model = _model_of(llm_resp) or self.default_model_name()
+        identity = self._identity(llm_resp)
+        observed = time.time()
+        first = not rec["steps"]
+        token = usage_event(llm_resp)
         rec["steps"].append(
             {
                 "index": _attr(llm_resp, "agent_step_index", len(rec["steps"])),
-                "model": model,
-                "ts": time.time(),
+                **identity,
+                "ts": observed,
+                "usage_ts": rec["started"] if first else observed,
+                "timestamp_source": "request_hook" if first else "response_observed",
                 "text": clip(text),
                 "reasoning": clip(reasoning),
                 "tool_calls": [{"name": _tool_name_of(c), "args": _tool_args_of(c)} for c in calls],
-                "input_tokens": inp,
-                "output_tokens": _attr(llm_resp, "output_tokens", None),
-                "cached_tokens": cached,
-                "cache_hit": round(cached / inp * 100, 1) if (cached and inp) else None,
+                "input_tokens": token["input"],
+                "output_tokens": token["output"],
+                "cached_tokens": token["cached"],
+                "cache_hit": round(token["cached"] / token["input"] * 100, 1) if token["input"] else None,
                 "time_consumed": _attr(llm_resp, "time_consumed", None),
                 "llm_elapsed_seconds": _attr(llm_resp, "time_consumed", None),
             }
@@ -498,6 +582,21 @@ class Tracer:
         else:
             rec["debounce"] = 0.0
         rec.update(timing_fields(rec))
+        final_steps = list(_attr(final_result, "step_results", None) or [])
+        final_by_index: dict = {}
+        for item in final_steps:
+            index = _attr(item, "step_index", None)
+            if index is not None:
+                final_by_index.setdefault(index, []).append(item)
+        for step in rec["steps"]:
+            matches = final_by_index.get(step.get("index"), [])
+            if len(matches) == 1:
+                identity = self._identity(matches[0])
+                # Never replace actual response identity with weaker final metadata.
+                if identity["model"] and not step.get("provider_id"):
+                    step.update(identity)
+        rec["kind"] = "reply"
+        rec["usage"] = self._step_usage(rec)
         totals = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
         for step in rec["steps"]:
             for k in totals:
@@ -517,7 +616,6 @@ class Tracer:
             if name:
                 model_hits[name] = model_hits.get(name, 0) + 1
         rec["model"] = max(model_hits, key=model_hits.get) if model_hits else ""
-        final_steps = list(getattr(final_result, "step_results", None) or [])
         if final_result is not None:
             rec["step_results"] = len(final_steps)
         errors = [str(_attr(step, "raw_output", "") or "") for step in final_steps]
@@ -591,30 +689,125 @@ class Tracer:
 
     # ------------------------------------------------------------ 24 小时账本
 
+    @staticmethod
+    def _kind(row: dict) -> str:
+        if row.get("kind") in ("decision", "reply"):
+            return row["kind"]
+        return "decision" if row.get("decision_only") or str(row.get("event_id") or row.get("key") or "").startswith("dec-") else "reply"
+
+    def _row_key(self, row: dict) -> tuple:
+        event = str(row.get("event_id") or row.get("key") or "").strip()
+        if not event:
+            event = self._ledger_key(row)
+        return (normalize_sid(str(row.get("sid") or "")), self._kind(row), event)
+
+    @staticmethod
+    def _usage_totals(usage: list) -> tuple:
+        return tuple(sum(item.get(key, 0) for item in usage) for key in ("input", "output", "cached"))
+
+    @staticmethod
+    def _counts(row: dict) -> tuple:
+        return (max(0, _as_int(row.get("input"))), max(0, _as_int(row.get("output"))),
+                min(max(0, _as_int(row.get("input"))), max(0, _as_int(row.get("cached")))))
+
+    def _step_usage(self, rec: dict) -> list:
+        result = []
+        for step in rec.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            event = {**step, **self._identity(step)}
+            event["ts"] = step.get("usage_ts", step.get("ts", 0))
+            source = "response_observed" if _number(event["ts"]) else "legacy_round"
+            if not _number(event["ts"]):
+                event["ts"] = rec.get("ended") or rec.get("started") or 0
+            result.append(usage_event(event, timestamp_source=source))
+        return result
+
+    def _trace_row(self, rec: dict) -> dict:
+        totals = rec.get("totals") or {}
+        row = {**usage_identity(rec), "ts": _number(rec.get("ended") or rec.get("started")),
+               "sid": normalize_sid(str(rec.get("sid") or "")), "kind": self._kind(rec),
+               "event_id": str(rec.get("event_id") or ""), "key": self._ledger_key(rec),
+               "input": totals.get("input_tokens"), "output": totals.get("output_tokens"),
+               "cached": totals.get("cached_tokens"), "elapsed": rec.get("elapsed"),
+               "elapsed_trigger": rec.get("elapsed_trigger"), "debounce": rec.get("debounce"),
+               "llm": rec.get("llm_elapsed_seconds")}
+        row["input"], row["output"], row["cached"] = self._counts(row)
+        explicit = isinstance(rec.get("usage"), list)
+        usage = [usage_event(item) for item in rec["usage"] if isinstance(item, dict)] if explicit else self._step_usage(rec)
+        if self._usage_totals(usage) == self._counts(row) and (usage or explicit):
+            row["usage"] = usage
+        else:
+            row["usage"] = [usage_event(row)]
+        return row
+
+    def _snapshot_row(self, payload: dict) -> Optional[dict]:
+        if not isinstance(payload, dict):
+            return None
+        original = payload.get("trace")
+        if payload.get("decision_only"):
+            rec = copy.deepcopy(original) if isinstance(original, dict) else {}
+            totals = rec.get("totals") or {}
+            rec.update(sid=payload.get("sid", rec.get("sid", "")),
+                       event_id=payload.get("event_id", rec.get("event_id", "")),
+                       kind="decision", started=payload.get("ts", 0), ended=payload.get("ts", 0),
+                       model=payload.get("decision_model") or "")
+            rec["totals"] = {key: payload.get(key, totals.get(key, 0)) for key in
+                             ("input_tokens", "output_tokens", "cached_tokens")}
+            if isinstance(payload.get("usage"), list):
+                rec["usage"] = copy.deepcopy(payload["usage"])
+            if not isinstance(rec.get("usage"), list):
+                # Old decision traces have neither provider evidence nor request times.
+                rec["steps"] = []
+            return self._trace_row(rec)
+        if not isinstance(original, dict) or not isinstance(original.get("totals"), dict):
+            return None
+        rec = dict(original)
+        rec.setdefault("sid", payload.get("sid") or "")
+        rec.setdefault("event_id", payload.get("event_id") or "")
+        return self._trace_row(rec)
+
+    def _snapshot_rows(self) -> Iterator[dict]:
+        try:
+            folders = list(self._rounds_root().iterdir())
+        except OSError:
+            return
+        for folder in folders:
+            if not folder.is_dir():
+                continue
+            for path in folder.glob("*.json"):
+                try:
+                    row = self._snapshot_row(json.loads(path.read_text(encoding="utf-8")))
+                    if row is not None:
+                        yield row
+                except Exception:
+                    continue
+
+    def decision(self, sid: str, rec: dict) -> None:
+        """Persist one business decision, with evidence from every actual response."""
+        if not self.enabled:
+            return
+        stamp = _number(rec.get("ts"))
+        event_id = "dec-%d" % int(stamp * 1000)
+        usage = [usage_event(item) for item in rec.get("usage", []) if isinstance(item, dict)]
+        trace = {**usage_identity(rec), "sid": normalize_sid(sid), "kind": "decision",
+                 "event_id": event_id, "started": stamp, "ended": stamp,
+                 "elapsed": rec.get("elapsed"),
+                 "totals": {key: rec.get(key, 0) for key in ("input_tokens", "output_tokens", "cached_tokens")}}
+        if "usage" in rec:
+            trace["usage"] = usage
+        self._append_ledger(trace)
+
     def _append_ledger(self, rec: dict) -> None:
         """往 24 小时账本追加一行。写失败只吞异常：统计坏了不能影响业务。"""
         try:
-            totals = rec.get("totals") or {}
-            row = {
-                "ts": round(float(rec.get("ended") or time.time()), 3),
-                "sid": str(rec.get("sid") or ""),
-                "event_id": str(rec.get("event_id") or ""),
-                "key": self._ledger_key(rec),
-                "model": str(rec.get("model") or ""),
-                "input": _as_int(totals.get("input_tokens")),
-                "output": _as_int(totals.get("output_tokens")),
-                "cached": _as_int(totals.get("cached_tokens")),
-                "elapsed": float(rec.get("elapsed") or 0.0),
-                # v3.51（用户 m07385 第 7 条）：含防抖的整段用时与模型自己耗时，
-                # 老行没有这两个键，读的时候按 0 处理。
-                "elapsed_trigger": float(rec.get("elapsed_trigger") or 0.0),
-                "debounce": float(rec.get("debounce") or 0.0),
-                "llm": float(rec.get("llm_elapsed_seconds") or 0.0),
-            }
+            row = self._trace_row(rec)
             self.ledger.parent.mkdir(parents=True, exist_ok=True)
             with self.ledger.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
             self._ledger_cache = None
+            self._recent_cache = None
+            self._today_cache = None
         except Exception:
             logger.debug("[multi-decision] 写 24 小时 token 账本失败", exc_info=True)
             return
@@ -739,57 +932,23 @@ class Tracer:
         return rows
 
     def _backfill_ledger(self) -> None:
-        """把盘上还留着的 traces 回填进账本，只跑一次（升级当天补齐 24 小时窗口）。"""
+        """Backfill snapshots once; the read projection itself never mutates history."""
         try:
             marker = self.ledger.parent / "tokens.backfill"
             if marker.exists():
                 return
-            known = {str(row.get("key") or "") for row in self._ledger_rows()}
+            known = {self._row_key(row) for row in self._ledger_rows()}
             rows: List[str] = []
-            root = self._rounds_root()
-            dirs = list(root.iterdir()) if root.exists() else []
-            for d in dirs:
-                try:
-                    if not d.is_dir():
-                        continue
-                except OSError:
+            for row in self._snapshot_rows():
+                key = self._row_key(row)
+                if not row.get("ts") or key in known:
                     continue
-                for fp in d.glob("*.json"):
-                    try:
-                        payload = json.loads(fp.read_text(encoding="utf-8"))
-                    except Exception:
-                        continue
-                    # v3.64：轨迹挂在请求快照的 "trace" 键里
-                    rec = payload.get("trace") if isinstance(payload, dict) else None
-                    if not isinstance(rec, dict):
-                        continue
-                    key = self._ledger_key(rec)
-                    if not key or key in known:
-                        continue
-                    known.add(key)
-                    totals = rec.get("totals") or {}
-                    try:
-                        ts = round(float(rec.get("ended") or rec.get("started") or 0.0), 3)
-                    except (TypeError, ValueError):
-                        ts = 0.0
-                    if not ts:
-                        continue
-                    rows.append(json.dumps({
-                        "ts": ts,
-                        "sid": str(rec.get("sid") or ""),
-                        "event_id": str(rec.get("event_id") or ""),
-                        "key": key,
-                        "model": str(rec.get("model") or ""),
-                        "input": _as_int(totals.get("input_tokens")),
-                        "output": _as_int(totals.get("output_tokens")),
-                        "cached": _as_int(totals.get("cached_tokens")),
-                        "elapsed": float(rec.get("elapsed") or 0.0),
-                        "elapsed_trigger": float(rec.get("elapsed_trigger") or 0.0),
-                        "debounce": float(rec.get("debounce") or 0.0),
-                        "llm": float(rec.get("llm_elapsed_seconds") or 0.0),
-                    }, ensure_ascii=False))
+                known.add(key)
+                rows.append(json.dumps(row, ensure_ascii=False))
+            if not rows:
+                return  # Do not mark an empty first boot as a completed upgrade backfill.
+            self.ledger.parent.mkdir(parents=True, exist_ok=True)
             if rows:
-                self.ledger.parent.mkdir(parents=True, exist_ok=True)
                 with self.ledger.open("a", encoding="utf-8") as fh:
                     fh.write("\n".join(rows) + "\n")
                 self._ledger_cache = None
@@ -802,116 +961,91 @@ class Tracer:
     # ------------------------------------------------------------ 读
 
     def _model_name(self, model: Any, memo: dict) -> str:
-        """空模型名 → 框架默认模型（懒加载一次）；配置也读不到才退回「未记录模型」。
+        """Historical missing identity stays missing, regardless of today's default."""
+        return str(model or "").strip() or MODEL_UNKNOWN
 
-        v3.43：老轨迹里有一部分 rec["model"] 是空的（那时 step() 还没兜底），
-        它们其实就是当时的默认模型，不该和真有名字的同名模型分成两份算钱。
-        """
-        name = str(model or "").strip()
-        if name:
-            return name
-        if "fallback" not in memo:
-            try:
-                memo["fallback"] = self.default_model_name() or ""
-            except Exception:
-                memo["fallback"] = ""
-        return memo["fallback"] or MODEL_UNKNOWN
+    def _valid_usage(self, row: dict) -> Optional[list]:
+        raw = row.get("usage")
+        if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+            return None
+        usage = [usage_event(item, row.get("ts", 0)) for item in raw]
+        return usage if self._usage_totals(usage) == self._counts(row) else None
 
     def _add_round(self, out: dict, row: dict, memo: dict) -> None:
-        """把一轮的数字并进汇总：账本行与轨迹记录都走这里，口径只有一份。"""
-        inp = _as_int(row.get("input"))
-        outp = _as_int(row.get("output"))
-        cch = _as_int(row.get("cached"))
+        """A business round is global; model buckets count distinct participation."""
+        inp, outp, cached = self._counts(row)
         out["input"] += inp
         out["output"] += outp
-        out["cached"] += cch
+        out["cached"] += cached
         out["rounds"] += 1
-        bucket = out["models"].setdefault(
-            self._model_name(row.get("model"), memo),
-            {"input": 0, "output": 0, "cached": 0, "rounds": 0},
-        )
-        bucket["input"] += inp
-        bucket["output"] += outp
-        bucket["cached"] += cch
-        bucket["rounds"] += 1
-        # 用户 m11091 第 9 条：平均用时看**流水线总耗时**（elapsed）。v3.51 曾改成
-        # elapsed_trigger（触发→请求结束，含防抖等待），但页面同一行里显示的时长
-        # 是 elapsed，两个数不一样，看着像同一轮有两个用时。老账本/老轨迹没有
-        # elapsed 时才退回 elapsed_trigger，不能因为升级就把它们全丢掉。
+        kind = self._kind(row)
+        out[kind + "_rounds"] += 1
+        # v4.68（用户 m02472）：概览卡片要按「回复 / 决策」分开看次数、用时、命中率，
+        # 所以同一批数字再按 kind 存一份。key 用 _kind() 的返回值，未知 kind 也照样建桶。
+        kinds = out.setdefault("kinds", {})
+        if not isinstance(kinds, dict):
+            kinds = out["kinds"] = {}
+        kb = kinds.setdefault(kind, _blank_kind())
+        kb["rounds"] += 1
+        kb["input"] += inp
+        kb["output"] += outp
+        kb["cached"] += cached
+        usage = self._valid_usage(row)
+        if usage is None:
+            usage = [usage_event(row)]
+        participating = set()
+        for item in usage:
+            name = self._model_name(item.get("model"), memo)
+            bucket = out["models"].setdefault(name, {
+                **{key: item.get(key, "") for key in ("model", "model_name", "provider_id", "provider_name", "model_id", "identity_source")},
+                "input": 0, "output": 0, "cached": 0, "rounds": 0,
+                "decision_rounds": 0, "reply_rounds": 0, "calls": 0, "usage": []})
+            if bucket["identity_source"] != item["identity_source"]:
+                bucket["identity_source"] = "mixed"
+            for key in ("input", "output", "cached"):
+                bucket[key] += item[key]
+            bucket["calls"] += 1
+            out["calls"] += 1
+            kb["calls"] += 1
+            # 打上 kind 再进模型桶：花费卡片要按回复 / 决策分开算钱（pricing.summarize 读这个字段）。
+            item["kind"] = kind
+            bucket["usage"].append(copy.deepcopy(item))
+            if name not in participating:
+                participating.add(name)
+                bucket["rounds"] += 1
+                bucket[kind + "_rounds"] += 1
         elapsed = row.get("elapsed") or row.get("elapsed_trigger")
-        if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) and elapsed > 0:
+        if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) and _number(elapsed):
             memo["elapsed_sum"] = memo.get("elapsed_sum", 0.0) + float(elapsed)
             out["elapsed_rounds"] += 1
+            kb["elapsed_sum"] += float(elapsed)
+            kb["elapsed_rounds"] += 1
 
     def _round_rows(self, start: float) -> Iterator[dict]:
-        """窗口内的每一轮：先读账本，再用 traces 补（同一个 key 只算一次）。
-
-        v3.47（用户 2026-10-24 第 3/4 条）：traces 每个会话只留 keep 份（默认 60），
-        所以 rounds / avg_elapsed 一直卡在 60 —— 被裁掉的轮根本读不到。
-        账本是新加的，升级当天窗口里更早的轮只存在于 traces 里，两边都有的轮
-        按 key 去重，不能双算；账本上线前的历史因此仍然算得到。
-        """
+        """Deduplicate sid/kind/event; enrich old rows only on exact token equality."""
+        snapshots = {}
+        for row in self._snapshot_rows():
+            if _number(row.get("ts")) >= start:
+                snapshots.setdefault(self._row_key(row), row)
         seen = set()
-        for row in self._ledger_rows():
-            try:
-                ts = float(row.get("ts") or 0)
-            except (TypeError, ValueError):
+        for original in self._ledger_rows():
+            if _number(original.get("ts")) < start:
                 continue
-            if ts < start:
+            key = self._row_key(original)
+            if key in seen:
                 continue
-            key = str(row.get("key") or row.get("event_id") or "")
-            if key:
+            seen.add(key)
+            row = copy.deepcopy(original)
+            usage = self._valid_usage(row)
+            snapshot = snapshots.get(key)
+            if usage is None and snapshot is not None and self._counts(row) == self._counts(snapshot):
+                usage = self._valid_usage(snapshot)
+            row["usage"] = usage if usage is not None else [usage_event(row)]
+            yield row
+        for key, row in snapshots.items():
+            if key not in seen:
                 seen.add(key)
-            yield {
-                "input": _as_int(row.get("input")),
-                "output": _as_int(row.get("output")),
-                "cached": _as_int(row.get("cached")),
-                "elapsed": row.get("elapsed"),
-                "elapsed_trigger": row.get("elapsed_trigger"),
-                "debounce": row.get("debounce"),
-                "llm": row.get("llm"),
-                "model": row.get("model"),
-            }
-        try:
-            root = self._rounds_root()
-            dirs = list(root.iterdir()) if root.exists() else []
-        except Exception:
-            return
-        for d in dirs:
-            try:
-                if not d.is_dir():
-                    continue
-            except OSError:
-                continue
-            for f in d.glob("*.json"):
-                try:
-                    if f.stat().st_mtime < start:
-                        continue
-                    payload = json.loads(f.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                rec = payload.get("trace") if isinstance(payload, dict) else None
-                if not isinstance(rec, dict):
-                    continue
-                t = rec.get("totals") or {}
-                if not t:
-                    continue
-                # 没有 event_id 的轨迹：账本记的是 "ts:<毫秒>"，这里必须用同一口径，
-                # 不能拿文件名凑——快照的 ts 是 stage 时刻，跟轨迹的 started 差几十毫秒，
-                # 差一点就对不上，同一轮会被算两次（审查发现）。
-                key = self._ledger_key(rec) if not str(rec.get("event_id") or "").strip() else str(rec.get("event_id") or "").strip()
-                if key and key in seen:
-                    continue
-                yield {
-                    "input": _as_int(t.get("input_tokens")),
-                    "output": _as_int(t.get("output_tokens")),
-                    "cached": _as_int(t.get("cached_tokens")),
-                    "elapsed": rec.get("elapsed"),
-                    "elapsed_trigger": rec.get("elapsed_trigger"),
-                    "debounce": rec.get("debounce"),
-                    "llm": rec.get("llm_elapsed_seconds"),
-                    "model": rec.get("model"),
-                }
+                yield row
 
     def today_totals(self) -> dict:
         """今天的 token 汇总（输入 / 输出 / 缓存复用），给概览卡片用。
@@ -923,24 +1057,25 @@ class Tracer:
         today = time.strftime("%Y-%m-%d")
         cache = getattr(self, "_today_cache", None)
         if cache and cache[1] == today and (now - cache[0]) < 5.0:
-            return dict(cache[2])
+            return _clone_totals(cache[2])
         start = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
-        out = {"input": 0, "output": 0, "cached": 0, "total": 0, "rounds": 0, "cache_hit": None}
+        out = {"input": 0, "output": 0, "cached": 0, "total": 0, "rounds": 0, "cache_hit": None,
+               "decision_rounds": 0, "reply_rounds": 0, "calls": 0, "models": {}, "elapsed_rounds": 0,
+               "kinds": {"reply": _blank_kind(), "decision": _blank_kind()}}
+        memo: dict = {}
         try:
             # v3.47：口径跟 recent_totals 一样——账本优先、traces 补历史并去重，
             # 不再只扫 traces（轮数一多就被 keep 截断，今日数字也跟着少）。
             for row in self._round_rows(start):
-                out["input"] += _as_int(row.get("input"))
-                out["output"] += _as_int(row.get("output"))
-                out["cached"] += _as_int(row.get("cached"))
-                out["rounds"] += 1
+                self._add_round(out, row, memo)
         except Exception:
             logger.debug("[multi-decision] 统计今日 token 失败", exc_info=True)
         out["total"] = out["input"] + out["output"]
         if out["input"]:
             out["cache_hit"] = round(out["cached"] * 100.0 / out["input"], 1)
-        self._today_cache = (now, today, dict(out))
-        return out
+        _finish_kinds(out)
+        self._today_cache = (now, today, _clone_totals(out))
+        return _clone_totals(out)
 
     def recent_totals(self, hours: int = 24) -> dict:
         """最近 N 小时的 token 与用时汇总（v3.19）。
@@ -960,7 +1095,9 @@ class Tracer:
             return _clone_totals(cache[2])
         # models：按模型分开的同一批数字，给「花费」卡片算钱用（v3.37）
         out = {"input": 0, "output": 0, "cached": 0, "total": 0, "rounds": 0,
-               "cache_hit": None, "avg_elapsed": None, "elapsed_rounds": 0, "models": {}}
+               "cache_hit": None, "avg_elapsed": None, "elapsed_rounds": 0, "models": {},
+               "decision_rounds": 0, "reply_rounds": 0, "calls": 0,
+               "kinds": {"reply": _blank_kind(), "decision": _blank_kind()}}
         # memo 放跨轮的状态：默认模型名（懒加载一次）与 elapsed 总和，
         # 全量放进去会被 _clone_totals 拷给调用方，不该出现在返回结构里。
         memo: dict = {}
@@ -974,6 +1111,7 @@ class Tracer:
             out["cache_hit"] = round(out["cached"] * 100.0 / out["input"], 1)
         if out["elapsed_rounds"]:
             out["avg_elapsed"] = round(memo.get("elapsed_sum", 0.0) / out["elapsed_rounds"], 1)
+        _finish_kinds(out)
         self._recent_cache = (now, start, _clone_totals(out))
         return _clone_totals(out)
 

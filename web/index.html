@@ -180,6 +180,10 @@ html.plugin-on #sw-plugin .tr:after{transform:translateX(18px);}
 .card .k{color:var(--muted);font-size:12px;}
 .card .v{font-size:22px;font-weight:600;margin-top:2px;font-variant-numeric:tabular-nums;}
 .card .v small{font-size:12px;font-weight:400;color:var(--muted);margin-left:4px;}
+/* v4.68（用户 m02807）：回复 / 决策两格的主值行是三段「30次 / 17秒 / 命中87%」，
+   22px 装不下，压到 17px；斜杠用淡色小一号，别抢数字的注意力。 */
+.card .v .vm{font-size:17px;font-weight:600;letter-spacing:0;}
+.card .v .vsep{color:var(--muted);font-weight:400;font-size:14px;margin:0 5px;}
 .card .metric-sep{font-size:16px;font-weight:400;color:var(--muted);margin:0 9px;}
 /* 副行一律不折行（用户 m02080 图2）：原来插件数据那行会掉到第二行，卡片被撑高、右边还剩一大片空 */
 .card .sub{font-size:11px;line-height:15px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
@@ -638,7 +642,7 @@ html[data-theme="dark"] .mc-bd .at{background:rgba(59,130,246,.26);color:#93c5fd
     .mc-bd a.qcard:hover .qc-t{color:var(--accent);}
     .mc-bd .qcard .qc-logo{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;
       border-radius:9px;background:var(--soft);border:1px solid var(--line);color:var(--text);font-size:13px;font-weight:700;flex:none;overflow:hidden;}
-    .mc-bd .qcard .qc-logo.xianyu{background:#ffe24b;border-color:#ecd23f;color:#302b13;}
+    .mc-bd .qcard .qc-logo.xianyu{background:#ffe24b;border-color:#ecd23f;color:#302b13;padding:0;}
     /* 品牌图标（用户 m04325）：B 站用官方 TV 图形染白压在品牌粉底上，小黑盒用官方黑色标志放白牌上；
        都是内嵌 data URI，外网图标挂了、内网离线也照样显示。 */
     .mc-bd .qcard .qc-logo.bili{background:#fb7299;border-color:#f2658c;padding:4px;}
@@ -1468,13 +1472,6 @@ a.tag.ret .go{margin-left:5px;font-weight:700;font-size:13px;line-height:1;}
 
   // fromCache=true：这一遍只是拿上次的数据先把版面铺出来，不能动开关状态、
   // 也不能提前释放 booting（否则外壳里那一帧又会看到开关滑动）。
-  // 「X秒/次」：请求平均用时的单位写进值里（用户 m41961），超过一分钟给「X分Y秒/次」
-  function durPerCall(s){
-    if(s == null || typeof s !== "number") return "—";
-    if(s < 60) return (s < 10 ? (Math.round(s * 10) / 10) : Math.round(s)) + "秒/次";
-    var m = Math.floor(s / 60), r = Math.round(s % 60);
-    return m + "分" + (r ? r + "秒" : "") + "/次";
-  }
   // 用户 m07085 第 3 条：5 秒一次轮询原本每次都重建 #cards 的 innerHTML，
   // 鼠标正停在某张卡上看 title 时节点被换掉，表现就是「卡一下」。这里对比拼好的
   // HTML，内容没变就不动 DOM（悬停的 title 气泡就不会被打断）。
@@ -1482,10 +1479,8 @@ a.tag.ret .go{margin-left:5px;font-weight:700;font-size:13px;line-height:1;}
   function renderCards(data, fromCache){
     var box = document.getElementById("cards");
     var t = data.today || {};
-    var per = t.per_reply;
     // 口径统一成「最近 24 小时」（用户 m41511）：不再按自然日切，跨零点的夜聊也算进来。
     var tk = t.tokens || {};
-    var ae = (typeof tk.avg_elapsed === "number") ? tk.avg_elapsed : null;
     // v3.20（用户 m41961）：副行拆成群聊 / 私聊两个数——「群聊接收 X 条 · 私聊接收 X 条」。
     // 老后端没有 groups/privates 时返回空串，卡片回到只有主值的样子。
     var kindSub = function(key, word, unit){
@@ -1534,82 +1529,113 @@ a.tag.ret .go{margin-left:5px;font-weight:700;font-size:13px;line-height:1;}
       var bars = segs.map(function(s, i){
         // 最矮也留 5px，否则小目录会矮成一条线、看着像没画
         var h = Math.max(5, Math.round(s.mb / max * 36));
-        return "<i title='" + esc(s.n + " " + s.lbl + " · " +
-               Math.round(s.mb / sum * 100) + "%") +
-               "' style='height:" + h + "px;background:" + PIE_COLORS[i % PIE_COLORS.length] + "'></i>";
+        return "<i style='height:" + h + "px;background:" +
+               PIE_COLORS[i % PIE_COLORS.length] + "'></i>";
       }).join("");
-      var tip = segs.map(function(s){
-        return s.n + " " + s.lbl + " · " + Math.round(s.mb / sum * 100) + "%";
-      }).join("；");
-      return "<div class='bars-c' title='" + esc(tip) + "'>" + bars + "</div>";
+      // 用户 m02889：柱子也不挂悬浮提示，各类占比看卡片底下那行小字。
+      return "<div class='bars-c'>" + bars + "</div>";
     }
     // 用户 m06348 第 2 条：以前用「轮数 − 回复数」当未回复，失败轮也被算进去，
     // 于是 186 轮只回 90 次时看不出差在哪。现在失败只算失败；真正的沉默由后端
     // 单独给（silent = 结算了但没发出去），并且单独占一张卡片显式写出来。
     var ksMsg = kindSub("messages", "接收", " 条");
     var ksRep = kindSub("replied", "回复", " 次");
-    // 用户 m07085 第 2 条：未回次数不能再靠悬浮才知道，副行无条件写出来（0 也写）。
-    var sil = Number(t.silent) || 0;
-    var repSub = (ksRep ? ksRep.plain + " · " : "") + "未回 " + sil + " 次";
-    var repSubHtml = (ksRep ? ksRep.html + " · " : "") +
-                     "<span class='nowrap'>未回 " + sil + " 次</span>";
+    // v4.68（用户 m02472 + m02807）：回复 / 决策两格的主值行直接写成
+    // 「30次 / 17秒 / 命中87%」——用户要的是第二行，不是再加一行副行。
+    // 数字来自 tracer 的分 kind 汇总（kinds.reply / kinds.decision）：
+    // 回复的用时取快照里的 elapsed（决策单独记 decision_elapsed，不含在里面），
+    // 命中率是这批轮的 cached / input。
+    var kk = function(k){ return (tk.kinds && tk.kinds[k]) || {}; };
+    var kr = kk("reply"), kd = kk("decision");
+    var secTxt = function(v){
+      if(v == null || typeof v !== "number") return "—";
+      return (v < 10 ? (Math.round(v * 10) / 10) : Math.round(v)) + "秒";
+    };
+    // 百分比后缀叫「命中」两个字：一个字没有不别扭的说法（「中」「命」都读不通），
+    // 也跟 token 卡里的「命中 X%」对上。
+    // null 一律写「命中 —」：回复这一路框架回的 LLMResponse 不带 cached_tokens，
+    // 0 是「没记录」不是「没命中」，写成 0% 会让人以为缓存全废了。
+    var pctTxt = function(v){
+      return (v == null || typeof v !== "number") ? "—" : Math.round(v) + "%";
+    };
+    var hitTxt = function(v){
+      return (v == null || typeof v !== "number") ? "命中 —" : "命中" + Math.round(v) + "%";
+    };
+    var seg = function(s){ return "<span class='nowrap'>" + s + "</span>"; };
+    // 主值行三段：段之间用淡一点的斜杠，别让 / 抢了数字的注意力
+    var vsep = "<span class='vsep'>/</span>";
+    var vline = function(a, b, c){
+      return "<span class='vm'>" + seg(a) + vsep + seg(b) + vsep + seg(c) + "</span>";
+    };
     // 最近 24 小时决策（用户本轮）：决策模型跑了多少次、其中判要回的多少次。
     // 数据来自后端 /overview 的 today.decisions（decision_stats(24) 数盘上
     // decision_only 的快照）。判定不回不发请求，所以这个数跟「请求」卡不是一回事，
     // 悬停提示里说清楚。后端没给（老后端 / 请求记录关着）就写「—」，不假装 0 次。
     var dec = t.decisions || null;
     var decOk = !!(dec && typeof dec.rounds === "number");
+    // v4.68（用户 m02472）：请求卡副行按类型拆开——回复轮 = 总轮数 − 决策轮。
+    // 决策轮取 decisions.rounds（跟决策卡同一个来源），两段加起来正好等于主值；
+    // 成功率也跟着改成「回复成功 / 回复轮」，拿决策轮当分母会把成功率压低一半。
+    var decRounds = decOk ? (Number(dec.rounds) || 0) : 0;
+    var repRounds = Math.max(0, (Number(t.rounds) || 0) - decRounds);
+    var repRate = repRounds > 0 ? ((t.replied || 0) / repRounds * 100).toFixed(1) + "%" : "—";
+    // 请求维度的成功轮：总轮数减掉出错的那几轮（决策判「不回」也算请求成功）
+    var reqOk = Math.max(0, (Number(t.rounds) || 0) - (Number(t.failed) || 0));
     var items = [
       ["最近24小时消息", t.messages || 0, "条",
         "最近 24 小时收到的群消息条数", ksMsg ? ksMsg.plain : "", ksMsg ? ksMsg.html : ""],
-      // 回复紧挨消息（用户 m41961：最近24小时回复放到平均回复间隔左边）。
+      // 回复紧挨消息（用户 m41961）。
       // 用户 m06761 第 2 条：未回并进这张卡，不再单占一格——副行写「未回 N 次」，
-      // 分群/私聊拆分的仍按原来的 kindSub 口径；失败轮算在请求卡的失败里，
-      // 只有「结算了但没发出回复」才算未回。
-      ["最近24小时回复", t.replied || 0, "次",
-        "真正发出去的回复条数；未回 " + (Number(t.silent) || 0) +
-        " 次（结算了但没发出回复，失败和重试不算未回）",
-        repSub, repSubHtml],
-      ["平均回复间隔", per == null ? "—" : per, per == null ? "" : "条/次",
-        "平均每多少条消息回一次", "最近 24 小时"],
-      // 用户本轮：紧挨「平均回复间隔」右边再加一格「最近24小时决策」。
-      // 主值是 24 小时内决策模型跑过的次数，副行只写其中建议回复几次（建议不回不发请求，
-      // 所以这个数跟「最近24小时请求」不是一回事），建议不回 / 决策失败挂在悬停提示里。
-      ["最近24小时决策", decOk ? dec.rounds : "—", decOk ? "次" : "",
+      // 失败轮算在请求卡的失败里，只有「结算了但没发出回复」才算未回。
+      // v4.68（用户 m02472）：改名「24小时回复概览」——这格现在同时讲次数、平均用时、
+      // 缓存命中，还叫「回复」会让人以为只有次数；群聊/私聊拆分挪进悬浮（一行装不下）。
+      ["最近24小时回复概览",
+        vline((t.replied || 0) + "次", secTxt(kr.avg_elapsed), hitTxt(kr.cache_hit)), "",
+        "真正发出去的回复条数；平均每次 " + secTxt(kr.avg_elapsed) +
+        "（回复请求本身的耗时，不含决策），命中率 " + pctTxt(kr.cache_hit) +
+        " 按最近 24 小时有记录的 " + (kr.elapsed_rounds || 0) + " 轮回复算" +
+        (kr.cache_hit == null
+          ? "（框架回给插件的回复结果里没有缓存用量，这一路只能显示 —；决策那一路有）" : ""),
+        ksRep ? ksRep.plain : "", ksRep ? ksRep.html : ""],
+      // 用户 m02472：决策这格跟回复一样，副行写「次数 / 平均用时 / 缓存命中」；
+      // 建议回复 / 建议不回 / 决策失败改挂悬停（一行装不下四项）。
+      // 建议不回不发请求，所以决策次数跟「请求」卡不是一回事。
+      ["最近24小时决策概览",
+        decOk ? vline((dec.rounds || 0) + "次", secTxt(kd.avg_elapsed), hitTxt(kd.cache_hit)) : "—", "",
         decOk ? ("最近 24 小时决策模型跑了 " + dec.rounds + " 次；其中建议回复 " +
                  (Number(dec.reply) || 0) + " 次、建议不回 " + (Number(dec.silent) || 0) +
                  " 次" +
                  (Number(dec.failed) ? "、决策失败 " + dec.failed + " 次" : "") +
-                 "（建议不回不发请求，不计入请求卡）")
+                 "（建议不回不发请求，不计入请求卡）；平均每次 " + secTxt(kd.avg_elapsed) +
+                 "（决策请求本身的耗时），命中率 " + pctTxt(kd.cache_hit) +
+                 " 按决策轮的输入算，共 " + (kd.elapsed_rounds || 0) + " 轮")
               : "还没有决策记录：决策模式开着、并且真触发过一轮才有",
-        decOk ? ("建议回复 " + (Number(dec.reply) || 0) + " 次") : ""],
+        decOk ? ("建议回复 " + (Number(dec.reply) || 0) + " · 建议不回 " +
+                 (Number(dec.silent) || 0) + (Number(dec.failed) ? " · 失败 " + dec.failed : "")) : "",
+        null],
       // 请求和回复拆成两张卡（用户 m41511），成功率只挂在请求这张上。
       // 用户 m05552 第 2 条：失败轮和重试轮以前根本没进统计（结算日志只在成功路径写），
       // 卡片永远 100%。现在后端把失败轮也写进结算日志、重试轮另记 is_retry，
-      // 这里副行直接写「成功率 · 失败 N · 重试 N」，点进去能对上请求表里的红行。
+      // 这里副行直接写「成功 N · 失败 N · 重试 N」，点进去能对上请求表里的红行。
       ["最近24小时请求", t.rounds || 0, "次",
-        "agent 实际发起的请求轮数（重试轮也各算一次）；失败 " + (t.failed || 0) +
-        " 轮、其中重试 " + (t.retried || 0) + " 轮",
-        "成功率 " + (t.rounds > 0 ? ((t.replied || 0) / t.rounds * 100).toFixed(1) + "%" : "—") +
-        (Number(t.failed) ? " · 失败 " + t.failed : "") +
-        (Number(t.retried) ? " · 重试 " + t.retried : "")],
-      // 平均用时带单位（用户 m41961：改成 X秒/次）
-      ["请求平均用时", durPerCall(ae), "",
-        // 用户 m07085 第 1 条：这个轮数只数「有 token/用时记录」的轮，跟请求表的总轮数
-        // 本来就不等（早先被 keep 截断的轮没有记录），提示里把两个数都写出来，别让人以为锁死 60。
-        ae == null ? "还没有带用时的新记录"
-                   : "最近 24 小时有记录的 " + (tk.elapsed_rounds || 0) + " 轮（共 " +
-                     (t.rounds || 0) + " 轮请求），平均 " + fmtDur(ae),
-        ae == null ? "" : "最近 24 小时"]
+        "agent 实际发起的请求轮数（重试轮也各算一次）；其中回复轮 " + repRounds +
+        " 次（成功率 " + repRate + "，回复 " + (t.replied || 0) + " 次）、决策轮 " + decRounds +
+        " 次；失败 " + (t.failed || 0) + " 轮、其中重试 " + (t.retried || 0) + " 轮",
+        // 用户 m02869 + m02934：副行写「成功 / 失败 / 重试」三段。成功按请求轮算——
+        // 总轮数减失败轮，决策判「不回」的那几轮请求本身是成功的，不能算失败，
+        // 也不能只报「发出回复」的轮数（那会把 190 次缩成 30 次）。
+        "成功 " + reqOk + " · 失败 " + (t.failed || 0) + " · 重试 " + (t.retried || 0),
+        seg("成功 " + reqOk) + " · " + seg("失败 " + (t.failed || 0)) +
+        " · " + seg("重试 " + (t.retried || 0))]
     ];
-    // 最近 24 小时 token（用户 m33573 图4）：总 / 入 / 出 / 平均缓存命中。
-    // 明细挂 title，格子里只留缩写，别把统计条撑成两行。
+    // 最近 24 小时 token（用户 m33573 图4）：总 / 输入 / 输出 / 平均缓存命中。
+    // 用户 m02952：副行原来写「入 / 出」，跟价目表统一成「输入 / 输出」，不用单字缩写。
     if(tk.total){
       items.push(["最近24小时 token", tokText(tk.total), "",
                   "输入 " + (tk.input || 0) + " · 输出 " + (tk.output || 0) +
                   " · 命中 " + (tk.cached || 0) + " · " + (tk.rounds || 0) + " 轮有 token 记录" +
                   "（24 小时共 " + (t.rounds || 0) + " 轮请求）",
-                  "入 " + tokText(tk.input) + " · 出 " + tokText(tk.output) +
+                  "输入 " + tokText(tk.input) + " · 输出 " + tokText(tk.output) +
                   (tk.cache_hit == null ? "" : " · 命中 " + tk.cache_hit + "%")]);
     }
     // 最近 24 小时花费（用户 m02080 第 4 条）：紧挨着 token 卡，token × 设置页手填单价。
@@ -1628,14 +1654,39 @@ a.tag.ret .go{margin-left:5px;font-weight:700;font-size:13px;line-height:1;}
         var s = String(name || "");
         return s.length > 16 ? (s.slice(0, 8) + "…" + s.slice(-6)) : s;
       };
+      // 副行按类型拆开：回复 / 决策各多少钱，两段加起来就是主值。
+      var ck = cost.by_kind || {};
+      // v4.68（用户 m02472）：悬停里每个模型再按回复 / 决策拆一次（pricing 新给的字段）。
+      // 只列真的有钱进来的那一路——回复轮框架没回模型名，pricing 当隐藏模型跳过了，
+      // 这时候写「回复 ¥0」会让人以为回复不要钱，干脆不列。
       var costTip = (cparts.length ? cparts.map(function(p){
+        var sp = [];
+        if(ck.reply) sp.push("回复 " + money(p.reply_cost || 0));
+        if(ck.decision) sp.push("决策 " + money(p.decision_cost || 0));
+        var split = sp.length ? "（" + sp.join(" / ") + "）" : "";
         return shortModel(p.model) + " " + (p.priced ? money(p.cost) : "未定价") +
-               "（入 " + (p.input || 0) + " · 出 " + (p.output || 0) + "）";
+               "（输入 " + (p.input || 0) + " · 输出 " + (p.output || 0) + "）" + split;
       }).join(" · ") : "还没填价目") + " ｜ 单位：" + (cost.unit || "元 / 百万 token");
-      var costSub = unpriced.length
-        ? unpriced.length + " 个模型未定价"
-        : (cost.priced ? "按设置页价目估算" : "还没填价目");
-      items.push(["最近24小时花费", costTotal == null ? "—" : money(costTotal), "", costTip, costSub]);
+      var ckRep = (ck.reply && typeof ck.reply.total === "number") ? ck.reply.total : null;
+      var ckDec = (ck.decision && typeof ck.decision.total === "number") ? ck.decision.total : null;
+      var costSub, costSubHtml = null;
+      if(unpriced.length){
+        costSub = unpriced.length + " 个模型未定价";
+      } else if(ckRep != null || ckDec != null){
+        // 没填价的模型算不出钱：写「未定价」而不是 ¥0（回复那一路的模型名框架没回，
+        // 一直是「未记录模型」，写 ¥0 会让人以为回复不要钱）。
+        var kMoney = function(v, priced){
+          if(v == null) return "—";
+          return priced ? money(v) : "未定价";
+        };
+        var ca = "回复 " + kMoney(ckRep, ck.reply && ck.reply.priced);
+        var cb = "决策 " + kMoney(ckDec, ck.decision && ck.decision.priced);
+        costSub = ca + " / " + cb;
+        costSubHtml = seg(ca) + " / " + seg(cb);
+      } else {
+        costSub = cost.priced ? "按设置页价目估算" : "还没填价目";
+      }
+      items.push(["最近24小时花费", costTotal == null ? "—" : money(costTotal), "", costTip, costSub, costSubHtml]);
     }
     // 最右一格放内存（用户 m28965）：窗口和待发都吃内存，出问题先看这里。
     // 峰值和明细挂 title，格子里只留一位小数，别把统计条撑高。
@@ -1695,7 +1746,9 @@ a.tag.ret .go{margin-left:5px;font-weight:700;font-size:13px;line-height:1;}
       var kv = "<div class='k'>" + it[0] + "</div><div class='v'>" + it[1] +
                (it[2] ? "<small>" + it[2] + "</small>" : "") + "</div>";
       var sub = subHtml ? "<div class='sub'>" + subHtml + "</div>" : "";
-      var tip = it[3] ? " title='" + esc(it[3]) + "'" : "";
+      // 用户 m02889：这些统计卡不再挂悬浮提示（以前鼠标停上去会弹一长段说明）。
+      // it[3] 仍留在数据里当注释用，只是不再渲染成 title。
+      var tip = "";
       var pie = it[6] || "";
       if(!pie) return "<div class='card'" + tip + ">" + kv + sub + "</div>";
       // 带图的卡：文字块和柱状图并排在第一行，副行整行压在下面（用户 m02580）
@@ -4333,6 +4386,9 @@ var ctxSnapRequest = 0;
   // B 站 favicon 是单色蓝 TV，抠出形状染白压品牌粉底；小黑盒 favicon 是白底黑标，抠出深色标志放白牌。
   var ICON_BILI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACgAAAAoCAYAAACM/rhtAAAEPklEQVR42sWYz4scVRDHP9XTM7srq8ksZDEb14NB8QcYf108SMwp4jF4WVBPHjyGQP4AL4FEyEk9CTkY9KAeXchlIxEv6iWCxI3Eg6wiBBOzJmQnM9NfD1avRds90zOzOz5ouvt1V9X31aufDyqGJKuYTxhzVNFWyQKoBGFmmaTHgDeAA8AV4EMzuylpxsw6I4KbMbOOpDbwFvAksAF8ZGZXc5l1mZmk/ZLe1b/jjqT3JB30f5qDVl7g1fTng87jTuB7xmVZLWDh+bCkb5zJ3cDwA0nLdbanwG/ZaVXg+a2kw3X4bX/0VT8v6Qtn0i9c5yTtGcS0AG6P0xT5SNKqy7JaACUlklqSZiUdL2gvZ7ol6bykvbl9SUoL10wAd95pIo9ci8ddVstlWxW4VFKjZP6YpKvOMJPUCyDPSVocsOBF/ycH13Mecp7HSmgaktL8Pc3BmVnPn58GngIeBjJgEbgveL35/AzwJtCU9BPQ8HmABOgDjwIr/p4Fepzni+50CfAL8IOZfZ87oZl1LYSUfcAR4DXgJeDBIT5VFFipSL+Gxc/fga+Az4CLZnZ9O25KmpN0SlI32Ec3XJnKR+bf71VcdWi7JXJPSZrb3mLgJHAivBO2Et+uQRoa9K0ObdRu6lg6wDuppCPAK25T9/yHxG2qwXRHBvQcy1FJl1I34od8pQ0HtwmsAj/6u3YJUL5LjwOvAg84hr5jWkHSuqTNYCsdj/hL01KbpCWX2Qn2uSlp3SR1HXUPaAI3gRfM7GdJs74alRQXGkNbRVoDGma2JekR4DugDXTd1HppcAyF+43cJsysG1JQw5kK6JuZ6hYfVbQhc9woYDCgmVbw/E/KcYa9sQxtCK3LKo2TaTVPk6TI5H435Ce8Nlw1s79yAUVtxrlBtPkCBuVgBeeQpD8kLeQB3O8tSW9L2vB/Nvy9lefPspxakzaXseCyIxYNAzjv97aka/79tt+veXVMLqwAsFWTdn4QwGQED2wXnKldIw9PSssoDVA/hJz+kBS2Y7SjAExDlG94zNx12qRGqYTn6DUXsNdDxkWfrwrak9DW9uLZ0Ao8I+lz//6ppGdDH5FU9cA1aGcn8eJWoV+Zd0bztdrEGrTB20sBpiNmg9sTZJKxaNO6Jw6+6jTk096IuXgYrY0CUBW5uDuBBrtDFqBRvDirq50dqVr/kZVVabAXSqFc1QvAn17VNHe5ok5Kskvetm5VVdTvS9o/xYr6gMuMFfUtSVdS4BJwNDTnLeB1oC1pfco9SSukwVvA1ynwiZ8kLHt0N29eVpj+yBxgC/gV+Dg1szVJF4DnvN2LCT6bErAkdJQt74kvmNlabqBngLOFslx1S6Id2OZi5XMWOA1QdTbzMrBvytt7HfiyeDZj8STJnw8Bh4AlYG7Ekmxcu7sL/AZcNrPLRUzxXK7B/zyKOKwk5cTgadPCFbSpmMX+BoxOh4zi61ruAAAAAElFTkSuQmCC";
   var ICON_HEYBOX = "data:image/png;base64,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";
+  // 用户 m01693：闲鱼分享卡以前直接拿链接域名取 favicon，m.tb.cn 是淘宝的短链，画出来是淘宝图标。
+  // 跟 B 站、小黑盒一样把官方图标内嵌，离线也能显示。
+  var ICON_XIANYU = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAJAAAACQCAYAAADnRuK4AAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAkKADAAQAAAABAAAAkAAAAAA/PwqIAAATt0lEQVR4Ae1dC5QU1Zn+b3dPM28GGWZ6QB4RFA0aDT7QxFWRBBLXlTFryAnrrpJsDqxRYzwrq1HY1SybBGMwGokxuK4aNtHoEQO6m+jGRzY+Iq5IgkJE5D2MMAww757uvvv/1dZ0dXVVddWtx/R03XvOTFXfx3/v/e5X933/y8Ajw/mMOHzYNhsy6dnA2cnA+Ekoeiy+1wHwKo+ikWLsIsAgA8C6gUMXlsVefN+GQTdDLLaBjTtE754Y5kYKPzxmNCTh88AzrZhAfPJ6N/Jk2MAQ2AYs8jRE2Dpo6niNMcZFYxYiED/YWAep1E0Y6Y1ImhrRyGW4EkCAsS3A2M0s0blBJDWOCMT5mRVwYMdigMxyrBrHiUQow5QoAoy9DCy6lCU6XneSQtsE4gdHz4QUPIbEmeYkAul3hCHA2COQqF3C2N4+Oym3RSDedtwC7Of8h+wM24G0LPy8CfHYfNbYsa9YbiJWHjjnjLc13AE8/ZgkjxVSZed2Jgym3+AHxs4qljPTGojIA20Na1HAl4sJke5li8AAjta+wFo6nzXLoXkNdGDM7RhIkscMuXDYj8KW5xfYhZlhll3DGijb56FmSxqJACLAYAfU1J7D6vd16PEoqIGU0ZbSYdZ7lb9DiwCHE6Cn5wnOL4rpMcgjkDLPQ0N1ufSgx0n+RvZA26ab9UDkEQja318i53n0EMnfQwgwWMrbEnkTyEMEUpYnOF825Fm+SAT0CHCOC+P9y7XWQwRS1rbk8oQWG/luiABfzNubpqpOCoGUVXVaGJVGIlAMAQ4VkEnepnrL1kBJuESuqquQyGdRBDi0qiOyLIF4Zn7RQNKDRGAIAd4A7W9dSD8jyk5C2gwmjUTACQKc4SZCJJCyDVXuJHQCnfRLCHC4jB4RyPCL6UUaiYAzBPgkfqC5KYKd5+nOAkrfEoGPEGA8Efno9ITERCLgHIFUqplGYWOdh5QhJAKIQCxTg00YnduSRiIggABnlVgDyUN/AtDJIIRAKhLPTiRKOCQCIghEaRgvjUTABQKSQC7Ak0FlDSQ54BIBWQO5BDDswSWBws4Al/mXBHIJYNiDSwKFnQEu8y8J5BLAsAeXBAo7A1zmXxLIJYBhDy4JFHYGuMy/JJBLAMMeXBIo7AxwmX9JIJcAhj24JFDYGeAy/5JALgEMe/AChUFOAenrZ7Dx7RgcPhqBMz4+CJOPRw37BmbLthj84leVsHNvBE6YlIaFrf0wfWrawCfAjl1RePvdGHT3ZBWocWE96lnx2vA11QBTJ6dg2pQM1NUap9UwUTrL9oMR2PROBRw+onPw6GeEMdT/7ZEwjZholMOJH0vDaSenPJHP+P7RwsXzJyTFNd+qhX3tuDUNTQQzvPjKPvjHxb2aJAM8/ZtRsHRFLaQ0fIlXANz9L10w78Jknt/bV9XAo09W4rk1fw2Vzd9c3g//dE0vVFc5i23Nz6vgrgeqITnobxr9lH7WJ1Jw3792QeNx4h8RsNhVwgRKJhnMu7IBdu8vbAXvvaMLLrk4S4zDRxjMXjAGunsLP6eGeg4vPt6JNUG2AB/DGupbK4O9OWHyhAw88/ARqKq0R6JX36yAK79RHleCzD4vCWvu7BLnKRKosPRtituMTYwReSj4hv9B5Z4fmY1vVxiSh5yPHGNAclTz7Atx9TWw5659EXhgbZXt+J77XfBptJ04hx5feDUOXd3CFFBiEw5NwJuZPZpaqRf7SFZGWzOpfR4r/364/fTnlUB9OTtmf7t5vu2ELzU/uy3K0U5afUFD22mljrVZ0UQx9tNPSQ2l89yZufchywBeiDy792X7cQFEV1ZR+EIgLUJTJmbg6gX9Wquhd+pwJ5pynbhr/q4XTsIRwnCYXTg6tGO0H4cd/6Xux+1IL9cBcZhTugnBrrn1uh4Y35yBtU9V4pcewaF+GhYt6MNR0ECeiJpqDk8/eBTWrquENzdHoacPj+5rfGgzq33PejHvBHfiFMOmd6yzardpyuT4rklZ9pUGBed+EmtcvL8tn2i5XGhTqfVj9G5kRzFp7UkLuNZOdVPjOXSYwTvvmee9EEdFnO1/5pKLilCTWNSjMt/wlS/1Af1RAUQsPvZ4nCvkWrSguFwnPtY+NQqW31VrGiSdyRWyqSd0qLUYJC7BGvVrC23dkmQVhaduaazQT/vscTCAo2YjY3f0aRSW7CyK0iyIO3sr8riTbB2aarvmRovqwzr4kOvpp5hP/px5mrnbkICAX6LYtTt1unG3oK4mo7QGbpIUOIHsJnZggMH65+Jw38NV8OuX4kBfkltDM+BuzcLWAThxSqGcS+ckYeZpwzMIKJanpUt6IGYwRrjl632uZ6NdNGHFki3uvrctClffWA8f7Mnxe8ZJKXjormMwdoz9plOfArftPcmjJvaJnxyFHz5YBa/+XwXOYgPMvSCpNM/6+Erl91mnp+DJB47C6keq4M87onB8SwauuqIfZn8qfxVAJL3CBPKiMMwSfMt3a/LIQ/62/DkGt6+qhXtwllvUeJXm2hoOt16fv1wjmqagwp06PQWrV4hjZ5bO3Cdu5iNg+x5c8ngNv2wj89tXUMe1+26MkWhpJ4iAcA2kDhcF4zUN9uEh0vtp7EwTfjQkHztm+Fn0ysYK+P3GONAw2Q9D+PqBMa3G006Eyz47AE0eDCqECeRVc+AH+H7LvOPuGnj4iUq/o/FVPvWH1qw85rrjX3JNWKkT83evV4x48hAzj3YxuGmFe+2GwjWQ0+qV+jZv4MYzGmEZGZU4HZ3WnP7lhjhu/zCSkLNLjMvAOWekCjaMqXHkfDp/e/kP5bMaT5v7aGVgEm5pETXCBHJSGLSl47rltfBhhzU57GTizp9YTAVrBIzBfXKrlnfBX8zydnKP+mjlZA5imbghkDAadmugrm4G1y7zhjxOCq7zKIPr/7kWtDWa3TQ7iSfsfn2vgf6wqQIOHhbmqavyOYabpV7Aof8Vf5m/aOtKaJHANCarMJ6FsAxJ0xPaLb96z7QF2KmhD2bQ58lxYQLZ/Zqpszac5mhXcOSdND4Dj/7wGM70Fi51FMPgyWdx3/i/GXfuaA3vlXWdxUQUuFMZ/SfubFh+l71mv0CADQthdO32gWaeOqhstreRFl+8aBc47ZJeNCFzLxgQIo9ofMXCURnR6ReR2quYbNVdmECqgGJP2lD29auGZ4vDwvkDcMaMXB3uN4FEmq5i+Ll1JxLR/iS/jO9NGCX8hr/vVc4hPfPbuOkwXs1gH25etNoARVtg9QWlJ0YL7nKc8+kBuGxu/mKh3p8aZ/k//etGCBPIbhOmFs6c85NAf8XMB7uj8JmFDabefrqyS3gpw28C9eMWlI5OscKyOlBAW1lE5RKQfuZbmECmJRxih4cerwT689ocwsnVc/7qOK/FeiLP9z6QJ6n0SIifX6JHSRxxYsJFoBFXPKWf4MAJREed/7g1Br19Yn0FM0j7cavHH7dGcXuFeZZkDWSGnri9cB/IaWHQksay79fC+uezi5EVGPO1V/fiX/4Q36lcyvr9j1bCPQ/V4MmDLBC0xfS7N3fDaDxmk2+8JW2+7HD+Mv9ci+DhdBR268oceUg0TbGvWlMNNAPrxvxyQyXQAqtKHpL1m5fjcMv3jGd13cQlwxYiIFwDFYoyt6Fmi+aAjAzpDPrrS3JrVU6J+TM872Vk6CQHLaQGuXvx7NMH4WzcwE6mWF2nz+c23OxuprihBtXPLDI53WuUd73dj/Bki18mEAK9v8s8mg/25O8PctqEvfdBfngtUO+joqogCfTpswbhukX5TbI2PVbvpEPJlEB4YvebXxPfxO8ngYSbMCsw9G5WZ7rS6fx+iv7L1MvS/85YnCgtjDc/Lr0st7+dpl0bn9MPRxt2ON8DIdBwZjDIuCWBgkTbJK6R+iVSdki3o6jxK9/UjPtpzDsnfsYakGw3NYJIEtc/P0oZDU4+3nlTue1984Km/eR33u98T08yyZVj4SJ5sRum5AgUdKHbBcqOvzTuKvyvF41HhXbCm/npwUnX+3/m/RqbWXxO7EPVBxrJ5HRSqEH6HXYCMVmqQZa353EFQqBy4khzo/P9zp6XmocCW5qd99e00QdCIG2Exd79Go0Ui9euO+m/NtK1Yzd8KfkjZePjm919ECVHoFIC2CgttMf6/u8cg4+fmALSMjsSDWkmuwKXj1avOOY6+SU3CnOdowAEzP7UICpnOgopXPbqRUWgfphss++ueTFKF6kYJGWmXpmSI5Cf/aViC5xOQY0hevV14ufKncZXiv79+XxKMacyTb4gIFwD+dXZ9UuuL+gZCKW7J7birDJpvdizP4oKsZgyOz2QpG+VQx1OKNdUZ6AeL5gZn8jABOzEks7CZtQo4mftS0klxRA0W763LYJXXqWVbTRu1fwKE8irzHolx6AsA7OiC2M24E7L196qgHdRqbeZhjWrBFFBTj8hDaeciH/TBrGTnlb+Ro1y31/ZtCWGp0Wq4L9fjOedvye7x398BLe8iMchTKCRXlNYFaYdtyRun31sfaWiff+9nebrWHZkkR9S30fa9LMa9bPLITTKm4YqhWnENwN1PdNFeZMnZGss0v9sZqim2b4zhhpZI/Cr50Ypl/cZ+SX9QN9bXQMrb+02crZlJ0wgW9JLzJNXtR1tw737wWqwez2CKAy0tkY7FenvqV/npNA8FG2Ua6inPw7UmSftHnRQYcfuCHT12O/aPv+/xjtFc7FZvwkTyKvCsE5e6bn+AG8qvA/1Cw6nITUw7VjL0J9bU4v9MTfGfQrcxG4QtpSJuRO33w43eQwgc2Wl3iwpKkSYQFYFrXfT/9YmVu+m/631m33P7/BZ3b2hd7OSbeWmpuGl1wS0PKmBS/B50bmDcKOLvdaUJeEmjDpzZmaK7uZma7/5cmhthtp4I21do+t4wYhh0vg0mHVip+C1UlozZWJaGSlp7dR3vV/VXvusx/jtmkYc2WRvh04rV10RQemPNofR0J70Xe9BhaM79zBHfRa78Vv5Oz6Rhuu/0geXf27A8uYkKxmqmzCB6Npomksw2jLZOi93TIciojmO82YOKndLqBGrT8qE1sSxT/f52cmhA4haN+3xH9W+dV6/ci5M/a0+zz97sECR9nxU90IX++ppQHeZzcJ7voqZz5w/iPM3GSDVeUaGTmXQHRSk1KrBwWXYdOxp6/aYotaGrnT407YokJYSfTqN4rRrR7Pw55wxCF+8dAAunTNQoCLHrhy9P+Fbm0kQXdxx7bK6IRLRadMbvtoDS/628IbCNrxrlPyqF79RhhZ9qR/oMjq9OaIoyKxDTfC5JmP+3AE8bdqjXHai9U8nL5Z9v0YZUqv2sxCoe+7oNrzSmi69W3FvNU7uUQoAJqI6unu/3a3oL1LDWz03oqri65bXDWmcrcb5m/nzkkicPuU+dquwTtyoptq6PYqTkjF4F8lFWNNdtKRV1S6xSE/SmXiD0KxPJuGCWSnvtae5ufZbBWMQP1w6605V8idQ+dO4sea9ehpqkvIoIhPNaxTbSkBfJc3onnRCCkjTmZUhf9sQ7Imop/DkaTmtZEZh6It/G+dcaFaY0kw38DgxNAe0cXMc743nWDgp21eGO4nDzC9dt07TB6QDoAu/PSJa/0AEaxQOlTh9VFWZASLORJzdrrR5lblZXEXtvSBQ0Uikh/JFAAlk3JiXb5ZlzjxGQBLIY0DDJk4SKGwl7nF+JYE8BjRs4iSBwlbiHudXEshjQMMmThIobCXucX4lgTwGNGziJIHCVuIe51cSyGNAwyZOEihsJe5xfiWBPAY0bOIkgcJW4h7nVxLIY0DDJk4SKGwl7nF+JYE8BjRs4iKok996q1/YEJH5tY9AJJPBGoiJn2u1H5X0WY4IZBhupuXQVY55k3kKAAHG+7EJ43sDiEpGUY4IRADvQwK2rRzzJvMUBAIxPB8CsDmIqGQcZYYADb4yETypVhF9psyyJrMTBAKcvcIS7T0R1tixFeOTzVgQoJdTHAzWUXayE4ks8nQ55U3mJQAEohUKZ7IEijCFTQFEK6MoBwQY28KaDm6nrGQJ1HT966h7ZEs55E3mIQAEODyoxpJVUYG/+IExl6KivfWqg3xKBAwRYGwXJBqnM7Zd0cuTrYHQJ0t0bsBa6GXDQNJSIqAiwNltKnnIaohAijuLLlX9yadEoBABtglaDq/V2ucRiCU6qC/0iNaDfJcIKAgwSOPOjRvwgsA8ZUp5BFI8JmqX4PNNCZtEIA8Bzm5iLUdeyrPDH0OdaK0DPzR2Agym3wDOW7T28j2kCDD270ierxrlvrAGQl84O70PWPRyfFV62kYBpV1YEGC/h8SEfzDLrSGByHO2PxT5AvaJ5H4hM/TK3h7JU1vdilOEqBXS2JgSiLyzls5ncaB2HjZ0O4yDS9uyRQCbLWiZcDGr33/IKo+GfSB9AH5swljo6XkC+0QX6d3k7zJDgEZb1GEef2SVnZxZ1kCqAFa/rwMSU+dinbRMNmkqKuX4xHkeYHPskocQsFUDaaHibYlxAP3LcfFjMe6nzmkC13qS7yMLAVqewBlmmiTUz/MUy4hjAqkCeXvTVMgkb0MStSKZGlR7+RxBCDD2DpbfGmhpXK1dnnCSA2ECqZFgtygG7W9diAxuxcRchmSapLrJZ4khQNtQcSchtjvrAPfzqFsy3KTSNYH0kfMDzU140iOBl6o3QyxTgwmuhFQkDhZXNOplyN8eIICH/gDPbWFZ9OOKZydezNROe5hpG6oH0odE/D/DKoXhMaK89gAAAABJRU5ErkJggg==";
   // 用户 m17212 图7：抖音卡换成官方图标（favicon 内嵌，内网/离线也能显示）。
   var ICON_DY = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAS6UlEQVR4nM2b2XMc13WHv3u7p2cGAwyxEdxBAiRESuIikaJF2ZLoVYrp2E5VUqlUnDgPec9D/p68+C1JVV4Uy0sUa7Udi5Qpi6S5gRB3Evs6e3ffmzq3e4AhSJAABdg6rObMYHq67zn3rL9zWgE5oEZCB4F/Br4DbAECoB3QbARpDUEGtJd8tjZ5VSx9jg3EMRiz9P2TyaZHc91V4BzwNvDvwHD696yfMp8FBoFXgT1AG5AB5PuNI2GqVn+A5yfRqkXwIIkgisAQ8HrK2whQb973eeAfgTfTnS8A+fSHeg3reyqSi3urUDODIsauVgi2Zd0xsJAek8D/AD8BLskO7013/q+BfWw0idrLzgu1F2B3P7a9SOSWGSZLdiahoFGHuVmYmYGFeYiaJqJWYw6tmyYX7EyPXak23JZzRAB/BzybfrnxzPs+NBrJ5/5d8K//AodfSj6XJxPm86nyTY7B6U/gow/hzO9hTkw5FZCJ1+ITllMP8IZsvgjg+6lE5L2sLBX/4rG+5CWKLhe2nZvg1a+SfeYwvS2LWKIGqBzcmCQ8d5s5dZ9pG1KXS5j0Gqu/c9zyKjweEr8n9zucml+mheGNs3lrF20+Eg9fqznmZRe+kqqhaS7A+pDbjGrfy1RmiI91yM/NOPdST+CtzSc0XUzTp3WLEYoARN/+5ORWE4YwPU2hVnPb8UatxrZMButlUNZgwxhb7MTr3c2U3o6Kr/OhyEUlLOtUAKsktey92/CNDXOr8QkZH4LArcg3Bh0EoLwk9sv7oZ3w/Ay93b1su50nq33QFqUM2irk36p1YIm8dOOtTm1CtO6pPcoXIqWItaaqNSWtaGhNrBWxUtQ9TaU9R7R3K/bZfto7NlMwHtRirLUYrZ7WWJv+Tes/Vax/0mpkS/z0kPeeWvrsb+tGnTxM9/HD7Al6nZ/Q2sNkPKxOtOBpyf9zMr5S/upUUWu3yxiLLWbhlSG6Sic4NnuDkYtz/L42SyRmIkxoL3WGdkmPVxci7Z/XByyjxdib/qclYsiR82H/Vnr8E7xemeOeV2XkzLtME+ErCLJZ6tYQN+sFyRGcUT85WfL5kpOLFspicz65/bvY/+arvGpr/J4Fzoxcpjo9Q1StLJ27zJk9SQQ+X2ZSCuVpx4SouO97bDq0jxc6At7YHFB573/55KPfwNiYOz27zJuvpnbw+bKT2IORsjjGShbZlmXbc0N8M6+JOzvIdPdw7dowk3NzVCXFnp9P6ob5uVXVDj5fdrLJ+j3PAwl7aQA/3L+b3o5NDB59kXcrJd4pL3Bn9D58dh5+93/wyepqB39DFu282HJGnjLNcJdSySYai7EWMYqC5zPU20tXby+b0vr9XHWWqWI3ZrJE/Me7lObuMklI4zG1g/90q1ppsc3EpOW1SU9fuS0hQ7KZ4heaCBK4OuI14AAwEbRzs7iFWvsANX+QT6nyNhOudhDWPTQx5gEh+KznbstC3dUfZjaRR+LQVk3uejYto6X0Sa5sjHHaYOMYLzJ0akWnUgzVGhyJfOqqizrbKXKP3zLDPRLUqZn2sm4CUCpZnLPN1NFIcpLu9kOlpVOMJ+VdLSKKYijXIfCd82tGA8LIXUdEotwaUv+gPPLKp+Bgznb2UCDv8sqEknT3wdrBf2rG3VpThlOxLrImBY7nYwX8kDAm6ivojsvcUjRoJRKP3wzotRBuTWBLNWx3O7pnE35PB2SDRVE1r+iOwCP2NAUldaJHFs8J6XHkP7UAxCtL5pWmo66ykKO3B9XTDR3t2GIRk88TL5Tg5m2YGE/hsFSZk5TvYZVv3qbagGv3Meeu04gigv39eCePQH+X+z5sAf7c7ooSrjG399fMuJAwkeJ6qi0PPT3Yvs3EW/qIt22Brq4E7+vuhnwBNTaK/9vT6HMxZmYWQ/0hH7kkhGXaMFfBXLpD6cZdypeGYWaU/NED9Pb0EGTzCayek8OHegPqopHGubrVgCX+mgXQgumpTAZ9+CD61a8Rf+UYRjC+jvbUN3jQUSTnZem+dZ3OSow3vkC5NMIcJQfUJ4l/ghA9ShZKtCyTwcSGhVujnBs+y/D5D+jasZtv7jnI4PYB6O2ErcXkEHO/PYmZKWGiFqjErocAlGRkYssNtyi1px978Hnil18ifuVlOHaUtkKvw5lEQTsxtKNdjO72fDq3DEP759zz5rnMBMNEVNLab0U4XDK/XAaVzRCFIbdnbvPuzG284XMsdF3j5e176ezppW1rDx1bewmyAWqmQjA8ha6G+Pgoubr5IgJQ6d5kMks7PziA/+MfEX/765htW526FwoFDmN5DcWLrruinS8W3CljsmRMJzW7hT8yQcBN7jLHVCqAFW3WVXYGz1h8cTdobmHcby/PfMZbpRv0Bx3szXXyTLaLHbqNrthjV8VnU9kwjyUSAaQ1tn2EOvhr23kfPTCA+cvvEv7gFBw8RgeK7abMoUbE8XiB15TPETzaYguZNASVxTYVxFkato3PCFzPrbmYlZ1W4hRFQ6QQ8vw8DV1gzq8wV6syElYphqPsK+cZoo2dZOkmxw4KdJLjLAvMSMch5flRiuCvpZGhBgfxfvwj7A9OYYf24RNynAxv6oDXAs2u2NJtoE2clxVn1LxzwoiksRHWOai1JETuXEmDxbnFUaoZyXfzwEWq3KRKHk0GjxwZ9zpPzFiaBAlFy7LAlQXQTHAkxEWRc3xqcA/2+98lEuYPHqaI4UBpnlNBju/pgANir4JjeUl4irOZJGuTm/S2QyFDOWNZIKaGeOm1UZJg2gQyswpPawI0VWWoKUtNpdmAlQgVtkBLy66xagH4KTIrH7f04f3D3xP9zQ+xe/fSRsxxNKdybZzyAvYJtiq77RIB5ew+rT+SlldbBpvRWBenvxj2mrAp2iTVvtx2eXL7GG5XJQDVkuXJ+2wWhvbCN0+inj3q1H5gYZbv5Aq86QfsF0+rIRQZyAUrdbypBbypEl4Yk5GFTJZheIpcydBpfXLo1PM/nTCazkwww2Z6uxRKl96bFdR+ZQEoyafTnD6KXZxXu3djjr6I2dLnEJed+LyWyfJtL2BIeajYYj2VqGatjv3DdcxvLqFPD6PuzKR1eDbJ6ecXCGKxEklVW4unp6dE0x8EwZqCSGHSNWqA1ondy+JyObx9g5jn9mNyAdmozlHt8YbKsN8qpJ0hMH0YxWTuTaPP3YKPLsGvL8KZYSrhGNOUqZClQZ5K3mdYV7lPwzUhm6v7og2J5b9/VLhbvQDUUlBS7QX0vkHYO+gyvC7P8rrSvK592sXmpQiTi0wvwFun4e1P4eIdmJxlPpznEnVOM8cVqoxjCOse1cBjghJlt8akJfHn68rwKCfYEpXb2rADu10bO8jm6DcRh7yAHu25ely8fSY2eLcmMe+dx777KWFjgTEsp70FPgkqnLE1rpoFRqOKYzQgi0+UOMfUE6w1Iqwn+Q+Hv6WK3eRzRP278HbsZmsm4PlGja0SbrSPShuUZq6Md+UeaniURmOG29R4nyr/Ed/jSr3MLCE1GxOKt1YyrCO1fJIhPhI6+xOTv9IXDj2RQqSzk7ZsO7uBZ2ydgqSk0p+UxTdC4juTeFfuo2br1Dw4q6v81J/h/foUkThAdxPtsnIr3R6H6KXlcHNS5HG0MVMKj/MBLL2IQ8wGbmKq3x2KtjTcu+8rdcytcbgzDVXDbBzzoZniIzVJ1BKfJRQ5crV+au2uLbkKekRCs57kP3kBhsAaeqxlUxjh6SQBEdJhDDMl7FyZum1wXTc4bxaYNlWHxEim1kgT39bSVAKUS4+l3H2SGSwDSdab9MM3TF7cskRF6w20il0IzNbqeC1q63kaPwiwWc2UV2NYlxlTycihVONm8UiisyQuVgDNJtMyIuNnWhCdZcIQKK0eusP9rrmydZSHfvIcXy0pbLQAFBqVNifcqEs2QO/ZAns2Y31LKSo51fe1TphpPdLZIAd0yo4KkrR5s7uGGIvkBQ8ltSKA+aprcOjQpPmj2kgTsA+qm4ywzM5DuQTtRSgUElwgxemNQFHP7kTdmKC7u5ueez5Zz0NlEuxVOccvzq+JISZwFV4W9u1F7x1At7Utpq1OMxYbezYBRcdmYWwO6tHS/NY6+gX92G/rdRgfh4mJpDCSukCcl1RcUt56mqjYhnpuN20vPEtf53b8OCIsNzCNEBuHqDhChSGqVkM15HPsQFP1ysuY40eJujrRNnIoUlva8HDCEKE1IhidxY7PEIUNIuW8x7qSfuCTk2xLIlmuwLXPsVev0Zibp2Gk35gUIc1znEfY0QvfPU7X68coquIDF9ctU6DufcbHO/w83ne+Ba+cgK5u+qI6Q9bQ5fkuvEpP05nDXAXuz9CYnWWWCnOeIWqqyzopgf/QX5pOTtSxVILzF6gN7WP0hReZ9GQSA5TD7pMuj5Lz23PYE8/QVzvJieged0Y+5U65RFVMSAAMKRfzOSgWk7T6WycJj70APX3sMDEvN2oMqCxZz3f3lbLZyO6Pz2OnSkRRhSlqTOgG9bRFtl7kPyrkOEUQAVSqcO4CpWeGuFIpcwU4AWyKTYLYSloj58lg165Otp/6Gn871Ev26h/5zyuXGL5zOxmGFsZ37kzK6qF9sKcf+nrZHNX5q0rIDwz0CeinU5C01oDbE9ir9zBTUkxF3KbKLapUWlzlF8UWHq0BqXobaUKK3c/OUb9ylVsXL3Glq4/5jiK7xBGmZfNixy6jyW7t4djWr8JzQ5Qu7+f9WzcYr9eoFouEu3bC3gGy3dvIoilS50SpzA8NHPUy5ET2koZrH69SJj47gvp4GG+2QlkpLtoy103JoUlNsGU9dMF/pABSZ9O033Dkc2Z//guGlcetYy9xoLcPT7RAPL20wNKfNuP5wZ7N/NMLeQ7tf4Y/xCEj2mMhn4VCmwNRZS7/CD5Hcu0cMNDhnElLR+jOFFaKq19fRM3OcUfFnLUlJ4DQGjJohy2upt5fuwCWCcKp+vQM5oOPuJvJcLq7i4GeHg74QVLQuNAeO01wiY615H2PFwvt7ChIgzIZzF+QJYch7XGZfUpzxAvY7AVuBUtZoiW+ehfvZ58SfDwC9yaZosx5XWaEKlWT1JDNcm1jnKBQi5eXgUVnx8MjTPgZfjk4SPf27fT1D7omSBxGhFGE9n20JEASJtOMri+d/5WHEWKkWarxtXEFVYfT4aRvr6T7Kx/vThH+5F34rzN4tyec7X/IDB/aCWYSCCU5b132fhUaYJVK7ExG1up16tdGuPDe+7ybzXHk9a9zfM8A+VyOvHSDW2zStjQ0Oqylo5kJinAcerzU2XXF3kIVOzaD/tV5cv99Fq7eoIrhfFDjF+EUZx37xmlZ0vNbP/KXPVnxsBCiSNp3ieMplVj44CM+uzfKL0cnyH/vFC8de2kxk6tj8KXGEYcuNt08EgBwqSOcDpCIfzH1BvEnw4Rv/Y7gvcv4V0fd7l5gnrejST6wk877h6kAEkGvXzrkPzG5bqLDmcBldOIPRj8+zXsWAqkO56oM7eyno7OLfFsOCoHjTPr0j9wpyQQrDfRsGT1Twrs2ivfBJTJvfQo37lMm4nJQ52fRFO/Yca5Tdru/QWRX/cyBs22TlMKynEI+z8Dm7fzFwCHePPAiX3v5BPnnh2BnL1FXQDmfdQIQJHlxRqNag4k51/NXp6+hz90kc/U+3J+H0QUwZd5nip+qCX7BGNet5ABL8wduxevEePPwW59PeJw2SDkqFZ6WsGcN5WqVC7dG4NYdqpdvMnt/nEPXDtK7cwf5rg6ymwr4bXn8fCFpmsyUYK4Mk/MwfB9OD8OF61TKYyxgmMXnZtDgZ9E475gxLrrnm5op9JoejFgNLeJMSjLu1BSC1QAkIoRmLUC6w91k2d25maPFbZzMbedIppttmQJFLwdyyOmS2grcLq/SLJ1ZwFRnOc+kQ47PUOaqKnONEhO28YDar/HRmDVLYjxlvm2ZANTjhCC9OcncZOyMMFnsDvdQXpGjFNlJjk4ydOM7ZEg7F9aEwX0qKEZ1zAW/xMd2mtPxNBOm+fymmE0S7dd55xdnydMJGyP3OJ/OGfYuM9ml8aoVhLCYLbSgSJIbdLrZAO1S3g48N6mVw3MdW2FLBiOmiZ3qLyhR/wazNnz4Hhtg82n0lenqUWkuy46/kz47KE9UBqu+YmoGbh4rHZULlWVKGXcsZgUJugpWBKBcSG3YKJ0zehCCE/RY/pBMfm2MzacbK131s80HJ/8N+EaasK352UFZZuTm9JNPS0y3UiKQ8DGz7LYVPd54mgX3/NWvRAAX0/vvSh8mFFPoSI+mGayYLLWagWiDQ+3cw0wPntOavCZF01I+30xtN4D9JmYjh8xlSUdOZut/CfwauNZcZzY1g1eAk4A8yjmY/p2WUPlERPJJk28rnbdBXl7WLZ5VlG8a+Cxl/gPgc0leRQOESZkjEU2QE7dLE+hpy+3VMLvSeRtEUkIKX+L4bqQ7fyn9Lvf/Hq4jLuKNhukAAAAASUVORK5CYII=";
   // 用户 m11820 图1/图2：位置分享卡（com.tencent.map / LocationShare）以前只显示
@@ -4507,7 +4563,8 @@ var ctxSnapRequest = 0;
     }
     // 只展示来源给出的图标；品牌站点用内置图标，缺图时用标题首字，不伪造商品图、价格或卖家。
     var logoUrl = safeWebUrl(c.icon || c.logo || c.app_icon);
-    var iconSrc = brand === "bili" ? ICON_BILI : (brand === "heybox" ? ICON_HEYBOX : "");
+    var iconSrc = brand === "bili" ? ICON_BILI : (brand === "heybox" ? ICON_HEYBOX
+      : (brand === "xianyu" ? ICON_XIANYU : ""));
     var letter = brand === "xianyu" ? "闲" : (brand === "bili" ? "B" : (rawT ? rawT.slice(0, 1) : "↗"));
     var logo;
     if(iconSrc){
@@ -4711,6 +4768,9 @@ var ctxSnapRequest = 0;
       if(!url) continue;
       out += renderText(src.slice(end, m.index)) + cardHtml({app: "闲鱼", title: m[3] || m[4] || "", url: url});
       end = re.lastIndex;
+      // 用户 m01693：卡片和下面那句话中间空出一大截。模板自己带的那行换行还留在正文里，
+      // 卡片又是块级元素，紧跟几个空行就成了一段空白；卡片后面的空白一律吃掉。
+      while(end < src.length && /\s/.test(src.charAt(end))) end++;
     }
     return end ? out + renderText(src.slice(end)) : null;
   }
@@ -6685,8 +6745,8 @@ var ctxSnapRequest = 0;
     if(dAgg.n){
       // 用户 m07562 第 3 条：合计行跟回复记录用同一套写法——入 / 出 / 缓存命中（复用）
       // / 命中预估 / 预估差 / 请求体积估算，照着回复页那行念就能对上。
-      dTitle += "<span class='hint'>本页 " + dAgg.n + " 轮合计：入 " + tokText(dAgg.inp) +
-                " · 出 " + tokText(dAgg.out) + " · 缓存命中 " +
+      dTitle += "<span class='hint'>本页 " + dAgg.n + " 轮合计：输入 " + tokText(dAgg.inp) +
+                " · 输出 " + tokText(dAgg.out) + " · 缓存命中 " +
                 (dAgg.inp ? (dAgg.cached / dAgg.inp * 100).toFixed(1) + "%" : "—") +
                 "（复用 " + tokText(dAgg.cached) + "）" +
                 (dAgg.estW ? " · 命中预估 " + (dAgg.estSum / dAgg.estW).toFixed(1) + "%" : "") +
@@ -6700,7 +6760,7 @@ var ctxSnapRequest = 0;
       "<div class='tbl'><table><thead><tr><th>时间</th><th>结论</th><th class='lft'>理由</th>" +
       "<th class='lft'>模型</th>" + "<th class='lft' title='触发 → 真正开始这一轮之间等的那段（防抖 / 抖动），必回（@ / 叫名字）这一路不等'>防抖用时</th>" +
       "<th class='lft'>用时</th><th class='lft'>窗口条数</th>" +
-      "<th class='lft' title='这一次决策调用的入 / 出 token'>token（入 / 出）</th>" +
+      "<th class='lft' title='这一次决策调用的输入 / 输出 token'>token（输入 / 输出）</th>" +
       "<th class='lft' title='决策提示词 + 聊天记录 + 本轮输入的 UTF-8 字节数；带图的轮次把图片 base64 也算进来'>体积估算</th>" +
       "<th class='lft'>命中预估</th><th class='lft'>缓存命中</th>" +
       "<th class='lft' title='这一轮是怎么被叫起来的：概率类写触发概率，@ 或叫昵称写来源'>触发类型</th></tr></thead><tbody>";
@@ -6784,7 +6844,7 @@ var ctxSnapRequest = 0;
         : "<span class='est'>" + est.toFixed(1) + "%</span>") + "</td>";
       var hit = (tk.cache_hit === null || tk.cache_hit === undefined) ? null : Number(tk.cache_hit);
       html += "<td class='num'" + (hit === null ? "" : " title='" +
-        esc("复用 " + tokText(tk.cached || 0) + " / 入 " + tokText(tk.input || 0)) + "'") + ">" +
+        esc("复用 " + tokText(tk.cached || 0) + " / 输入 " + tokText(tk.input || 0)) + "'") + ">" +
         (hit === null ? "<span class='dim'>—</span>" : hit.toFixed(1) + "%") + "</td>";
       // v4.01（用户 m11166 图3）：末列叫「触发类型」——概率类（概率 / 曲线 / 动态）
       // 写「触发概率 X %」；@、叫昵称这种没有概率的写来源，跟回复记录同一套叫法。
@@ -6887,8 +6947,8 @@ var ctxSnapRequest = 0;
     var roundTitle = "最近 " + keepN + " 次回复";
     html += "<div class='trend-hd' style='margin-bottom:8px'><span>" + roundTitle + "</span>";
     if(agg.n){
-      html += "<span class='hint'>本页 " + agg.n + " 轮合计：入 " + tokText(agg.inp) +
-              " · 出 " + tokText(agg.out) + " · 缓存命中 " +
+      html += "<span class='hint'>本页 " + agg.n + " 轮合计：输入 " + tokText(agg.inp) +
+              " · 输出 " + tokText(agg.out) + " · 缓存命中 " +
               (agg.inp ? (agg.cached / agg.inp * 100).toFixed(1) + "%" : "—") +
               "（复用 " + tokText(agg.cached) + "）" +
               (agg.estW ? " · 命中预估 " + (agg.estSum / agg.estW).toFixed(1) + "%" : "") +
@@ -6904,7 +6964,7 @@ var ctxSnapRequest = 0;
     html += "<div class='tbl'><table><thead><tr><th>时间</th><th>结果</th>" +
             "<th class='lft' title='触发 → 真正开始请求之间等的那段（防抖 / 抖动）；必回（@ / 叫名字）这一路不等'>防抖用时</th>" +
             "<th class='lft' title='流水线总耗时：请求开始到请求结束，不含防抖等待与回复吐字'>用时</th><th class='lft'>窗口条数</th>" +
-            "<th class='lft' title='这一轮所有步骤的合计；多步（有工具调用）时会把上下文重复计一次'>token（入 / 出）</th>" +
+            "<th class='lft' title='这一轮所有步骤的合计；多步（有工具调用）时会把上下文重复计一次'>token（输入 / 输出）</th>" +
             "<th class='lft' title='文本JSON + 请求图片base64投影预测（图片按 base64 计入体积）；不是实际wire抓包字节'>体积估算</th>" +
             "<th class='lft'>命中预估</th>" +
             "<th class='lft'>缓存命中</th><th class='lft'>触发</th></tr></thead><tbody>";
@@ -7236,8 +7296,12 @@ var ctxSnapRequest = 0;
     return d + "d" + (rh ? rh + "h" : "");
   }
 
+  // v4.68（用户 m02472）：24 小时 token 会到百万级，原来一律折成 k（2119831 → 2119.8k），
+  // 位数太多反而看不清量级。现在 k / M / B 三档往上走。
   function tokText(n){
     if(n === null || n === undefined) return "—";
+    if(n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+    if(n >= 1e6) return (n / 1e6).toFixed(1) + "M";
     return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
   }
 
@@ -7516,11 +7580,15 @@ var ctxSnapRequest = 0;
     return {view:view, display:projection(md) || projection(view.display) || undefined};
   }
   function carrySnapshotDisplay(m, vm){
-    var d = snapshotDisplay(m, vm), media = d.view.media;
-    if(d.display || (Array.isArray(media) && media.length && !(m.media || []).length)){
+    var d = snapshotDisplay(m, vm), media = d.view.media, files = d.view.files;
+    // v4.34（用户 m01303）：快照里的 [文件] 一直是裸文本——后端把文件名/大小投影到了
+    // 显示层（files），这里只搬 display / media，files 被丢在半路，卡片就画不出来。
+    var hasFiles = Array.isArray(files) && files.length && !(m.files || []).length;
+    if(d.display || (Array.isArray(media) && media.length && !(m.media || []).length) || hasFiles){
       var out = Object.assign({}, m);
       if(d.display) out.display = d.display;
       if(Array.isArray(media) && media.length && !(m.media || []).length) out.media = media;
+      if(hasFiles) out.files = files;
       return out;
     }
     return m;
@@ -7833,6 +7901,7 @@ var ctxSnapRequest = 0;
         var mm = {role: m.role, text: c, raw: rawContent(m.content), chars: c.length, media: dm.media || m.media || [],
                   display: projected.display, who: m.who || "", name: m.name || "",
                   tools: dm.tools === undefined ? (m.tool_calls || []).length : dm.tools, tool_call_id: m.tool_call_id || "",
+                  files: m.files || (dm && dm.files) || [],
                   tc: dm.tc || tcOf(m)};
         var gk = groupKeyOf(mm, i);
         if(gk !== grpKey2){
@@ -7877,6 +7946,7 @@ var ctxSnapRequest = 0;
           if(role3 !== "user") text3 = tidyBody(text3);
           var mm3 = {role:role3,who:m.who || m.name || "",name:m.name || "",text:text3,
             raw:tsShortOf(rawContent(m.content)),media:m.media || [],display:snapshotDisplay(m).display,chars:text3.length,
+            files:m.files || [],
             tools:(m.tool_calls || []).length,tool_call_id:m.tool_call_id || "",tc:tcOf(m)};
           var gk3 = groupKeyOf(mm3, "f" + idx);
           if(gk3 !== grpKey3){

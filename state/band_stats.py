@@ -288,7 +288,9 @@ class BandStats:
         return cells
 
     def _weight(self, rec: dict) -> int:
-        """这条日志算几条消息——口径一律用 DecisionLog 的那个类方法。"""
+        """调参样本排除已过滤短语，其余沿用收到日志的消息权重。"""
+        if rec.get("result") == "phrase_skip":
+            return 0
         fn = getattr(self.log, "_message_weight", None)
         if callable(fn):
             try:

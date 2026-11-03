@@ -339,6 +339,22 @@ def parse_decision(text: str):
 #: 单张图上限 4MB（v4.39，用户 m20816）：再大 base64 之后会把请求撑爆，干脆不带。
 _IMG_MAX_BYTES = 4 * 1024 * 1024
 
+#: 上游临时性故障（v4.67，用户 m02347）：5xx / 429 / 超时 / 连接断开这一类，跟「这一轮带了图」
+#: 没有关系——同一个请求换成纯文字也一样会挂。这类失败只按重试设置再试，不再丢图重判。
+_TRANSIENT_RE = re.compile(
+    r"(?:\b(?:429|500|502|503|504)\b)|too busy|overloaded|service_unavailable|"
+    r"service unavailable|timed? ?out|timeout|connection (?:reset|aborted|error)|"
+    r"reset by peer|temporarily|temporarily unavailable|bad gateway|gateway time-?out",
+    re.I)
+
+
+def _is_transient_error(text) -> bool:
+    """上游临时性故障（5xx / 429 / 超时 / 断连）——重试能救，跟图没关系。"""
+    s = str(text or "")
+    if not s:
+        return False
+    return _TRANSIENT_RE.search(s) is not None
+
 
 def _sniff_image_mime(raw: bytes, rel: str = "") -> str:
     """按文件头认图片类型，认不出再退回后缀（v4.39，用户 m20816）。"""
@@ -798,7 +814,7 @@ class DecisionPhase:
             return None
 
     async def _one_call(self, client, messages, tools, timeout: float) -> dict:
-        """发一次请求。返回 {ok, text, tool_calls, in, out, cached, error}。"""
+        """发一次请求，保留这个真实响应的 token、模型身份与请求开始时刻。"""
         if LLMRequest is None:
             return {"ok": False, "error": "框架没有 core.provider.LLMRequest"}
         req = LLMRequest(messages=messages)
@@ -812,7 +828,19 @@ class DecisionPhase:
                 req.tool_choice = "auto"
             except Exception:
                 logger.debug("[multi-decision] 决策工具挂载失败", exc_info=True)
+        identity = {}
         try:
+            actual_model = getattr(client, "model", None)
+            for key in ("provider_id", "model_id", "model_name", "provider_name"):
+                value = str(_field(actual_model, key, "") or "").strip()
+                if value:
+                    identity[key] = value
+        except Exception:
+            logger.debug("[multi-decision] 读取决策模型身份失败（保留请求引用）", exc_info=True)
+        model_ref = ("%s:%s" % (identity["provider_id"], identity["model_id"])
+                     if identity.get("provider_id") and identity.get("model_id") else "")
+        try:
+            request_started = time.time()
             resp = client.chat(req)
             if asyncio.iscoroutine(resp):
                 resp = await asyncio.wait_for(resp, timeout=timeout)
@@ -822,13 +850,24 @@ class DecisionPhase:
             return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
         text = str(getattr(resp, "text_response", "") or "")
         calls = list(getattr(resp, "tool_calls", []) or [])
+        token_in = max(0, int(getattr(resp, "input_tokens", 0) or 0))
+        token_out = max(0, int(getattr(resp, "output_tokens", 0) or 0))
+        token_cached = min(token_in, max(0, int(getattr(resp, "cached_tokens", 0) or 0)))
+        # 仅有响应中的 token 字段才是用量证据；超时/网络异常不能虚构一次用量。
+        evidenced = any(getattr(resp, key, None) is not None
+                        for key in ("input_tokens", "output_tokens", "cached_tokens"))
+        usage = [{"ts": request_started, "timestamp_source": "request_start",
+                  "model": model_ref, **identity,
+                  "input": token_in, "output": token_out, "cached": token_cached}] if evidenced else []
         return {
             "ok": True,
             "text": text,
             "tool_calls": calls,
-            "in": int(getattr(resp, "input_tokens", 0) or 0),
-            "out": int(getattr(resp, "output_tokens", 0) or 0),
-            "cached": int(getattr(resp, "cached_tokens", 0) or 0),
+            "model": model_ref,
+            "in": token_in,
+            "out": token_out,
+            "cached": token_cached,
+            "usage": usage,
         }
 
     async def _run_tool(self, tool, args: dict) -> str:
@@ -854,6 +893,7 @@ class DecisionPhase:
         """
         names = {str(getattr(t, "name", "") or ""): t for t in tools}
         last = await self._one_call(client, messages, tools, opt.timeout)
+        budget.setdefault("usage", []).extend(last.get("usage") or [])
         rounds = 0
         while last.get("ok") and last.get("tool_calls") and rounds < max(0, opt.tool_rounds):
             rounds += 1
@@ -893,6 +933,7 @@ class DecisionPhase:
             budget["out"] += last.get("out", 0)
             budget["cached"] += last.get("cached", 0)
             last = await self._one_call(client, messages, tools, opt.timeout)
+            budget["usage"].extend(last.get("usage") or [])
         return last
 
     async def _chain(self, messages, tools, opt: DecisionOptions, tool_cache: dict = None) -> dict:
@@ -903,7 +944,7 @@ class DecisionPhase:
         """
         if tool_cache is None:
             tool_cache = {}
-        budget = {"in": 0, "out": 0, "cached": 0}
+        budget = {"in": 0, "out": 0, "cached": 0, "usage": []}
         now = time.time()
         tripped = self._fail_streak >= max(1, opt.fail_switch)
         cooling = self._fallback_until > 0 and now < self._fallback_until
@@ -936,10 +977,14 @@ class DecisionPhase:
                 # 用户 m36396：上一次是「没按 JSON 回」才失败的，重试时补一句提醒；网络/上游报错则原样重试。
                 if note:
                     msg_copy.append({"role": "user", "content": note})
+                usage_start = len(budget["usage"])
                 last = await self._tool_loop(client, msg_copy, tools, opt, budget,
                                              tool_cache, reuse=attempts > 1)
+                for item in budget["usage"][usage_start:]:
+                    if not item.get("model"):
+                        item["model"] = model or "fast"
                 last["attempts"] = attempts
-                last["model"] = model or "fast"
+                last["model"] = last.get("model") or model or "fast"
                 last["via"] = kind
                 last["tool_messages"] = msg_copy
                 budget["in"] += last.get("in", 0)
@@ -960,6 +1005,14 @@ class DecisionPhase:
                                    t + 1, model or "快速模型", str(last.get("text") or "")[:160])
                 else:
                     note = ""
+                    # v4.67（用户 m02347）：上游 5xx / 429 / 超时跟这一轮带没带图无关，照样
+                    # 按同一套重试参数（decision_retry / decision_retry_delay）再试，只是日志
+                    # 里单独标一句，事后能跟「没按 JSON 回」区分开。
+                    if t < tries - 1 and _is_transient_error(last.get("error")):
+                        logger.warning("[multi-decision] 决策请求上游临时故障（%s），第 %d/%d 次失败，"
+                                       "%s 秒后再试",
+                                       str(last.get("error") or "")[:140], t + 1, tries,
+                                       int(opt.retry_delay))
                 if t < tries - 1 and opt.retry_delay > 0:
                     await asyncio.sleep(opt.retry_delay)
             # 主模型整轮（含重试）都没成，才记账；fallback 失败不再加计
@@ -1024,10 +1077,12 @@ class DecisionPhase:
         chat_comparison = _comparison_snapshot(payload[1:], dyn)
         tool_cache: dict = {}
         got = await self._chain(payload, tools, opt, tool_cache)
+        usage = list(got.get("usage") or [])
         parsed = got.get("parsed")
         # 带图那次没成（上游不认 image_url / 图太大 / 模型没有视觉），退回纯文字再判
         # 一次：宁可这一次看不见图，也不能因为有图把整轮判断判死。
         img_fallback = False
+        img_busy = False
         img_err = ""
         img_tries = 0
         if img_rows and not (bool(got.get("ok")) and parsed):
@@ -1035,17 +1090,28 @@ class DecisionPhase:
             # 尝试」的 error（纯文字那次），带图为什么没成、试了几次，事后全查不到。
             img_err = str(got.get("error") or "")[:300]
             img_tries = int(got.get("attempts") or 0)
-            logger.warning("[multi-decision] 决策带图失败（%d 张图，试了 %d 次）：%s，退回纯文字重判一次",
-                           len(img_rows), img_tries, img_err[:200])
-            img_fallback = True
-            no_img, _unused = self.chat_payload(messages, None, dyn)
-            payload = [{"role": "system", "content": system_text}] + no_img
-            if len(payload) < 2:
-                payload.append({"role": "user", "content": user_text})
-            chat_comparison = _comparison_snapshot(payload[1:], dyn)
-            got = await self._chain(payload, tools, opt, tool_cache)
-            parsed = got.get("parsed")
-            img_rows = []
+            # v4.67（用户 m02347）：上游 5xx / 429 / 超时是临时过载，跟这一轮带没带图无关——
+            # 同一个请求换成纯文字一样会挂，白花一次调用还把「带图失败」记到这一轮头上。
+            # 这类失败只按重试设置再试（参数跟「决策失败重试」共用），试完仍失败就按决策
+            # 失败处理（fail_action 决定放行还是拦下），图不丢、原图留在记录里。
+            img_busy = _is_transient_error(img_err)
+            if img_busy:
+                logger.warning("[multi-decision] 决策带图请求上游临时故障（%d 张图，试了 %d 次）：%s，"
+                               "本轮按决策失败处理，不丢图重判",
+                               len(img_rows), img_tries, img_err[:200])
+            else:
+                logger.warning("[multi-decision] 决策带图失败（%d 张图，试了 %d 次）：%s，退回纯文字重判一次",
+                               len(img_rows), img_tries, img_err[:200])
+                img_fallback = True
+                no_img, _unused = self.chat_payload(messages, None, dyn)
+                payload = [{"role": "system", "content": system_text}] + no_img
+                if len(payload) < 2:
+                    payload.append({"role": "user", "content": user_text})
+                chat_comparison = _comparison_snapshot(payload[1:], dyn)
+                got = await self._chain(payload, tools, opt, tool_cache)
+                usage.extend(got.get("usage") or [])
+                parsed = got.get("parsed")
+                img_rows = []
         out = {
             "ok": bool(parsed) and bool(got.get("ok")),
             "reply": bool(parsed.get("reply")) if parsed else False,
@@ -1057,9 +1123,10 @@ class DecisionPhase:
             "via": str(got.get("via") or ""),
             "attempts": int(got.get("attempts") or 0),
             "elapsed": round(time.time() - started, 3),
-            "input_tokens": int(got.get("in") or 0),
-            "output_tokens": int(got.get("out") or 0),
-            "cached_tokens": int(got.get("cached") or 0),
+            "input_tokens": sum(int(item.get("input") or 0) for item in usage),
+            "output_tokens": sum(int(item.get("output") or 0) for item in usage),
+            "cached_tokens": sum(int(item.get("cached") or 0) for item in usage),
+            "usage": usage,
             "tools_used": [str(getattr(t, "name", "")) for t in tools],
             "system_parts": system_parts,
             "transcript": body,
@@ -1075,6 +1142,9 @@ class DecisionPhase:
             "images_fallback": img_fallback,
             "images_fallback_error": img_err,
             "images_fallback_attempts": img_tries,
+            # v4.67（用户 m02347）：这一轮是「上游临时故障」而不是「图有问题」时标出来，
+            # 记录页 / 快照里能一眼分清。
+            "upstream_busy": img_busy,
             "sid": sid,
         }
         if not out["ok"]:

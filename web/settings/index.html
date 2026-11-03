@@ -79,7 +79,9 @@ button.mini{padding:2px 8px;font-size:12px;border-radius:6px;}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}
 .saved{color:var(--ok);font-size:12px;}
 .empty{padding:36px;text-align:center;color:var(--muted);}
-select,input[type=text],input[type=number]{font:inherit;padding:5px 9px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);}
+select,input[type=text],input[type=number],input[type=time]{font:inherit;padding:5px 9px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);}
+/* 用户 m00153：时间框在深色主题下别再是白底白字，连带原生钟表图标一起跟随主题。 */
+html[data-theme="dark"] input[type=time]{color-scheme:dark;}
 input[type=number]{width:var(--ipt-w);} /* v3.49：兜底宽度也走同一套变量，见下面 .ipt 那段 */
 /* v3.43（用户本轮第 3 条）：设置页的数字框收成一套尺寸 —— 宽 / 高 / 字号只在这里各写一次，
    不再有三列 108px、参数行 78px、价目 96px 三套数（图 8 里同一列的数字框宽窄不一）。
@@ -155,6 +157,10 @@ html.booting .setgrp.pgin{animation:none;}
 .setrow{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:16px;align-items:center;padding:11px 14px;border-bottom:1px solid var(--line);}
 .setrow.wide{grid-template-columns:1fr;row-gap:7px;grid-column:1/-1;}
 .setrow:last-child{border-bottom:none;}
+/* 用户 m02105：分区最后一行也画着一条灰线，紧挨着下面那个分区标题，看着像多出一道分割。
+   .rows 末尾有时还挂着隐藏 input，:last-child 抓不到，所以再按 .setrow 自己补一条。 */
+.setgrp .sub .rows > .setrow:last-of-type,
+.setgrp .sub .rows > .setrow:nth-last-child(1 of .setrow){border-bottom:none;}
 /* v3.11：紧凑分组（身份区）——行距收一半，说明只留一行，全文在 title 里
    v3.12：紧凑组的右内边距必须和普通组一样（12→14），否则同一列里
    紧凑组的开关比普通组偏右 2px，四条开关列不成一条线（用户 m39759 ③）
@@ -934,7 +940,7 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .bd-pop .bp-btns button:hover{border-color:var(--accent);color:var(--accent);}
   .bd-pop .bp-btns button.pri{background:var(--accent);border-color:var(--accent);color:#fff;}
   /* v3.37（用户 m02080 第 4 条）：API 价目表——模型单价手填，插在缓存记录页后面那一页 */
-  /* 用户 m10749 第 3 条：列从 6 变 8，窄窗口下允许横向滚动，别把整页撑破 */
+  /* 普通 / 高峰单价成对显示；窄窗口换行时段控制，避免继续横向扩表。 */
   .pricing{padding:2px 0 4px;overflow-x:auto;}
   .ptable{width:100%;border-collapse:collapse;font-size:13px;}
   .ptable th{text-align:center;font-weight:500;color:var(--muted);font-size:12px;padding:2px 8px 7px;}
@@ -954,7 +960,8 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .pstat.bad{color:var(--bad);}
   .pricing .phint{color:var(--muted);font-size:12px;}
   /* 用户 m10749 第 3 条：价目页顶部——左边区间胶囊（24 小时 / 7 天 / 30 天），右边区间总花费。 */
-  .ptop{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:2px 0 12px;}
+  .ptop{display:flex;align-items:center;gap:16px;flex-wrap:nowrap;overflow-x:auto;min-width:0;padding:2px 0 12px;}
+  .ptop .prange{flex-shrink:0;}
   .prange{display:inline-flex;align-items:center;gap:2px;padding:2px;border-radius:11px;
     background:var(--soft);border:1px solid var(--line);height:30px;}
   .prange button{height:24px;padding:0 11px;border:0;border-radius:8px;background:transparent;
@@ -963,16 +970,82 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .prange button.on{background:var(--accent);color:#fff;font-weight:600;}
   /* 用户本轮第 6 条：金额数字大、单位小，baseline 对齐会让两者错位，改成整行垂直居中；
      单位是单独的 .cunit（数字在前、单位在后，中间留 3px）。 */
-  .pcost{display:inline-flex;align-items:center;gap:7px;flex-wrap:wrap;}
+  .pcost{display:inline-flex;align-items:center;gap:7px;flex-wrap:nowrap;white-space:nowrap;min-width:0;}
+  .pcost .clab,.pcost .cnum,.pcost .cunit{flex-shrink:0;}
   .pcost .clab{color:var(--muted);font-size:12.5px;}
   .pcost .cnum{font-size:21px;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums;
     line-height:1;}
   .pcost .cunit{font-size:12.5px;font-weight:500;color:var(--accent);margin-left:3px;line-height:1;}
-  .pcost .cwarn{flex-basis:100%;color:var(--muted);font-size:11.5px;}
+  .pcost .cwarn{min-width:0;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:11.5px;}
   /* 用户 m10749 第 3 条：除「模型」列之外，表头与单元格一律居中 */
   .ptable td{text-align:center;}
   .ptable th:first-child,.ptable td:first-child{text-align:left;}
   .ptable input[type=number]{text-align:center;}
+  /* 用户 m00153：一行固定两行高——单价普通/高峰两行、时段固定两段两行；
+     高峰价与周末谷价各占一列，时段仍在最右，九列。 */
+  .pricing{overflow-x:visible;min-width:0;}
+  .ptable,.ptable thead,.ptable tbody{display:block;width:100%;}
+  .ptable tr{display:grid;grid-template-columns:
+      minmax(150px,1.45fr) repeat(3,minmax(84px,.9fr)) minmax(84px,.8fr) minmax(92px,.88fr)
+      minmax(72px,.62fr) minmax(56px,.44fr) minmax(64px,.5fr) minmax(196px,.95fr);align-items:center;}
+  /* 用户 m00669：格子各自的下边框会跟着格子高度错位，看起来像断开的灰线——统一去掉，行分隔交给 tr。 */
+  .ptable th,.ptable td{min-width:0;padding:7px 5px;border-top:0;border-bottom:0;}
+  .ptable tbody tr{border-top:1px solid var(--line);}
+  .ptable tbody tr:hover{background:var(--soft);}
+  .ptable td.pm{max-width:none;}
+  .ptable .pmc{display:flex;align-items:center;gap:6px;min-width:0;}
+  /* 用户 m00443：模型名与渠道名放大一档，渠道那行前面加「渠道」两字，上下两行才对得齐。 */
+  .ptable .pname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px;font-weight:600;}
+  /* 缩进 = 删除按钮 38px + 间距 6px，「渠道」二字正好落在模型名下面，两行左边缘对齐。 */
+  .ptable .psrcline{display:flex;align-items:baseline;gap:5px;min-width:0;margin:5px 0 0 44px;}
+  .ptable .psrc-lb{color:var(--muted);font-size:11px;flex-shrink:0;}
+  .ptable .psource{display:block;color:var(--muted);font-size:12px;font-weight:400;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .ppair{display:grid;gap:4px;}
+  .ppair label{display:flex;align-items:center;gap:4px;min-width:0;}
+  .ppair label>span{color:var(--muted);font-size:10px;flex-shrink:0;width:20px;}
+  .ptable .ppair input[type=number]{width:100%;min-width:0;height:26px;padding:0 4px;font-size:12px;}
+  .ppair .ppeak input{border-style:dashed;}
+  /* 用户 m00443：请求/决策/回复、入/缓存/出 各占三行，字小所以整行高度不变。
+     三行包在一个 inline-block 里：整块在格子里居中，行与行的左边缘又对得齐。 */
+  .ptable .puc{display:inline-block;text-align:left;vertical-align:top;max-width:100%;}
+  .ptable .pl{display:block;font-size:11px;line-height:1.35;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .ptable .pt .pl{color:var(--muted);}
+  .ptable .ph{font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums;}
+  .ptable .ph .pdim{color:var(--muted);font-weight:400;}
+  /* 用户 m00153：两个开关各占一列，单元格里只放勾选框，含义由列头说明。 */
+  .ptable .psw{text-align:center;}
+  .ptable .psw input[type=checkbox]{width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--accent);}
+  .pschedule{display:grid;gap:4px;}
+  .pschedule .ptimes{display:flex;align-items:center;justify-content:center;gap:3px;min-width:0;}
+  .pschedule .ptimes .psep{color:var(--muted);font-size:11px;flex-shrink:0;}
+  .ptable .pschedule input[type=time]{width:82px;min-width:0;height:26px;padding:0 2px;font-size:11px;text-align:center;}
+  .ppricing-note{padding:8px 5px 0;line-height:1.7;}
+  /* 中等窗口先撤统计两列，保证单价与时段不被挤扁。 */
+  @media(max-width:1240px) and (min-width:621px){
+    .ptable tr{grid-template-columns:minmax(132px,1.35fr) repeat(3,minmax(80px,.9fr))
+      minmax(68px,.6fr) minmax(52px,.44fr) minmax(60px,.5fr) minmax(188px,.95fr);}
+    .ptable tr>:nth-child(5),.ptable tr>:nth-child(6){display:none;}
+  }
+  @media(max-width:620px){
+    .ptable thead{display:none;}
+    .ptable tr{grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;}
+    .ptable td.pm{grid-column:1/-1;}
+    .ptable .pprice:before{display:block;font-size:11px;color:var(--muted);margin-bottom:4px;}
+    .ptable .pprice:nth-child(2):before{content:"输入单价";}
+    .ptable .pprice:nth-child(3):before{content:"缓存命中单价";}
+    .ptable .pprice:nth-child(4):before{content:"输出单价";}
+    .ptable .pu{grid-column:1/3;text-align:left;}
+    .ptable .pu small{display:inline;margin-left:6px;}
+    .ptable .psw{display:flex;align-items:center;justify-content:flex-start;gap:6px;font-size:11px;color:var(--muted);}
+    .ptable .psw:nth-child(8):before{content:"高峰价";}
+    .ptable .psw:nth-child(9):before{content:"周末谷价";}
+    .ptable .ph{display:flex;align-items:baseline;gap:6px;justify-content:flex-start;font-weight:600;}
+    .ptable .ph:before{content:"缓存命中率";color:var(--muted);font-size:11px;font-weight:400;}
+    .ptable .pschedule{grid-column:1/-1;}
+    .pschedule .ptimes{justify-content:flex-start;}
+  }
   /* v3.54（用户本轮第 4 条）：记录页的「缓存记录」——按类型一张账本表 + 合计 + 各会话小表。
      表格沿用全局 table 的观感（见上面 th,td 那段），这里只补列宽、数字右对齐、内联数字框和清空按钮。 */
   .cachebox{padding:2px 0 2px;overflow-x:auto;}
@@ -1089,8 +1162,9 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
 .sub.sect .rowline .nm .stword{font-size:11.5px;font-weight:400;color:var(--muted);}
 /* v4.08（用户 m16927 第 3 条）：说明格里挂一枚琥珀胶囊（决策模式那句「多一次模型调用」），
    照「动态调整」行尾 .ad-warn 的样子做。文字那段自己省略，胶囊 flex:0 0 auto 不被吃掉。 */
-.setrow.inline .ds.dsw{display:flex;align-items:center;gap:8px;overflow:visible;}
-.setrow.inline .ds.dsw .dtxt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* v4.36（用户 m02314）：说明和胶囊都压短后，这一行又回到一行装下；折行只是窄屏兜底。 */
+.setrow.inline .ds.dsw{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;overflow:visible;white-space:normal;}
+.setrow.inline .ds.dsw .dtxt{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .setrow .warnpill{display:inline-flex;align-items:center;flex:0 0 auto;padding:2px 9px;
   border-radius:7px;font-size:11.5px;line-height:1.55;white-space:nowrap;
   color:#b45309;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.38);}
@@ -1101,6 +1175,9 @@ html[data-theme="dark"] .setrow .warnpill{color:#fbbf24;background:rgba(251,191,
   /* v4.09（用户 m17145 第 1 条）：sect 块现在自己带行（节奏 / 决策两行并进来了），
      间距与标题回到普通小节那一套——以前它只有一行标题，才需要把边距压小。 */
   .sub.sect{margin-top:14px;padding-top:12px;border-top:1px dashed var(--line);}
+  /* 用户 m01961：「进阶模式」这一节排在右列最上面，上面没有内容时那条虚线会悬在列顶，
+     看着像一条多出来的线——列里的第一节不画它。 */
+  .split2 > .col > .sub.sect:first-child{border-top:0;padding-top:0;margin-top:0;}
 /* v3.92（用户 m06951 第 5~7 条）：提示词页——左设置、右预览，右栏吸顶。
    v4.10（本轮美化）：整页收紧。基线这条 .pp-tabs 保留（测试拿它当锚点），紧跟着覆盖成分段控件：
    两个 54px 蓝块 → 一条 34px 的胶囊条，标题与副标题同行。 */
@@ -1309,12 +1386,13 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
   .pm-tools{margin:0 6px 5px 26px;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:4px 6px 5px;}
   .pm-tools-head{display:flex;gap:6px;align-items:baseline;font-size:11px;color:var(--muted);margin-bottom:3px;}
   .pm-tools-sum{margin-left:auto;color:var(--text);font-size:11px;}
-  .pm-tool{display:flex;align-items:center;gap:6px;padding:2px 4px;border-radius:6px;font-size:12px;line-height:1.35;cursor:pointer;}
+  .pm-tool{display:flex;align-items:flex-start;gap:6px;padding:2px 4px;border-radius:6px;font-size:12px;line-height:1.35;cursor:pointer;}
   .pm-tool:hover{background:var(--soft);}
   .pm-tool.on{background:var(--soft);}
-  .pm-tool input{flex:none;margin:0;}
+  .pm-tool input{flex:none;margin:1px 0 0;}
   .pm-tool-name{flex:none;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;}
-  .pm-tool-desc{flex:1 1 auto;min-width:0;color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  /* 用户 m02105：工具说明以前一行省略号截断，1920 下也有三条看不全——改成整段折行。 */
+  .pm-tool-desc{flex:1 1 auto;min-width:0;color:var(--muted);font-size:11px;line-height:1.45;white-space:normal;overflow:visible;text-overflow:clip;}
   .pm-module-head .pm-lock{flex:none;margin-left:1px;}
   .pm-module.pm-locked .pm-label{color:var(--muted);}
   .pm-dynamic .pm-dyn-note{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:11px;}
@@ -1625,6 +1703,7 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
         "rest_silent_enabled", "rest_silent_minutes"] },
     // v3.93（用户 m07570 图1 第 1 条）：节奏模式与决策模式说的都是「这一轮怎么决定
     // 回不回」，用户要在这两行上面加一条「高级设置」小标题把它们归进去。
+    // 用户 m01961：决策模式搬去右列，这一节只剩节奏模式一行。
     { p: "trigger", t: "高级设置", col: "rhythm", split: 3, sect: 1 },
     // v3.81（用户 m02645 图2）：这一组从「伪随机（加概率）」换成「节奏模式」——
     // 开 = 按间隔排队回（state/band_rhythm.py），关 = 每条独立掷骰，概率模式 / 曲线模式 /
@@ -1639,17 +1718,23 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
       // 计数模式不掷骰，这一组要整块压暗。
       grp: "rhythm",
       keys: ["prob_pseudo", "adaptive_rhythm_sigma"] },
-    // v3.92（用户 m06951 第 4 条）：进阶模式改名「决策模式」，开关从提示词页搬回这一列，
+    // 用户 m01961：左边那行「决策模式」搬到右边来，右边补一条「进阶模式」小标题——
+    // 退避模式本来就排在进阶模式那一列下面（v3.53），这次把标题补回去。
+    // 标题与这一行同处一个 .sub（v4.09 的 sect 合并），不会多出两层虚线内边距。
+    { p: "trigger", t: "进阶模式", col: "dev", split: 3, sect: 1 },
+    // v3.92（用户 m06951 第 4 条）：进阶模式改名「决策模式」，开关从提示词页搬回设置页，
     // 跟节奏模式一样「标题 + 开关」一行——这两行说的都是「这一轮怎么决定回不回」。
     // 提示词页只留人格 / 判断提示词 / 模型 / 工具那些设置（见那页顶上的两个子页签）。
     // 描述按用户原话改写：「开启后单独调用模型决定是否回复」。
-    { p: "trigger", t: "决策模式", col: "rhythm", split: 3, rowline: 1,
+    { p: "trigger", t: "决策模式", col: "dev", split: 3, rowline: 1,
       // v3.93（用户 m07570 图1 第 2 条）：用户要在描述后面补一句提醒——
       // 开它等于每轮多一次模型调用，而且判定用的提示词在「提示词」页那半边。
-      note: "开启后先单独判一次这轮回不回，建议回复才走完整回复。",
+      // v4.36（用户 m02314）：说明和胶囊都压到一行装得下——「使用快速模型进行决策」+「多一次调用，「提示词」页设置」。
+      // v4.67（用户 m02347）：把「使用模型」补成「使用快速模型」，默认就是快速模型，写明更直观。
+      note: "使用快速模型进行决策",
       // v4.08（用户 m16927 第 3 条）：后半句（多一次调用 / 提示词在哪）从说明里拿出来，
       // 单独渲染成行尾的琥珀胶囊，跟「动态调整」那条 .ad-warn 一个样式。
-      warn: "多一次模型调用 · 判定提示词在「提示词」页设置",
+      warn: "多一次调用，「提示词」页设置",
       keys: ["advanced_enabled"] },
     // v3.36：进阶模式还是占位块，等真做出来再补内容。
     // v3.37：节奏不再跨栏，它回到第三列（三列等宽）。
@@ -4279,10 +4364,12 @@ var DM_SPECIAL = { trigger_probability: 1 };
       // v3.93（用户 m07570 图1 第 1 条）：描述里那串「0 / 65 / 120 最晚 1.5 倍」太像
       // 参数说明，用户要「优化一下」。改成先说效果、再说那个数字框是干什么的。
       // v4.08（用户 m16927 第 2 条）：用户嫌这三句太长（真机上被省略号截断），各压到 30 字上下。
+      // v4.35（用户 m02105）：1920 分辨率下这一格只有 248px（≈19 个字），三句都在截断，
+      // 各压到 19 字以内，含义保留「越等越容易中 / 右边那格管松紧」。
       var pHint = dynOn
-        ? "动态调整接管，固定按节奏走；右边那格管松紧（0 准时，越大越能等）"
-        : (onNow ? "越等越容易中，平均不变；右边那格管松紧（0 最准时，越大越能等）"
-                 : "每条单独掷一次骰子，10% 就是 10%；不攒也不保底");
+        ? "动态调整接管，右边那格越大越能等。"
+        : (onNow ? "越等越容易中；右边那格越大越能等。"
+                 : "每条单独掷一次，不攒也不保底。");
       if(pNm){
         pNm.textContent = pName;
         var pNmBox = pNm.parentNode;
@@ -6064,7 +6151,14 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // v3.43（用户本轮第 4 条）：价目改成实时保存——没有「保存价目」按钮了。
   // 停手 600ms 自动 POST 一次；连续敲键只发最后一个请求。结果写行内小字（#p-stat），不弹窗不刷新。
   var PRICING_DELAY = 600;
+  // 用户 m00153：高峰时段固定两行，最多两段；没填起止的那行等于没有。
+  var PEAK_ROWS = 2;
   var pricingTimer = 0;
+  var pricingSaving = false, pricingSaveQueued = false;
+  var pricingPartialSaved = false;
+  var pricingLoadSeq = 0, pricingWriteVersion = 0;
+  var pricingTimezone = "";
+  var pricingRemoved = Object.create(null);
 
   function setPMsg(text, cls){
     var el = document.getElementById("p-stat");
@@ -6075,7 +6169,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
 
   function schedulePricingSave(){
     if(pricingTimer) clearTimeout(pricingTimer);
-    setPMsg("待保存…");
+    pricingPartialSaved = false;
+    setPMsg(pricingPendingMessage(false));
     pricingTimer = setTimeout(function(){ pricingTimer = 0; savePricing(); }, PRICING_DELAY);
   }
 
@@ -6129,78 +6224,197 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var html = "<span class='clab'>" + esc(label) + "共</span>" +
                "<span class='cnum'>" + esc(num) + "</span>" +
                (cur ? "<span class='cunit'>" + esc(cur) + "</span>" : "");
-    var unset = (c.unset || []).length;
-    if(unset) html += "<span class='cwarn'>" + fmtNum(unset) + " 个模型没在价目表里，按 0 元算</span>";
+    var unset = (c.unset || []).length, short = [], detail = [];
+    if(unset){ short.push(fmtNum(unset) + " 模型未设价"); detail.push(fmtNum(unset) + " 个模型没在价目表里，按 0 元算"); }
+    if(c.approximate){ short.push("近似估算"); detail.push("近似估算：历史记录无逐次请求时间，按记录时间应用当前价目"); }
+    if(c.unknown_time){ short.push("缺时间按普通价"); detail.push("缺少有效时间的用量按普通价估算"); }
+    if(short.length) html += "<span class='cwarn' title='" + esc(detail.join("；")) + "'>" + esc(short.join(" · ")) + "</span>";
     return html;
   }
 
-  function loadPricing(){
+  function pricingPeak(value){
+    var p = Object.assign({enabled:false,in:null,out:null,cache:null,start:"",end:"",weekends:false}, value || {});
+    // An explicit list (including []) is authoritative; legacy fields mirror only its first interval.
+    p.periods = Array.isArray(p.periods) ? p.periods.map(function(t){ return {start:String(t.start || ""),end:String(t.end || "")}; }) :
+      (p.start || p.end ? [{start:p.start,end:p.end}] : []);
+    p.start = p.periods.length ? p.periods[0].start : "";
+    p.end = p.periods.length ? p.periods[0].end : "";
+    return p;
+  }
+
+  function pricingPeakIncomplete(p){
+    var clock=/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/;
+    return (p.enabled && !p.periods.length) || p.periods.some(function(t){
+      return !clock.test(t.start) || !clock.test(t.end) || t.start === t.end;
+    });
+  }
+
+  // 用户 m00153：分钟只有 00 / 30 两档，别的分钟就近夹到这两档（45 分进到下一小时）。
+  function snapClock(value){
+    var text=String(value || "").trim();
+    if(!text) return "";
+    var hit=text.match(/^(\d{1,2}):(\d{2})/);
+    if(!hit) return "";
+    var hour=Math.min(23, Math.max(0, Number(hit[1]) || 0));
+    var minute=Number(hit[2]) || 0;
+    if(minute >= 45){ hour=(hour + 1) % 24; minute=0; }
+    else if(minute >= 15) minute=30;
+    else minute=0;
+    return (hour < 10 ? "0" : "") + hour + ":" + (minute ? "30" : "00");
+  }
+
+  function pricingPeriodsFromRow(tr){
+    var ends=tr.querySelectorAll("[data-pfield='peak.end']"), periods=[];
+    Array.prototype.forEach.call(tr.querySelectorAll("[data-pfield='peak.start']"), function(el,i){
+      var t={start:snapClock(el.value),end:snapClock(ends[i] && ends[i].value)};
+      // 用户 m00153：起止都没填的那一行等于没有，直接不收集。
+      if(t.start || t.end) periods.push(t);
+    });
+    return periods.slice(0, PEAK_ROWS);
+  }
+
+  function pricingPendingMessage(saved){
+    var models=collectPricing(), incomplete=Object.keys(models).some(function(m){ return pricingPeakIncomplete(models[m].peak); });
+    if(incomplete) return saved ? "普通价格已保存，高峰时段待补全" : "高峰时段待补全（普通价格仍会保存）";
+    return "待保存…";
+  }
+
+  // 用户 m00153：固定画两行、最多两段；不填起止的那行等于没有，所以不再有「添加时段 / 删段」。
+  function pricingPeriodsHtml(p){
+    var periods=(p.periods || []).slice(0, PEAK_ROWS);
+    while(periods.length < PEAK_ROWS) periods.push({start:"",end:""});
+    return "<div class='pperiods'>" + periods.map(function(t,i){
+      var attrs=" data-pperiod='" + i + "'";
+      return "<div class='ptimes'>" +
+        "<input type='time' step='1800' data-pfield='peak.start'" + attrs + " aria-label='第 " + (i+1) + " 段高峰开始时间' title='第 " + (i+1) + " 段开始（整点或半点）' value='" + esc(t.start) + "'>" +
+        "<span class='psep'>–</span>" +
+        "<input type='time' step='1800' data-pfield='peak.end'" + attrs + " aria-label='第 " + (i+1) + " 段高峰结束时间' title='第 " + (i+1) + " 段结束（整点或半点）' value='" + esc(t.end) + "'>" +
+        "</div>";
+    }).join("") + "</div>";
+  }
+
+  function pricingFocus(box){
+    var el = document.activeElement;
+    var tr = el && el.closest ? el.closest("tr[data-pmodel]") : null;
+    if(!tr || tr.closest("#pricing-box") !== box) return null;
+    return {model:tr.getAttribute("data-pmodel"), field:el.getAttribute("data-pfield"), period:el.getAttribute("data-pperiod"), start:el.selectionStart, end:el.selectionEnd};
+  }
+
+  function restorePricingFocus(box, focus){
+    if(!focus || !focus.field) return;
+    Array.prototype.some.call(box.querySelectorAll("tr[data-pmodel]"), function(tr){
+      if(tr.getAttribute("data-pmodel") !== focus.model) return false;
+      var el = tr.querySelector("[data-pfield='" + focus.field + "']" + (focus.period !== null ? "[data-pperiod='" + focus.period + "']" : ""));
+      if(el){
+        el.focus();
+        if(typeof focus.start === "number" && el.setSelectionRange){
+          try{ el.setSelectionRange(focus.start, focus.end); }catch(e){}
+        }
+      }
+      return true;
+    });
+  }
+
+  // 用户 m00153：silent=true 时只把花费与统计换掉，不重画整张表（保存后用）。
+  function loadPricing(silent){
     var box = document.getElementById("pricing-box");
     if(!box){ pricingCache = pricingCache || []; return; }
-    // 用户 m10749 第 3 条：统计区间跟着顶部胶囊走（24 / 168 / 720 小时）
+    var seq = ++pricingLoadSeq;
+    var writeVersion = pricingWriteVersion;
     get(API + "/pricing?hours=" + encodeURIComponent(String(pricingHours))).then(function(d){
-      pricingCache = (d && d.rows) || [];
+      if(seq !== pricingLoadSeq) return;
+      var previous = pricingCache || [];
+      var rows = ((d && d.rows) || []).filter(function(r){ return !pricingRemoved[r.model]; });
+      // Statistics can arrive after an acknowledgement: never replace newer prices.
+      if(writeVersion !== pricingWriteVersion){
+        rows.forEach(function(r){
+          var old = previous.filter(function(p){ return p.model === r.model; })[0];
+          if(old){ r.in=old.in; r.out=old.out; r.cache=old.cache; r.peak=pricingPeak(old.peak); }
+        });
+      }
+      previous.forEach(function(r){
+        var keep = pricingDraft[r.model] || (writeVersion !== pricingWriteVersion && (r.in != null || r.out != null || r.cache != null));
+        if(keep && !pricingRemoved[r.model] && !rows.some(function(n){ return n.model === r.model; })){
+          // The older range can lack a newly saved row. Keep its identity/prices,
+          // but do not carry token counts from a different statistics window.
+          rows.push(Object.assign({},r,{input:0,output:0,cached:0,rounds:0,decision_rounds:0,reply_rounds:0,calls:0}));
+        }
+      });
+      pricingCache = rows;
       pricingUnit = (d && d.unit) || "元 / 百万 token";
-      // 用户 m10749 第 3 条：区间花费（后端统计失败时给 null，界面显示「—」）
-      pricingCost = (d && d.cost) ? d.cost : null;
-      paintPricing();
+      pricingTimezone = (d && d.timezone) || "";
+      pricingCost = writeVersion === pricingWriteVersion && d && d.cost ? d.cost : null;
+      if(silent){
+        var costEl = document.getElementById("p-cost");
+        if(costEl) costEl.innerHTML = priceCostHtml();
+      }else paintPricing();
     }).catch(function(e){
-      box.innerHTML = "<div class='phint'>价目读取失败：" + esc(String((e && e.message) || e)) + "</div>";
+      if(seq !== pricingLoadSeq) return;
+      // Keep the editable table and drafts on a failed range reload.
+      if(box.querySelector("tr[data-pmodel]")) setPMsg("价目读取失败：" + String((e && e.message) || e), "bad");
+      else box.innerHTML = "<div class='phint'>价目读取失败：" + esc(String((e && e.message) || e)) + "</div>";
     });
+  }
+
+  function pricePairHtml(field, value, peak){
+    return "<td class='pprice'><div class='ppair'>" +
+      "<label><span>普通</span><input class='p" + field + "' data-pfield='" + field + "' type='number' min='0' step='0.001' placeholder='未填' value='" + esc(value) + "'></label>" +
+      "<label class='ppeak'><span>高峰</span><input data-pfield='peak." + field + "' type='number' min='0' step='0.001' placeholder='继承' title='留空继承普通价；0 表示免费' value='" + esc(peak == null ? "" : peak) + "'></label>" +
+      "</div></td>";
+  }
+
+  // 用户 m00443：缓存命中率 = 命中 token / 输入 token，没输入过就留一个破折号。
+  function hitRateHtml(r){
+    var inp = Number(r.input) || 0, hit = Number(r.cached) || 0;
+    if(!(inp > 0)) return "<span class='pdim' title='这段时间没有输入 token'>—</span>";
+    var pct = Math.max(0, Math.min(100, hit / inp * 100));
+    return "<span title='" + esc("缓存 " + fmtNum(hit) + " / 入 " + fmtNum(inp)) + "'>" + pct.toFixed(1) + "%</span>";
   }
 
   function paintPricing(){
     var box = document.getElementById("pricing-box");
     if(!box) return;
+    var focus = pricingFocus(box);
     var rows = (pricingCache || []).map(function(r){
-      // 没保存的输入优先（重绘别把用户刚敲的数字冲掉）
       var d = pricingDraft[r.model] || {};
-      var inV = (d.in !== undefined) ? d.in : (r.in == null ? "" : r.in);
-      var outV = (d.out !== undefined) ? d.out : (r.out == null ? "" : r.out);
-      // v3.42（用户 m03616 第 1 条）：缓存命中单独一列单价——命中部分的 token 通常只有
-      // 输入价的十分之一，混在输入单价里算会把花费估高。
-      var cacheV = (d.cache !== undefined) ? d.cache : (r.cache == null ? "" : r.cache);
+      var p = pricingPeak(Object.assign(pricingPeak(r.peak), d.peak || {}));
+      var inV = d.in !== undefined ? d.in : (r.in == null ? "" : r.in);
+      var outV = d.out !== undefined ? d.out : (r.out == null ? "" : r.out);
+      var cacheV = d.cache !== undefined ? d.cache : (r.cache == null ? "" : r.cache);
+      var source = r.provider_name || r.provider_id || "来源未记录";
       return "<tr data-pmodel='" + esc(r.model) + "'>" +
-        // v3.44（用户 m04471 第 2 条）：模型名左侧一个删除按钮。删掉之后后端会把它记进
-        // pricing.json 的 hidden 列表，traces 下次再报这个模型也不会被自动加回来。
         "<td class='pm' title='" + esc(r.model) + "'><span class='pmc'>" +
-          // 用户 m10749 第 3 条：删除按钮改成红框「删除」，点第一次变「确认」，第二次才真删
-          "<button type='button' class='pdel' data-pdel='" + esc(r.model) + "'" +
-            " title='从价目表删除这个模型（要点两次确认）'>删除</button>" +
-          "<span class='pname'>" + esc(r.model) + "</span></span></td>" +
-        "<td><input class='pin' type='number' min='0' step='0.001' placeholder='未填' value='" + esc(inV) + "'></td>" +
-        "<td><input class='pcache' type='number' min='0' step='0.001' placeholder='未填' value='" + esc(cacheV) + "'></td>" +
-        "<td><input class='pout' type='number' min='0' step='0.001' placeholder='未填' value='" + esc(outV) + "'></td>" +
-        "<td class='pu'>" + (r.rounds ? r.rounds + " 轮" : "—") + "</td>" +
-        // 用户 m10749 第 3 条：输入 / 缓存命中 / 输出 token 各占一列，数字自动换算到 K / M / B，
-        // 完整数字（千分位）放进 title，悬停能看精确值。
-        "<td class='pt' title='" + esc(fmtNum(r.input)) + "'>" + esc(fmtBig(r.input)) + "</td>" +
-        "<td class='pt' title='" + esc(fmtNum(r.cached)) + "'>" + esc(fmtBig(r.cached)) + "</td>" +
-        "<td class='pt' title='" + esc(fmtNum(r.output)) + "'>" + esc(fmtBig(r.output)) + "</td>" +
-        "</tr>";
+          "<button type='button' class='pdel' data-pdel='" + esc(r.model) + "' title='从价目表删除这个模型（要点两次确认）'>删除</button>" +
+          "<span class='pname'>" + esc(r.model_name || r.model) + "</span></span>" +
+          "<span class='psrcline'><span class='psrc-lb'>渠道</span><span class='psource'>" + esc(source) + "</span></span></td>" +
+        pricePairHtml("in", inV, p.in) + pricePairHtml("cache", cacheV, p.cache) + pricePairHtml("out", outV, p.out) +
+        // 用户 m00443：请求 / 决策 / 回复各一行，token 拆成入 / 缓存 / 出三行，再加一列缓存命中率。
+        "<td class='pu'><span class='puc'><span class='pl'>请求 " + esc(fmtNum(r.calls)) + "</span>" +
+          "<span class='pl'>决策 " + esc(fmtNum(r.decision_rounds)) + "</span>" +
+          "<span class='pl'>回复 " + esc(fmtNum(r.reply_rounds)) + "</span></span></td>" +
+        "<td class='pt'><span class='puc'><span class='pl' title='" + esc("输入 " + fmtNum(r.input)) + "'>输入 " + esc(fmtBig(r.input)) + "</span>" +
+          "<span class='pl' title='" + esc("缓存 " + fmtNum(r.cached)) + "'>缓存 " + esc(fmtBig(r.cached)) + "</span>" +
+          "<span class='pl' title='" + esc("输出 " + fmtNum(r.output)) + "'>输出 " + esc(fmtBig(r.output)) + "</span></span></td>" +
+        "<td class='ph'>" + hitRateHtml(r) + "</td>" +
+        "<td class='psw'><input type='checkbox' data-pfield='peak.enabled' title='勾选后高峰时段按高峰价计费'" + (p.enabled ? " checked" : "") + "></td>" +
+        "<td class='psw'><input type='checkbox' data-pfield='peak.weekends' title='勾选后周末全天按普通价计费'" + (!p.weekends ? " checked" : "") + "></td>" +
+        "<td class='pschedule'>" + pricingPeriodsHtml(p) + "</td></tr>";
     }).join("");
-    if(!rows){
-      rows = "<tr><td colspan='8' class='pempty'>还没有用过的模型。插件跑过一轮之后这里会自动出现；" +
-             "也可以下面手动加一行，先把价格填好。</td></tr>";
-    }
+    if(!rows) rows = "<tr><td colspan='10' class='pempty'>还没有用过的模型。插件跑过一轮之后这里会自动出现；也可以下面手动加一行，先把价格填好。</td></tr>";
     box.innerHTML =
-      // 用户 m10749 第 3 条：顶上一排区间胶囊（24 小时 / 7 天 / 30 天）+ 区间总花费
-      "<div class='ptop'>" +
-        "<span class='prange' id='p-range'>" + priceRangeHtml() + "</span>" +
-        "<span class='pcost' id='p-cost'>" + priceCostHtml() + "</span>" +
-      "</div>" +
-      "<table class='ptable'><thead><tr>" +
-      "<th>模型</th><th>输入单价</th><th>缓存命中单价</th><th>输出单价</th>" +
-      "<th>轮数</th><th>输入 token</th><th>缓存命中 token</th><th>输出 token</th>" +
-      "</tr></thead><tbody>" + rows + "</tbody></table>" +
-      "<div class='padd'>" +
-      "<input type='text' id='p-new' placeholder='模型名，例如 gpt-4o-mini' spellcheck='false'>" +
-      "<button id='p-add'>加一行</button>" +
-      // v3.43：单位是固定的，单独一行小字；保存结果写右边那个 #p-stat
-      "<span class='phint' id='p-msg'>单位：" + esc(pricingUnit) + "</span>" +
-      "<span class='pstat' id='p-stat'></span>" +
-      "</div>";
+      "<div class='ptop'><span class='prange' id='p-range'>" + priceRangeHtml() + "</span>" +
+        "<span class='pcost' id='p-cost'>" + priceCostHtml() + "</span></div>" +
+      "<table class='ptable'><thead><tr><th>模型 / 来源</th><th>输入单价</th><th>缓存命中单价</th><th>输出单价</th>" +
+        "<th>请求</th><th>token</th><th>缓存命中率</th><th>高峰价</th><th>周末谷价</th><th>高峰时段</th></tr></thead><tbody>" + rows + "</tbody></table>" +
+      "<div class='phint ppricing-note'>高峰价留空继承普通价，填 0 为免费；普通缓存价 0 沿用原有计算规则。" +
+        "按服务端本地时间" + (pricingTimezone ? "（" + esc(pricingTimezone) + "）" : "") + "，含起不含止，可跨午夜；" +
+        "每行两段，没填起止的那段等于不存在，时间只到整点或半点；勾选周末谷价后，周末全天使用普通价。</div>" +
+      "<div class='padd'><input type='text' id='p-new' placeholder='模型名或 provider_id:model_id' spellcheck='false'>" +
+        "<button id='p-add'>加一行</button><span class='phint' id='p-msg'>单位：" + esc(pricingUnit) + "</span>" +
+        "<span class='pstat' id='p-stat'></span></div>";
     bindPricing();
+    restorePricingFocus(box, focus);
+    if(Object.keys(pricingDraft).length) setPMsg(pricingPendingMessage(pricingPartialSaved));
   }
 
   // 用户 m10749 第 3 条：删除按钮的「确认」态——第一次点只变成「确认」，3 秒不点第二次自动复位。
@@ -6230,7 +6444,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(!name){ setPMsg("先写个模型名"); return; }
       var exists = (pricingCache || []).some(function(r){ return r.model === name; });
       if(exists){ setPMsg("这个模型已经在表里了"); return; }
-      pricingCache.push({ model: name, in: null, out: null, cache: null, input: 0, output: 0, cached: 0, rounds: 0 });
+      pricingRemoved[name] = false;
+      pricingDraft[name] = {};
+      pricingCache.push({ model: name, model_name: name, in: null, out: null, cache: null, peak: null, input: 0, output: 0, cached: 0, rounds: 0, decision_rounds:0, reply_rounds:0, calls:0 });
       paintPricing();
       setPMsg("已加一行，填完自动保存");
     };
@@ -6253,6 +6469,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(!name) return;
       if(btn.getAttribute("data-armed") !== "1"){ armPricingDelete(btn); return; }
       if(pdelTimer){ clearTimeout(pdelTimer); pdelTimer = 0; }
+      pricingRemoved[name] = true;
+      pricingWriteVersion++;
       pricingCache = (pricingCache || []).filter(function(r){ return r.model !== name; });
       try{ delete pricingDraft[name]; }catch(e){}
       paintPricing();
@@ -6265,70 +6483,128 @@ var DM_SPECIAL = { trigger_probability: 1 };
         })
         .catch(function(e){ setPMsg("删除没落到后端：" + String((e && e.message) || e), "bad"); });
     };
-    box.oninput = function(ev){
-      var tr = (ev.target && ev.target.closest) ? ev.target.closest("tr[data-pmodel]") : null;
-      if(!tr) return;
-      var name = tr.getAttribute("data-pmodel");
-      var d = pricingDraft[name] || (pricingDraft[name] = {});
-      var cls = (ev.target.className || "");
-      // 顺序要注意：pout 里也含 pin 那三个字母之外的片段，先判 pcache 再判 pin/pout
-      if(cls.indexOf("pcache") >= 0) d.cache = ev.target.value;
-      else if(cls.indexOf("pin") >= 0) d.in = ev.target.value;
-      else if(cls.indexOf("pout") >= 0) d.out = ev.target.value;
-      // v3.43：改动即排队，停手 600ms 自动保存（原来要另外点「保存价目」）
+    function changed(ev){
+      var target=ev.target;
+      var tr=target && target.closest ? target.closest("tr[data-pmodel]") : null;
+      var field=target && target.getAttribute ? target.getAttribute("data-pfield") : "";
+      if(!tr || !field) return;
+      var name=tr.getAttribute("data-pmodel");
+      var d=pricingDraft[name] || (pricingDraft[name]={});
+      var value=target.type === "checkbox" ? !!target.checked : target.value;
+      // 用户 m00153：分钟只有 00 / 30；时间框选完（change）才夹一次，选的过程中不动它的值。
+      if(target.type === "time" && ev.type === "change"){
+        var snapped=snapClock(target.value);
+        if(snapped !== target.value) target.value=snapped;
+      }
+      if(field.indexOf("peak.") === 0){
+        var key=field.slice(5);
+        if(["in","out","cache","enabled","start","end","weekends"].indexOf(key) < 0) return;
+        var peak=d.peak || (d.peak={});
+        if(key === "start" || key === "end"){
+          peak.periods=pricingPeriodsFromRow(tr);
+          peak.start=peak.periods.length ? peak.periods[0].start : "";
+          peak.end=peak.periods.length ? peak.periods[0].end : "";
+        }else peak[key]=key === "weekends" ? !value : value;
+      }else if(["in","out","cache"].indexOf(field) >= 0) d[field]=value;
+      else return;
+      // 用户 m00153：时间框在原生选择器里每点一下都会发 input，只记草稿；等 change（选完）再保存。
+      if(target.type === "time" && ev.type === "input") return;
       schedulePricingSave();
-    };
+    }
+    box.oninput=changed;
+    box.onchange=changed;
   }
+
 
   function collectPricing(){
     var models = {};
     Array.prototype.forEach.call(document.querySelectorAll("#pricing-box tr[data-pmodel]"), function(tr){
       var name = tr.getAttribute("data-pmodel");
-      var pin = tr.querySelector(".pin"), pout = tr.querySelector(".pout");
-      var pcache = tr.querySelector(".pcache");
-      var a = pin ? String(pin.value || "").trim() : "";
-      var b = pout ? String(pout.value || "").trim() : "";
-      var c = pcache ? String(pcache.value || "").trim() : "";
-      // 三项都没填 = 还没定价，不写进表（免得价目里堆一堆 0）
-      if(a === "" && b === "" && c === "") return;
-      models[name] = { in: a === "" ? 0 : Number(a), out: b === "" ? 0 : Number(b),
-                       cache: c === "" ? 0 : Number(c) };
+      var value = function(field){
+        var el = tr.querySelector("[data-pfield='" + field + "']");
+        return el && el.type === "checkbox" ? !!el.checked : String(el && el.value || "").trim();
+      };
+      var a=value("in"), b=value("out"), c=value("cache");
+      var p=pricingPeak();
+      ["in","out","cache"].forEach(function(k){ var v=value("peak."+k); p[k]=v === "" ? null : Number(v); });
+      p.enabled=value("peak.enabled"); p.weekends=!value("peak.weekends");
+      p.periods=pricingPeriodsFromRow(tr);
+      p.start=p.periods.length ? p.periods[0].start : ""; p.end=p.periods.length ? p.periods[0].end : "";
+      // Keep legacy all-unset ordinary rows out of the persisted table. A peak
+      // schedule/override itself is meaningful, including an explicit free 0.
+      if(a === "" && b === "" && c === "" && !p.enabled && !p.weekends && !p.periods.length && p.in === null && p.out === null && p.cache === null) return;
+      models[name]={in:a === "" ? 0 : Number(a), out:b === "" ? 0 : Number(b), cache:c === "" ? 0 : Number(c), peak:p};
     });
     return models;
   }
 
-  // 只清掉「跟发出去的那份一致」的草稿：请求飞在路上时用户又敲的字不能被冲掉。
-  function sameNum(a, b){
-    var x = String(a == null ? "" : a).trim();
-    var y = String(b == null ? "" : b).trim();
-    if(x === "" || y === "") return x === y;
-    return Number(x) === Number(y);
+  function validatePricing(models){
+    var names=Object.keys(models);
+    for(var i=0;i<names.length;i++){
+      var m=models[names[i]], p=m.peak;
+      var prices=[m.in,m.out,m.cache,p.in,p.out,p.cache];
+      for(var j=0;j<prices.length;j++){
+        if(prices[j] !== null && (!isFinite(prices[j]) || prices[j] < 0)) return "单价必须是非负数；高峰价可留空继承";
+      }
+    }
+    return "";
   }
 
   function savePricing(){
-    if(pricingTimer){ clearTimeout(pricingTimer); pricingTimer = 0; }
-    var models = collectPricing();
-    var names = Object.keys(models);
-    var url = API + "/pricing?values=" + encodeURIComponent(JSON.stringify({ models: models }));
+    if(pricingTimer){ clearTimeout(pricingTimer); pricingTimer=0; }
+    if(pricingSaving){ pricingSaveQueued=true; return; }
+    var models=collectPricing();
+    var error=validatePricing(models);
+    if(error){ setPMsg(error,"bad"); return; }
+    var names=Object.keys(models), deferredPeak=Object.create(null), blankOrdinary=Object.create(null);
+    Array.prototype.forEach.call(document.querySelectorAll("#pricing-box tr[data-pmodel]"), function(tr){
+      blankOrdinary[tr.getAttribute("data-pmodel")]=["in","out","cache"].every(function(k){
+        var el=tr.querySelector("[data-pfield='" + k + "']");
+        return !String(el && el.value || "").trim();
+      });
+    });
+    names.forEach(function(m){
+      if(!pricingPeakIncomplete(models[m].peak)) return;
+      deferredPeak[m]=true;
+      var old=(pricingCache || []).filter(function(r){ return r.model === m; })[0];
+      // Stage incomplete intervals locally, never disable them or overwrite a legal saved peak.
+      if(old && old.peak && !pricingPeakIncomplete(pricingPeak(old.peak))) models[m].peak=pricingPeak(old.peak);
+      else{
+        delete models[m].peak;
+        // A peak-only draft must not turn an entirely unpriced row into three explicit free prices.
+        if(blankOrdinary[m] && (!old || (old.in == null && old.out == null && old.cache == null))) delete models[m];
+      }
+    });
+    names=Object.keys(models);
+    var sentDraft=JSON.parse(JSON.stringify(pricingDraft));
+    pricingSaving=true;
     setPMsg("保存中…");
-    post(url).then(function(d){
-      if(!d || !d.ok){ setPMsg((d && d.detail) || "保存失败", "bad"); return; }
-      // 后端 save() 会把空项清掉，回传的是清洗后的整表；用它回填缓存即可。
-      // 不重绘：重绘会把焦点从正在敲的框里抢走（实时保存最容易踩这个）。
-      var saved = (d && d.models) || {};
+    post(API + "/pricing?values=" + encodeURIComponent(JSON.stringify({models:models}))).then(function(d){
+      if(!d || !d.ok){ setPMsg((d && d.detail) || "保存失败","bad"); return; }
+      var saved=d.models || {};
+      pricingWriteVersion++;
       (pricingCache || []).forEach(function(r){
-        var s = saved[r.model];
-        if(s){ r.in = s.in; r.out = s.out; r.cache = s.cache; }
-        else { r.in = null; r.out = null; r.cache = null; }
+        var s=saved[r.model];
+        r.in=s ? s.in : null; r.out=s ? s.out : null; r.cache=s ? s.cache : null;
+        r.peak=s && s.peak ? pricingPeak(s.peak) : null;
       });
-      Object.keys(pricingDraft).forEach(function(m){
-        var d0 = pricingDraft[m] || {}, s0 = models[m];
-        if(!s0) return;
-        if(sameNum(d0.in, s0.in) && sameNum(d0.out, s0.out) && sameNum(d0.cache, s0.cache)) delete pricingDraft[m];
+      Object.keys(sentDraft).forEach(function(m){
+        var current=pricingDraft[m], sent=sentDraft[m];
+        if(!current || !models[m]) return;
+        ["in","out","cache"].forEach(function(k){ if(current[k] === sent[k]) delete current[k]; });
+        if(!deferredPeak[m] && JSON.stringify(current.peak) === JSON.stringify(sent.peak)) delete current.peak;
+        if(!Object.keys(current).length) delete pricingDraft[m];
       });
-      setPMsg(names.length ? ("已保存 " + names.length + " 个模型的价目") : "已保存（表里还没有价格）", "ok");
+      // 用户 m00153：保存后只静默换掉花费与统计，不重画整张表——重绘会把正在点选的时间框打断。
+      pricingPartialSaved=true;
+      if(Object.keys(pricingDraft).length) setPMsg(pricingPendingMessage(true));
+      else setPMsg(names.length ? "已保存 " + names.length + " 个模型的价目" : "已保存（表里还没有价格）","ok");
+      loadPricing(true);
     }).catch(function(e){
-      setPMsg("保存失败：" + String((e && e.message) || e), "bad");
+      setPMsg("保存失败：" + String((e && e.message) || e),"bad");
+    }).then(function(){
+      pricingSaving=false;
+      if(pricingSaveQueued){ pricingSaveQueued=false; savePricing(); }
     });
   }
 

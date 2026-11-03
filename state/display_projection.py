@@ -20,6 +20,7 @@ _OWNER_HEAD = re.compile(
 )
 _REPLY_HEAD = re.compile(r"^\s*\[Reply ID:\s*([^\]\s]+)", re.I)
 _LEAF_TYPES = {"text", "at", "emoji", "notice", "poke", "record", "file", "video", "json"}
+_MAX_FILE_CARDS = 8
 
 
 def content_text(content) -> str:
@@ -265,6 +266,32 @@ def _forward_own_body(text: str):
     return body.strip() if "[Forward" in body else None
 
 
+def _native_files(chain):
+    """Native file parts as display-only cards (name/size/kind).
+
+    The host's own text stays "\u6587\u4ef6" in the model context; only the Web view
+    gets a file card, so no prompt byte changes.
+    """
+    out = []
+    for part in chain if isinstance(chain, list) else ():
+        if not isinstance(part, dict) or part.get("type") != "file":
+            continue
+        name = part.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        card = {"name": name.strip()[:260]}
+        size = part.get("size")
+        if isinstance(size, (int, float)) and not isinstance(size, bool) and size > 0:
+            card["size"] = int(size)
+        kind = part.get("file_type")
+        if isinstance(kind, str) and kind.strip():
+            card["kind"] = kind.strip()[:40]
+        out.append(card)
+        if len(out) >= _MAX_FILE_CARDS:
+            break
+    return out
+
+
 def _native_display(chain, raw_sid: str, public_media):
     refs = []
     body = []
@@ -499,6 +526,9 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
                 and isinstance(row.get("chain"), list)):
             known, refs, direct, body = _native_display(row["chain"], raw_sid, public_media)
             native_candidates = refs
+            files = _native_files(row["chain"])
+            if files:
+                display["files"] = files
             if direct is not None:
                 display["direct_reply"] = direct
             if known:
@@ -529,5 +559,7 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
             )
         projected = dict(item)
         projected["display"] = display
+        if display.get("files"):
+            projected["files"] = display["files"]
         out.append(projected)
     return out
