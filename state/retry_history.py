@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from core.logging_manager import get_logger
@@ -15,6 +16,10 @@ class RetryHistory:
     def __init__(self, data_dir):
         self.path = Path(data_dir) / "retry_history.json"
         self.chains = {}
+        # v4.54（用户 m18227）：每个会话保留多少条重试链，由插件注入；None = 不限。
+        self._limit_fn = None
+        # v4.55（用户 m19940）：每个会话保留多少天，由插件注入；None = 不按天清理。
+        self._days_fn = None
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             if data.get("version") == 1 and isinstance(data.get("chains"), dict):
@@ -46,8 +51,144 @@ class RetryHistory:
                     rec["status"] = "unknown"
                     rec["succeeded"] = None
 
+    def set_limit_fn(self, fn):
+        """注入「这个会话留多少条链」的回调；传 None 恢复不限。"""
+        self._limit_fn = fn
+
+    def set_keep_days_fn(self, fn):
+        """注入「这个会话留多少天」的回调；传 None 不按天清理。"""
+        self._days_fn = fn
+
+    def _trim(self):
+        """按天数 / 条数裁一遍；返回是否真的删过东西。"""
+        fn = self._limit_fn
+        days_fn = self._days_fn
+        if not callable(fn) and not callable(days_fn):
+            return False
+        changed = False
+        for sid in list(self.chains.keys()):
+            roots = self.chains.get(sid) or {}
+            protected = {root for root, rec in roots.items()
+                         if isinstance(rec, dict)
+                         and rec.get("status") in ("scheduled", "running")}
+            if callable(days_fn):
+                try:
+                    days = int(days_fn(sid) or 0)
+                except Exception:
+                    days = 0
+                if days > 0:
+                    now = time.time()
+                    for root in list(roots.keys()):
+                        if root in protected:
+                            continue
+                        rec = roots.get(root)
+                        if not isinstance(rec, dict):
+                            continue
+                        ts = rec.get("created_at")
+                        if not isinstance(ts, (int, float)):
+                            # 老记录没有时间戳：从首次读到开始算一个完整周期。
+                            rec["created_at"] = int(now)
+                            changed = True
+                            continue
+                        if now - float(ts) > days * 86400:
+                            roots.pop(root, None)
+                            changed = True
+            if not callable(fn):
+                if not roots:
+                    self.chains.pop(sid, None)
+                continue
+            try:
+                limit = int(fn(sid) or 0)
+            except Exception:
+                limit = 0
+            if not roots:
+                self.chains.pop(sid, None)
+                continue
+            if limit <= 0 or len(roots) <= limit:
+                continue
+            # 正在重试的链先保住，再按插入顺序丢最旧的，留下的就是最近的那几条。
+            for root in list(roots.keys()):
+                if len(roots) <= limit:
+                    break
+                if root in protected:
+                    continue
+                roots.pop(root, None)
+                changed = True
+            if not roots:
+                self.chains.pop(sid, None)
+        return changed
+
+    def clear(self, cutoff=None) -> int:
+        """清重试链，返回删掉的链数（用户 m21482）。
+
+        cutoff 为 None 清全部；给了 cutoff 就只删 created_at 早于它的链。
+        正在重试 / 已排队的链先保住，避免清掉还在跑的状态。
+        没有 created_at 的旧链在按天清理时保留。
+        """
+        removed = 0
+        for sid in list(self.chains.keys()):
+            roots = self.chains.get(sid) or {}
+            for root in list(roots.keys()):
+                rec = roots.get(root)
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("status") in ("scheduled", "running"):
+                    continue
+                if cutoff is not None:
+                    ts = rec.get("created_at")
+                    if not isinstance(ts, (int, float)):
+                        continue
+                    if float(ts) >= float(cutoff):
+                        continue
+                roots.pop(root, None)
+                removed += 1
+            if not roots:
+                self.chains.pop(sid, None)
+        if removed:
+            self._save()
+        return removed
+
+    def prune(self):
+        """按当前设置清一次；有变化才落盘。缓存页 / 重启后都会走这里。"""
+        try:
+            if self._trim():
+                self._save()
+        except Exception:
+            logger.exception("[multi-decision] 清理重试历史失败")
+
+    def stats(self, sid: str = ""):
+        """重试链条数 / 事件数 / 占用；sid 非空时只算这个会话（用户 m22090）。"""
+        self.prune()
+        chains = events = 0
+        by_sid = {}
+        for owner, roots in (self.chains or {}).items():
+            if not isinstance(roots, dict):
+                continue
+            by_sid[owner] = len(roots)
+            chains += len(roots)
+            for rec in roots.values():
+                if isinstance(rec, dict) and isinstance(rec.get("events"), list):
+                    events += len(rec["events"])
+        target = normalize_sid(str(sid or "").strip()) if sid else ""
+        if target:
+            roots = self.chains.get(target) or {}
+            if not isinstance(roots, dict):
+                roots = {}
+            subset_events = sum(len(rec.get("events") or [])
+                                for rec in roots.values() if isinstance(rec, dict))
+            return {"count": len(roots), "events": subset_events,
+                    "bytes": len(json.dumps({"version": 1, "chains": {target: roots}},
+                                            ensure_ascii=False).encode("utf-8")),
+                    "sids": by_sid}
+        try:
+            size = int(self.path.stat().st_size or 0)
+        except Exception:
+            size = 0
+        return {"count": chains, "events": events, "bytes": size, "sids": by_sid}
+
     def _save(self):
         try:
+            self._trim()
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps({"version": 1, "chains": self.chains},
@@ -65,7 +206,9 @@ class RetryHistory:
         roots = self.chains.setdefault(normalize_sid(sid), {})
         rec = roots.setdefault(str(root), {"root_event_id": str(root), "had_error": True,
             "attempts": 0, "status": "not_retried", "succeeded": False,
-            "events": [str(root)], "tokens": {}, "current_event_id": str(root)})
+            "events": [str(root)], "tokens": {}, "current_event_id": str(root),
+            "created_at": int(time.time())})
+        rec.setdefault("created_at", int(time.time()))
         if str(event_id) not in rec["events"]:
             return
         rec["had_error"] = True

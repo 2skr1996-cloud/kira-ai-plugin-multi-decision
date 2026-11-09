@@ -20,11 +20,22 @@ from core.plugin import logger
 PRUNE_GRACE_SECONDS = 300
 
 
+def _is_dm_sid(sid: str) -> bool:
+    """这个 sid 是不是私聊。认 gm:1 / 桃华:dm:1 / dm_1 三种写法（同 main.py 的口径）。"""
+    s = str(sid or "")
+    parts = s.split(":")
+    if len(parts) >= 3 and parts[-2] in ("gm", "dm"):
+        return parts[-2] == "dm"
+    if len(parts) >= 2 and parts[0] == "dm":
+        return True
+    return s.split(":")[-1].startswith("dm_")
+
+
 class Summaries:
     """sid -> {text, ts, count, lines}。count 是累计被压进来的消息条数。"""
 
     def __init__(self, data_dir, filename: str = "summaries.json",
-                 keep: int = 0, keep_days: int = 0):
+                 keep: int = 0, keep_days: int = 0, keep_dm: int = 0):
         self.path = Path(data_dir) / filename
         self._data: dict[str, dict] = {}
         self._backup_required = False
@@ -39,6 +50,12 @@ class Summaries:
             self.keep_days = max(0, int(keep_days or 0))
         except (TypeError, ValueError):
             self.keep_days = 0
+        # v4.90（发版前审计）：设置页一直有「中期摘要上限（私聊）」这一项，
+        # 但以前只按全局 keep 裁，私聊那份存进去没人读。改成群聊 / 私聊各按各的裁。
+        try:
+            self.keep_dm = max(0, int(keep_dm or 0))
+        except (TypeError, ValueError):
+            self.keep_dm = 0
         self._load()
         # 老数据可能早就超过新设的上限，开机先按设置剪一次（用户第 5 条：
         # 「早期记录可以先清掉」）。默认 0/0 = 不删，行为和以前一样。
@@ -66,16 +83,23 @@ class Summaries:
                 if ts > 0 and ts < cutoff:
                     self._data.pop(sid, None)
                     removed += 1
-        if self.keep > 0 and len(self._data) > self.keep:
-            def _ts(sid: str) -> float:
-                try:
-                    return float(self._data[sid].get("ts") or 0.0)
-                except (TypeError, ValueError, AttributeError):
-                    return 0.0
-            order = sorted(self._data.keys(), key=_ts, reverse=True)
+        def _ts(sid: str) -> float:
+            try:
+                return float(self._data[sid].get("ts") or 0.0)
+            except (TypeError, ValueError, AttributeError):
+                return 0.0
+        # v4.90（发版前审计）：群聊与私聊各按各的上限裁——keep 管群聊，
+        # keep_dm 管私聊；哪个是 0 就哪一类不限。
+        for _limit, _want_dm in ((self.keep, False), (self.keep_dm, True)):
+            if _limit <= 0:
+                continue
+            pool = [s for s in self._data.keys() if _is_dm_sid(s) == _want_dm]
+            if len(pool) <= _limit:
+                continue
+            order = sorted(pool, key=_ts, reverse=True)
             # v3.67（用户 m20117）：刚更新过的先留着，别一压完就被删。
             grace_cut = time.time() - PRUNE_GRACE_SECONDS
-            for sid in order[self.keep:]:
+            for sid in order[_limit:]:
                 if _ts(sid) >= grace_cut:
                     continue
                 self._data.pop(sid, None)
@@ -182,6 +206,24 @@ class Summaries:
         self._data.pop(sid, None)
         self._save()
         return True
+
+    def clear_before(self, cutoff: float) -> int:
+        """删掉最后更新早于 cutoff 的摘要，返回会话数（用户 m21482）。
+
+        ts 缺失的条目当「不知道多久」，不按天数删。
+        """
+        removed = 0
+        for sid in list(self._data.keys()):
+            try:
+                ts = float(self._data[sid].get("ts") or 0.0)
+            except (TypeError, ValueError, AttributeError):
+                ts = 0.0
+            if ts > 0 and ts < cutoff:
+                self._data.pop(sid, None)
+                removed += 1
+        if removed:
+            self._save()
+        return removed
 
     def clear_all(self) -> int:
         n = len(self._data)

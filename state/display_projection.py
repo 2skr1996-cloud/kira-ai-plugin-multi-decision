@@ -213,23 +213,32 @@ def raw_forward_proof_items(messages):
             for msg in messages or []]
 
 
+def _public_ref(ref, raw_sid, public_media):
+    """Resolve one media ref to the same public shape the rest of the page uses.
+
+    Aggregate media often still points at a session_media path that the host has
+    already cleaned; public_media swaps it for the plugin cache copy. Keeping the
+    raw path here made the thumb fail and also hid the fact that a native-chain
+    candidate was the same image under a different path.
+    """
+    path = str(ref.get("path") or ref.get("url") or "")
+    mime = str(ref.get("mime") or ref.get("mime_type") or "")
+    try:
+        got = public_media(path, mime, raw_sid) if path else dict(ref)
+    except Exception:
+        got = {}
+    if not isinstance(got, dict) or not (got.get("path") or got.get("url") or got.get("missing")):
+        got = {"missing": 1, "path": path, "mime": mime} if path else {}
+    return got
+
+
 def _unassigned_media(item, raw_sid, public_media):
-    refs = [dict(ref) for ref in item.get("media") or [] if isinstance(ref, dict)]
+    refs = [_public_ref(ref, raw_sid, public_media)
+            for ref in item.get("media") or [] if isinstance(ref, dict)]
     explicit = _content_refs(item) if "[Forward" in content_text(item.get("content") or item.get("raw")) else None
     pending = _merge_slots(item.get("media_refs"), explicit)
-    converted = []
-    for ref in pending:
-        if not isinstance(ref, dict):
-            continue
-        path = str(ref.get("path") or ref.get("url") or "")
-        mime = str(ref.get("mime") or ref.get("mime_type") or "")
-        try:
-            got = public_media(path, mime, raw_sid) if path else dict(ref)
-        except Exception:
-            got = {}
-        if not isinstance(got, dict) or not (got.get("path") or got.get("url") or got.get("missing")):
-            got = {"missing": 1, "path": path, "mime": mime} if path else {}
-        converted.append(got)
+    converted = [_public_ref(ref, raw_sid, public_media)
+                 for ref in pending if isinstance(ref, dict)]
     return _merge_slots(refs, converted)
 
 
@@ -440,7 +449,10 @@ def _forward_cache_display(original, mid, raw_sid, chain, public_media, display_
     if refs:
         # Explicit original image parts are a separate, complete source. They may
         # not be paired with a placeholder or a truncated/Reply-containing body.
-        if not _complete_forward(body) or not 0 < body.count("[图片]") == len(refs):
+        # Host snapshots spell the same slot as [Image attached]; the proof path
+        # already normalizes it, so this explicit-refs path must count it too.
+        normalized = body.replace("[Image attached]", "[图片]")
+        if not _complete_forward(body) or not 0 < normalized.count("[图片]") == len(refs):
             return None
         ready = _public_slots(refs, raw_sid, public_media)
         return (body, ready) if ready is not None else None
@@ -552,11 +564,33 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
                     display.update(own_media_known=True, own_media=refs, own_body=body,
                                    unassigned_media=[], source="forward_cache_aligned")
         if not display["own_media_known"]:
+            # 普通消息自己带的图：没有引用、没有转发时，item.media 就是这条消息的图。
+            # 先转成插件缓存副本，能全部转成功就按 own_media 收下，不再挂「归属未确认」。
+            _txt = " ".join(texts)
+            if direct is None and item.get("media") and "[Forward" not in _txt and "[Reply ID:" not in _txt:
+                _own = [_public_ref(ref, raw_sid, public_media)
+                        for ref in item.get("media") or [] if isinstance(ref, dict)]
+                if _own and not any(ref.get("missing") for ref in _own):
+                    display.update(own_media_known=True, own_media=_own, unassigned_media=[],
+                                   source="own_media")
+        if not display["own_media_known"]:
             original = proofs.get(mid)
-            display["unassigned_media"] = _merge_slots(
+            # The raw proof item knows how many images the message really had; the
+            # native chain can carry one extra copy under a different cache path.
+            count_src = original if isinstance(original, dict) else item
+            own_count = len([ref for ref in count_src.get("media") or [] if isinstance(ref, dict)])
+            native = native_candidates[:own_count] if own_count else native_candidates
+            merged = _merge_slots(
                 _unassigned_media(original, raw_sid, public_media) if isinstance(original, dict) else [],
-                _unassigned_media(item, raw_sid, public_media), native_candidates,
+                _unassigned_media(item, raw_sid, public_media), native,
             )
+            # If the native chain has a usable copy, drop the cleaned session_media
+            # refs instead of drawing a broken thumb next to the real image.
+            if any(not ref.get("missing") for ref in merged):
+                merged = [ref for ref in merged if not ref.get("missing")]
+            if own_count and len(merged) > own_count:
+                merged = merged[:own_count]
+            display["unassigned_media"] = merged
         projected = dict(item)
         projected["display"] = display
         if display.get("files"):

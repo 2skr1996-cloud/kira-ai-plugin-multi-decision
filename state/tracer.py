@@ -206,6 +206,54 @@ def _default_model_of(path: Any) -> str:
     return str(name or mid).strip()[:80]
 
 
+def _provider_label_of(path: Any, provider_id: str = "", model_name: str = "") -> str:
+    """模型属于哪个「API 渠道」（用户 m00375 第 6 条）。
+
+    价目表与决策记录里的「渠道」以前只认 LLMResponse 上的 provider_name，而框架
+    的响应对象根本没有这个字段，第三方接口（custom:xxx）更是压根不在框架配置里，
+    于是整列都是「来源未记录」。这里按两种情况补：
+      1. provider_id 在配置里 —— 用那个供应商的显示名（用户自己起的实例名）；
+      2. 只有模型名 —— 在配置里按 model_name 精确找，唯一命中才认，同名不猜。
+    都找不到就返回空串，页面照旧写「来源未记录」，绝不编一个。
+    只读 providers 的 name 与 model_config.*.model_name，绝不碰密钥等其他字段。
+    """
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8")) or {}
+    except Exception:
+        return ""
+    provs = raw.get("providers") if isinstance(raw, dict) else None
+    if not isinstance(provs, dict):
+        return ""
+    pid = str(provider_id or "").strip()
+    if pid:
+        prov = provs.get(pid)
+        if isinstance(prov, dict):
+            return str(prov.get("name") or prov.get("provider_name") or pid).strip()[:60]
+        return ""
+    want = str(model_name or "").strip()
+    if not want:
+        return ""
+    hits = []
+    for _pid, prov in provs.items():
+        if not isinstance(prov, dict):
+            continue
+        mcfg = prov.get("model_config")
+        if not isinstance(mcfg, dict):
+            continue
+        found = False
+        for group in mcfg.values():
+            if found or not isinstance(group, dict):
+                continue
+            for item in group.values():
+                if isinstance(item, dict) and str(item.get("model_name") or "").strip() == want:
+                    found = True
+                    break
+        if found:
+            hits.append(str(prov.get("name") or _pid).strip())
+    hits = [h for h in hits if h]
+    return hits[0][:60] if len(set(hits)) == 1 else ""
+
+
 def content_text(content: Any) -> str:
     """把消息 content 拉成纯文本：多模态只留文字，图片记占位。"""
     if isinstance(content, str):
@@ -338,6 +386,9 @@ class Tracer:
         self._days_of = days_of
         self._open: Dict[tuple[str, str], dict] = {}
         self._refs: Dict[tuple[str, str], list] = {}
+        # v4.90（用户 m02939 第 2 条）：这一轮真正拿去发请求的模型名，由 main.py 在
+        # ON_LLM_REQUEST 里问 provider_mgr 要到后传进来（见 begin 的 model_hint）。
+        self._hints: Dict[tuple[str, str], str] = {}
         # 模型名兜底的缓存（见 default_model_name）：数据目录 + 解析到的配置路径 + mtime
         self._data_dir = Path(data_dir)
         # v3.47（用户 2026-10-24 第 3/4 条）：24 小时 token/用时的账本。
@@ -350,6 +401,9 @@ class Tracer:
         self._cfg_path: Optional[Path] = None
         self._cfg_mtime: Optional[float] = None
         self._cfg_model: str = ""
+        # 用户 m00375 第 8 条：模型名 → API 渠道显示名，按配置文件 mtime 缓存。
+        self._cfg_label_mtime: Optional[float] = None
+        self._cfg_label_map: Optional[Dict[str, str]] = None
         # v3.48（用户 m06761 第 1 条）：账本是这版才有的，升级当天 24 小时窗口里
         # 早先那些轮只剩 traces 还留着。第一次起来时把盘上轨迹回填进账本，
         # 「请求平均用时」「最近24小时 token」的轮数立刻能超过 keep=60 的截断。
@@ -375,11 +429,13 @@ class Tracer:
             if not started or now - started > self.STALE_SECONDS:
                 self._open.pop(key, None)
                 self._refs.pop(key, None)
+                self._hints.pop(key, None)
 
     # ------------------------------------------------------------ 生命周期
 
     def begin(self, event: Any, request: Any, trigger_at: float = 0.0,
-              debounce: float = 0.0, decision: float = 0.0) -> Optional[dict]:
+              debounce: float = 0.0, decision: float = 0.0,
+              model_hint: str = "") -> Optional[dict]:
         """开始记一轮。
 
         trigger_at 是这一轮「被点起来」的墙钟（v3.51，用户 m07385 第 7 条）：
@@ -418,6 +474,7 @@ class Tracer:
         }
         self._open[key] = rec
         self._refs[key] = []
+        self._hints[key] = str(model_hint or "").strip()[:80]
         return rec
 
     def _identity(self, obj: Any) -> dict:
@@ -457,6 +514,17 @@ class Tracer:
         inp = _attr(llm_resp, "input_tokens", None)
         cached = _attr(llm_resp, "cached_tokens", None)
         identity = self._identity(llm_resp)
+        # v4.90（用户 m02939 第 2 条）：框架的 LLMResponse 只有 token，没有模型身份，
+        # 回复轮的轨迹一直是空身份，价目表把回复用量全记成「未记录模型」——用户把那一行
+        # 删掉之后，回复花费就彻底看不见了。这里补的是「这一轮真正拿去发请求的模型」：
+        # main.py 在 ON_LLM_REQUEST 里问 provider_mgr 要到的那个客户端（跟框架
+        # BuildRequestStage 的兜底是同一个），不是拿配置文件里的默认值猜历史归属。
+        if not str(identity.get("model") or "").strip():
+            hint = str(self._hints.get(key) or "").strip()
+            if hint:
+                identity = {**identity, "model": hint,
+                            "model_name": identity.get("model_name") or hint,
+                            "identity_source": "request_model"}
         observed = time.time()
         first = not rec["steps"]
         token = usage_event(llm_resp)
@@ -531,6 +599,7 @@ class Tracer:
         key = self._key(event)
         rec = self._open.pop(key, None)
         refs = self._refs.pop(key, [])
+        self._hints.pop(key, None)
         if rec is None:
             return None
         # 把每步的 tool_results 补进来（引用在这一步之后被填好）
@@ -767,21 +836,54 @@ class Tracer:
         rec.setdefault("event_id", payload.get("event_id") or "")
         return self._trace_row(rec)
 
-    def _snapshot_rows(self) -> Iterator[dict]:
+    def _snapshot_rows(self, since: float = 0.0) -> Iterator[dict]:
+        """遍历请求快照里的轨迹行。
+
+        v4.88：两处提速，都是「别重复读同一份文件」——
+        ① since>0 时先看文件名（毫秒时间戳），明显早于窗口的直接跳过，不读不解析；
+        ② 解析结果按 (mtime_ns, size) 记忆，文件没改过就不再 json.loads。
+        概览卡片每 5 秒刷一次，以前每次都把几百份快照（几十 MB）整读一遍。
+        """
         try:
             folders = list(self._rounds_root().iterdir())
         except OSError:
             return
+        memo = getattr(self, "_snap_rows_cache", None)
+        if memo is None:
+            memo = self._snap_rows_cache = {}
         for folder in folders:
             if not folder.is_dir():
                 continue
-            for path in folder.glob("*.json"):
-                try:
-                    row = self._snapshot_row(json.loads(path.read_text(encoding="utf-8")))
-                    if row is not None:
-                        yield row
-                except Exception:
+            try:
+                entries = list(os.scandir(folder))
+            except OSError:
+                continue
+            for ent in entries:
+                name = ent.name
+                if not name.endswith(".json"):
                     continue
+                stem = name[:-5]
+                if since > 0 and stem.isdigit() and int(stem) / 1000.0 < since - 60:
+                    continue
+                try:
+                    st = ent.stat()
+                except OSError:
+                    continue
+                hit = memo.get(ent.path)
+                if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+                    if hit[2] is not None:
+                        yield hit[2]
+                    continue
+                row = None
+                try:
+                    row = self._snapshot_row(json.loads(Path(ent.path).read_text(encoding="utf-8")))
+                except Exception:
+                    row = None
+                if len(memo) >= 4096:
+                    memo.clear()
+                memo[ent.path] = (st.st_mtime_ns, st.st_size, row)
+                if row is not None:
+                    yield row
 
     def decision(self, sid: str, rec: dict) -> None:
         """Persist one business decision, with evidence from every actual response."""
@@ -1024,7 +1126,7 @@ class Tracer:
     def _round_rows(self, start: float) -> Iterator[dict]:
         """Deduplicate sid/kind/event; enrich old rows only on exact token equality."""
         snapshots = {}
-        for row in self._snapshot_rows():
+        for row in self._snapshot_rows(start):
             if _number(row.get("ts")) >= start:
                 snapshots.setdefault(self._row_key(row), row)
         seen = set()
@@ -1089,9 +1191,13 @@ class Tracer:
         rounds / models / avg_elapsed / elapsed_rounds 字段名与含义不变。
         """
         now = time.time()
-        start = now - max(1, int(hours or 24)) * 3600
+        hours = max(1, int(hours or 24))
+        start = now - hours * 3600
         cache = getattr(self, "_recent_cache", None)
-        if cache and cache[1] == start and (now - cache[0]) < 5.0:
+        # v4.88：缓存键以前存的是 start（每次重算出来的 float），永远对不上缓存里的旧值，
+        # 等于没有缓存——概览卡片每 5 秒就把几百份快照整读一遍。改成存 hours；
+        # 新数据落账本时 _append_ledger 会把缓存置空，所以 TTL 放宽到 30 秒也不会看到旧数。
+        if cache and cache[1] == hours and (now - cache[0]) < 30.0:
             return _clone_totals(cache[2])
         # models：按模型分开的同一批数字，给「花费」卡片算钱用（v3.37）
         out = {"input": 0, "output": 0, "cached": 0, "total": 0, "rounds": 0,
@@ -1112,7 +1218,7 @@ class Tracer:
         if out["elapsed_rounds"]:
             out["avg_elapsed"] = round(memo.get("elapsed_sum", 0.0) / out["elapsed_rounds"], 1)
         _finish_kinds(out)
-        self._recent_cache = (now, start, _clone_totals(out))
+        self._recent_cache = (now, hours, _clone_totals(out))
         return _clone_totals(out)
 
     def list_sessions(self) -> List[dict]:
@@ -1148,7 +1254,9 @@ class Tracer:
             return None
         folder = self._rounds_folder(sid)
         try:
-            files = sorted(folder.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+            # v4.88：文件名就是毫秒时间戳，按名字倒序等价于按 mtime 倒序，
+            # 但省掉几百次 path.stat()（Windows 上每次约 2ms，474 份就是 1 秒）。
+            files = sorted(folder.glob("*.json"), reverse=True)
         except Exception:
             return None
         for path in files[: max(1, int(window))]:
@@ -1204,7 +1312,8 @@ class Tracer:
     def recent(self, sid: str, limit: int = 20) -> List[dict]:
         folder = self._rounds_folder(sid)
         try:
-            files = sorted(folder.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+            # v4.88：同上，文件名即毫秒时间戳，按名字倒序即可，不必逐个 stat。
+            files = sorted(folder.glob("*.json"), reverse=True)
         except Exception:
             return []
         want = max(1, int(limit))
@@ -1299,3 +1408,57 @@ class Tracer:
             return name
         except Exception:
             return ""
+
+    def provider_label(self, provider_id: str = "", model_name: str = "") -> str:
+        """模型键 → API 渠道显示名（用户 m00375 第 6 条）。读不到就是空串。"""
+        try:
+            path = self._config_path()
+            if path is None:
+                return ""
+            return _provider_label_of(path, provider_id, model_name)
+        except Exception:
+            return ""
+
+    def provider_label_map(self) -> Dict[str, str]:
+        """模型名 → API 渠道显示名，按配置文件 mtime 缓存。
+
+        用户 m00375 第 8 条：回复记录里老快照没存 reply_provider，列表接口按模型名
+        回填一次；一次列表上百行，不能每行都重新读一遍配置。同名模型挂在两个供应商
+        下面就不猜（跟 _provider_label_of 一样，宁可空着）。
+        """
+        try:
+            path = self._config_path()
+            if path is None:
+                return {}
+            mtime = path.stat().st_mtime
+            if self._cfg_label_mtime == mtime and self._cfg_label_map is not None:
+                return self._cfg_label_map
+            raw = json.loads(path.read_text(encoding="utf-8")) or {}
+            provs = raw.get("providers") if isinstance(raw, dict) else None
+            out: Dict[str, str] = {}
+            if isinstance(provs, dict):
+                for _pid, prov in provs.items():
+                    if not isinstance(prov, dict):
+                        continue
+                    label = str(prov.get("name") or _pid).strip()[:60]
+                    mcfg = prov.get("model_config")
+                    if not label or not isinstance(mcfg, dict):
+                        continue
+                    for group in mcfg.values():
+                        if not isinstance(group, dict):
+                            continue
+                        for item in group.values():
+                            if not isinstance(item, dict):
+                                continue
+                            mn = str(item.get("model_name") or "").strip()
+                            if not mn:
+                                continue
+                            if mn in out and out[mn] != label:
+                                out[mn] = ""
+                            else:
+                                out[mn] = label
+            self._cfg_label_mtime = mtime
+            self._cfg_label_map = out
+            return out
+        except Exception:
+            return {}

@@ -129,6 +129,10 @@ class SessionState:
         "backoff_until",
         "adaptive_n",
         "last_silent_ts",
+        # v4.90（用户 m00375 第 1 条）：静默兜底的起算点也要存。以前只在内存里，
+        # 插件一热重载就归零，_check_silent 把它重新钉成「重载那一刻」，倒计时
+        # 从头再数一遍——实测多等 3 分半才冒泡，用户看到的是「静默 7 分钟才回」。
+        "silent_armed_ts",
         "silent_fired_ts",
         "rest_fired_ts",
         "hour_key",

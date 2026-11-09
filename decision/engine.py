@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+from html import unescape as _html_unescape
 from collections import deque
 import inspect
 import json
@@ -157,6 +158,53 @@ _TEMPLATE_FALLBACK = {
     ),
     "root_tags": "",
 }
+
+
+def _framework_tag_prompt() -> Optional[str]:
+    """框架 assemble 阶段会填进 format 段的标签清单（同源：core.tag.tag_registry）。
+
+    取不到就返回 None，调用方退回 _TEMPLATE_FALLBACK。
+    """
+    try:
+        from core.tag import tag_registry
+        return "\n".join(str(getattr(t, "description", "") or "")
+                         for t in tag_registry.get_all())
+    except Exception:
+        return None
+
+
+def _framework_root_tag_prompt() -> Optional[str]:
+    """同上，<msg> 之外的控制标签；没有就是空串。"""
+    try:
+        from core.tag import tag_registry
+        root = "\n".join(str(getattr(t, "description", "") or "")
+                         for t in tag_registry.get_all_root())
+    except Exception:
+        return None
+    return f"此外，你可以在<msg>标签外使用以下控制标签（与<msg>同级）：\n{root}" if root else ""
+
+
+def _fill_late_template_kwargs(p) -> bool:
+    """把框架稍后才填的模板变量先补上，返回是否补了东西。
+
+    format 段的 {{ message_types }} / {{ root_tags }} 由框架在 ON_LLM_REQUEST
+    之后才填（core/workflow/src/im/stages/assemble.py），hook 里提前渲染必然
+    缺变量。这里按框架稍后会算出来的同一份清单先补上：快照和预览看到的就是
+    真实请求那一份，框架稍后还会用同样的值覆盖一次。
+    """
+    kw = getattr(p, "kwargs", None)
+    if not isinstance(kw, dict):
+        return False
+    added = False
+    if "message_types" not in kw:
+        text = _framework_tag_prompt()
+        kw["message_types"] = text if (text or "").strip() else _TEMPLATE_FALLBACK["message_types"]
+        added = True
+    if "root_tags" not in kw:
+        text = _framework_root_tag_prompt()
+        kw["root_tags"] = text if text is not None else _TEMPLATE_FALLBACK["root_tags"]
+        added = True
+    return added
 
 
 def emoji_repr(element) -> str:
@@ -799,6 +847,12 @@ _MSG_XML_RE = re.compile(
     r'<msg\s+message_id="(-?\d+)"[^>]*>\s*\[([^\]]*)\]\s*<text>([\s\S]*?)</text>',
     re.I,
 )
+# 回复快照要存这一轮真正发出去的正文（v4.85，用户 m10425 第 8 条）。框架交给
+# ON_FINAL_RESULT 的 raw_output 是模型原始 XML（<msg><text>正文</text></msg>…，
+# 见 core/workflow/src/im/stages/execute.py 的 add_message_ids），正文要自己抽。
+_OUT_MSG_RE = re.compile(r"<msg\b[^>]*>([\s\S]*?)</msg>", re.I)
+_OUT_TEXT_RE = re.compile(r"<text>([\s\S]*?)</text>", re.I)
+_OUT_MEDIA_RE = re.compile(r"<(?:image|record|video|file|sticker)\b", re.I)
 _REPLY_SEEN = []
 _REPLY_MISS = []
 
@@ -1180,6 +1234,10 @@ class DecisionEngine:
         # 超过 _TRIM_AFTER_TTL 秒就自动失效，不会把某个群的裁切永久锁死。
         self._trim_after: dict[str, float] = {}
         self._round_errors: dict[tuple[str, str], str] = {}
+        # 用户 2026-11-07：回复快照要记这一轮实际用的模型与渠道。请求那一刻
+        # 从 event.model_group / 适配器上取到就存这里，结算（含出错轮、看门狗）
+        # 时按 (sid, event_id) 取回；取不到再退回 tracer 的默认模型名。
+        self._round_reply_meta: dict[tuple[str, str], dict] = {}
         self._settled_rounds: dict[tuple[str, str], float] = {}
         self._retry_events: dict[str, list] = {}
         self._round_roots: dict[tuple[str, str], str] = {}
@@ -1234,6 +1292,24 @@ class DecisionEngine:
             "last_decision": {},
             "decision_skip": 0,
         }
+
+    def _decision_mode(self, sid: str = "") -> str:
+        """这一刻该走哪条决策链：off / llm / jev（用户 m06706）。
+
+        插件侧 decision_mode() 才是唯一权威（它还要处理单群覆盖与双开收敛），
+        这里只负责「取不到就退回老口径」——老行为是只看 advanced_enabled，
+        绝不能让插件侧出个异常就把决策整条关掉。
+        """
+        try:
+            mode = str(self.plugin.decision_mode(sid) or "")
+        except Exception:
+            mode = ""
+        if mode in ("off", "llm", "jev"):
+            return mode
+        try:
+            return "llm" if self._c("advanced_enabled", sid) else "off"
+        except Exception:
+            return "off"
 
     def _c(self, key: str, sid: str = ""):
         """取某项配置在当前会话下的有效值。
@@ -1365,6 +1441,9 @@ class DecisionEngine:
         eid = str(getattr(event, "event_id", "") or "")
         if self._closed or (sid, eid) in self._settled_rounds:
             return
+        # 用户 2026-11-07：这一轮回复用的模型/渠道先记下来。结算时 event 可能
+        # 已经拿不到了（看门狗、异常钩子），那时只能靠这份缓存。
+        self._note_reply_meta(sid, eid, event)
         if self._active_rounds.get(sid) != eid:
             self._bind_retry_round(sid, eid, event)
             st = self.state(sid)
@@ -1387,6 +1466,10 @@ class DecisionEngine:
                 self._settled_rounds.pop(key, None)
                 self._round_errors.pop(key, None)
                 self._cleared_retry_rounds.discard(key)
+        # 回复快照的模型/渠道缓存同样带 TTL：没走到结算的轮不能一直占着内存
+        for key, meta in list(self._round_reply_meta.items()):
+            if now - float(meta.get("ts") or 0.0) > 900:
+                self._round_reply_meta.pop(key, None)
         # round_end 去重表同样带 TTL：失败轮的 event_id 过了 15 分钟不可能再来 final
         for key, logged_at in list(self._round_end_logged.items()):
             if now - logged_at > 900:
@@ -1583,6 +1666,12 @@ class DecisionEngine:
         assemble_prompt 是 "".join(p.to_string() ...)，任何一个 Prompt 抛异常
         都会让整段 system 拼不出来——框架不会吞这个异常，但会直接丢掉全部
         系统提示。这里提前把会抛的段换成静态文本。
+
+        format 段是例外：它的 {{ message_types }} / {{ root_tags }} 要等框架
+        在 ON_LLM_REQUEST 之后才填，这里提前渲染必然缺变量。以前一律降级，
+        等于把框架的标签清单永久换成插件写死的那四条，模型再也看不到
+        <at> / <reply> / <record> 这些标签。现在先按框架稍后会填的那份补上
+        再试一次，能渲染就保留模板，让框架稍后用同一份值覆盖。
         """
         prompts = getattr(request, "system_prompt", None) or []
         for p in prompts:
@@ -1593,6 +1682,12 @@ class DecisionEngine:
                 continue
             except Exception:
                 pass
+            if _fill_late_template_kwargs(p):
+                try:
+                    p.to_string()
+                    continue
+                except Exception:
+                    pass
             try:
                 content = str(getattr(p, "content", "") or "")
                 for key, value in _TEMPLATE_FALLBACK.items():
@@ -2562,6 +2657,214 @@ class DecisionEngine:
                 return bot
         return None
 
+    # ------------------------------------------------- 回复快照的模型 / 渠道
+
+    @staticmethod
+    def _model_name_of(client) -> str:
+        """LLMModelClient -> 上游模型名（ModelInfo.model_name），取不到空串。"""
+        try:
+            name = str(getattr(getattr(client, "model", None), "model_name", "") or "").strip()
+        except Exception:
+            return ""
+        return name[:80]
+
+    @staticmethod
+    def _provider_name_of(client) -> str:
+        """LLMModelClient -> 这个模型属于哪个 API 渠道（ModelInfo.provider_name）。
+
+        用户 m00375 第 8 条：回复记录里的「渠道」以前记的是 IM 平台（QQ / webchat），
+        用户要的是 API 渠道，也就是框架里那个供应商实例的名字。
+        """
+        try:
+            name = str(getattr(getattr(client, "model", None), "provider_name", "") or "").strip()
+        except Exception:
+            return ""
+        return name[:60]
+
+    def _reply_provider_name(self, event=None) -> str:
+        """这一轮回复用的模型属于哪个 API 渠道（用户 m00375 第 8 条）。
+
+        跟 _reply_model_name 走同一条路：先看 event.model_group 的第一个，再问
+        provider_mgr 要默认 LLM，最后退回 tracer 按模型名回配置里查。取不到空串。
+        """
+        try:
+            group = list(getattr(event, "model_group", None) or [])
+        except Exception:
+            group = []
+        for one in group:
+            name = self._provider_name_of(one)
+            if name:
+                return name
+        try:
+            mgr = getattr(self.ctx, "provider_mgr", None)
+            if mgr is not None:
+                name = self._provider_name_of(mgr.get_default_llm())
+                if name:
+                    return name
+        except Exception:
+            pass
+        try:
+            tracer = getattr(self.plugin, "tracer", None)
+            fn = getattr(tracer, "provider_label", None)
+            if callable(fn):
+                return str(fn("", self._reply_model_name(event)) or "").strip()[:60]
+        except Exception:
+            pass
+        return ""
+
+    def _reply_model_name(self, event=None) -> str:
+        """这一轮回复实际用的模型名（用户 2026-11-07）。
+
+        优先取框架这一轮真正拿去发请求的那个模型：event.model_group 的第一个
+        （agent_executor 就是拿它调 chat()，失败才往后换）。IM 事件通常不带
+        model_group，那就问 provider_mgr 要默认 LLM —— 框架的 BuildRequestStage
+        也是这么兜底的，拿到的是同一个客户端。都取不到再退回 tracer 读配置里的
+        默认模型（按 mtime 缓存，不额外读盘）。全程不发请求、不读大文件，
+        任何异常都返回空串。
+        """
+        try:
+            group = list(getattr(event, "model_group", None) or [])
+        except Exception:
+            group = []
+        for one in group:
+            name = self._model_name_of(one)
+            if name:
+                return name
+        try:
+            mgr = getattr(self.ctx, "provider_mgr", None)
+            if mgr is not None:
+                name = self._model_name_of(mgr.get_default_llm())
+                if name:
+                    return name
+        except Exception:
+            pass
+        try:
+            tracer = getattr(self.plugin, "tracer", None)
+            fn = getattr(tracer, "default_model_name", None)
+            if callable(fn):
+                return str(fn() or "").strip()[:80]
+        except Exception:
+            pass
+        return ""
+
+    def _reply_channel_name(self, sid: str = "") -> str:
+        """这一轮回复走的是哪个渠道（用户 2026-11-07）。
+
+        框架的原始 sid 是 `{机器人名}:{gm|dm}:{对方 id}`，适配器的 info.name 就是
+        那个机器人名，按它认最准；认不出来（会话还没见过、名字被改过）就退回
+        第一个适配器。返回平台名（"QQ"），平台空才用适配器显示名；适配器管理器
+        拿不到（离线/测试）再退回框架配置里第一个启用的适配器。都取不到空串。
+        """
+        want = ""
+        try:
+            raw = str(self._raw_sids.get(sid) or "")
+        except Exception:
+            raw = ""
+        parts = raw.split(":")
+        if len(parts) >= 3 and parts[-2] in ("gm", "dm"):
+            want = parts[0].strip()
+        info = None
+        try:
+            mgr = getattr(self.ctx, "adapter_mgr", None)
+            ads = mgr.get_adapters() if mgr is not None else None
+        except Exception:
+            ads = None
+        items = list(ads.values()) if isinstance(ads, dict) else list(ads or [])
+        if want:
+            for one in items:
+                if str(getattr(getattr(one, "info", None), "name", "") or "").strip() == want:
+                    info = getattr(one, "info", None)
+                    break
+        if info is None and items:
+            info = getattr(items[0], "info", None)
+        if info is not None:
+            platform = str(getattr(info, "platform", "") or "").strip()
+            if platform:
+                return platform[:40]
+            name = str(getattr(info, "name", "") or "").strip()
+            if name:
+                return name[:40]
+        try:
+            conf = (self.ctx.config.get("adapters", {}) or {}) if self.ctx is not None else {}
+            for _aid, ent in conf.items():
+                if isinstance(ent, dict) and ent.get("enabled") is not False:
+                    val = str(ent.get("platform") or ent.get("name") or "").strip()
+                    if val:
+                        return val[:40]
+        except Exception:
+            pass
+        return ""
+
+    def _note_reply_meta(self, sid: str, eid: str, event=None) -> None:
+        """请求这一刻就把模型/渠道记下来（结算时 event 可能已经拿不到了）。"""
+        if not eid:
+            return
+        try:
+            self._round_reply_meta[(sid, str(eid))] = {
+                "ts": time.time(),
+                "reply_model": self._reply_model_name(event),
+                "reply_provider": self._reply_provider_name(event),
+                "reply_channel": self._reply_channel_name(sid),
+            }
+        except Exception:
+            logger.debug("[multi-decision] 记回复模型/渠道失败（已忽略）", exc_info=True)
+
+    def _reply_meta_of(self, sid: str, eid: str, event=None) -> dict:
+        """这一轮回复的模型与渠道：请求时记过就用记下的，没记过现取一份。
+
+        返回的 dict 直接展开进 flush 的 extra —— 键名就是前端读的
+        reply_model / reply_channel，取不到一律空串（老快照没有这两个键，
+        前端按「—」显示，后端不做迁移）。
+        """
+        key = (sid, str(eid or ""))
+        meta = self._round_reply_meta.get(key) if eid else None
+        model = str((meta or {}).get("reply_model") or "")
+        provider = str((meta or {}).get("reply_provider") or "")
+        channel = str((meta or {}).get("reply_channel") or "")
+        if not model:
+            model = self._reply_model_name(event)
+        if not provider:
+            provider = self._reply_provider_name(event)
+        if not channel:
+            channel = self._reply_channel_name(sid)
+        if eid and (meta is None or not meta.get("reply_model") or not meta.get("reply_channel")):
+            self._round_reply_meta[key] = {
+                "ts": time.time(),
+                "reply_model": model,
+                "reply_provider": provider,
+                "reply_channel": channel,
+            }
+        return {"reply_model": model, "reply_provider": provider, "reply_channel": channel}
+
+    def _reply_text_of(self, final_result, limit: int = 160) -> str:
+        """这一轮真正发出去的回复正文（v4.85，用户 m10425 第 8 条）。
+
+        框架只交原始 XML 过来（<msg> 里套 <text>正文</text>），正文要自己从标签里
+        抽。多条气泡用「 / 」连；只发了图、视频这类没写字的记「[图片]」；太长截断。
+        抽不出来就空串——前端按「—」显示，不当成「回了空消息」。
+        """
+        parts = []
+        try:
+            for step in getattr(final_result, "step_results", None) or []:
+                sent = [r for r in (getattr(step, "message_results", None) or [])
+                        if getattr(r, "ok", False) and not getattr(r, "is_notice", False)]
+                if not sent:
+                    continue
+                raw = str(getattr(step, "raw_output", "") or "")
+                for inner in _OUT_MSG_RE.findall(raw):
+                    texts = [t.strip() for t in _OUT_TEXT_RE.findall(inner) if t.strip()]
+                    txt = " ".join(texts)
+                    if not txt and _OUT_MEDIA_RE.search(inner):
+                        txt = "[图片]"
+                    if txt:
+                        parts.append(txt)
+        except Exception:
+            logger.debug("[multi-decision] 抽回复正文失败（已忽略）", exc_info=True)
+        text = _html_unescape(" / ".join(parts)).strip()
+        if len(text) > limit:
+            text = text[:limit].rstrip() + "…"
+        return text
+
     async def _hydrate_forwards(self, message, *, raw_sid=None) -> int:
         """把空壳转发补成真内容（框架 im.py 把 message_id 当成 res_id 传给 get_forward_msg，
         取不到就 Forward(chains=[])）。必须在 _admit_message 取正文之前做。"""
@@ -2776,6 +3079,11 @@ class DecisionEngine:
         epoch = flow.epoch
         sender = sender_id_of(message)
         self._last_events[sid] = event
+        # 用户 m01875 第 4 条：这一条消息的发言时刻，下面每条日志都带上它。
+        msg_ts = self._msg_ts_of(message, now)
+
+        def _log_msg(result):
+            self._write_log(sid, result, msg_ts=msg_ts)
         self._stash_trigger(sid, event)
         flow.ready.append(event)
         flow.admitting = (event, now)
@@ -2855,7 +3163,7 @@ class DecisionEngine:
         media = media_kind(message)
         if not (must or direct or media) and self._phrase_hit(text, sid):
             self._mark(sid, pend, "short")
-            self._write_log(sid, "phrase_skip")
+            _log_msg("phrase_skip")
             return
 
         # 只有未被短语过滤的消息，才撤掉上一轮「静默 / 休兜已冒泡」标记。
@@ -2870,19 +3178,19 @@ class DecisionEngine:
             # 就拦掉了，所以静音照样生效，不用在这再判一次。
             if self._quota_blocked(st, now):
                 self._mark(sid, pend, "quota")
-                self._write_log(sid, "quota_skip")
+                _log_msg("quota_skip")
                 return
             self._mark(sid, pend, "direct")
-            self._write_log(sid, "direct")
-            self._trigger(sid, must, st)
+            _log_msg("direct")
+            self._trigger(sid, must, st, msg_ts=msg_ts)
             return
 
         if direct:
             st.last_sender_id = sender
             st.last_msg_ts = now
             self._mark(sid, pend, "direct")
-            self._write_log(sid, "direct")
-            self._trigger(sid, "wake", st)
+            _log_msg("direct")
+            self._trigger(sid, "wake", st, msg_ts=msg_ts)
             return
 
         # 休息时段：这段时间只按「休息回复概率」掷骰——不看曲线、不走动态调整、
@@ -2893,15 +3201,15 @@ class DecisionEngine:
             probability = self._rest_probability(sid)
             if random.uniform(0, 100) >= probability:
                 self._mark(sid, pend, "rest")
-                self._write_log(sid, "rest_skip")
+                _log_msg("rest_skip")
                 return
             # 掷中了就按这个概率直接回一条，不进计数（休息时段的条数不攒）
             if self._quota_blocked(st, now):
                 self._mark(sid, pend, "quota")
-                self._write_log(sid, "quota_skip")
+                _log_msg("quota_skip")
                 return
             self._mark(sid, pend, "counted")
-            self._trigger(sid, "rest", st, prob=float(probability))
+            self._trigger(sid, "rest", st, prob=float(probability), msg_ts=msg_ts)
             return
 
         # 概率模式对每条未过滤消息独立掷骰，仍不合并同一人的连发。
@@ -2919,7 +3227,7 @@ class DecisionEngine:
         ):
             st.last_msg_ts = now
             self._mark(sid, pend, "burst")
-            self._write_log(sid, "burst_merged")
+            _log_msg("burst_merged")
             return
         st.last_sender_id = sender
         st.last_msg_ts = now
@@ -2931,15 +3239,16 @@ class DecisionEngine:
         st.hour_messages += 1
 
         # 退避
-        # v3.52（用户 m08226 第 6 条）：退避只有开了进阶模式才生效
+        # v3.52（用户 m08226 第 6 条）：退避只有开了「某种」决策才生效。
+        # 用户 m06706：JEV 决策也是进阶模式的一种，两种都开（或只开 JEV）都算数。
         if (
-            self._c("advanced_enabled", sid)
+            self._decision_mode(sid) != "off"
             and self._c("backoff_enabled", sid)
             and st.backoff_until > now
         ):
             if st.counter < self._c("backoff_bypass_count", sid):
                 self._mark(sid, pend, "backoff")
-                self._write_log(sid, "backoff_skip")
+                _log_msg("backoff_skip")
                 return
             logger.info(
                 f"[multi-decision] {sid} 积压 {st.counter} 条，达到绕过阈值，忽略退避"
@@ -2950,18 +3259,18 @@ class DecisionEngine:
         hit, reason, prob = self._judge(st)
         if not hit:
             self._mark(sid, pend, "counted")
-            self._write_log(sid, "counting")
+            _log_msg("counting")
             return
 
         # 配额：本小时说得够多了就先忍住。计数不清零，配额一恢复立刻触发。
         if self._quota_blocked(st, now):
             self._mark(sid, pend, "quota")
-            self._write_log(sid, "quota_skip")
+            _log_msg("quota_skip")
             return
 
         self._mark(sid, pend, "counted")
-        self._write_log(sid, "counting")
-        self._trigger(sid, reason, st, prob=prob)
+        _log_msg("counting")
+        self._trigger(sid, reason, st, prob=prob, msg_ts=msg_ts)
 
     async def _cache_media(self, message, sid: str) -> list:
         """把这条消息里的图片/表情存一份到本地，页面才能显示出来（用户 m28965）。
@@ -3233,7 +3542,7 @@ class DecisionEngine:
             st.busy_since = 0.0
             # 异常路径不会有 final，不在这里落盘的话这一轮在「最近请求」里查无此行，
             # 看起来就像「那次错误没被算进去」（用户 2026-10-24 图7）
-            self._flush_error_round(sid, eid, text)
+            self._flush_error_round(sid, eid, text, event)
             # 异常这一轮不会有 final，round_end 得在这里补：不然「最近 24 小时」
             # 只剩成功轮的结算，成功率永远是 100%（用户 2026-10-24 第 2 条）。
             self._log_failed_round(sid, eid, st, text)
@@ -3246,7 +3555,7 @@ class DecisionEngine:
         except Exception:
             logger.exception("[multi-decision] 异常钩子处理失败（已吞掉）")
 
-    def _flush_error_round(self, sid: str, eid: str, reason: str) -> None:
+    def _flush_error_round(self, sid: str, eid: str, reason: str, event=None) -> None:
         """出错这一轮立刻落一条失败记录（保留 failed/outcome 标记）。
 
         请求一旦抛异常，框架不会再给这一轮 final，stage() 写下的快照就永远停在内存里；
@@ -3271,6 +3580,7 @@ class DecisionEngine:
                     "outcome": "failed",
                     "error": str(reason or "请求失败")[:200],
                     "error_flush": 1,
+                    **self._reply_meta_of(sid, eid, event),
                 },
             )
         except Exception:
@@ -3476,8 +3786,11 @@ class DecisionEngine:
         outcome = "failed" if failed else "replied" if replied else "no_reply"
         if self.request_log is not None:
             try:
-                self.request_log.flush(sid, replied=replied, reply_bubbles=bubble_count,
-                                       event_id=eid, extra={"failed": failed, "outcome": outcome, "error": error})
+                self.request_log.flush(
+                    sid, replied=replied, reply_bubbles=bubble_count, event_id=eid,
+                    extra={"failed": failed, "outcome": outcome, "error": error,
+                           "reply_text": self._reply_text_of(final_result),
+                           **self._reply_meta_of(sid, eid, event)})
             except Exception:
                 logger.exception("[multi-decision] 落盘请求记录失败")
         if tracked:
@@ -3535,9 +3848,10 @@ class DecisionEngine:
             # 失败轮不是「模型决定不回」，不该累加未回复退避
             st.reject_streak += 1
             start_rejects = self._c("backoff_start_rejects", sid)
-            # v3.52（用户 m08226 第 6 条）：没开进阶模式就不武装退避
+            # v3.52（用户 m08226 第 6 条）：没开进阶模式就不武装退避。
+            # 用户 m06706：JEV 决策一样算进阶模式。
             if (
-                self._c("advanced_enabled", sid)
+                self._decision_mode(sid) != "off"
                 and self._c("backoff_enabled", sid)
                 and st.reject_streak >= start_rejects
             ):
@@ -4287,8 +4601,12 @@ class DecisionEngine:
         用户 m27528 第 1 条：休息时段不触发决策，fold_pending 只在决策收尾时跑
         （现由 gate 在提交注记前统一折叠），窗口裁到 keep 之后 maybe_trim 在
         _trim_gate 里因为「counted_before <= keep」直接返回，于是待发一路堆到
-        天亮，下一轮请求一口气带上八十多条。这里补一条：待发够「阈值 + 缓冲」
-        就并进来，再交给 maybe_trim 按 keep 压回去。
+        天亮，下一轮请求一口气带上八十多条。这里补一条：窗口内 user 加上待发够
+        「阈值 + 缓冲」就并进来，再交给 maybe_trim 按 keep 压回去。
+
+        v4.72（用户 m02280）：原来这里只数待发。窗口正好停在保留条数时，窗口里
+        那十几条 user 算不进合计，「合计 76 条 user」会卡在「待发 62 < 70」的夹缝
+        里，得再攒 8 条才动；现在口径跟 _trim_gate 统一成「窗口内 user + 待发」。
         """
         plugin = self.plugin
         if plugin.window is None:
@@ -4301,12 +4619,15 @@ class DecisionEngine:
             buffer_extra = max(0, int(plugin.eff("window_buffer", sid) or 0))
             cur = int(plugin.window.size(sid) or 0)
             pend = int(plugin.window.pending_counted(sid) or 0)
+            win_user = int(plugin.window.counted_user(sid) or 0)
         except Exception:
             return 0
         # 窗口还有余量就先让 maybe_trim 自己裁，别多此一举
         if cur > keep:
             return 0
-        if pend < threshold + buffer_extra:
+        # v4.72（用户 m02280）：触发线按「窗口内 user + 待发」算，跟 _trim_gate 同一个
+        # 口径。只数待发的话，窗口钉在 keep（里面还躺着十几条 user）时合计再高也不算数。
+        if win_user + pend < threshold + buffer_extra:
             return 0
         try:
             return int(plugin.window.fold_pending(sid) or 0)
@@ -4316,7 +4637,8 @@ class DecisionEngine:
 
     # ------------------------------------------------------------------ 触发链
 
-    def _trigger(self, sid: str, reason: str, st: SessionState, prob: float = 0.0) -> None:
+    def _trigger(self, sid: str, reason: str, st: SessionState, prob: float = 0.0,
+                 msg_ts: Optional[int] = None) -> None:
         plugin = self.plugin
         if self._c("session_enabled", sid) is False:
             self._drop_pending_round(st)
@@ -4387,6 +4709,7 @@ class DecisionEngine:
         self._write_log(
             sid, "trigger",
             extra={"reason": reason, "message_logged": True},
+            msg_ts=msg_ts,
         )
 
     async def _debounce_loop(self, sid: str) -> None:
@@ -4982,7 +5305,9 @@ class DecisionEngine:
                     st.last_error_at = time.time()
                     await self._settle_input(sid, epoch=epoch)
                     return
-            if not retry and self._c("advanced_enabled", sid):
+            # 用户 m06706：闸门认「有效模式」——普通决策与 JEV 都从这里进，
+            # 只开 JEV 时老口径（只看 advanced_enabled）会把它挡在门外。
+            if not retry and self._decision_mode(sid) != "off":
                 try:
                     if await self._decision_gate(sid, st):
                         await self._settle_input(sid, epoch=epoch, trim=False)
@@ -5107,14 +5432,40 @@ class DecisionEngine:
         # 也只算拿到一次开口的机会，还得让模型判一遍才真回。
         if reason not in ("count", "probability", "curve", "adaptive", "silent", "wake", "rest"):
             return False
-        phase = getattr(self.plugin, "decision_phase", None)
-        if phase is None:
-            return False
-        try:
-            opt = self.plugin.decision_options(sid)
-        except Exception:
-            logger.exception("[multi-decision] 取决策配置失败，按没装进阶模式继续")
-            return False
+        # 用户 m06706：决策模式与 JEV 决策互斥，运行入口只认一个「有效模式」——
+        # 手改配置写成双开时 decision_mode() 会收敛成 jev 并记警告，绝不两套都跑。
+        # 「要不要进这道闸」由调用方按同一个模式判（engine.py「if not retry and
+        # self._decision_mode(sid) != "off"」），这里只负责挑阶段：真调到这里说明
+        # 调用方已经放行，模式再是 off 就按老口径（普通决策）跑，不再二次拦截。
+        mode = self._decision_mode(sid)
+        if mode == "off":
+            mode = "llm"
+        normal_opt = None
+        if mode == "jev":
+            phase = getattr(self.plugin, "jev_phase", None)
+            if phase is None:
+                return False
+            try:
+                opt = self.plugin.jev_options(sid)
+            except Exception:
+                logger.exception("[multi-decision] 取 JEV 配置失败，按没装进阶模式继续")
+                return False
+            # 用户 m06706：万一命中不确定区间且设置为「交给决策模型」，转交那一步
+            # 要用的普通决策配置在这里先取好——但绝不因为取失败就变成「按不确定设置」。
+            try:
+                normal_opt = self.plugin.decision_options(sid)
+            except Exception:
+                logger.exception("[multi-decision] 取普通决策配置失败（JEV 转交会记为失败）")
+                normal_opt = None
+        else:
+            phase = getattr(self.plugin, "decision_phase", None)
+            if phase is None:
+                return False
+            try:
+                opt = self.plugin.decision_options(sid)
+            except Exception:
+                logger.exception("[multi-decision] 取决策配置失败，按没装进阶模式继续")
+                return False
         # v3.95（用户 m09171）：决策接管的是「这一轮要不要开口」，读的必须是这一轮
         # 真正的那批消息——包括还挂在待发里、框架记忆里还没有的那些。只读窗口本体
         # 时窗口一空就判出「没人说话」。
@@ -5142,14 +5493,26 @@ class DecisionEngine:
         # v4.39（用户 m20816）：决策也要能看图。v4.40（用户 m21305）：不再自己
         # 定张数——跟回复那条同一个口径，窗口里留几张原图（history_images，
         # 默认 128）就带几张；开关关掉才退回纯文字。
+        # 用户 m06706：JEV 那条链不带图——decision 类模型只有 choice()，没有图片入参；
+        # 文本里的图片占位照留，但绝不声称「看到原图」。
         dec_imgs = []
         try:
-            if self._c("decision_see_images", sid) is not False:
+            # v4.85（用户 m10425 第 6 条）：JEV 那条链自己只看文字（decision 类模型
+            # 只有 choice()），这个开关管的是「不确定 → 交给决策模型」那一次转交——
+            # dec_imgs 会原样传给普通决策，所以按 mode 换一个键读。
+            _img_key = "jev_see_images" if mode == "jev" else "decision_see_images"
+            if self._c(_img_key, sid) is not False:
                 dec_imgs = self.window.decision_images(sid, messages=msgs)
         except Exception:
             logger.exception("[multi-decision] 决策取图失败（这一轮按纯文字判）")
             dec_imgs = []
-        got = await phase.decide(sid, msgs, opt, images=dec_imgs)
+        if mode == "jev":
+            # 转交用的普通决策配置由上面预先取好；allow_transfer 只在「不确定 + 设置里选
+            # 交给决策模型」时才真的会用到，其余分支根本不调它。
+            got = await phase.decide(
+                sid, msgs, opt, normal_opt=normal_opt, images=dec_imgs, allow_transfer=True)
+        else:
+            got = await phase.decide(sid, msgs, opt, images=dec_imgs)
         if self._closed or (epoch is not None and
                 (flow.epoch != epoch or flow.phase != "active")):
             return True  # A timed-out/cancelled decision may not mutate a later window.
@@ -5204,6 +5567,14 @@ class DecisionEngine:
             # v3.98（用户 m10169 图6）：触发时掷到多大点概率（_trigger 记在
             # st.last_trigger_prob 上，计数模式恒 0）。
             "trigger_probability": float(getattr(st, "last_trigger_prob", 0.0) or 0.0),
+            # 用户 m06706：这次判定走的是哪条链（llm / jev）。记录上不加徽标，
+            # 但得能查——判失败时第一件事就是确认它到底调的是哪套。
+            "decision_mode": mode,
+            # JEV 的结构化概率、边界与动作。改区间不回写旧记录：旧记录里没有这些键，
+            # 页面按旧格式显示即可，绝不拿今天的区间去解释昨天的判定。
+            "jev": copy.deepcopy(got.get("jev") or {}),
+            # 转交普通决策那一次的两阶段账（只在「不确定 + 交给决策模型」时非空）。
+            "jev_transfer": copy.deepcopy(got.get("jev_transfer") or {}),
         }
         # v4.12（用户 m18246/m18275）：决策快照的 ②③ 跟回复快照走同一套投影。
         # 以前 display_messages 直接存原始窗口消息（纯文本、没有 media），转发消息
@@ -5251,6 +5622,7 @@ class DecisionEngine:
             "error": str(rec["error"])[:160],
             "model": str(rec["model"]),
             "elapsed": float(rec["elapsed"]),
+            "mode": str(rec.get("decision_mode") or ""),
         }
         # 必须先成功折叠（新增 0 条也算成功），再提交注记或放行回复。
         try:
@@ -5439,7 +5811,8 @@ class DecisionEngine:
             self.request_log.flush(
                 sid, replied=False, event_id=eid,
                 extra={"failed": True, "outcome": "failed",
-                       "error": st.last_error or "请求失败", "watchdog_released": 1})
+                       "error": st.last_error or "请求失败", "watchdog_released": 1,
+                       **self._reply_meta_of(sid, eid)})
         except Exception:
             logger.exception("[multi-decision] 看门狗落盘失败记录异常（已吞掉）")
 
@@ -5499,21 +5872,48 @@ class DecisionEngine:
         except Exception:
             logger.exception("[multi-decision] 补写失败轮 round_end 失败（已吞掉）")
 
-    def _write_log(self, sid, result, extra: Optional[dict] = None) -> None:
+    @staticmethod
+    def _msg_ts_of(message, now: float = 0.0) -> int:
+        """用户真正发出这条消息的时刻（秒）。
+
+        用户 m01875 第 4 条：消息日志要留下发言时间，精确到秒。平台消息自带
+        timestamp（各适配器都是 epoch 秒），有就用它；没有才退回收到它的时刻。
+        个别适配器给的是毫秒，这里顺手归一。
+        """
+        try:
+            ts = int(getattr(message, "timestamp", 0) or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        if ts > 100000000000:      # 毫秒（1e11 秒 ≈ 5138 年，正常时间戳不会这么大）
+            ts //= 1000
+        if ts > 0:
+            return ts
+        try:
+            return int(now or time.time())
+        except (TypeError, ValueError):
+            return int(time.time())
+
+    def _write_log(self, sid, result, extra: Optional[dict] = None,
+                   msg_ts: Optional[int] = None) -> None:
         """消息日志：只记统计要用的字段，正文不落盘（用户 m19238）。
 
         一行 = 一次事件：收下一条消息（counting / 各种 skip）、一次触发
         （trigger）、一轮结算（round_end）。落盘的键只有 ts / sid / result
         和 extra 里那几个（reason / event_id / replied / failed / is_retry /
-        message_logged）——state/decision_log.py 的统计、时段曲线与日志页
-        只用这些。正文、发送者、媒体类型、计数、错误文本 v3.65 起不再写
-        （日志页本来也不展示，删了省一半体积）。
+        message_logged），外加 msg_ts——用户真正发出这条消息的时刻（秒，
+        用户 m01875 第 4 条）——state/decision_log.py 的统计、时段曲线与
+        日志页只用这些。正文、发送者、媒体类型、计数、错误文本 v3.65 起
+        不再写（日志页本来也不展示，删了省一半体积）。
         """
         # 每次落日志都是状态刚刚变化过的时刻，顺手落一次盘（内部有节流）
         self._persist_soon()
         if self.log is None:
             return
         record = {"ts": time.time(), "sid": sid, "result": result}
+        if msg_ts:
+            # 用户 m01875 第 4 条：留下「用户真正发出这条消息的时刻」（秒）。
+            # ts 是写日志的时刻——消息被延后重放时会晚几秒，对不上发言时间。
+            record["msg_ts"] = int(msg_ts)
         if extra:
             record.update(extra)
         self.log.write(record)

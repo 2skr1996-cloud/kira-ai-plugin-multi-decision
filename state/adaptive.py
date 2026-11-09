@@ -163,6 +163,113 @@ class AdaptiveStats:
                 continue
         return removed
 
+    # ------------------------------------------------------------------ 清理
+
+    def _loaded_sid_for(self, stem: str) -> str:
+        for sid in list(self._data):
+            if _safe_sid(sid) == stem:
+                return sid
+        return ""
+
+    def clear_before(self, cutoff: float) -> int:
+        """删掉早于 cutoff 的按天统计和用量账行，返回删掉的条数。
+
+        只动 stats/ 下的 *.json 和 *.jsonl，不碰 tokens.backfill。
+        日键按当天 23:59:59 算，整天的数据都早于 cutoff 才删。
+        """
+        if not cutoff:
+            return self.clear_all()
+        self.flush()
+        removed = 0
+        for path in list(self.dir.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(raw, dict):
+                continue
+            keep = {}
+            for day, val in raw.items():
+                try:
+                    day_ts = time.mktime(time.strptime(str(day), "%Y-%m-%d")) + 86400
+                except Exception:
+                    day_ts = 0
+                if day_ts and day_ts <= cutoff:
+                    removed += 1
+                else:
+                    keep[day] = val
+            sid = self._loaded_sid_for(path.stem)
+            try:
+                if not keep:
+                    path.unlink()
+                    if sid:
+                        self._data.pop(sid, None)
+                        self._dirty.discard(sid)
+                elif len(keep) != len(raw):
+                    tmp = path.with_suffix(".json.tmp")
+                    tmp.write_text(json.dumps(keep, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+                    os.replace(tmp, path)
+                    if sid:
+                        self._data[sid] = keep
+                        self._dirty.discard(sid)
+            except Exception:
+                continue
+        for path in list(self.dir.glob("*.jsonl")):
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            except Exception:
+                continue
+            keep_lines = []
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                    ts = float(rec.get("ts") or 0) if isinstance(rec, dict) else 0
+                except Exception:
+                    ts = 0
+                if ts and ts < cutoff:
+                    removed += 1
+                else:
+                    keep_lines.append(line if line.endswith("\n") else line + "\n")
+            try:
+                if not keep_lines:
+                    path.unlink()
+                elif len(keep_lines) != len(lines):
+                    tmp = path.with_suffix(".jsonl.tmp")
+                    tmp.write_text("".join(keep_lines), encoding="utf-8")
+                    os.replace(tmp, path)
+            except Exception:
+                continue
+        return removed
+
+    def clear_all(self) -> int:
+        """清空 stats/ 下的按天统计和用量账，返回删掉的条数。"""
+        removed = 0
+        for path in list(self.dir.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    removed += len(raw)
+            except Exception:
+                pass
+            try:
+                path.unlink()
+            except Exception:
+                continue
+        for path in list(self.dir.glob("*.jsonl")):
+            try:
+                removed += sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+            except Exception:
+                pass
+            try:
+                path.unlink()
+            except Exception:
+                continue
+        self._data.clear()
+        self._dirty.clear()
+        return removed
+
     # ------------------------------------------------------------------ 记录
 
     def record_message(self, sid: str, ts: float = None) -> None:

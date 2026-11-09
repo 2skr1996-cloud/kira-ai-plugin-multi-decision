@@ -16,12 +16,22 @@ engine._forward_text 就会照框架的格式吐出完整的 "[Forward …]"，�
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 
 from core.logging_manager import get_logger
 
 logger = get_logger("multi_decision", "orange")
+
+
+def _norm_sid(sid: str) -> str:
+    """只留 gm/dm + 对方 id，兼容带机器人名前缀的旧 raw_sid。"""
+    text = str(sid or "").strip()
+    parts = text.split(":")
+    if len(parts) >= 3 and parts[-2] in ("gm", "dm") and parts[-1]:
+        return parts[-2] + ":" + parts[-1]
+    return text
 
 # 同一条转发常常被读两次（进待发一次、结算时再一次），按 res_id 记一份就行。
 _CACHE: dict = {}
@@ -131,6 +141,19 @@ _MEDIA_DB_LOADED = False
 _MEDIA_DB_LOAD_FAILED = False
 _MEDIA_DB_BACKED_UP = False
 _MEDIA_DB_MAX = 300
+# v4.54（用户 m18227）：转发配图索引以前只记 mid -> refs，没有会话归属，没法按
+# 「每个群 / 私聊各自的上限」裁。这里再落一份 mid -> raw_sid 的旁挂表：
+# 老索引没有这条记录，统一归到空 sid（仍受一份上限约束），不猜它属于哪个群。
+_MEDIA_SIDS: dict = {}
+_MEDIA_SIDS_LOADED = False
+_MEDIA_HARD_MAX = 5000
+# 由插件注入：返回某个会话该留多少条（0 / 非法值 = 不限）。没注入时保持老行为。
+_MEDIA_KEEP_FN = None
+# v4.55（用户 m19940）：转发配图索引也按保留天数清理。老索引没有时间戳，首次读到
+# 时按当前时间补一份，给已有记录留一个完整周期，不立刻删老数据。
+_MEDIA_KEEP_DAYS_FN = None
+_MEDIA_SEEN = {}
+_MEDIA_SEEN_LOADED = False
 
 
 def _media_cache_dir():
@@ -153,6 +176,311 @@ def _media_db_path():
         return folder.parent / "forward_media.json"
     except Exception:
         return None
+
+
+def _media_sids_path():
+    folder = _media_cache_dir()
+    if folder is None:
+        return None
+    try:
+        return folder.parent / "forward_media_sids.json"
+    except Exception:
+        return None
+
+
+def _media_seen_path():
+    folder = _media_cache_dir()
+    if folder is None:
+        return None
+    try:
+        return folder.parent / "forward_media_seen.json"
+    except Exception:
+        return None
+
+
+def _media_sids() -> dict:
+    global _MEDIA_SIDS, _MEDIA_SIDS_LOADED
+    if _MEDIA_SIDS_LOADED:
+        return _MEDIA_SIDS
+    path = _media_sids_path()
+    if path is None or not path.is_file():
+        _MEDIA_SIDS_LOADED = True
+        return _MEDIA_SIDS
+    try:
+        import json
+        blob = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        # 旁挂表坏了就当没有：统计和裁剪都按空 sid 处理，索引本身仍可读。
+        _MEDIA_SIDS_LOADED = True
+        return _MEDIA_SIDS
+    if isinstance(blob, dict):
+        _MEDIA_SIDS = {str(k): str(v) for k, v in blob.items()
+                       if isinstance(v, str) and len(v) <= 512}
+    _MEDIA_SIDS_LOADED = True
+    return _MEDIA_SIDS
+
+
+def _media_sids_save() -> None:
+    path = _media_sids_path()
+    if path is None:
+        return
+    import json
+    import os
+    import uuid
+    tmp = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex[:8])
+        blob = json.dumps(_media_sids(), ensure_ascii=False).encode("utf-8")
+        with open(tmp, "xb") as fp:
+            fp.write(blob)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(tmp, path)
+        tmp = None
+    except Exception as exc:
+        logger.info("[multi-decision] 转发配图会话索引没写成 %s: %s",
+                    type(exc).__name__, exc)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _media_seen() -> dict:
+    """转发配图索引每条的写入时间（epoch 秒），给按天清理用。"""
+    global _MEDIA_SEEN, _MEDIA_SEEN_LOADED
+    if _MEDIA_SEEN_LOADED:
+        return _MEDIA_SEEN
+    path = _media_seen_path()
+    if path is None or not path.is_file():
+        _MEDIA_SEEN_LOADED = True
+        return _MEDIA_SEEN
+    try:
+        import json
+        blob = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        _MEDIA_SEEN_LOADED = True
+        return _MEDIA_SEEN
+    if isinstance(blob, dict):
+        for key, value in blob.items():
+            try:
+                _MEDIA_SEEN[str(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+    _MEDIA_SEEN_LOADED = True
+    return _MEDIA_SEEN
+
+
+def _media_seen_save() -> None:
+    path = _media_seen_path()
+    if path is None:
+        return
+    import json
+    import os
+    import uuid
+    tmp = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex[:8])
+        blob = json.dumps(_media_seen(), ensure_ascii=False).encode("utf-8")
+        with open(tmp, "xb") as fp:
+            fp.write(blob)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(tmp, path)
+        tmp = None
+    except Exception as exc:
+        logger.info("[multi-decision] 转发配图时间索引没写成 %s: %s",
+                    type(exc).__name__, exc)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _media_db_pop(mid, sids=None) -> None:
+    _MEDIA_DB.pop(mid, None)
+    (sids if sids is not None else _media_sids()).pop(mid, None)
+    _media_seen().pop(mid, None)
+
+
+def _media_db_trim() -> None:
+    """按会话裁转发配图索引。
+
+    没注入 limit_fn 时保持老行为（全局 300 条）；注入后按每个 sid 各自的上限裁，
+    只留最新插入的那几条，旧条目连同 sid 一起丢。
+    v4.55（用户 m19940）：再按每个会话的保留天数先清一遍；老条目没有时间戳时
+    按当前时间补一份，给它们一个完整周期，不立刻删。
+    """
+    sids = _media_sids()
+    seen = _media_seen()
+    days_fn = _MEDIA_KEEP_DAYS_FN
+    if callable(days_fn):
+        now = time.time()
+        for mid in list(_MEDIA_DB.keys()):
+            sid = str(sids.get(mid) or "")
+            try:
+                days = int(days_fn(sid) or 0)
+            except Exception:
+                days = 0
+            if days <= 0:
+                continue
+            ts = seen.get(mid)
+            if not isinstance(ts, (int, float)):
+                seen[mid] = now
+                continue
+            if now - float(ts) > days * 86400:
+                _media_db_pop(mid, sids)
+    fn = _MEDIA_KEEP_FN
+    if not callable(fn):
+        while len(_MEDIA_DB) > _MEDIA_DB_MAX:
+            _media_db_pop(next(iter(_MEDIA_DB)), sids)
+        return
+    counts = {}
+    for mid in list(_MEDIA_DB.keys()):
+        sid = str(sids.get(mid) or "")
+        try:
+            limit = int(fn(sid) or 0)
+        except Exception:
+            limit = 0
+        if limit <= 0:
+            continue
+        counts[sid] = counts.get(sid, 0) + 1
+        if counts[sid] > limit:
+            _media_db_pop(mid, sids)
+    # 兜底：配置写坏 / 群特别多时别让进程内存无限长；正常不会碰到。
+    while len(_MEDIA_DB) > _MEDIA_HARD_MAX:
+        _media_db_pop(next(iter(_MEDIA_DB)), sids)
+
+
+def set_media_db_limit_fn(fn) -> None:
+    """插件注入「这个会话留多少条」的回调；传 None 恢复老的全局限额。"""
+    global _MEDIA_KEEP_FN
+    _MEDIA_KEEP_FN = fn
+
+
+def set_media_db_keep_days_fn(fn) -> None:
+    """插件注入「这个会话留多少天」的回调；传 None 不按天清理。"""
+    global _MEDIA_KEEP_DAYS_FN
+    _MEDIA_KEEP_DAYS_FN = fn
+
+
+def _legacy_media_owners() -> dict:
+    """旧转发配图没有 sid 旁挂表时，从原图凭证里反查归属。
+
+    早期版本的 forward_media.json 只记 message_id，没有 forward_media_sids.json。
+    原图凭证里同时有 outer_mid 和每条转发里的图片路径，可以补出大部分旧条目的
+    会话；仍补不出的保持空归属，统计时不硬塞给某个群。
+    """
+    owners = {}
+    try:
+        proofs = _display_proofs_read()
+    except Exception:
+        return owners
+    for proof in proofs.values():
+        if not isinstance(proof, dict):
+            continue
+        owner = _norm_sid(str(proof.get("raw_sid") or ""))
+        if not owner:
+            continue
+        mid = str(proof.get("outer_mid") or "").strip()
+        if mid:
+            owners.setdefault(mid, owner)
+        for node in (proof.get("nodes") or []):
+            if not isinstance(node, dict):
+                continue
+            for media in (node.get("media") or []):
+                if not isinstance(media, dict):
+                    continue
+                path = str(media.get("path") or "").strip()
+                if path:
+                    owners.setdefault(path, owner)
+    return owners
+
+
+def media_db_stats(sid: str = "") -> dict:
+    """转发配图索引的条数 / 图片数 / 磁盘占用，给缓存记录页用。
+
+    sid 非空时只算这个会话的条目（用户 m22090）；占用按这份子集序列化后的
+    字节数算，不把整份混写索引都记到它头上。
+    旧数据没有 sid 时先按原图凭证的 outer_mid / 图片路径反查；如果所有已知归属
+    都指向同一个会话，就把仍无归属的旧条目算给这个会话，多个会话时不猜。
+    """
+    import json
+    db = _media_db()
+    sids = _media_sids()
+    target = _norm_sid(str(sid or "").strip())
+    legacy = _legacy_media_owners() if target else {}
+    refs = 0
+    by_sid = {}
+    owners = {}
+    for mid, items in db.items():
+        n = len(items or [])
+        refs += n
+        owner = _norm_sid(str(sids.get(mid) or ""))
+        if not owner:
+            owner = legacy.get(str(mid)) or ""
+            if not owner:
+                for item in (items or []):
+                    if not isinstance(item, dict):
+                        continue
+                    path = str(item.get("path") or "").strip()
+                    owner = legacy.get(path) or ""
+                    if owner:
+                        break
+        owners[str(mid)] = owner
+        row = by_sid.setdefault(owner, {"count": 0, "refs": 0})
+        row["count"] += 1
+        row["refs"] += n
+    size = 0
+    for path in (_media_db_path(), _media_sids_path(), _media_seen_path()):
+        try:
+            if path is not None and path.is_file():
+                size += int(path.stat().st_size or 0)
+        except Exception:
+            pass
+    if target:
+        known = {owner for owner in owners.values() if owner}
+        only = next(iter(known)) if len(known) == 1 else ""
+        subset = {}
+        for mid, items in db.items():
+            owner = owners.get(str(mid)) or ""
+            if owner == target or (not owner and only == target):
+                subset[mid] = items
+        return {"count": len(subset),
+                "refs": sum(len(items or []) for items in subset.values()),
+                "bytes": len(json.dumps(subset, ensure_ascii=False).encode("utf-8")),
+                "sids": by_sid}
+    return {"count": len(db), "refs": refs, "bytes": size, "sids": by_sid}
+
+
+def media_db_clear(cutoff=None) -> int:
+    """清转发配图索引，返回删掉的消息条数（用户 m21482）。
+
+    cutoff 为 None 清全部；给了 cutoff 就只删写入时间早于它的条目。
+    没有时间戳的条目在按天清理时保留，不拿「不知道」当「太旧」。
+    """
+    db = _media_db()
+    seen = _media_seen()
+    sids = _media_sids()
+    removed = 0
+    for mid in list(db.keys()):
+        if cutoff is not None:
+            ts = seen.get(mid)
+            if not isinstance(ts, (int, float)):
+                continue
+            if float(ts) >= float(cutoff):
+                continue
+        _media_db_pop(mid, sids)
+        removed += 1
+    if removed:
+        _media_db_save()
+    return removed
 
 
 def _media_db() -> dict:
@@ -180,8 +508,17 @@ def _media_db() -> dict:
         return _MEDIA_DB
     _MEDIA_DB = {str(k): [x for x in v if isinstance(x, dict)]
                  for k, v in blob.items() if isinstance(v, list)}
+    # 旁挂表里可能残留已经不在索引里的 mid，读的时候顺手清掉，统计才对得上。
+    sids = _media_sids()
+    for mid in list(sids.keys()):
+        if mid not in _MEDIA_DB:
+            sids.pop(mid, None)
     _MEDIA_DB_LOADED = True
     _MEDIA_DB_LOAD_FAILED = False
+    _media_db_trim()
+    # 首次读到老索引时补的时间戳 / 按天数删掉的旧条目都要落盘，
+    # 否则下次重启又会把同一批老条目读回来。
+    _media_db_save()
     return _MEDIA_DB
 
 
@@ -218,8 +555,7 @@ def _media_db_save() -> None:
     tmp = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        while len(_MEDIA_DB) > _MEDIA_DB_MAX:
-            _MEDIA_DB.pop(next(iter(_MEDIA_DB)))
+        _media_db_trim()
         if _MEDIA_DB_LOAD_FAILED and path.is_file():
             if not _media_db_backup_broken(path):
                 return
@@ -232,6 +568,7 @@ def _media_db_save() -> None:
         os.replace(tmp, path)
         tmp = None
         _MEDIA_DB_LOAD_FAILED = False
+        _media_seen_save()
     except Exception as exc:
         logger.info("[multi-decision] 转发配图索引没写成 %s: %s", type(exc).__name__, exc)
     finally:
@@ -266,14 +603,68 @@ def _mime_of(ext: str) -> str:
     return {".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "image/jpeg")
 
 
+def _save_local_image(u: str, folder) -> dict:
+    """转发图只有本地路径（file:// 或裸路径）时，直接复制进缓存。
+
+    以前这里直接返回 {}，图就静默丢了：35 个 [图片] 只存下 9 张、日志里一条
+    失败都没有，就是这条分支吃掉的。读不到才记一条日志。
+    """
+    import hashlib
+    from pathlib import Path
+    from urllib.parse import unquote
+
+    raw = u[7:] if u.startswith("file://") else u
+    try:
+        raw = unquote(raw)
+    except Exception:
+        pass
+    if not raw:
+        logger.info("[multi-decision] 转发配图没有可用地址，跳过")
+        return {}
+    src = Path(raw)
+    if not src.is_absolute():
+        try:
+            from core.utils.path_utils import get_data_path
+            src = Path(str(get_data_path())) / raw
+        except Exception:
+            pass
+    try:
+        if not src.is_file():
+            logger.info("[multi-decision] 转发配图本地路径读不到，跳过 %s", raw[:80])
+            return {}
+        size = src.stat().st_size
+        if size <= 0 or size > _IMG_MAX:
+            return {}
+        blob = src.read_bytes()
+    except Exception as exc:
+        logger.info("[multi-decision] 转发配图本地路径读取失败 %s：%s", raw[:80], exc)
+        return {}
+    ext = _sniff_image_ext(blob)
+    if not ext:
+        logger.info("[multi-decision] 转发配图不是图片（按文件头判断）%s", raw[:80])
+        return {}
+    key = "fw_" + hashlib.sha1(u.encode("utf-8")).hexdigest()[:24]
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / (key + ext)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_bytes(blob)
+        os.replace(tmp, target)
+    except Exception as exc:
+        logger.info("[multi-decision] 转发配图写入失败 %s：%s", raw[:80], exc)
+        return {}
+    return {"path": "plugin_data/%s/media_cache/%s%s" % (_PLUGIN_ID, key, ext),
+            "mime": _mime_of(ext)}
+
+
 def _save_image(url: str) -> dict:
     """把转发里的一张图存进插件缓存，返回 {path, mime}；取不到就返回 {}。"""
     u = str(url or "").strip()
-    if not (u.startswith("http://") or u.startswith("https://")):
-        return {}
     folder = _media_cache_dir()
     if folder is None:
         return {}
+    if not (u.startswith("http://") or u.startswith("https://")):
+        return _save_local_image(u, folder)
     import hashlib
     import urllib.request as _ur
 
@@ -328,7 +719,7 @@ def media_of(messages) -> list:
     return out
 
 
-def remember_media_by_mid(mid: str, refs: list) -> None:
+def remember_media_by_mid(mid: str, refs: list, raw_sid: str = "") -> None:
     key = str(mid or "").strip()
     if not key or not refs:
         return
@@ -340,7 +731,17 @@ def remember_media_by_mid(mid: str, refs: list) -> None:
             _MID_MEDIA.pop(old, None)
     db = _media_db()
     db[key] = list(refs)
+    # v4.55（用户 m19940）：记下写入时间，按保留天数清理时要用。
+    _media_seen()[key] = time.time()
+    # v4.54（用户 m18227）：记下这条索引属于哪个群 / 私聊，缓存页才能按会话设上限。
+    sid = str(raw_sid or "").strip()
+    if sid:
+        _media_sids()[key] = sid[:512]
+    else:
+        # 显式没有会话归属时别留上一次的旧归属，统计才不会串群。
+        _media_sids().pop(key, None)
     _media_db_save()
+    _media_sids_save()
 
 
 def media_for_mid(mid: str) -> list:
@@ -481,6 +882,13 @@ async def _forward_raw(bot, res_id: str, timeout: float):
 # Readers never fetch, mutate either cache, or write. Only this fetch's raw nodes may
 # establish slot ownership; old text/media entries are not provenance.
 _DISPLAY_PROOF_MAX = 128
+# v4.54（用户 m18227）：按会话设上限后，总条数可以超过老的全局 128；这里只留一个
+# 防止配置写坏的安全阀。没注入回调时仍旧按全局 128 裁（测试也按这个口径）。
+_DISPLAY_PROOF_HARD_MAX = 10000
+_DISPLAY_PROOF_KEEP_FN = None
+# v4.55（用户 m19940）：转发原图记录也按保留天数清理；老记录没有 saved_at
+# 时按首次读到的时间算，给它们一个完整周期。
+_DISPLAY_PROOF_DAYS_FN = None
 _DISPLAY_NODE_MAX = 128
 _DISPLAY_SLOT_MAX = 256
 _DISPLAY_TEXT_MAX = 65536
@@ -555,7 +963,9 @@ def _display_proofs_read():
         if path.stat().st_size > _DISPLAY_FILE_MAX:
             return None
         blob = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(blob, dict) or len(blob) > _DISPLAY_PROOF_MAX:
+        cap = (_DISPLAY_PROOF_HARD_MAX if callable(_DISPLAY_PROOF_KEEP_FN)
+               else _DISPLAY_PROOF_MAX)
+        if not isinstance(blob, dict) or len(blob) > cap:
             return None
         return {key: value for key, value in blob.items()
                 if isinstance(value, dict)
@@ -563,6 +973,159 @@ def _display_proofs_read():
                 and _display_proof_ok(value, value.get("raw_sid"), value.get("outer_mid"))}
     except Exception:
         return None
+
+
+def set_display_proof_keep_fn(fn) -> None:
+    """插件注入「这个会话留多少条原始凭证」；传 None 恢复全局 128。"""
+    global _DISPLAY_PROOF_KEEP_FN
+    _DISPLAY_PROOF_KEEP_FN = fn
+
+
+def set_display_proof_keep_days_fn(fn) -> None:
+    """插件注入「这个会话留多少天原始凭证」；传 None 不按天清理。"""
+    global _DISPLAY_PROOF_DAYS_FN
+    _DISPLAY_PROOF_DAYS_FN = fn
+
+
+def _display_proof_trim(records: dict) -> None:
+    days_fn = _DISPLAY_PROOF_DAYS_FN
+    if callable(days_fn):
+        now = time.time()
+        for key in list(records.keys()):
+            proof = records.get(key) or {}
+            sid = str(proof.get("raw_sid") or "")
+            try:
+                days = int(days_fn(sid) or 0)
+            except Exception:
+                days = 0
+            if days <= 0:
+                continue
+            ts = proof.get("saved_at")
+            if not isinstance(ts, (int, float)):
+                proof["saved_at"] = int(now)
+                continue
+            if now - float(ts) > days * 86400:
+                records.pop(key, None)
+    fn = _DISPLAY_PROOF_KEEP_FN
+    if not callable(fn):
+        while len(records) > _DISPLAY_PROOF_MAX:
+            records.pop(next(iter(records)))
+        return
+    counts = {}
+    for key in list(records.keys()):
+        proof = records.get(key) or {}
+        sid = str(proof.get("raw_sid") or "")
+        try:
+            limit = int(fn(sid) or 0)
+        except Exception:
+            limit = 0
+        if limit <= 0:
+            continue
+        counts[sid] = counts.get(sid, 0) + 1
+        if counts[sid] > limit:
+            records.pop(key, None)
+    while len(records) > _DISPLAY_PROOF_HARD_MAX:
+        records.pop(next(iter(records)))
+
+
+def _display_proof_write(records: dict) -> bool:
+    """原子写回凭证文件；写不下（超过 8MB）就保留旧文件，返回 False。"""
+    import json
+    import os
+    import uuid
+    path = _display_proof_path()
+    if path is None:
+        return False
+    tmp = None
+    try:
+        blob = json.dumps(records, ensure_ascii=False).encode("utf-8")
+        while len(blob) > _DISPLAY_FILE_MAX and len(records) > 1:
+            records.pop(next(iter(records)))
+            blob = json.dumps(records, ensure_ascii=False).encode("utf-8")
+        if len(blob) > _DISPLAY_FILE_MAX:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
+        with open(tmp, "xb") as fp:
+            fp.write(blob)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(tmp, path)
+        tmp = None
+        return True
+    except Exception as exc:
+        logger.info("[multi-decision] 转发显示证据没写成 %s: %s",
+                    type(exc).__name__, exc)
+        return False
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def display_proof_stats(sid: str = "") -> dict:
+    """转发原图凭证的条数 / 磁盘占用，给缓存记录页用。
+
+    sid 非空时只算这个会话的凭证（用户 m22090）；占用按这份子集序列化后的
+    字节数算，不把整份混写凭证都记到它头上。
+    """
+    import json
+    records = _display_proofs_read()
+    if records is None:
+        records = {}
+    else:
+        # 缓存页也算一次维护：读的时候顺手按天数 / 每会话上限清一遍，
+        # 否则一个很久没新转发的群，旧凭证永远不会被写到触发清理。
+        before = json.dumps(records, ensure_ascii=False, sort_keys=True)
+        _display_proof_trim(records)
+        if json.dumps(records, ensure_ascii=False, sort_keys=True) != before:
+            _display_proof_write(records)
+    by_sid = {}
+    for proof in records.values():
+        owner = _norm_sid(str(proof.get("raw_sid") or "")) if isinstance(proof, dict) else ""
+        by_sid[owner] = by_sid.get(owner, 0) + 1
+    target = _norm_sid(str(sid or "").strip())
+    if target:
+        subset = {key: proof for key, proof in records.items()
+                  if isinstance(proof, dict)
+                  and _norm_sid(str(proof.get("raw_sid") or "")) == target}
+        return {"count": len(subset),
+                "bytes": len(json.dumps(subset, ensure_ascii=False).encode("utf-8")),
+                "sids": by_sid}
+    size = 0
+    try:
+        path = _display_proof_path()
+        if path is not None and path.is_file():
+            size = int(path.stat().st_size or 0)
+    except Exception:
+        pass
+    return {"count": len(records), "bytes": size, "sids": by_sid}
+
+
+def display_proof_clear(cutoff=None) -> int:
+    """清转发原图凭证，返回删掉的条数（用户 m21482）。
+
+    cutoff 为 None 清全部；给了 cutoff 就只删 saved_at 早于它的条目。
+    没有 saved_at 的条目在按天清理时保留。
+    """
+    records = _display_proofs_read()
+    if not records:
+        return 0
+    removed = 0
+    for key in list(records.keys()):
+        if cutoff is not None:
+            ts = (records.get(key) or {}).get("saved_at")
+            if not isinstance(ts, (int, float)):
+                continue
+            if float(ts) >= float(cutoff):
+                continue
+        records.pop(key, None)
+        removed += 1
+    if removed:
+        _display_proof_write(records)
+    return removed
 
 
 def _display_proof_denied(key, *, reject=False, clear=False) -> bool:
@@ -633,35 +1196,15 @@ def _display_proof_save(raw_sid, mid, proof) -> None:
         _display_proof_denied(key, reject=True)
     records.pop(key, None)
     if proof is not None:
+        # v4.55（用户 m19940）：记下写入时间，按保留天数清理时要用。
+        proof = dict(proof)
+        proof["saved_at"] = int(time.time())
         records[key] = proof
-    tmp = None
-    try:
-        while len(records) > _DISPLAY_PROOF_MAX:
-            records.pop(next(iter(records)))
-        blob = json.dumps(records, ensure_ascii=False).encode("utf-8")
-        while len(blob) > _DISPLAY_FILE_MAX and len(records) > 1:
-            records.pop(next(iter(records)))
-            blob = json.dumps(records, ensure_ascii=False).encode("utf-8")
-        if len(blob) > _DISPLAY_FILE_MAX:
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
-        with open(tmp, "xb") as fp:
-            fp.write(blob)
-            fp.flush()
-            os.fsync(fp.fileno())
-        os.replace(tmp, path)
-        tmp = None
-        if proof is not None:
-            _display_proof_denied(key, clear=True)
-    except Exception as exc:
-        logger.info("[multi-decision] 转发显示证据没写成 %s: %s", type(exc).__name__, exc)
-    finally:
-        if tmp is not None:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+    _display_proof_trim(records)
+    if not _display_proof_write(records):
+        return
+    if proof is not None:
+        _display_proof_denied(key, clear=True)
 
 
 def _display_fetch_identity_ok(data, raw_sid, mid) -> bool:
@@ -787,7 +1330,7 @@ async def fetch_forward_items(bot, message_id: str, timeout: float = 5.0, *,
             except Exception:
                 refs_again = []
             if refs_again:
-                remember_media_by_mid(mid, refs_again)
+                remember_media_by_mid(mid, refs_again, raw_sid)
             if _display_key(raw_sid, mid) is not None:
                 proof = (_display_proof_from_raw(raw_sid, mid, res_id, raw_again, refs_again)
                          if identity_ok else None)
@@ -803,7 +1346,7 @@ async def fetch_forward_items(bot, message_id: str, timeout: float = 5.0, *,
     except Exception:
         refs = []
     if refs:
-        remember_media_by_mid(mid, refs)
+        remember_media_by_mid(mid, refs, raw_sid)
     if _display_key(raw_sid, mid) is not None:
         proof = (_display_proof_from_raw(raw_sid, mid, res_id, raw_msgs, refs)
                  if identity_ok else None)

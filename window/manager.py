@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import io
 import json
@@ -16,6 +17,7 @@ import mimetypes
 import os
 import re
 import shutil
+import stat
 import sys
 import functools
 import types
@@ -340,6 +342,54 @@ _MEDIA_ROOT = "session_media"
 _MID_RE = re.compile(r"\[message_id:\s*([^\]]{1,200})\]")
 _MID_ATTR_RE = re.compile(r'<msg\b[^>]*\bmessage_id="?(-?\d+)"?', re.I)
 _MEDIA_ID_CACHE: dict = {}
+# v4.76（点柱子 1–9 秒）：这台机器（D 盘）上一次 stat / 目录 scandir 要 2–8ms，
+# 一次快照里同一批图会被反复解析几百遍。下面几个进程内记忆把「同一张图」的
+# 磁盘操作压到每个进程只剩一次；裁剪真删了文件时由 _media_memos_clear() 作废。
+_MEDIA_COPY_MEMO: dict = {}
+_PUBLIC_MEDIA_MEMO: dict = {}
+_TOUCH_LAST: dict = {}
+_MEDIA_MEMO_LIMIT = 8192
+_TOUCH_MIN_GAP = 300.0
+_PUBLIC_MEDIA_MISSING_TTL = 30.0
+
+
+def _memo_put(memo: dict, key, value) -> None:
+    if len(memo) >= _MEDIA_MEMO_LIMIT:
+        memo.clear()
+    memo[key] = value
+
+
+#: 一次快照渲染内的复用表。渲染途中文件不会变，所以同一张图在一次渲染里
+#: 只需要查一次磁盘；用 contextvars 而不是全局 dict，是为了让结论只活在
+#: 这一次渲染的上下文里，不会带进下一次渲染或别的线程。
+_RENDER_MEMO = contextvars.ContextVar("mdp_media_render", default=None)
+
+
+def media_render_begin() -> None:
+    """标记「一次快照渲染开始」，渲染内 public_media/_media_by_ids 只查一次磁盘。"""
+    _RENDER_MEMO.set({})
+
+
+def media_render_state():
+    """这一轮渲染的媒体记忆（交给下一次 to_thread 接着用）。"""
+    return _RENDER_MEMO.get()
+
+
+def media_render_resume(memo) -> None:
+    """接着用上一段（head 或 tail）的渲染记忆，别在 tail 里从头再查一遍。"""
+    _RENDER_MEMO.set(memo if isinstance(memo, dict) else {})
+
+
+def _render_memo():
+    return _RENDER_MEMO.get()
+
+
+def _media_memos_clear() -> None:
+    """缓存文件被删/被清之后作废所有「路径还指着它」的记忆。"""
+    _MEDIA_COPY_MEMO.clear()
+    _PUBLIC_MEDIA_MEMO.clear()
+    _MEDIA_DIRS_MEMO.clear()
+    _MID_INDEX_MEMO.clear()
 
 
 def _media_paths_alive(items) -> bool:
@@ -351,8 +401,10 @@ def _media_paths_alive(items) -> bool:
         return False
     for it in items:
         try:
-            f = (root / str(it.get("path") or "")).resolve()
-            if not f.is_file() or f.stat().st_size <= 0:
+            # v4.76：不再 resolve（一次 resolve 在这台机器上要 2ms 以上），
+            # 一次 stat 同时判「是不是普通文件」和「是不是 0 字节」。
+            st = os.stat(str(root / str(it.get("path") or "").replace("\\", "/")))
+            if st.st_size <= 0 or not stat.S_ISREG(st.st_mode):
                 return False
         except OSError:
             return False
@@ -412,54 +464,30 @@ def _media_by_ids(content, raw_sid: str = "") -> list:
         base = Path(get_data_path()) / _MEDIA_ROOT
     except Exception:
         return []
-    dirs = []
-    if raw_sid:
-        dirs.append(hashlib.sha256(str(raw_sid).encode("utf-8")).hexdigest())
-    try:
-        if base.is_dir():
-            for d in sorted(base.iterdir(), key=lambda x: x.name):
-                if d.is_dir() and d.name != "archive" and d.name not in dirs:
-                    dirs.append(d.name)
-    except OSError:
-        pass
+    dirs = _session_dirs(raw_sid, base)
     out = []
+    misses = []
     for mid in ids:
         mid = mid.strip()
         key = (mid, tuple(dirs))
+        fresh = _render_memo()
+        if fresh is not None:
+            got = fresh.get(("ids", key))
+            if got is not None:
+                out.extend(got)
+                continue
         found = _MEDIA_ID_CACHE.get(key)
         # 用户 m05828 第 1 条：缓存里存的是「反查那一刻的路径」，框架事后清掉某个
         # 会话目录的副本时，这里还留着那条死路径 → 页面显示「图片已清理」，
         # 可同一张图明明还躺在别的会话目录里。命中缓存也必须先确认文件还在。
-        if found and not _media_paths_alive(found):
+        if found and fresh is None and not _media_paths_alive(found):
+            # v4.76：把「这条路径还活着吗」压成一次 stat（原来 resolve+is_file+
+            # stat 三次，这台机器上一次 5ms 以上）。框架挪图/清图随时可能发生，
+            # 所以每次命中都复核，不能靠时间窗偷懒（用户 m05828 第 1 条即此）。
             found = None
             _MEDIA_ID_CACHE.pop(key, None)
         if found is None:
-            found = []
-            mid_hash = hashlib.sha256(mid.encode("utf-8")).hexdigest()
-            for sid_hash in dirs:
-                folder = base / sid_hash / mid_hash
-                try:
-                    if not folder.is_dir():
-                        continue
-                    for f in sorted(folder.iterdir()):
-                        # 框架对转发卡里没下载下来的图会落一个 0 字节占位文件，
-                        # 反查出来只会让页面显示一张裂图，直接跳过（用户 m33994 图1）。
-                        try:
-                            if not f.is_file() or f.stat().st_size <= 0:
-                                continue
-                        except OSError:
-                            continue
-                        found.append(
-                            {
-                                "path": "%s/%s/%s/%s" % (_MEDIA_ROOT, sid_hash, mid_hash, f.name),
-                                "mime": mimetypes.guess_type(f.name)[0] or "",
-                            }
-                        )
-                    if found:
-                        # 同一条消息可能被好几个会话目录各存一份，取第一个就够
-                        break
-                except OSError:
-                    continue
+            found = _scan_mid_dirs(mid, dirs, base)
             if not found:
                 # 目录里扫不到不等于图没了：框架会把旧图挪进 session_media/archive
                 # 或整个删掉，而插件在收消息那一刻就留过副本（用户本轮图2：23:22
@@ -474,9 +502,99 @@ def _media_by_ids(content, raw_sid: str = "") -> list:
                 if len(_MEDIA_ID_CACHE) >= 2048:
                     _MEDIA_ID_CACHE.clear()
                 _MEDIA_ID_CACHE[key] = found
-        out.extend(found)
+        if fresh is not None:
+            fresh[("ids", key)] = found
+        if found:
+            out.extend(found)
+        else:
+            misses.append(mid)
+    if misses:
+        # 会话目录可能刚建出来（目录列表有 5 秒缓存），只有真没找到时才重扫一遍。
+        dirs2 = _session_dirs(raw_sid, base, force=True)
+        if tuple(dirs2) != tuple(dirs):
+            for mid in misses:
+                found = _scan_mid_dirs(mid, dirs2, base)
+                if not found:
+                    found = _media_by_mid_index(mid)
+                if not found:
+                    found = _media_from_db(mid)
+                if found:
+                    key2 = (mid, tuple(dirs2))
+                    if len(_MEDIA_ID_CACHE) >= 2048:
+                        _MEDIA_ID_CACHE.clear()
+                    _MEDIA_ID_CACHE[key2] = found
+                    fresh = _render_memo()
+                    if fresh is not None:
+                        fresh[("ids", key2)] = found
+                    out.extend(found)
     return out
 
+
+
+
+_MEDIA_DIRS_MEMO: dict = {}
+_MEDIA_DIRS_TTL = 5.0
+
+
+def _session_dirs(raw_sid: str, base: Path, force: bool = False) -> list:
+    """session_media 下的会话目录名（raw_sid 对应的排最前）。
+
+    这台机器上一次目录扫描要好几个毫秒，而一条快照里每条消息都要反查图片，
+    逐条重扫就是几百毫秒，所以结果缓存 5 秒；真没找到时会 force 重扫一次。
+    """
+    now = time.monotonic()
+    memo_key = str(base)
+    memo = _MEDIA_DIRS_MEMO.get(memo_key)
+    if memo is not None and not force and now - memo[0] <= _MEDIA_DIRS_TTL:
+        names = list(memo[1])
+    else:
+        names = []
+        try:
+            if base.is_dir():
+                for d in sorted(base.iterdir(), key=lambda x: x.name):
+                    if d.is_dir() and d.name != "archive":
+                        names.append(d.name)
+                _MEDIA_DIRS_MEMO[memo_key] = (now, tuple(names))
+        except OSError:
+            names = list(memo[1]) if memo is not None else []
+    dirs = []
+    if raw_sid:
+        dirs.append(hashlib.sha256(str(raw_sid).encode("utf-8")).hexdigest())
+    for name in names:
+        if name not in dirs:
+            dirs.append(name)
+    return dirs
+
+
+def _scan_mid_dirs(mid: str, dirs, base: Path) -> list:
+    """在给定的会话目录里找这条消息的图，返回相对 data 的路径。"""
+    found = []
+    mid_hash = hashlib.sha256(mid.encode("utf-8")).hexdigest()
+    for sid_hash in dirs:
+        folder = base / sid_hash / mid_hash
+        try:
+            if not folder.is_dir():
+                continue
+            for f in sorted(folder.iterdir()):
+                # 框架对转发卡里没下载下来的图会落一个 0 字节占位文件，
+                # 反查出来只会让页面显示一张裂图，直接跳过（用户 m33994 图1）。
+                try:
+                    if not f.is_file() or f.stat().st_size <= 0:
+                        continue
+                except OSError:
+                    continue
+                found.append(
+                    {
+                        "path": "%s/%s/%s/%s" % (_MEDIA_ROOT, sid_hash, mid_hash, f.name),
+                        "mime": mimetypes.guess_type(f.name)[0] or "",
+                    }
+                )
+            if found:
+                # 同一条消息可能被好几个会话目录各存一份，取第一个就够
+                break
+        except OSError:
+            continue
+    return found
 
 def _mid_of_text(text) -> str:
     """从一行消息原文里取 message_id（没有就空串）。"""
@@ -516,13 +634,18 @@ def media_map_of(msgs) -> dict:
     return out
 
 
-def _materialize_session_media(rel: str, raw_sid: str, mid: str) -> str:
+def _materialize_session_media(rel: str, raw_sid: str, mid: str,
+                               force: bool = False) -> str:
     """把插件缓存里的图复制成框架认得的 session_media 路径。
 
     框架的 resolve_media_references 只认 <data>/session_media 下的真实文件；
     with_owned_images 也只收 session_media/<会话哈希>/<消息哈希>/<文件> 或
     archive/<内容哈希> 两种形状。插件自己按 URL 抓下来的图（sha1(url).gif）
     两边都不满足，塞进去会被整段丢掉（用户 m22856 图1 就是这张动图）。
+
+    force=True：本来就落在 session_media 下的文件也照样复制一份进本消息目录。
+    派生图是 session_media/derived/mdp_*.jpg 这种共享文件名，不复制就落在 owned
+    形状之外，工具结果那条路会被框架当成「不是这条消息的图」丢掉（用户 m00969）。
     """
     root = _data_root()
     if root is None or not raw_sid or not mid:
@@ -530,7 +653,7 @@ def _materialize_session_media(rel: str, raw_sid: str, mid: str) -> str:
     rel = str(rel or "").replace("\\", "/").strip().lstrip("/")
     if not rel:
         return ""
-    if rel.startswith(_MEDIA_ROOT + "/"):
+    if rel.startswith(_MEDIA_ROOT + "/") and not force:
         return rel if ensure_media_file(rel) else ""
     src = root / rel
     try:
@@ -580,10 +703,7 @@ def _media_by_mid_index(mid: str) -> list:
         return []
     out = []
     seen = set()
-    for rel_key, name in by_path.items():
-        if ("/" + mid_hash + "/") not in str(rel_key):
-            continue
-        name = str(name or "")
+    for name in _by_mid_index(cache, by_path).get(mid_hash) or []:
         if not name or name in seen:
             continue
         path = cache / name
@@ -676,6 +796,33 @@ def _refs_from_chain(chain, root: Path) -> list:
                     "mime": str(el.get("mime") or "") or _sniff_image_mime(target)})
     return out
 
+
+
+
+_MID_INDEX_MEMO: dict = {}
+
+
+def _by_mid_index(cache: Path, by_path: dict) -> dict:
+    """把 _index.json 的 byPath 反着建成「消息哈希 → 缓存文件名」。
+
+    每条快照里每条消息都要走一次兜底查找，直接遍历几千条 byPath 就是几百毫秒，
+    所以按 byPath 的条数缓存一份反向表（条数变了就重建）。
+    """
+    memo_key = str(cache)
+    memo = _MID_INDEX_MEMO.get(memo_key)
+    if memo is not None and memo[0] == len(by_path):
+        return memo[1]
+    table: dict = {}
+    for rel_key, name in by_path.items():
+        name = str(name or "")
+        if not name:
+            continue
+        parts = str(rel_key).split("/")
+        if len(parts) < 3:
+            continue
+        table.setdefault(parts[-2], []).append(name)
+    _MID_INDEX_MEMO[memo_key] = (len(by_path), table)
+    return table
 
 def _media_from_db(mid: str) -> list:
     """按 message_id 查框架消息库，返回它归档过的图片路径（相对 data）。
@@ -910,6 +1057,14 @@ DECISION_KEEP = 20
 #: 之后被下一次复制触发的清理带走（不然刚发的一张图可能马上就没了）。
 #: 用户 m06046 图2：原来只护 5 分钟，刚决策完回头一看图没了；改成 2 小时。
 _MEDIA_PRUNE_GRACE = 7200.0
+#: 用户 m24018：推文卡片等“其他图片”默认上限 40 张。
+#: 当时按 100 次回复快照约 4.3 张 ×4 = 17.4 取整到 20；m24364 用户要求改成
+#: 可配置的群聊 40 / 私聊 40，所以这里只留兜底默认值。
+_OTHER_MEDIA_LIMIT = 40
+#: 用户 m24364：其他图片也按会话取上限；WindowManager 初始化时注册 fn(sid)->张数。
+_OTHER_MEDIA_LIMITS = None
+#: 用户 m24990：其他图片也按会话取保留天数；fn(sid) -> 天数（0=不限）。
+_OTHER_MEDIA_KEEP_DAYS = None
 #: 用户 m18059 第 4 条：图片缓存三条线按会话取值的回调。
 #: 签名 fn(sid) -> (张数, 天数, 容量MB)；WindowManager 初始化时注册，拿不到就用模块级值。
 _MEDIA_SESSION_LIMITS = None
@@ -935,7 +1090,8 @@ def set_media_cache_limit(n) -> None:
 # 所以单独落一份盘，重启后接回来。
 _DM_WINDOW_FILE = "window_dm.json"
 _DM_WINDOW_SAVE_GAP = 3.0
-_DM_WINDOW_MAX = 80
+
+
 _DATA_URL_RE = re.compile(r"^data:(?P<mime>[^;,]{1,80});base64,(?P<data>[A-Za-z0-9+/=\s]{64,})$")
 
 
@@ -961,12 +1117,129 @@ def _dm_window_file() -> Optional[Path]:
     return root / "plugin_data" / _PLUGIN_ID / _DM_WINDOW_FILE
 
 
-def _media_cache_files(cache: Path) -> list:
-    """缓存目录里的图片副本（跳过 _index.json 这类下划线开头的元数据）。"""
+def _media_cache_files(cache: Path, include_shared: bool = True) -> list:
+    """缓存目录里的图片副本（跳过 _index.json 这类下划线开头的元数据）。
+
+    include_shared=False 时排除 fw_（转发图）和 tw_（推文图）：它们有自己的
+    保留策略，不能跟聊天图挤在同一个「无归属」桶里被聊天额度裁掉。
+    """
     try:
-        return [f for f in cache.iterdir() if f.is_file() and not f.name.startswith("_")]
+        files = [f for f in cache.iterdir()
+                 if f.is_file() and not f.name.startswith("_")
+                 and f.name != "media_owners.json"]
+        if not include_shared:
+            files = [f for f in files if not f.name.startswith(("fw_", "tw_"))]
+        return files
     except Exception:
         return []
+
+
+def prune_other_media(cache: Path, limit: int = None) -> int:
+    """只裁 tw_ 推文卡片图（用户 m24018 / m24364）。
+
+    limit 传数字时是旧的全目录总上限（测试和兜底用）；不传时按
+    media_owners 里的会话归属，分别套每个群 / 私聊自己的有效上限。
+    tw_ 不写 _index，归属只认 media_owners；没有归属的旧图算一个
+    单独的无归属桶，按默认 40 张裁。
+    """
+    try:
+        files = [f for f in _media_cache_files(cache) if f.name.startswith("tw_")]
+    except Exception:
+        return 0
+    if not files:
+        return 0
+
+    def _stamp(f):
+        try:
+            return (float(f.stat().st_mtime), f.name)
+        except Exception:
+            return (0.0, f.name)
+
+    if limit is not None:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = _OTHER_MEDIA_LIMIT
+        if limit <= 0 or len(files) <= limit:
+            return 0
+        files.sort(key=_stamp)
+        drop = files[:len(files) - limit]
+    else:
+        try:
+            _owners_backfill(cache)
+            owners = (_owners_load(cache).get("files") or {})
+        except Exception:
+            owners = {}
+        groups = {}
+        for f in files:
+            ent = owners.get(f.name) or {}
+            sids = []
+            for raw in (ent.get("sids") or []):
+                sid = normalize_sid(str(raw or ""))
+                if sid and sid not in sids:
+                    sids.append(sid)
+            if not sids:
+                groups.setdefault("", []).append(f)
+            else:
+                for sid in sids:
+                    groups.setdefault(sid, []).append(f)
+        keep = set()
+        now = time.time()
+        for sid, group in groups.items():
+            lim = _other_media_limit_for(sid) if sid else _OTHER_MEDIA_LIMIT
+            days = _other_media_keep_days_for(sid)
+            group.sort(key=_stamp)
+            eligible = group
+            if days > 0:
+                deadline = now - days * 86400
+                eligible = [f for f in group if _stamp(f)[0] >= deadline]
+            if lim > 0:
+                eligible = eligible[-lim:]
+            keep.update(eligible)
+        drop = [f for f in files if f not in keep]
+
+    removed = 0
+    deleted = []
+    for f in drop:
+        try:
+            f.unlink()
+            removed += 1
+            deleted.append(f.name)
+        except Exception:
+            continue
+    if deleted:
+        try:
+            _owners_forget(cache, deleted)
+        except Exception:
+            logger.debug("[multi-decision] 清理推文图归属失败", exc_info=True)
+        logger.info(f"[multi-decision] 裁剪推文图缓存 {removed} 张")
+    return removed
+
+
+def clear_other_media(cache: Path, cutoff: float = None) -> int:
+    """清掉其他图片（tw_）；cutoff=None 清全部，否则只清 mtime 早于 cutoff 的。"""
+    try:
+        files = [f for f in _media_cache_files(cache) if f.name.startswith("tw_")]
+    except Exception:
+        return 0
+    removed = 0
+    deleted = []
+    for f in files:
+        try:
+            if cutoff is not None and float(f.stat().st_mtime) >= cutoff:
+                continue
+            f.unlink()
+            removed += 1
+            deleted.append(f.name)
+        except Exception:
+            continue
+    if deleted:
+        try:
+            _owners_forget(cache, deleted)
+        except Exception:
+            logger.debug("[multi-decision] 清理推文图归属失败", exc_info=True)
+        logger.info(f"[multi-decision] 清理推文图缓存 {removed} 张")
+    return removed
 
 
 def set_media_cache_retention(days, max_mb) -> None:
@@ -994,6 +1267,31 @@ def set_media_session_limits(fn) -> None:
     """
     global _MEDIA_SESSION_LIMITS
     _MEDIA_SESSION_LIMITS = fn
+
+
+def set_other_media_limit(fn) -> None:
+    """注册「按会话取其他图片上限」的回调（用户 m24364）。
+
+    tw_ 推文图没有会话路径，裁剪时靠 media_owners 的 sid 找有效上限；
+    同样由 WindowManager 初始化时把 plugin.eff 包一层传进来。
+    """
+    global _OTHER_MEDIA_LIMITS
+    _OTHER_MEDIA_LIMITS = fn
+
+
+def set_other_media_keep_days(fn) -> None:
+    """注册「按会话取其他图片保留天数」的回调（用户 m24990）。"""
+    global _OTHER_MEDIA_KEEP_DAYS
+    _OTHER_MEDIA_KEEP_DAYS = fn
+
+
+def _other_media_keep_days_for(sid: str) -> int:
+    if not callable(_OTHER_MEDIA_KEEP_DAYS):
+        return 0
+    try:
+        return max(0, int(_OTHER_MEDIA_KEEP_DAYS(sid) or 0))
+    except Exception:
+        return 0
 
 
 def _media_sid_key(sid: str) -> str:
@@ -1024,19 +1322,42 @@ def _media_sid_of_rel(rel_key: str) -> str:
     return ""
 
 
-def _media_limits_for(rel_key: str):
-    """这条图片属于哪个会话、按它的有效设置该用哪三条线；问不到就返回 None。"""
+def _media_limits_for_group(group: str):
+    """这个群组桶（会话 sid / 群组哈希 / ""）按它的有效设置该用哪三条线。
+
+    用户本轮：media_cache_limit 是「每个群组各自的上限」，所以裁剪时每个桶都要
+    问一次自己那三条线，不能拿一个 limit 套所有桶。空桶（无归属）不问——没有
+    会话可问，问了也只会拿到全局默认，反而盖掉 set_media_cache_limit() 设的
+    模块级值。没注册回调 / 回调抛错都返回 None，由调用方退回模块级默认。
+    """
+    if not group:
+        return None
     fn = _MEDIA_SESSION_LIMITS
     if fn is None:
         return None
-    sid = _media_sid_of_rel(rel_key)
-    if not sid:
-        return None
     try:
-        return fn(sid)
+        return fn(group)
     except Exception:
-        logger.debug("[multi-decision] 取会话图片缓存上限失败", exc_info=True)
+        logger.debug("[multi-decision] 取群组图片缓存上限失败", exc_info=True)
         return None
+
+
+def _media_limits_for(rel_key: str):
+    """这条图片属于哪个会话、按它的有效设置该用哪三条线；问不到就返回 None。"""
+    return _media_limits_for_group(_media_sid_of_rel(rel_key))
+
+
+def _other_media_limit_for(sid: str) -> int:
+    """这个会话的其他图片上限；没注册回调或值非法时回落到 40 张。"""
+    fn = _OTHER_MEDIA_LIMITS
+    if fn is not None:
+        try:
+            value = fn(sid)
+            if value is not None:
+                return int(value)
+        except Exception:
+            logger.debug("[multi-decision] 取其他图片上限失败", exc_info=True)
+    return _OTHER_MEDIA_LIMIT
 
 
 def _media_group_of_rel(rel_key: str) -> str:
@@ -1054,19 +1375,417 @@ def _media_group_of_rel(rel_key: str) -> str:
 
 
 def _media_cache_groups(cache: Path, names=None) -> dict:
-    """缓存文件名 -> 引用它的群组集合（同一张图被多个群引用就有多个群）。"""
+    """缓存文件名 -> 引用它的群组集合（同一张图被多个群引用就有多个群）。
+
+    归属以 media_owners.json 为准，_index.json 的 byPath 只给账本里没有会话归属
+    的文件兜底（用户本轮：缓存超上限却从不清理）。
+    以前两张表无条件合并：同一个群在账本里是 "gm:1145141974"，在 byPath 里是
+    session_media/<群组哈希> 那一段，于是同一个群被拆成两个桶——哈希桶 1488 张
+    没超限不投票，账本桶 1749 张超了 249 张，可删除判定要求「引用它的每个群都
+    超限」，all() 永远不成立，溢出的一张也删不掉。账本按文件名记、不受 byPath
+    条数上限影响，所以账本已经给出会话归属的文件不再看 byPath。
+    """
     groups: dict = {}
     try:
         data = _index_load(cache)
         by_path = data.get("byPath") or {}
     except Exception:
         return groups
+    # 归属账本优先：byPath 会被 4000 条上限截断，账本按文件名记，不受影响。
+    try:
+        _owners_backfill(cache)
+        owners = (_owners_load(cache).get("files") or {})
+    except Exception:
+        owners = {}
+    owned: set = set()
+    for name, ent in owners.items():
+        if not isinstance(ent, dict) or ent.get("kind") != "chat":
+            continue
+        if names is not None and name not in names:
+            continue
+        for sid in (ent.get("sids") or []):
+            groups.setdefault(name, set()).add(sid)
+            owned.add(name)
     for rel_key, name in by_path.items():
         name = str(name or "")
         if not name or (names is not None and name not in names):
             continue
+        # 账本已经给出会话归属的，不再按 byPath 的哈希桶重复计一遍：否则同一个群
+        # 两种键各占一个桶，_prune_media_cache 的 all() 判定永远不成立（见上）。
+        if name in owned:
+            continue
         groups.setdefault(name, set()).add(_media_group_of_rel(rel_key))
     return groups
+
+
+_MEDIA_REF_RE = re.compile(r"media_cache/([0-9a-f]{40}\.(?:jpe?g|png|gif|webp))", re.I)
+_SESSION_MEDIA_REF_RE = re.compile(r"session_media/([0-9a-f]{64})", re.I)
+
+
+def _media_request_refs(sid: str):
+    """从请求快照里找这个会话用过的缓存图 / 群组哈希。
+
+    bySid 是后来才加的，老群可能一条都没有；byPath 又被全局 4000 条上限
+    截过，老群的路径可能已经不在索引里。请求快照里还留着当时发出去的
+    media_cache/<文件名> 和 session_media/<群组哈希>，拿它兜底。
+    """
+    names = set()
+    hashes = set()
+    root = _data_root()
+    if root is None or not sid:
+        return names, hashes
+    folder = root / "plugin_data" / _PLUGIN_ID / "requests" / str(sid).replace(":", "_")
+    if not folder.is_dir():
+        return names, hashes
+    for path in folder.glob("*.json"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        names.update(m.group(1) for m in _MEDIA_REF_RE.finditer(text))
+        hashes.update(m.group(1) for m in _SESSION_MEDIA_REF_RE.finditer(text))
+    return names, hashes
+
+
+_MEDIA_OWNERS_FILE = "media_owners.json"
+_MEDIA_OWNERS_VERSION = 1
+_MEDIA_OWNERS_LIMIT = 50000
+_MEDIA_OWNERS: dict = {}
+_MEDIA_OWNERS_DIRTY: dict = {}
+
+
+def _media_kind_of_name(name: str) -> str:
+    """按文件名判断共享图类型；聊天图是 40 位内容哈希 + 后缀。"""
+    name = str(name or "")
+    if name.startswith("fw_"):
+        return "forward"
+    if name.startswith("tw_"):
+        return "twitter"
+    return "chat"
+
+
+def _owners_path(cache: Path) -> Path:
+    return cache / _MEDIA_OWNERS_FILE
+
+
+def _owners_load(cache: Path) -> dict:
+    """按缓存文件名记「这张图属于哪些会话」。
+
+    和 _index.json 分开：索引按原路径存，路径一多就会被上限裁掉；归属只认
+    文件名，一个文件一条，不随路径条数增长。老数据第一次读时由
+    _owners_backfill() 从 bySid / byPath / 请求快照回填。
+    """
+    key = str(cache)
+    if key in _MEDIA_OWNERS:
+        return _MEDIA_OWNERS[key]
+    data = {"version": _MEDIA_OWNERS_VERSION, "backfilled": False, "files": {}}
+    try:
+        raw = json.loads(_owners_path(cache).read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            data["version"] = int(raw.get("version") or _MEDIA_OWNERS_VERSION)
+            data["backfilled"] = bool(raw.get("backfilled"))
+            files = raw.get("files")
+            if isinstance(files, dict):
+                for name, ent in files.items():
+                    if not name or not isinstance(ent, dict):
+                        continue
+                    sids = []
+                    for sid in (ent.get("sids") or []):
+                        sid = normalize_sid(str(sid or ""))
+                        if sid and sid not in sids:
+                            sids.append(sid)
+                    kind = str(ent.get("kind") or "chat")
+                    if kind not in ("chat", "forward", "twitter", "archive", "derived", "unknown"):
+                        kind = "unknown"
+                    data["files"][str(name)] = {
+                        "sids": sids,
+                        "kind": kind,
+                        "first": float(ent.get("first") or 0),
+                        "last": float(ent.get("last") or 0),
+                    }
+    except Exception:
+        pass
+    _MEDIA_OWNERS[key] = data
+    return data
+
+
+def _owners_save(cache: Path, force: bool = False) -> None:
+    key = str(cache)
+    data = _MEDIA_OWNERS.get(key)
+    if data is None:
+        return
+    if not force and _MEDIA_OWNERS_DIRTY.get(key, 0) < 10:
+        return
+    files = data.get("files") or {}
+    # 文件已经不在的条目顺手清掉；只清真正不存在的，避免把刚写一半的临时文件误删。
+    for name in list(files):
+        try:
+            if not (cache / name).is_file():
+                files.pop(name, None)
+        except Exception:
+            continue
+    if len(files) > _MEDIA_OWNERS_LIMIT:
+        # 极端情况下按最后使用时间留最新的；正常 1500 张/群远到不了这里。
+        keep = sorted(files.items(), key=lambda kv: float((kv[1] or {}).get("last") or 0))[-_MEDIA_OWNERS_LIMIT:]
+        data["files"] = dict(keep)
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+        tmp = cache / (_MEDIA_OWNERS_FILE + "." + os.urandom(4).hex() + ".tmp")
+        try:
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            try:
+                with open(tmp, "rb+") as fh:
+                    os.fsync(fh.fileno())
+            except OSError:
+                pass
+            os.replace(tmp, _owners_path(cache))
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        _MEDIA_OWNERS_DIRTY[key] = 0
+    except Exception:
+        pass
+
+
+def _owners_add(data: dict, name: str, sid: str = "", kind: str = "chat") -> bool:
+    """往内存账本里加一条，返回是否有变化。不落盘，批量回填时用。"""
+    name = str(name or "")
+    if not name:
+        return False
+    files = data.setdefault("files", {})
+    ent = files.get(name)
+    now = time.time()
+    changed = False
+    if not isinstance(ent, dict):
+        ent = {"sids": [], "kind": kind, "first": now, "last": now}
+        files[name] = ent
+        changed = True
+    if kind and kind != "chat":
+        # 已经有聊天归属的文件，不要被 archive/derived/unknown 覆盖掉；
+        # 同一张图可能既在聊天路径、又在归档路径下。
+        if kind in ("archive", "derived", "unknown") and ent.get("sids"):
+            pass
+        else:
+            if ent.get("kind") != kind:
+                ent["kind"] = kind
+                changed = True
+            # 转发图一份只归一个会话；推文图可能被多个群同时引用，保留全部 sid。
+            if kind == "forward" and ent.get("sids"):
+                ent["sids"] = []
+                changed = True
+    else:
+        # 同一张图先被当成派生/归档图、后来又在聊天里用到时，要升级成聊天图。
+        if ent.get("kind") in (None, "", "unknown") or (
+                kind == "chat" and sid and ent.get("kind") in ("derived", "archive")):
+            ent["kind"] = "chat"
+            changed = True
+    sid = normalize_sid(str(sid or ""))
+    if sid:
+        sids = ent.setdefault("sids", [])
+        if sid not in sids:
+            sids.append(sid)
+            changed = True
+        if ent.get("kind") in (None, "", "unknown"):
+            ent["kind"] = "chat"
+            changed = True
+    if not ent.get("first"):
+        ent["first"] = now
+        changed = True
+    ent["last"] = now
+    return changed
+
+
+def _owners_remember(cache: Path, name: str, sid: str = "", kind: str = "chat") -> None:
+    data = _owners_load(cache)
+    if not data.get("backfilled"):
+        # 第一次写入前先把老数据回填，否则新图一写，旧图就永远没机会进账本。
+        _owners_backfill(cache)
+        data = _owners_load(cache)
+    before = data.get("files", {}).get(str(name or ""))
+    changed = _owners_add(data, name, sid, kind)
+    if not changed:
+        return
+    key = str(cache)
+    _MEDIA_OWNERS_DIRTY[key] = _MEDIA_OWNERS_DIRTY.get(key, 0) + 1
+    # 新文件 / 新会话立刻落盘：归属账本丢了就补不回来，不能等攒 10 次。
+    force = before is None or bool(normalize_sid(str(sid or "")))
+    _owners_save(cache, force=force)
+
+
+def _owners_forget(cache: Path, names) -> None:
+    gone = {str(n) for n in (names or []) if n}
+    if not gone:
+        return
+    data = _owners_load(cache)
+    files = data.get("files") or {}
+    changed = False
+    for name in gone:
+        if files.pop(name, None) is not None:
+            changed = True
+    if changed:
+        _MEDIA_OWNERS_DIRTY[str(cache)] = _MEDIA_OWNERS_DIRTY.get(str(cache), 0) + 1
+        _owners_save(cache, force=True)
+
+
+def _owners_clear(cache: Path) -> None:
+    _MEDIA_OWNERS.pop(str(cache), None)
+    _MEDIA_OWNERS_DIRTY.pop(str(cache), None)
+    try:
+        _owners_path(cache).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+_OWNERS_BACKFILL_VERSION = 2
+
+
+def _owners_scan_disk(data: dict, cache: Path, hash_to_sid: dict) -> None:
+    """第 4 路回填：直接扫框架的 session_media / archive，按内容 sha1 反查缓存文件。
+
+    请求快照只能覆盖「请求里出现过」的图；有些图在请求快照生成前就被框架
+    挪进 session_media，索引里又没有路径。磁盘上的文件还在，按 sha1 能对回
+    media_cache 里的同名文件，再按目录哈希认会话。
+    """
+    root = _data_root()
+    if root is None:
+        return
+    by_sha: dict = {}
+    for f in _media_cache_files(cache):
+        stem = f.name.split(".")[0]
+        if len(stem) >= 40 and all(c in "0123456789abcdef" for c in stem[:40].lower()):
+            by_sha.setdefault(stem[:40].lower(), []).append(f.name)
+    if not by_sha:
+        return
+    bases = [root / "session_media"]
+    for base in bases:
+        if not base.is_dir():
+            continue
+        for top in base.iterdir():
+            if not top.is_dir():
+                continue
+            if top.name == "archive":
+                # archive 下面可能再套一层会话哈希；逐段找已知哈希。
+                for f in top.rglob("*"):
+                    if not f.is_file():
+                        continue
+                    sid = ""
+                    for part in f.relative_to(top).parts[:-1]:
+                        sid = hash_to_sid.get(part) or ""
+                        if sid:
+                            break
+                    if not sid:
+                        continue
+                    try:
+                        digest = hashlib.sha1(f.read_bytes()).hexdigest()
+                    except Exception:
+                        continue
+                    for name in by_sha.get(digest, []):
+                        _owners_add(data, name, sid, "chat")
+                continue
+            sid = hash_to_sid.get(top.name) or ""
+            if not sid:
+                continue
+            for f in top.rglob("*"):
+                if not f.is_file():
+                    continue
+                try:
+                    digest = hashlib.sha1(f.read_bytes()).hexdigest()
+                except Exception:
+                    continue
+                for name in by_sha.get(digest, []):
+                    _owners_add(data, name, sid, "chat")
+
+
+def _owners_backfill(cache: Path) -> None:
+    """老数据第一次读归属账本时，从现有索引和请求快照回填。
+
+    能确认的写回；确认不了的标 unknown，不猜。只跑一次，结果写进
+    media_owners.json 的 backfilled 标记。
+    """
+    data = _owners_load(cache)
+    try:
+        done = int(data.get("backfilled") or 0)
+    except (TypeError, ValueError):
+        done = 0
+    if done >= _OWNERS_BACKFILL_VERSION:
+        return
+    try:
+        idx = _index_load(cache) or {}
+    except Exception:
+        idx = {}
+    hash_to_sid: dict = {}
+    # 1) bySid 里已经有的「群组哈希 -> 会话」
+    for sid_key, bucket in (idx.get("bySid") or {}).items():
+        sid = normalize_sid(str(sid_key).replace("_", ":", 1))
+        if not sid or not isinstance(bucket, dict):
+            continue
+        for rel in bucket:
+            h = _media_sid_of_rel(rel)
+            if h and h not in ("archive", "derived"):
+                hash_to_sid.setdefault(h, sid)
+    # 2) 请求快照里的 session_media/<哈希> 和 media_cache/<文件名>
+    root = _data_root()
+    if root is not None:
+        req_root = root / "plugin_data" / _PLUGIN_ID / "requests"
+        if req_root.is_dir():
+            for folder in req_root.iterdir():
+                if not folder.is_dir():
+                    continue
+                sid = normalize_sid(folder.name.replace("_", ":", 1))
+                if not sid:
+                    continue
+                names, hashes = _media_request_refs(sid)
+                for h in hashes:
+                    if h and h not in ("archive", "derived"):
+                        hash_to_sid.setdefault(h, sid)
+                for name in names:
+                    _owners_add(data, name, sid, "chat")
+    # 3) bySid 直接给文件名
+    for sid_key, bucket in (idx.get("bySid") or {}).items():
+        sid = normalize_sid(str(sid_key).replace("_", ":", 1))
+        if not sid or not isinstance(bucket, dict):
+            continue
+        for name in bucket.values():
+            _owners_add(data, name, sid, "chat")
+    # 4) byPath 按群组哈希补；archive / derived / 空路径分别归类
+    for rel, name in (idx.get("byPath") or {}).items():
+        h = _media_sid_of_rel(rel)
+        if h in hash_to_sid:
+            _owners_add(data, name, hash_to_sid[h], "chat")
+        elif h == "archive":
+            _owners_add(data, name, "", "archive")
+        elif h == "derived":
+            _owners_add(data, name, "", "derived")
+        else:
+            _owners_add(data, name, "", "unknown")
+    # 4b) 磁盘上的 session_media / archive 按内容 sha1 反查
+    try:
+        _owners_scan_disk(data, cache, hash_to_sid)
+    except Exception:
+        logger.debug("[multi-decision] 扫 session_media 回填归属失败", exc_info=True)
+    # 5) byHash 里只剩内容哈希、没有路径的，先标 unknown
+    for name in (idx.get("byHash") or {}).values():
+        _owners_add(data, name, "", "unknown")
+    # 6) 磁盘上完全没进索引的：按前缀分转发 / 推文，其余 unknown
+    try:
+        for f in _media_cache_files(cache):
+            name = f.name
+            if name in (data.get("files") or {}):
+                continue
+            if name.startswith("fw_"):
+                _owners_add(data, name, "", "forward")
+            elif name.startswith("tw_"):
+                _owners_add(data, name, "", "twitter")
+            else:
+                _owners_add(data, name, "", "unknown")
+    except Exception:
+        pass
+    data["backfilled"] = _OWNERS_BACKFILL_VERSION
+    _MEDIA_OWNERS_DIRTY[str(cache)] = _MEDIA_OWNERS_DIRTY.get(str(cache), 0) + 1
+    _owners_save(cache, force=True)
 
 
 def _touch_cache_file(path: Path) -> None:
@@ -1082,6 +1801,20 @@ def _touch_cache_file(path: Path) -> None:
         os.utime(path, None)
     except OSError:
         pass
+
+
+def _touch_cache_file_throttled(path: Path) -> None:
+    """_touch_cache_file 的内存节流版：同一张图 5 分钟内只真写一次 mtime。
+
+    这台机器上一次 os.utime 要 2ms，而一次快照里同一张图会被引用十几遍；
+    5 分钟足够让它不被当成「最旧的那批」，又不至于每读一次就写盘。
+    """
+    key = str(path)
+    now = time.monotonic()
+    if now - _TOUCH_LAST.get(key, 0.0) < _TOUCH_MIN_GAP:
+        return
+    _memo_put(_TOUCH_LAST, key, now)
+    _touch_cache_file(path)
 
 
 def _index_forget_files(cache: Path, names) -> None:
@@ -1112,6 +1845,8 @@ def _index_forget_files(cache: Path, names) -> None:
                 changed = True
         if not items:
             data["bySid"].pop(sid_key, None)
+    # 归属账本同理：文件没了，别再留着「这个会话用过它」。
+    _owners_forget(cache, gone)
     if changed:
         # 这里是「文件已经删了」，索引必须立刻跟着落盘：攒 20 次再写的话，
         # 中途重启就会带着一批指向空文件的条目出来。
@@ -1129,18 +1864,43 @@ def _prune_media_cache(cache: Path, limits=None) -> None:
     超了额度」才真的删，否则留着——别的群还在用。
     limits 传 (张数, 天数, 容量MB) 时覆盖模块级三条线（用户 m18059 第 4 条：
     写这张图时按它所属会话的有效设置裁）。
+    不传 limits 时按桶问 _MEDIA_SESSION_LIMITS（用户本轮）：每个群组套自己的
+    有效设置，问不到（没注册回调 / 空桶 / 哈希桶这类伪群组）才退回模块级默认。
+    以前所有桶共用同一个 limit，写图时传的是写入会话的限额，别的群跟着被按别人
+    的额度裁。
     """
-    limit, keep_days, max_mb = _MEDIA_CACHE_LIMIT, _MEDIA_CACHE_KEEP_DAYS, _MEDIA_CACHE_MAX_MB
+    base = (_MEDIA_CACHE_LIMIT, _MEDIA_CACHE_KEEP_DAYS, _MEDIA_CACHE_MAX_MB)
+    fixed = None
     if limits is not None:
         try:
             _l, _d, _m = limits
-            limit = int(_l) if int(_l or 0) > 0 else 2000
-            keep_days = max(0, int(_d or 0))
-            max_mb = max(0, int(_m or 0))
+            fixed = (int(_l) if int(_l or 0) > 0 else 2000,
+                     max(0, int(_d or 0)),
+                     max(0, int(_m or 0)))
         except (TypeError, ValueError):
-            limit, keep_days, max_mb = _MEDIA_CACHE_LIMIT, _MEDIA_CACHE_KEEP_DAYS, _MEDIA_CACHE_MAX_MB
+            fixed = base      # 传坏了就按模块级默认，跟以前一样
+
+    def _lines_of(group):
+        """这个桶该用哪三条线：显式 limits > 按桶问会话 > 模块级默认。"""
+        if fixed is not None:
+            return fixed
+        # 只有真正的会话键（gm:/dm:）才问得到单群设置；哈希桶 / archive / derived
+        # 这些伪群组没有会话可问，直接用模块级默认。
+        if _media_sid_key(group).startswith(("gm_", "dm_")):
+            got = _media_limits_for_group(group)
+            if got is not None:
+                try:
+                    _l, _d, _m = got
+                    return (int(_l) if int(_l or 0) > 0 else 2000,
+                            max(0, int(_d or 0)),
+                            max(0, int(_m or 0)))
+                except (TypeError, ValueError):
+                    pass
+        return base
+
     try:
-        files = _media_cache_files(cache)
+        # 只裁聊天图；fw_ / tw_ 由各自的缓存逻辑管，别被聊天额度误删。
+        files = _media_cache_files(cache, include_shared=False)
         if not files:
             return
         now = time.time()
@@ -1161,6 +1921,10 @@ def _prune_media_cache(cache: Path, limits=None) -> None:
         for f in order:
             for group in (owners.get(f.name) or {""}):
                 buckets.setdefault(group, []).append(f)
+        # 每个桶的三条线先算好：张数 / 容量在 _plan 里按桶用，天数在最后按文件算。
+        # 用户本轮：media_cache_limit 是「每个群组各自的上限」，不能拿一个 limit
+        # 套所有桶——以前写图时传的是写入会话的限额，别的群跟着被按别人的额度裁。
+        lines = {group: _lines_of(group) for group in buckets}
         # 每个群组各自裁：一个文件可能被多个群引用，只有「引用它的每个群都超了」
         # 才真删（别的群还在用）。被别的群保下来的文件不算这个群的可裁对象，
         # 所以要多跑几轮——第 2 轮起跳过「已经证明删不掉」的那些，用它后面更新的
@@ -1168,11 +1932,12 @@ def _prune_media_cache(cache: Path, limits=None) -> None:
         alive = set(files)
         stuck: set = set()
 
-        def _plan(live):
+        def _plan(live, limit, max_mb):
             """这个群组按写入时间从旧到新该删哪些。
 
             live 是这个群组「还在的全部文件」（含本轮删不掉、被别人保下来的）；
-            额度要按全部算，候选只在删得掉的那部分里挑。
+            额度要按全部算，候选只在删得掉的那部分里挑。limit / max_mb 是这个
+            群组自己的线（每个群组各自的上限）。
             """
             drop = set()
             if len(live) > limit:
@@ -1200,7 +1965,8 @@ def _prune_media_cache(cache: Path, limits=None) -> None:
         for _round in range(8):
             votes: dict = {}
             for group, bucket in buckets.items():
-                votes[group] = _plan([f for f in bucket if f in alive])
+                _limit, _days, _mb = lines.get(group, base)
+                votes[group] = _plan([f for f in bucket if f in alive], _limit, _mb)
             voted = set().union(*votes.values()) if votes else set()
             if not voted:
                 break
@@ -1219,23 +1985,31 @@ def _prune_media_cache(cache: Path, limits=None) -> None:
                 except OSError:
                     stuck.add(f)
             stuck |= (voted - gone)     # 这轮被保下来的，下一轮别再拿它占额度
-        if keep_days > 0:
-            deadline = now - keep_days * 86400
-            for f in order:
-                # 用户本轮：天数这条线以前不看保护期——刚收进来的一张图，只要 mtime 是旧的
-                # （从别处复制过来、或老索引里的条目）当场就被判超期删掉。跟张数 / 容量
-                # 两条线一样，两小时内的不动。
-                if stamps.get(f, 0.0) >= grace_cut:
+        # 天数线也按群组算：一个文件只有「引用它的每个群都设了保留天数、且都过期」
+        # 才删（0 = 不限，任何一个群不限就留着）。跟张数 / 容量两条线一样，两小时
+        # 内的不动（用户本轮：以前天数线不看保护期，刚收进来的旧 mtime 图当场被删）。
+        # 过期判定取 max(days)：保留期最长的那个群还没到期就不能删，否则等于替它
+        # 提前清图——跟张数线「所有群都超限才删」是同一个口径。
+        for f in order:
+            if stamps.get(f, 0.0) >= grace_cut:
+                continue
+            if f not in alive or not stamps.get(f, 0.0):
+                continue
+            days_list = [lines.get(g, base)[1] for g in (owners.get(f.name) or {""})]
+            if not days_list or any(d <= 0 for d in days_list):
+                continue
+            if stamps[f] < now - max(days_list) * 86400:
+                try:
+                    f.unlink(missing_ok=True)
+                    removed.append(f.name)
+                    alive.discard(f)
+                except OSError:
                     continue
-                if f in alive and stamps.get(f, 0.0) and stamps[f] < deadline:
-                    try:
-                        f.unlink(missing_ok=True)
-                        removed.append(f.name)
-                        alive.discard(f)
-                    except OSError:
-                        continue
         if removed:
             _index_forget_files(cache, removed)
+            # 真删过文件：进程内「原路径 → 缓存路径」的记忆全部作废，别把死路径
+            # 继续发给页面（记忆重建一次很便宜，一张图一次 stat）。
+            _media_memos_clear()
     except Exception:
         pass
 
@@ -1245,9 +2019,12 @@ def _prune_media_cache(cache: Path, limits=None) -> None:
 #    缓存里只留一份；2) 另存 _index.json 记住「原路径 → 缓存文件」，
 #    框架把 session_media 清掉之后，老路径照样能找回这张图。
 _MEDIA_INDEX_FILE = "_index.json"
-_MEDIA_INDEX_LIMIT = 4000
-_MEDIA_INDEX_SID_LIMIT = 2000
-_MEDIA_INDEX_SIDS = 200
+# 用户 m23021：归属账本已经独立，但索引本身也别裁得太狠。一个群 1500 张图、
+# 一张图可能对应多个原路径，4000 条很容易把老路径挤掉；这里放宽到 2 万条，
+# 会话桶 1 万条，最多 500 个会话。真正的归属以 media_owners.json 为准。
+_MEDIA_INDEX_LIMIT = 20000
+_MEDIA_INDEX_SID_LIMIT = 10000
+_MEDIA_INDEX_SIDS = 500
 _MEDIA_INDEX: dict = {}
 _MEDIA_INDEX_DIRTY: dict = {}
 
@@ -1343,6 +2120,19 @@ def _index_remember(cache: Path, rel_key: str, name: str, digest: str,
         if bucket.get(str(rel_key)) != name:
             bucket[str(rel_key)] = name
             changed = True
+    # 归属账本按文件名记，不跟 byPath/bySid 的条数上限走。即使索引条目被裁掉，
+    # 这张图属于哪个会话仍然留着（用户 m23021：保证以后能正确绑定归属）。
+    if name:
+        group = _media_sid_of_rel(rel_key)
+        if group == "archive":
+            kind = "archive"
+        elif group == "derived":
+            kind = "derived"
+        elif not sid and not rel_key:
+            kind = "unknown"
+        else:
+            kind = "chat"
+        _owners_remember(cache, name, sid, kind)
     if changed:
         _MEDIA_INDEX_DIRTY[key] = _MEDIA_INDEX_DIRTY.get(key, 0) + 1
         _index_save(cache)
@@ -1531,8 +2321,12 @@ def sanitize_native_refs(messages) -> tuple:
     return kept, dropped
 
 
-def _store_cache(name: str, blob: bytes) -> str:
-    """把一张图落进插件缓存，返回相对 data 的路径；失败返回空串。"""
+def _store_cache(name: str, blob: bytes, sid: str = "", rel_key: str = "") -> str:
+    """把一张图落进插件缓存，返回相对 data 的路径；失败返回空串。
+
+    data URL 图以前只落盘、不写索引，所以永远没有会话归属（用户 m23021）。
+    现在把 sid / rel_key 一起传进来，落盘时同步写 _index.json 和归属账本。
+    """
     cache = _media_cache_root()
     root = _data_root()
     if cache is None or root is None or not blob:
@@ -1543,11 +2337,13 @@ def _store_cache(name: str, blob: bytes) -> str:
         if target.is_file() and target.stat().st_size == len(blob):
             # 命中也算「这次用上了」：刷写入时间，别让刚决策完的图排到最老那一头
             _touch_cache_file(target)
+            _index_remember(cache, rel_key, name, "", sid)
             return target.relative_to(root).as_posix()
         tmp = cache / (name + ".tmp")
         tmp.write_bytes(blob)
         os.replace(tmp, target)
         _touch_cache_file(target)
+        _index_remember(cache, rel_key, name, "", sid)
         _prune_media_cache(cache)
         return target.relative_to(root).as_posix()
     except Exception:
@@ -1572,23 +2368,72 @@ def _cache_media_file(source: Path, rel_key: str, sid: str = "") -> str:
     root = _data_root()
     if cache is None or root is None:
         return ""
+    memo_key = (str(rel_key), str(sid or ""))
+    hit = _MEDIA_COPY_MEMO.get(memo_key)
+    st_source = None
+    if hit:
+        # 命中进程内记忆：同一张图这次已经解析过，只剩一次 stat 核对源文件
+        # 还是不是当初那份——同一个路径被换成别的内容（换图、测试夹具重写）
+        # 就必须重算，否则会把上一次的旧副本发出去。
+        rel_hit, size_hit = hit[0], hit[1]
+        try:
+            st_now = source.stat()
+        except OSError:
+            st_now = None
+        if st_now is None:
+            # 源图被框架清掉了：缓存副本还在就直接用（留副本就是为了这一刻）。
+            try:
+                if (root / rel_hit).stat().st_size == size_hit:
+                    _touch_cache_file_throttled(root / rel_hit)
+                    return rel_hit
+            except OSError:
+                pass
+            _MEDIA_COPY_MEMO.pop(memo_key, None)
+            return ""
+        if (stat.S_ISREG(st_now.st_mode) and int(st_now.st_size) == size_hit
+                and int(st_now.st_mtime_ns) == hit[2]):
+            _touch_cache_file_throttled(root / rel_hit)
+            return rel_hit
+        _MEDIA_COPY_MEMO.pop(memo_key, None)
+        st_source = st_now
+    if st_source is None:
+        try:
+            st_source = source.stat()
+        except OSError:
+            return ""
+    if not stat.S_ISREG(st_source.st_mode):
+        return ""
+    size = int(st_source.st_size)
+    mtime_ns = int(st_source.st_mtime_ns)
+    if size <= 0 or size > _MEDIA_COPY_LIMIT:
+        return ""
     try:
-        if not source.is_file():
-            return ""
-        size = source.stat().st_size
-        if size <= 0 or size > _MEDIA_COPY_LIMIT:
-            return ""
         digest = _file_sha1(source)
         if not digest:
             return ""
+        # v4.76：先查索引里的内容哈希（纯内存 dict），命中只花一次 stat；
+        # 旧实现每次都去 1756 个文件的缓存目录里 glob 一遍（一次约 7ms）。
+        known = _index_lookup(cache, digest=digest)
+        if known:
+            f = root / known
+            try:
+                if f.stat().st_size == size:
+                    _index_remember(cache, rel_key, Path(known).name, digest, sid)
+                    _touch_cache_file_throttled(f)
+                    _memo_put(_MEDIA_COPY_MEMO, memo_key, (known, size, mtime_ns))
+                    return known
+            except OSError:
+                pass
         # 内容一样但后缀不同（.jpg / .jpeg）也当作同一张，先认已有的那份
         for f in cache.glob(digest + ".*") if cache.is_dir() else []:
             try:
                 if f.is_file() and f.stat().st_size == size:
                     _index_remember(cache, rel_key, f.name, digest, sid)
                     # 去重命中=这张图刚又被用了：写入时间往前推（本轮「新图被误删」）
-                    _touch_cache_file(f)
-                    return f.relative_to(root).as_posix()
+                    _touch_cache_file_throttled(f)
+                    rel = f.relative_to(root).as_posix()
+                    _memo_put(_MEDIA_COPY_MEMO, memo_key, (rel, size, mtime_ns))
+                    return rel
             except OSError:
                 continue
         # 归档图的文件名是内容哈希、没有后缀，靠文件头补一个：前端按后缀取
@@ -1598,8 +2443,10 @@ def _cache_media_file(source: Path, rel_key: str, sid: str = "") -> str:
         target = cache / name
         if target.is_file() and target.stat().st_size == size:
             _index_remember(cache, rel_key, name, digest, sid)
-            _touch_cache_file(target)
-            return target.relative_to(root).as_posix()
+            _touch_cache_file_throttled(target)
+            rel = target.relative_to(root).as_posix()
+            _memo_put(_MEDIA_COPY_MEMO, memo_key, (rel, size, mtime_ns))
+            return rel
         cache.mkdir(parents=True, exist_ok=True)
         tmp = cache / (name + ".tmp")
         shutil.copyfile(source, tmp)
@@ -1608,12 +2455,14 @@ def _cache_media_file(source: Path, rel_key: str, sid: str = "") -> str:
         _index_remember(cache, rel_key, name, digest, sid)
         # 这张图属于哪个会话，就按那个会话的有效设置裁（用户 m18059 第 4 条）
         _prune_media_cache(cache, _media_limits_for(rel_key))
-        return target.relative_to(root).as_posix()
+        rel = target.relative_to(root).as_posix()
+        _memo_put(_MEDIA_COPY_MEMO, memo_key, (rel, size, mtime_ns))
+        return rel
     except Exception:
         return ""
 
 
-def _cache_data_url(url: str) -> dict:
+def _cache_data_url(url: str, sid: str = "") -> dict:
     """图片 part 偶尔是内联的 data URL，落成缓存文件再交给前端。"""
     m = _DATA_URL_RE.match(url or "")
     if not m:
@@ -1625,11 +2474,81 @@ def _cache_data_url(url: str) -> dict:
     if not blob or len(blob) > _MEDIA_COPY_LIMIT:
         return {}
     ext = mimetypes.guess_extension(m.group("mime") or "") or ".img"
-    rel = _store_cache(hashlib.sha1(url.encode("utf-8")).hexdigest() + ext, blob)
+    name = hashlib.sha1(url.encode("utf-8")).hexdigest() + ext
+    rel = _store_cache(name, blob, sid=sid, rel_key="data:" + name)
     return {"path": rel, "mime": m.group("mime") or ""} if rel else {}
 
 
+def _media_source_stamp(rel: str):
+    """一次 stat 拿到 (size, mtime_ns)；拿不到（源图已被清）就给 (0, 0)。"""
+    root = _data_root()
+    if root is None:
+        return 0, 0
+    try:
+        st = (root / str(rel).replace("\\", "/")).stat()
+    except OSError:
+        return 0, 0
+    if not stat.S_ISREG(st.st_mode) or st.st_size <= 0:
+        return 0, 0
+    return int(st.st_size), int(st.st_mtime_ns)
+
+
+def _media_memo_still_valid(rel: str, cached_path, size: int, mtime: int):
+    """上次「这张图还在」的结论是否仍然成立。
+
+    返回 False 表示作废要重算；返回 Path 表示结论成立、顺带给出该刷 mtime 的
+    缓存文件（没有就不刷）；返回 None 表示成立但不用刷。
+    """
+    root = _data_root()
+    if root is None:
+        return None
+    try:
+        st = (root / str(rel).replace("\\", "/")).stat()
+        alive = stat.S_ISREG(st.st_mode) and int(st.st_size) > 0
+    except OSError:
+        alive = False
+    if not alive:
+        # 源图被框架清掉了：只要缓存副本还在，这个结论就一直有效。
+        if cached_path:
+            try:
+                p = root / str(cached_path).replace("\\", "/")
+                if p.stat().st_size > 0:
+                    return p
+            except OSError:
+                pass
+        return False
+    if not size:
+        # 记下这个结论时源图就已经没了（给的是缓存副本）：只能看副本自己还在不在。
+        if cached_path:
+            try:
+                p = root / str(cached_path).replace("\\", "/")
+                if p.stat().st_size > 0:
+                    return p
+            except OSError:
+                pass
+        return False
+    if int(st.st_size) == size and int(st.st_mtime_ns) == mtime:
+        if cached_path:
+            return root / str(cached_path).replace("\\", "/")
+        return None
+    return False
+
+
 def public_media(path: str, mime: str = "", sid: str = "") -> dict:
+    """同一次渲染内同一张图只解析一次（渲染途中文件不会变）。"""
+    rel_key = (str(path or "").strip(), str(sid or ""), str(mime or ""))
+    fresh = _render_memo()
+    if fresh is not None:
+        got = fresh.get(rel_key)
+        if got is not None:
+            return dict(got)
+    res = _public_media_cached(path, mime, sid)
+    if fresh is not None:
+        fresh[rel_key] = dict(res)
+    return res
+
+
+def _public_media_cached(path: str, mime: str = "", sid: str = "") -> dict:
     """把一条媒体引用变成前端能直接显示的形状。
 
     - http(s) 链接：原样给 url，前端直连
@@ -1643,7 +2562,38 @@ def public_media(path: str, mime: str = "", sid: str = "") -> dict:
     if rel.startswith(("http://", "https://")):
         return {"url": rel, "mime": mime}
     if rel.startswith("data:"):
-        return _cache_data_url(rel) or {"url": rel, "mime": mime}
+        return _cache_data_url(rel, sid) or {"url": rel, "mime": mime}
+    # v4.76：一次快照里同一条媒体引用会被解析几十遍，而这台机器上一次
+    # resolve+stat 要 5ms 以上。按「原路径 + 会话」记住结论：命中的图已经
+    # 留过缓存副本，原图事后被框架清掉也仍然对得上，放心复用。
+    memo_key = (rel, str(sid or ""))
+    memo = _PUBLIC_MEDIA_MEMO.get(memo_key)
+    if memo is not None:
+        res = memo["res"]
+        if res.get("missing"):
+            if (time.monotonic() - memo["at"]) <= _PUBLIC_MEDIA_MISSING_TTL:
+                return dict(res)
+            _PUBLIC_MEDIA_MEMO.pop(memo_key, None)
+        else:
+            # 「原图上还有图没有」这句话同样会过期：同一个路径被换成别的内容时
+            # （换图、测试夹具重写）必须重算，否则把旧副本当成这张图发出去。
+            # 只花一次 stat：源图已清掉的情形则核对缓存副本本身。
+            got = _media_memo_still_valid(rel, res.get("path"), memo["size"], memo["mtime"])
+            if got is not False:
+                if got:
+                    _touch_cache_file_throttled(got)
+                return dict(res)
+            _PUBLIC_MEDIA_MEMO.pop(memo_key, None)
+    res = _public_media_uncached(rel, mime, sid)
+    if res and not res.get("url"):
+        size_now, mtime_now = _media_source_stamp(rel)
+        _memo_put(_PUBLIC_MEDIA_MEMO, memo_key, {"res": dict(res), "size": size_now,
+                                                 "mtime": mtime_now,
+                                                 "at": time.monotonic()})
+    return res
+
+
+def _public_media_uncached(rel: str, mime: str = "", sid: str = "") -> dict:
     root = _data_root()
     if root is None:
         return {"path": rel, "mime": mime}
@@ -1654,7 +2604,9 @@ def public_media(path: str, mime: str = "", sid: str = "") -> dict:
     # 0 字节是框架下载失败时落的占位文件，当真图返回只会裂图，
     # 所以一律当「原图没了」处理，去缓存里找或标 missing。
     try:
-        size = target.stat().st_size if target.is_file() else 0
+        # v4.76：is_file + stat 两次系统调用合成一次（这台机器一次 2ms 以上）。
+        _st = target.stat()
+        size = int(_st.st_size) if stat.S_ISREG(_st.st_mode) else 0
     except OSError:
         size = 0
     if size > 0:
@@ -1687,7 +2639,7 @@ def public_media(path: str, mime: str = "", sid: str = "") -> dict:
         by_base = _find_by_basename(rel)
         if by_base:
             try:
-                _index_remember(cache, rel, Path(by_base).name, "")
+                _index_remember(cache, rel, Path(by_base).name, "", sid)
             except Exception:
                 pass
             return {"path": by_base, "mime": mime}
@@ -1945,6 +2897,52 @@ def strip_note_decl(text: str) -> str:
     return _DEC_NOTE_DECL_RE.sub("", str(text or ""), count=1)
 
 
+# v4.81（用户 2026-11-07 第 4 条）：转发「还有 N 张图没发，需要看就调用 view_forward」
+# 这类话是给模型的操作提示，跟着 content 进了 display_messages 就会在页面上多一行。
+# 只在投影时按这两句固定文案剥掉（决策链没挂工具，第一句不带「需要看就调用
+# view_forward」，所以那半句是可选的）；模型手里的 messages 一个字节不动；也别用泛化的
+# 「（…）」去剥——正文里的括号是用户自己打的。
+_VIEW_HINT_RE = re.compile(
+    r"（这条转发还有 \d+ 张图没发(?:，需要看就调用 view_forward)?）"
+    r"|（另有 \d+ 张动图按设置没有发给模型）"
+)
+
+
+def _strip_view_hint(text: str) -> str:
+    """去掉只给模型看的转发提示（页面/快照投影专用）。"""
+    if not text:
+        return text
+    if "（这条转发还有" not in text and "（另有" not in text:
+        return text
+    return _VIEW_HINT_RE.sub("", text)
+
+
+def _strip_view_hint_content(content):
+    """list content 里摘掉提示段；纯字符串只剥字面量，别动结构。
+
+    没剥到东西时原样返回同一个对象：prepare_messages 每次都会先剥旧提示再按
+    最新策略重插，不能因为「剥了个寂寞」就把每条多模态消息都复制一份。
+    """
+    if isinstance(content, str):
+        return _strip_view_hint(content)
+    if not isinstance(content, list):
+        return content
+    out = []
+    changed = False
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "text":
+            raw = str(part.get("text") or "")
+            text = _strip_view_hint(raw)
+            if text != raw:
+                changed = True
+                if not text.strip():
+                    continue
+                part = dict(part)
+                part["text"] = text
+        out.append(part)
+    return out if changed else content
+
+
 def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list:
     """把一份消息列表转成可 JSON 化的精简结构（列表展示用）。
 
@@ -1969,6 +2967,8 @@ def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list
             content = getattr(msg, "content", None)
             tool_calls = getattr(msg, "tool_calls", None)
             tool_call_id = getattr(msg, "tool_call_id", "") or ""
+        # v4.81：投影前先剥掉只给模型看的转发提示（见 _strip_view_hint）。
+        content = _strip_view_hint_content(content)
         text = text_of_content(content)
         media = media_list(content, raw_sid)
         if media:
@@ -2131,7 +3131,8 @@ _ERROR_RE = re.compile(
     r"\[ProviderError\]\s*(?:All models in the group failed|InternalServerError|Error code:|$)"
 )
 # 模型看到历史里 assistant 都带【名字】，自己输出时也会跟着写一个；
-# 再叠上我们加的就会变成【樱井桃华】【桃华】。加之前先剥掉已有的。
+# 再叠上我们加的就会变成【樱井桃华】【桃华】。加之前先剥掉已有的
+# （2026-11-08 起我们自己写的也是【名字】，老记录里的 [名字] 一并认）。
 _OLD_TAG_RE = re.compile(r"^\s*【[^】]{1,24}】\s*")
 #: <msg ...> 开头（机器人回复的框架格式）
 _MSG_HEAD_RE = re.compile(r"^\s*(<msg\b[^>]*>)\s*")
@@ -2149,11 +3150,13 @@ def _assistant_prefix(text: str, name: str = "", stamp: str = "") -> str:
     if not isinstance(text, str) or not text.strip():
         return text
     time_head = re.compile(r"^\s*(\[(?:\d{1,2}:\d{2}(?::\d{2})?|[A-Z][a-z]{2}\s+\d{1,2}\s+\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s+[A-Z][a-z]{2})?)\])\s*")
-    name_head = re.compile(r"^\s*\[" + re.escape(name) + r"\]\s*") if name else None
+    # 2026-11-08（J）：名字标签统一成【名字】，老记录里的 [名字] 也照旧认得。
+    name_head = re.compile(r"^\s*[\[【]" + re.escape(name) + r"[\]】]\s*") if name else None
     # A different square-bracket name is metadata only when a structural tag
     # follows it (optionally after a timestamp). Plain [正文] remains body text.
     structured_name = re.compile(
-        r"^\s*\[[^\]\n]{1,24}\]\s*(?=(?:\[\d{1,2}:\d{2}(?::\d{2})?\]\s*)*<[A-Za-z][\w:-]*(?:\s|/?>))")
+        r"^\s*(?:\[[^\]\n]{1,24}\]|【[^】\n]{1,24}】)\s*"
+        r"(?=(?:\[\d{1,2}:\d{2}(?::\d{2})?\]\s*)*<[A-Za-z][\w:-]*(?:\s|/?>))")
     found_time = ""
 
     def peel(value, legacy=False):
@@ -2176,9 +3179,9 @@ def _assistant_prefix(text: str, name: str = "", stamp: str = "") -> str:
     head = _MSG_HEAD_RE.match(body)
     if head:
         rest = peel(body[head.end():])
-        body = head.group(1) + (("[" + name + "] ") if name else "") + rest
+        body = head.group(1) + (("【" + name + "】 ") if name else "") + rest
     elif name:
-        body = "[" + name + "] " + body
+        body = "【" + name + "】 " + body
     prefix = found_time or ("[" + stamp + "]" if stamp else "")
     return (prefix + " " if prefix else "") + body
 
@@ -2190,7 +3193,12 @@ def _strip_bot_tag(text: str) -> str:
 
 def _stamp_bot_tag(text: str, tag: str) -> str:
     """Place one known name after MSG and one existing time before MSG."""
-    return _assistant_prefix(text, tag.strip().removeprefix("[").removesuffix("]"))
+    name = str(tag or "").strip()
+    # 标签从「[名字] 」换成「【名字】 」之后，两种括号都要能剥出名字。
+    for left, right in (("[", "]"), ("【", "】")):
+        if name.startswith(left) and name.endswith(right):
+            name = name[len(left):-len(right)]
+    return _assistant_prefix(text, name.strip())
 
 
 def is_error_message(msg) -> bool:
@@ -3038,6 +4046,148 @@ def _restore_model_projection(parts) -> bool:
     return True
 
 
+#: 转发图挂进请求的策略（用户 2026-11-06）：off 不展开 / text 只给文字 /
+#: on_demand 默认只挂前几张，模型需要时用 view_forward 工具看完整内容。
+_FORWARD_MEDIA_FN = None
+_FORWARD_POLICY_FN = None
+_FORWARD_IMAGE_PREVIEW = 3
+
+
+def _is_gif_ref(ref) -> bool:
+    """这张转发图是不是动图（gif）。v4.70（用户 m01237）：转发里的动图可以整档不发。"""
+    if not isinstance(ref, dict):
+        return False
+    mime = str(ref.get("mime") or "").strip().lower()
+    if "gif" in mime:
+        return True
+    rel = str(ref.get("path") or "").replace("\\", "/").strip().lower()
+    return rel.endswith(".gif")
+
+
+def set_forward_media_fn(fn) -> None:
+    """插件注入「这条转发有哪些图」的查询函数（forward_media_for_mid）。"""
+    global _FORWARD_MEDIA_FN
+    _FORWARD_MEDIA_FN = fn
+
+
+def set_forward_policy_fn(fn) -> None:
+    """插件注入「当前转发图策略」的读取函数，返回 (mode, all_images, drop_gif)。
+
+    每次取图都现读，设置页改完立刻生效，不用重载插件。
+    """
+    global _FORWARD_POLICY_FN
+    _FORWARD_POLICY_FN = fn
+
+
+def forward_policy() -> tuple:
+    """当前转发图策略：(mode, all_images, drop_gif)。每次现读，设置页改完立刻生效。"""
+    mode, all_images, drop_gif = "on_demand", False, False
+    if _FORWARD_POLICY_FN is None:
+        return mode, all_images, drop_gif
+    try:
+        got = _FORWARD_POLICY_FN()
+    except Exception:
+        return mode, all_images, drop_gif
+    if isinstance(got, (tuple, list)):
+        if len(got) >= 1 and str(got[0] or "").strip():
+            mode = str(got[0]).strip().lower()
+        if len(got) >= 2:
+            all_images = bool(got[1])
+        if len(got) >= 3:
+            drop_gif = bool(got[2])
+    return mode, all_images, drop_gif
+
+
+def forward_refs_plan(text: str, mid: str) -> tuple:
+    """这条转发挂哪些图：(要挂的 refs, 按设置丢掉的动图张数, 当前模式)。
+
+    v4.70（用户 m01237）：转发里的动图可以整档不发——只丢动图，静态图照发，
+    正文里的 [图片] 占位留着当标记，模型照样知道那儿原本有东西。
+    """
+    if _FORWARD_MEDIA_FN is None or "[Forward" not in str(text or ""):
+        return [], 0, ""
+    mode, all_images, drop_gif = forward_policy()
+    if mode == "off":
+        return [], 0, mode
+    try:
+        refs = list(_FORWARD_MEDIA_FN(mid) or [])
+    except Exception:
+        return [], 0, mode
+    if not refs:
+        return [], 0, mode
+    dropped = 0
+    if drop_gif:
+        keep = []
+        for _ref in refs:
+            if _is_gif_ref(_ref):
+                dropped += 1
+            else:
+                keep.append(_ref)
+        refs = keep
+    if not refs or mode == "text":
+        return [], dropped, mode
+    if all_images:
+        return refs, dropped, mode
+    return refs[:_FORWARD_IMAGE_PREVIEW], dropped, mode
+
+
+def forward_refs_for(text: str, mid: str) -> list:
+    """这条消息是转发时，按策略取要挂进请求的图。"""
+    return forward_refs_plan(text, mid)[0]
+
+
+def forward_model_refs(raw_sid: str, mid: str, refs, gif_mode: str = "grid",
+                       drop_gif: bool = False) -> list:
+    """把转发图物化成框架认得的 session_media 路径，返回可挂进请求的 refs。
+
+    view_forward 工具用：模型要看完整转发时，把这些图当工具结果的附件带回去。
+    v4.69（用户 m00969）：先过一遍 _derive_cached——动图拼九宫格、静态大图压到
+    1280，免得模型一调工具就把几十张原图 GIF 原样塞进请求体。衍生图必须强制
+    复制进本消息目录，否则框架的 owned 校验会把它们整段丢掉。
+
+    每项是 {"path", "mime", "note"}；path 为空表示这张按设置没发（note 说原因）。
+
+    v4.70（用户 m01237）：drop_gif 打开时动图整张不发（转发里的动图多半是表情包），
+    只回一条 note；静态图照旧派生、照旧发。
+    """
+    out = []
+    for ref in refs or []:
+        if not isinstance(ref, dict):
+            continue
+        rel = str(ref.get("path") or "").replace("\\", "/").strip()
+        if not rel:
+            continue
+        if drop_gif and _is_gif_ref(ref):
+            out.append({"path": "", "mime": "",
+                        "note": "（这张是动图，按设置没有发给模型）"})
+            continue
+        mime = str(ref.get("mime") or "image/jpeg")
+        note = ""
+        derived = False
+        try:
+            hit = _derive_cached(rel, gif_mode)
+        except Exception:
+            hit = None
+        if isinstance(hit, dict):
+            if hit.get("skip"):
+                out.append({"path": "", "mime": "", "note": str(hit.get("note") or "")})
+                continue
+            got_path = str(hit.get("path") or "")
+            if got_path:
+                rel = got_path
+                mime = "image/jpeg"
+                note = str(hit.get("note") or "")
+                derived = True
+        try:
+            live = _materialize_session_media(rel, raw_sid, mid, force=derived)
+        except Exception:
+            live = ""
+        if not live:
+            continue
+        out.append({"path": live, "mime": mime, "note": note})
+    return out
+
+
 def attach_window_images(messages, raw_sid: str, keep: int = 128,
                          gif_mode: str = "grid", media_map=None, sources=None) -> List[Any]:
     """统一模型媒体投影：首次 owned 原图固定，按模式派生，最后统一限图。
@@ -3246,7 +4396,16 @@ class WindowManager:
                     eff("media_cache_max_mb", sid),
                 )
             )
+            # 用户 m24364：其他图片也按群聊 / 私聊各自的有效上限裁。
+            set_other_media_limit(lambda sid: eff("media_other_limit", sid))
+            # 用户 m24990：其他图片的保留天数也按会话取。
+            set_other_media_keep_days(lambda sid: eff("media_other_keep_days", sid))
         self._restore()
+        # 用户 m24018 / m24364：启动时按各会话上限裁一遍推文图，避免旧数据一直超着。
+        try:
+            prune_other_media(_media_cache_root())
+        except Exception:
+            logger.debug("[multi-decision] 启动裁剪推文图缓存失败", exc_info=True)
         # 私聊窗口另有落盘存档：进程真重启、热重载都接得回来（用户 m06348 第 6 条）
         self._dm_saved_at = 0.0
         self._restore_dm()
@@ -3324,6 +4483,118 @@ class WindowManager:
                 continue
         return out
 
+    def dm_cache_stats(self, sid: str = "") -> dict:
+        """私聊窗口存档的个数 / 消息条数 / 磁盘占用，给缓存记录页用。
+
+        sid 非空时只算这一个私聊窗口（用户 m22090）：群聊作用域返回 0，
+        私聊作用域返回这个私聊自己的条数和序列化后的字节数。
+        """
+        path = _dm_window_file()
+        count = messages = size = 0
+        try:
+            if path is not None and path.is_file():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    data = {}
+                if sid:
+                    key = normalize_sid(str(sid or "").strip())
+                    raw = data.get(key) or data.get(str(sid or "").strip())
+                    if isinstance(raw, dict):
+                        count = 1
+                        if isinstance(raw.get("messages"), list):
+                            messages = len(raw["messages"])
+                        size = len(json.dumps(raw, ensure_ascii=False).encode("utf-8"))
+                else:
+                    size = int(path.stat().st_size or 0)
+                    count = len(data)
+                    for raw in data.values():
+                        if isinstance(raw, dict) and isinstance(raw.get("messages"), list):
+                            messages += len(raw["messages"])
+        except Exception:
+            logger.debug("[multi-decision] 统计私聊窗口存档失败（已吞掉）", exc_info=True)
+        return {"count": count, "messages": messages, "bytes": size}
+
+    @staticmethod
+    def _dm_entry_ts(raw, fallback: float = 0.0) -> float:
+        """估一个私聊窗口的最后活动时间；没有时间戳就用文件 mtime 兜底。"""
+        best = 0.0
+        if isinstance(raw, dict):
+            for msg in raw.get("messages") or []:
+                if not isinstance(msg, dict):
+                    continue
+                for key in ("ts", "time", "timestamp"):
+                    try:
+                        ts = float(msg.get(key) or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+                    if ts > best:
+                        best = ts
+            for dec in raw.get("decisions") or []:
+                if not isinstance(dec, dict):
+                    continue
+                try:
+                    ts = float(dec.get("ts") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if ts > best:
+                    best = ts
+        return best if best > 0 else float(fallback or 0.0)
+
+    def _clear_dm(self, cutoff=None) -> int:
+        """清私聊窗口存档，返回删掉的窗口数（用户 m21482）。
+
+        cutoff 为 None 清全部；给了 cutoff 就按窗口最后活动时间删整个窗口。
+        窗口没有逐条保存时间，只能按 decisions 的时间 / 文件 mtime 估。
+        """
+        path = _dm_window_file()
+        if path is None:
+            return 0
+        data = {}
+        try:
+            if path.is_file():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data = loaded
+        except Exception:
+            logger.debug("[multi-decision] 清理私聊窗口存档时读取失败（已吞掉）", exc_info=True)
+        # 内存里的状态更新，覆盖盘上的旧版本；盘上独有的窗口也保留。
+        try:
+            data.update(self._dm_snapshot())
+        except Exception:
+            pass
+        try:
+            fallback = float(path.stat().st_mtime) if path.is_file() else 0.0
+        except OSError:
+            fallback = 0.0
+        removed = 0
+        for sid, raw in list(data.items()):
+            key = normalize_sid(str(sid or ""))
+            if not key.startswith("dm:"):
+                continue
+            if cutoff is not None and self._dm_entry_ts(raw, fallback) >= float(cutoff):
+                continue
+            data.pop(sid, None)
+            self._states.pop(key, None)
+            removed += 1
+        if not removed:
+            return 0
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
+            self._dm_saved_at = time.time()
+        except Exception:
+            logger.debug("[multi-decision] 清理私聊窗口存档时写入失败（已吞掉）", exc_info=True)
+            return 0
+        return removed
+
+    def clear_dm_before(self, cutoff: float) -> int:
+        return self._clear_dm(cutoff)
+
+    def clear_dm_all(self) -> int:
+        return self._clear_dm(None)
+
     def _save_dm(self, force: bool = False) -> None:
         """把私聊窗口写到 window_dm.json（原子替换 + 限频）。
 
@@ -3339,11 +4610,7 @@ class WindowManager:
         if not force and (now - getattr(self, "_dm_saved_at", 0.0)) < _DM_WINDOW_SAVE_GAP:
             return
         data = self._dm_snapshot()
-        if len(data) > _DM_WINDOW_MAX:
-            # 私聊太多时只留攒得最满的那些（条数≈活跃度），避免文件无限长
-            keep = sorted(data.items(), key=lambda kv: len(kv[1].get("messages") or []),
-                          reverse=True)[:_DM_WINDOW_MAX]
-            data = dict(keep)
+        # 用户 m18819：不再限制私聊窗口个数，有多少私聊就留多少。
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
@@ -3931,7 +5198,7 @@ class WindowManager:
             self._raw_sids[sid] = raw_sid
         # 先给图片留副本：框架清理 session_media 之后再来取就没了（用户 m01008）
         for m in framework_messages or []:
-            _backup_media(_get(m, "content"))
+            _backup_media(_get(m, "content"), raw_sid)
         st = self.state(sid)
         # 旧pending（含无标记负例）也是已固定的首次来源；清队列前保留bool。
         self.normalize_mentions(sid, "")
@@ -4069,11 +5336,14 @@ class WindowManager:
         self.settle_decision_notes(sid)
         return len(out)
 
-    def prepare_messages(self, sid: str, messages, keep=None, media_by_id=None) -> List[Any]:
+    def prepare_messages(self, sid: str, messages, keep=None, media_by_id=None,
+                         hint_tools: bool = True) -> List[Any]:
         """只读的模型媒体出口，供决策/历史/本轮回复共用。
 
         不清理正文/时间戳，不改原状态；无媒体的 str 保持 str。keep=None 读取
         history_images，-1 不限张数。外部传入的 refs 只是缺源兜底，不能换掉首次源。
+        hint_tools=False 时转发提示只报「还有 N 张图没发」，不叫模型去调
+        view_forward——决策那条链默认没挂任何工具，写了也调不动。
         """
         msgs = list(messages or [])
         raw_sid = self.raw_sid(sid)
@@ -4090,6 +5360,51 @@ class WindowManager:
                     extra[mid] = list(item["media_refs"])
         for mid, refs in (media_by_id or {}).items():
             extra.setdefault(str(mid), refs)
+        # 转发图：默认只挂前几张，模型需要时用 view_forward 看完整内容（用户 2026-11-06）。
+        for _i, _msg in enumerate(msgs):
+            _text = text_of_content(_get(_msg, "content"))
+            _mid = _mid_of_text(_text)
+            if not _mid or _mid in extra:
+                continue
+            # 幂等：先剥掉上一次调用留下的提示，再按这次的实际张数重插。以前是直接
+            # 追加，snapshot 与回复装配各调一次，同一句提示就进了请求原文两遍。
+            _raw_content = _get(_msg, "content")
+            _clean = _strip_view_hint_content(_raw_content)
+            if _clean is not _raw_content:
+                _msg = _with_content(_msg, _clean)
+                msgs[_i] = _msg
+            _refs, _dropped, _fmode = forward_refs_plan(_text, _mid)
+            if _fmode in ("", "off", "text"):
+                continue
+            try:
+                _total = len(_FORWARD_MEDIA_FN(_mid) or []) if _FORWARD_MEDIA_FN else 0
+            except Exception:
+                _total = 0
+            if _refs:
+                extra[_mid] = _refs
+            # 没挂完的图、按设置丢掉的动图都要说一声，不然模型以为就这几张。
+            _left = max(0, _total - _dropped - len(_refs))
+            _notes = []
+            if _left > 0:
+                if hint_tools:
+                    _notes.append("（这条转发还有 %d 张图没发，需要看就调用 view_forward）" % _left)
+                else:
+                    _notes.append("（这条转发还有 %d 张图没发）" % _left)
+            if _dropped > 0:
+                _notes.append("（另有 %d 张动图按设置没有发给模型）" % _dropped)
+            if not _notes:
+                continue
+            _note = "".join(_notes)
+            _content = _get(_msg, "content")
+            if isinstance(_content, list):
+                _parts = list(_content)
+            elif isinstance(_content, str) and _content.strip():
+                # 一条图都没挂上（比如整条转发都是动图、按设置全丢了）时正文还是纯字符串，
+                # 这里也要能补一句，否则模型完全不知道原处有图。
+                _parts = [{"type": "text", "text": _content}]
+            else:
+                continue
+            msgs[_i] = _with_content(_msg, _parts + [{"type": "text", "text": _note}])
         # 窗口被裁/清理后不保留过期消息的源，也不能借缓存把它们复活。
         for mid in list(sources):
             if mid not in active:
@@ -4163,7 +5478,7 @@ class WindowManager:
             msgs = self.prepare_messages(sid, msgs)
         # bot 自己说的话也要带时间与名字（用户 m32754）：这两个函数原来只挂在
         # messages_of / normalize 上，真正发出去的 snapshot 漏了，请求原文里
-        # assistant 既没有 [HH:MM] 也没有 [桃华]。
+        # assistant 既没有 [HH:MM] 也没有【桃华】。
         msgs = self._prefix_assistant(msgs, sid)
         msgs = stamp_assistant_time(msgs)
         head = self._summary_head(sid)
@@ -4181,6 +5496,10 @@ class WindowManager:
         待发攒着的群消息框架记忆里还没有（没跑完一轮 agent 框架不写记忆），窗口
         本体也还没并进来；以前只给 snapshot，窗口一空就读到空记录，于是判出
         「没人说话」。这里按 collect 时同一套格式把待发接在窗口后面。
+
+        转发提示一律 hint_tools=False：决策链的 tool_set 只来自 decision_tools
+        配置（默认空），没挂 view_forward 就不能叫模型去调它。哪天把 view_forward
+        勾进 decision_tools，这里要跟着改成 True。
         """
         base = self.snapshot(sid, prepare=False)
         st = self._states.get(sid)
@@ -4192,14 +5511,14 @@ class WindowManager:
             logger.exception("[multi-decision] 取待发失败（决策按窗口判）")
             return base
         if not pend:
-            return self.prepare_messages(sid, base)
+            return self.prepare_messages(sid, base, hint_tools=False)
         pend = shrink_timestamps(pend)
         pend = self._prefix_assistant(pend, sid)
         pend = stamp_assistant_time(pend)
         out = list(base)
         for m in pend:
             out.append(self._as_openai(m))
-        return self.prepare_messages(sid, out)
+        return self.prepare_messages(sid, out, hint_tools=False)
 
     def decision_incoming(self, sid: str) -> list:
         """决策这一轮真正新来的那批：还挂在「待发」里的消息（v3.97，用户 m09615 图9）。
@@ -4476,14 +5795,14 @@ class WindowManager:
             # 名字只从配置里取（单群手填 > 全局「机器人昵称」 > 适配器探测），
             # 配置里一处都没有就不加前缀——不编一个假名字（用户 m32887「别硬写入」）。
             return list(messages or [])
-        tag = "[" + name + "] "
+        tag = "【" + name + "】 "
         out = []
         for msg in messages or []:
             if str(_get(msg, "role", "")) != "assistant":
                 out.append(msg)
                 continue
             # v4.03（用户 m11947）：注记的名字是「对当前聊天消息的决策建议」，
-            # 再套一层 [桃华] 之后正文就不再以 [决策记录] 开头，认不出来了。
+            # 再套一层【桃华】之后正文就不再以 [决策记录] 开头，认不出来了。
             if is_decision_note(msg):
                 out.append(msg)
                 continue
@@ -4542,6 +5861,17 @@ class WindowManager:
                 return default
             return t in ("1", "true", "on", "yes", "y", "开", "是")
         return bool(v)
+
+    def gif_mode(self, sid: str) -> str:
+        """当前会话的动图发法（公开入口，view_forward 工具那条路要用）。"""
+        try:
+            key = normalize_sid(str(sid or "")) or str(sid or "")
+        except Exception:
+            key = str(sid or "")
+        try:
+            return self._gif_mode(key)
+        except Exception:
+            return "grid"
 
     def _gif_mode(self, sid: str) -> str:
         """历史里的动图怎么发给模型（v4.45，用户 m22611）。
@@ -4633,34 +5963,100 @@ class WindowManager:
 
     # -------------------------------------------------------------- 图片缓存
 
-    def media_cache_stats(self) -> dict:
+    def media_cache_stats(self, sid: str = "") -> dict:
         """插件替群友图片留的副本占了多少（用户 m10749 第 5 条）。
 
         只统计 media_cache 这一个目录：session_media 是框架的，插件既管不着
         也不该删。
+
+        归属以 media_owners.json 为准（用户 m23021）：按缓存文件名记，不跟
+        byPath/bySid 的路径条数上限走。老数据第一次读时由 _owners_backfill()
+        从 bySid / byPath 群组哈希 / 请求快照回填。
+
+        sid 非空时只算这个会话的聊天图；不带 sid 时拆成聊天图、未归属、
+        转发图、推文图、归档图、派生图，页面可以分开显示，不再把非聊天图
+        混进「图片缓存」。
         """
         cache = _media_cache_root()
         out = {"ok": True, "count": 0, "bytes": 0, "mb": 0.0,
                "limit": _MEDIA_CACHE_LIMIT, "limit_total": _MEDIA_CACHE_LIMIT,
-               "groups": 1, "dir": ""}
+               "groups": 1, "dir": "", "breakdown": {},
+               "unknown_count": 0, "unknown_bytes": 0,
+               "other_count": 0, "other_bytes": 0, "other_limit": _OTHER_MEDIA_LIMIT,
+               "forward_count": 0, "forward_bytes": 0}
         if cache is None:
             return out
         out["dir"] = str(cache)
+        try:
+            _owners_backfill(cache)
+        except Exception:
+            logger.debug("[multi-decision] 回填图片归属失败", exc_info=True)
+        owners = (_owners_load(cache).get("files") or {})
         files = _media_cache_files(cache)
-        total = 0
+        target = normalize_sid(sid) if sid else ""
+        if target:
+            count = 0
+            total = 0
+            other_count = 0
+            other_total = 0
+            for f in files:
+                ent = owners.get(f.name) or {}
+                kind = ent.get("kind") or _media_kind_of_name(f.name)
+                if target not in (ent.get("sids") or []):
+                    continue
+                try:
+                    size = int(f.stat().st_size or 0)
+                except Exception:
+                    continue
+                if kind == "twitter":
+                    other_count += 1
+                    other_total += size
+                    continue
+                if kind not in ("chat", "derived", "archive"):
+                    continue
+                total += size
+                count += 1
+            out["count"] = count
+            out["bytes"] = total
+            out["mb"] = round(total / 1048576.0, 1)
+            out["other_count"] = other_count
+            out["other_bytes"] = other_total
+            out["other_limit"] = _other_media_limit_for(target)
+            out["breakdown"] = {"chat": {"count": count, "bytes": total},
+                                "twitter": {"count": other_count, "bytes": other_total}}
+            out["limit_total"] = int(_MEDIA_CACHE_LIMIT)
+            return out
+        buckets = {k: [0, 0] for k in ("chat", "unknown", "forward", "twitter", "archive", "derived")}
         for f in files:
+            ent = owners.get(f.name) or {}
+            kind = ent.get("kind") or _media_kind_of_name(f.name)
+            if kind in ("chat", "derived", "archive") and not (ent.get("sids") or []):
+                kind = "unknown"
+            elif kind in ("derived", "archive"):
+                kind = "chat"
+            if kind not in buckets:
+                kind = "unknown"
             try:
-                total += int(f.stat().st_size or 0)
+                size = int(f.stat().st_size or 0)
             except Exception:
-                continue
-        out["count"] = len(files)
-        out["bytes"] = total
-        out["mb"] = round(total / 1048576.0, 1)
+                size = 0
+            buckets[kind][0] += 1
+            buckets[kind][1] += size
+        out["count"] = buckets["chat"][0]
+        out["bytes"] = buckets["chat"][1]
+        out["mb"] = round(buckets["chat"][1] / 1048576.0, 1)
+        out["unknown_count"] = buckets["unknown"][0]
+        out["unknown_bytes"] = buckets["unknown"][1]
+        out["forward_count"] = buckets["forward"][0]
+        out["forward_bytes"] = buckets["forward"][1]
+        out["other_count"] = buckets["twitter"][0] + buckets["archive"][0] + buckets["derived"][0]
+        out["other_bytes"] = buckets["twitter"][1] + buckets["archive"][1] + buckets["derived"][1]
+        out["breakdown"] = {k: {"count": v[0], "bytes": v[1]} for k, v in buckets.items()}
         # 「上限」是每个群组各自的上限（用户本轮），所以再报一个算出来的总配额
         # = 每群上限 × 群组数，页面拿它可以提示「现在最多能存多少」。
         try:
-            owners = _media_cache_groups(cache, {f.name for f in files})
-            groups = {g for gs in owners.values() for g in gs}
+            groups_map = _media_cache_groups(cache, {f.name for f in files})
+            groups = {g for gs in groups_map.values() for g in gs}
         except Exception:
             groups = set()
         out["groups"] = len(groups) or 1
@@ -4691,8 +6087,37 @@ class WindowManager:
             pass
         _MEDIA_INDEX.pop(str(cache), None)
         _MEDIA_INDEX_DIRTY.pop(str(cache), None)
+        _owners_clear(cache)
+        _media_memos_clear()
         logger.info(f"[multi-decision] 已清空图片缓存：{removed} 张 / {freed} 字节")
         return {"ok": True, "removed": removed, "mb": round(freed / 1048576.0, 1)}
+
+    def clear_media_cache_before(self, cutoff: float) -> dict:
+        """只删 mtime 早于 cutoff 的图片缓存，返回删掉的张数 / 大小（用户 m21482）。
+
+        和 clear_media_cache 不同：索引文件不整个删，只把指向已删文件的条目
+        摘掉，其他群的索引还在。
+        """
+        cache = _media_cache_root()
+        if cache is None:
+            return {"ok": False, "detail": "取不到数据目录"}
+        freed = 0
+        names = []
+        for f in _media_cache_files(cache):
+            try:
+                if float(f.stat().st_mtime) >= float(cutoff):
+                    continue
+                freed += int(f.stat().st_size or 0)
+                names.append(f.name)
+                f.unlink(missing_ok=True)
+            except Exception:
+                continue
+        if names:
+            _index_forget_files(cache, names)
+            _media_memos_clear()
+        logger.info(f"[multi-decision] 已清理 {len(names)} 张旧图片缓存 / {freed} 字节")
+        return {"ok": True, "removed": len(names),
+                "mb": round(freed / 1048576.0, 1)}
 
     def purge_media_cache(self, sid: str) -> dict:
         """删掉某个会话留在图片缓存里的副本（用户 m18059 第 1 条）。
@@ -4706,6 +6131,7 @@ class WindowManager:
         out = {"ok": True, "removed": 0, "bytes": 0, "mb": 0.0, "paths": 0}
         cache = _media_cache_root()
         target = _media_sid_key(sid)
+        owner_target = normalize_sid(str(sid or ""))
         if cache is None:
             out.update(ok=False, detail="取不到数据目录")
             return out
@@ -4715,6 +6141,9 @@ class WindowManager:
         by_path = data.get("byPath") or {}
         by_hash = data.get("byHash") or {}
         by_sid = data.get("bySid") or {}
+        owners = (_owners_load(cache).get("files") or {})
+        owned_names = {name for name, ent in owners.items()
+                       if owner_target in (ent.get("sids") or [])}
         pairs = []
         # 优先按写入时记下的会话归属删（缓存路径里那段是框架的群组哈希，认不出 gm:/dm:，
         # 以前按路径判归属永远一条都对不上，删会话时一张图也清不掉）。
@@ -4727,12 +6156,22 @@ class WindowManager:
             for rel_key, name in list(by_path.items()):
                 if _media_sid_key(_media_sid_of_rel(rel_key)) == target:
                     pairs.append((rel_key, str(name or "")))
+        # 归属账本里记着、但 bySid/byPath 已经截断的，也要删。
+        seen_names = {name for _rel, name in pairs}
+        for name in owned_names:
+            if name not in seen_names:
+                pairs.append(("", name))
         if not pairs:
             return out
         for rel_key, _name in pairs:
             by_path.pop(rel_key, None)
-        # 还有别的会话路径指向同一个缓存文件吗？有就留着文件
+        # 还有别的会话路径或归属账本指向同一个缓存文件吗？有就留着文件
         still = set(by_path.values())
+        for name, ent in owners.items():
+            if name in owned_names:
+                continue
+            if ent.get("sids"):
+                still.add(name)
         for rel_key, name in pairs:
             if not name or name in still:
                 continue
@@ -4744,6 +6183,18 @@ class WindowManager:
                 out["bytes"] += size
             except Exception:
                 continue
+        # 账本里去掉这个会话；最后一个会话也没了就删条目。
+        for name in owned_names:
+            ent = owners.get(name)
+            if not isinstance(ent, dict):
+                continue
+            ent["sids"] = [s for s in (ent.get("sids") or []) if s != owner_target]
+            if not ent["sids"]:
+                owners.pop(name, None)
+        try:
+            _owners_save(cache, force=True)
+        except Exception:
+            pass
         # 指向已删文件的 byHash 一起清掉，别让 public_media 白查一圈
         alive = {f.name for f in _media_cache_files(cache)}
         for digest, name in list(by_hash.items()):
@@ -4758,6 +6209,8 @@ class WindowManager:
             pass
         out["paths"] = len(pairs)
         out["mb"] = round(out["bytes"] / 1048576.0, 1)
+        if out["removed"]:
+            _media_memos_clear()
         logger.info(
             f"[multi-decision] 已清掉 {sid} 的图片缓存：{out['removed']} 张 / {out['mb']}MB"
         )
@@ -5138,7 +6591,10 @@ class WindowManager:
             # 免得面板把这次裁切错标成上一轮（用户 m03343）
             record["event_id"] = event_id
             record["round_ts"] = now
-        elif request_log is not None:
+        # v4.74（用户 m02687）：空闲巡检那一下（trigger=buffer）不是哪一轮引起的，
+        # 以前照抄「最近一轮」的身份，隔了一两个小时也硬挂上去——橙标落到很早那根柱子上，
+        # 裁切快照自己又画一根青柱，同一刀被数了两遍。这类裁切只留自己的快照，不挂轮次。
+        elif request_log is not None and str(trigger or "") != "buffer":
             try:
                 # v4.53（用户 m29175）：裁切快照 v4.52 起是「先落快照、再动刀」，
                 # 它也会出现在轮次列表里。以前取 list_rounds(sid, 1) 正好取到这份
@@ -5153,6 +6609,10 @@ class WindowManager:
                     record["round_ts"] = latest[0].get("ts") or 0
             except Exception:
                 logger.exception("[multi-decision] 关联裁切轮次失败")
+        if snap_path:
+            # v4.74（用户 m02687）：这份裁切快照的文件名一起记下。走势图靠它认出
+            # 「这一刀已经有柱子了」，不再给同一刀单独画一根青柱。
+            record["snap_name"] = os.path.basename(str(snap_path))
         info = self._append_summary(sid, cut_msgs)
         if info:
             record["summary_generated"] = True

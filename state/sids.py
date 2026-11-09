@@ -11,6 +11,19 @@ from __future__ import annotations
 TYPES = ("gm", "dm")
 
 
+def bot_name(plugin, sid: str = "") -> str:
+    """这个会话里 bot 自己的昵称；没设就退全局名，再没有就写「机器人」。
+
+    2026-11-08（J）：提示词里的 {{bot}}、决策记录里 bot 自己那几行的标签都走这里——
+    以前三处各写一份，改名只改到一半就会有两种叫法。
+    """
+    try:
+        nm = str(plugin.bot_name_for(sid) or "").strip()
+    except Exception:
+        nm = ""
+    return nm or str(getattr(plugin, "bot_name", "") or "").strip() or "机器人"
+
+
 def normalize_sid(sid: str) -> str:
     """把 `桃华:gm:1145141974` 归成 `gm:1145141974`。已经归一化的原样返回。
 

@@ -3,6 +3,9 @@
 v3.65（用户 m19238）：用户要求「只留统计要用的信息」。落盘的是
 {ts, sid, result} 再加 reason / event_id / replied / failed / is_retry /
 message_logged 里那些有值的；正文、发送者、媒体类型、计数、错误文本一律不写。
+
+v4.90（用户 m01875 第 4 条）：再加一个 msg_ts——用户真正发出这条消息的时刻
+（epoch 秒）。ts 是写日志的时刻，消息被延后重放时会晚几秒，对不上发言时间。
 读侧只用这些（见 _message_weight / stats_recent / recent_round_rows /
 hour_histogram），日志页也不再展示内容。历史文件已按同一口径重写
 （2026-10-25 迁移，1.11 MB → 435 KB）。
@@ -525,6 +528,48 @@ class DecisionLog:
         for path in files:
             try:
                 path.unlink(missing_ok=True)
+            except OSError:
+                continue
+        return removed
+
+    def clear_before(self, cutoff: float) -> int:
+        """删掉 cutoff 之前的记录，返回删掉的条数（用户 m21482）。
+
+        按天文件是多会话混写的，只能逐行看 ts 再重写；没有 ts 的坏行原样留着，
+        不拿「读不懂」当「太旧」。
+        """
+        try:
+            files = sorted(self.dir.glob("*.jsonl"))
+        except Exception:
+            return 0
+        removed = 0
+        for path in files:
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except Exception:
+                continue
+            kept = []
+            for line in lines:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    rec = json.loads(text)
+                    ts = float(rec.get("ts") or 0.0)
+                except Exception:
+                    kept.append(line)
+                    continue
+                if ts > 0 and ts < cutoff:
+                    removed += 1
+                    continue
+                kept.append(line)
+            try:
+                if kept:
+                    tmp = path.with_suffix(".jsonl.tmp")
+                    tmp.write_text("\n".join(kept) + "\n", encoding="utf-8")
+                    tmp.replace(path)
+                else:
+                    path.unlink(missing_ok=True)
             except OSError:
                 continue
         return removed

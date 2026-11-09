@@ -522,7 +522,8 @@ class RequestLog:
 
     def __init__(self, data_dir, keep_rounds: int = 100, enabled: bool = True,
                  keep_days: int = 0, keep_of=None, days_of=None,
-                 dec_keep: int = 0, dec_keep_of=None):
+                 dec_keep: int = 0, dec_keep_of=None,
+                 trim_keep: int = 0, trim_keep_of=None):
         self.enabled = bool(enabled)
         self.dir = Path(data_dir) / "requests"
         try:
@@ -546,6 +547,13 @@ class RequestLog:
         except (TypeError, ValueError):
             self.dec_keep = 0
         self._dec_keep_of = dec_keep_of
+        # v4.78（用户 2026-11-07 第 3 条）：裁切快照是窗口快照的一种，跟窗口日志共用
+        # windows_keep 这份上限（回复/决策各有各的份数线）。没给回调就退回回复那份。
+        try:
+            self.trim_keep = max(0, int(trim_keep or 0))
+        except (TypeError, ValueError):
+            self.trim_keep = 0
+        self._trim_keep_of = trim_keep_of
         if self.enabled:
             try:
                 self.dir.mkdir(parents=True, exist_ok=True)
@@ -555,6 +563,10 @@ class RequestLog:
         # (sid, event_id) -> 落盘文件名。重试成功要把结果补写回「原错误那一轮」的
         # 记录，得先能按事件号找回那份文件；重启后索引是空的，_find_name 兜底扫盘。
         self._names: dict[tuple[str, str], str] = {}
+        # v4.88：快照分类（reply / trim / decision）的记忆表。
+        # 以前每次 _prune 都把目录里每份快照整份读一遍找标记，线上 474 份 / 42 MB，
+        # 实测冷读 3.6 秒、热读 0.8 秒，而每落一份快照都要跑一次 _prune。
+        self._kind_cache: dict[tuple, str] = {}
         # v3.47（用户 2026-10-24 第 2 条）：24 小时统计的账本。
         # requests/<sid>/ 每会话只留 keep 份，一天超过 keep 轮的会话
         # rounds / replied / failed / silent 就全被截在那个上限上
@@ -573,6 +585,9 @@ class RequestLog:
         # 这里按目录指纹（文件数 + 最新修改时间）缓存摘要行，新落一轮或裁掉旧文件
         # 才会重建；重建本身由调用方丢进线程，不占事件循环。
         self._rounds_cache: dict[str, tuple] = {}
+        # v4.80（2026-11-07 性能）：轻量行缓存，按 (文件名, mtime_ns, size) 命中。
+        # 决策快照保留加深到 300 份后目录有六百来份文件，轮询只该解析新落的那一份。
+        self._light_cache: dict[str, dict[tuple, dict]] = {}
         # prefix-v2 按同类请求的记录投影比较连续前缀，不跨模型推断缓存共享。
         # (sid, "decision") 只跟上一次决策比，(sid, "reply") 只跟上一次回复请求比。
         self._prev_cache: dict[tuple[str, str], tuple] = {}
@@ -1466,6 +1481,18 @@ class RequestLog:
         record["error"] = ""
         if extra:
             record.update(extra)
+        # 用户 2026-11-07：回复快照要带这一轮实际用的模型与渠道，前端按这两个
+        # 名字读。调用方（引擎）用 extra 传进来；没传或传空就补空串，保证新快照
+        # 一定有这两个键。老快照没有它们，前端显示「—」，后端不做迁移。
+        record.setdefault("reply_model", "")
+        # 用户 m00375 第 8 条：回复记录要的是 API 渠道（供应商实例名），不是 IM 平台。
+        # reply_channel 仍留着（QQ / webchat），前端挪到 title 里当补充说明。
+        record.setdefault("reply_provider", "")
+        record.setdefault("reply_channel", "")
+        # v4.85（用户 m10425 第 8 条）：回复记录表要显示这一轮真正发出去的正文。
+        # 引擎从 final_result 的 raw_output 里抽好传进来；没传（出错轮、看门狗
+        # 结算）就补空串，前端按「—」显示。
+        record.setdefault("reply_text", "")
         saved = self._save_round(sid, record, ledger=True)
         if saved:
             self._pending.pop(key, None)
@@ -1491,8 +1518,9 @@ class RequestLog:
         if not folder.is_dir():
             return None
         try:
-            files = sorted(folder.glob("*.json"),
-                           key=lambda p: p.stat().st_mtime, reverse=True)
+            # v4.88：文件名就是毫秒时间戳，按名字倒序即按时间倒序；
+            # 以前按 p.stat().st_mtime 排，474 份快照光 stat 就要 1 秒。
+            files = sorted(folder.glob("*.json"), reverse=True)
         except Exception:
             return None
         now = time.time()
@@ -1944,6 +1972,14 @@ class RequestLog:
             "decision_tools": list(data.get("tools_used") or []),
             "decision_system_names": names,
             "decision_transcript": transcript,
+            # 用户 m06706：这次判定走的是哪条链。记录页不加徽标，但要能查——
+            # 判失败时第一件事就是确认它调的是普通决策还是 JEV。
+            "decision_mode": str(data.get("decision_mode") or ""),
+            # JEV 的结构化概率与边界：改区间不回写旧记录，旧记录里没有这些键，
+            # 页面按旧格式显示即可（绝不拿今天的区间去解释昨天的判定）。
+            "decision_jev": copy.deepcopy(data.get("jev") or {}),
+            # 转交普通决策那一次的两阶段账（只在「不确定 + 交给决策模型」时非空）。
+            "decision_jev_transfer": copy.deepcopy(data.get("jev_transfer") or {}),
             "input_tokens": in_tok,
             "output_tokens": out_tok,
             "cached_tokens": cached,
@@ -2022,6 +2058,39 @@ class RequestLog:
                 logger.debug("[multi-decision] 取会话决策快照保留份数失败", exc_info=True)
         return self.dec_keep or self.keep
 
+    def trim_keep_for(self, sid: str = "") -> int:
+        """这个会话该留几份裁切快照（v4.78，用户 2026-11-07 第 3 条）。
+
+        裁切快照不动决策、也不调回复，它只是「窗口被裁掉那一下」的存档，属于窗口
+        快照那一类，所以份数线跟窗口日志共用 windows_keep（main.py 传回调进来）。
+        回调没给或取不到就退回实例值；实例值也没给（0）就跟回复快照用同一个数。
+        口径与 keep_for / dec_keep_for 一致：单群覆盖 > 全局默认。
+        """
+        if self._trim_keep_of is not None:
+            try:
+                value = int(self._trim_keep_of(sid) or 0)
+                if value > 0:
+                    return value
+            except Exception:
+                logger.debug("[multi-decision] 取会话裁切快照保留份数失败", exc_info=True)
+        return self.trim_keep or self.keep
+
+    def snap_keep_for(self, sid: str = "") -> int:
+        """这个会话最多留几份窗口快照（v4.90，用户 m01133 第 2 条）。
+
+        回复快照、决策快照、裁切快照合成一类之后，份数线只剩 windows_keep 这一条。
+        跟 trim_keep_for 的区别只有一个：**回调明确给 0 就是 0（不限）**，不再退回
+        回复快照的份数——设置页里 windows_keep 写着「0 = 不限」，退回 100 就把它
+        变成谎话了。没有回调（直接构造 RequestLog，比如测试和离线脚本）时还是按
+        实例值走，实例值也没给就退回 keep，跟改动前一样。
+        """
+        if self._trim_keep_of is not None:
+            try:
+                return max(0, int(self._trim_keep_of(sid) or 0))
+            except Exception:
+                logger.debug("[multi-decision] 取会话窗口快照保留份数失败", exc_info=True)
+        return max(0, int(self.trim_keep or self.keep or 0))
+
     @staticmethod
     def _is_decision_file(path) -> bool:
         """这份快照是不是决策快照（决策那一轮单独落的那份）。
@@ -2034,6 +2103,38 @@ class RequestLog:
         except OSError:
             return False
         return '"decision_only": true' in text
+
+    @staticmethod
+    def _is_trim_file(path) -> bool:
+        """这份快照是不是裁切快照（裁切那一刀单独落的，trim_only 标记）。
+
+        跟决策快照同样靠文本标记分辨，理由同 _is_decision_file：文件小，找文本比
+        json.loads 快一个数量级。裁切快照单独计数（v4.77），否则它会挤占回复快照名额。
+        """
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        return '"trim_only": true' in text
+
+    def _kind_of(self, path, size: int = -1, mtime: float = -1.0) -> str:
+        """这份快照属于哪一堆：reply / trim / decision（v4.88 记忆化）。
+
+        快照写完就不再改（文件名就是毫秒时间戳），所以按 (路径, 大小, mtime) 记一次就够。
+        调用方从 scandir 拿到大小和时间就传进来，省掉一次按路径 stat——Windows 上
+        按路径 stat 每次约 2ms，474 份就是 1 秒，而 scandir 的 entry.stat() 是枚举时
+        顺带拿到的，几乎不要钱。
+        """
+        key = (str(path), int(size), float(mtime))
+        hit = self._kind_cache.get(key)
+        if hit is not None:
+            return hit
+        kind = "decision" if self._is_decision_file(path) else (
+            "trim" if self._is_trim_file(path) else "reply")
+        if len(self._kind_cache) >= 4096:
+            self._kind_cache.clear()
+        self._kind_cache[key] = kind
+        return kind
 
     def days_for(self, sid: str = "") -> int:
         """这个会话该留多少天的旧请求；0 = 不限。口径同 keep_for。"""
@@ -2048,55 +2149,64 @@ class RequestLog:
         """裁掉这个会话的旧快照（用户 m13708 第 3 条：份数 + 天数两条线）。
 
         ① 天数线：keep_days > 0 时，早于 keep_days 天的文件删掉；0 = 不限。
-        ② 份数线：**回复快照与决策快照各算各的上限**（v4.00，用户 m10782：
-           决策快照是一类独立的缓存，不能被回复快照的份数挤掉，反之亦然）。
-           两者同目录，靠 _is_decision_file 分堆；文件总数没超过「较小那个上限」
-           时两堆必然都没超，直接返回、连文件都不用读——稳态下每条消息只多一次
-           stat。（v4.00 修：一开始拿 keep + keep_dec 当闸门，等于把回复快照的份数
-           线也放宽了一倍，留 3 份的会话会一直堆到 6 份。）
+        ② 份数线：**三种快照合成一个「窗口快照」概念，只留一条份数线**（v4.90，
+           用户 m01133 第 2 条）。回复轮、决策轮、裁切那一刻存下来的本来就是同一种
+           东西——当时的窗口存档，同一个目录、同一个命名，只是存下来的时机不同。
+           以前拆成三堆各按各的上限裁（回复 trace_keep、决策 decision_keep、裁切
+           windows_keep），缓存表三行加起来跟走势图上的柱子数永远对不上，用户看不出
+           哪个数才是真的。现在统一按 windows_keep 裁，0 = 不限。
         文件名就是毫秒时间戳，按名字排序即按时间排序；刚写下 5 分钟内的先留着
         （那一轮可能还在跑 / 刚回完，删了页面点进去是一片空）。
         """
-        keep = self.keep_for(sid)
-        keep_dec = self.dec_keep_for(sid)
+        keep_all = self.snap_keep_for(sid)
         keep_days = self.days_for(sid)
         grace_cut = time.time() - PRUNE_GRACE_SECONDS
         try:
-            files = sorted(folder.glob("*.json"))
-            if keep_days > 0:
-                cutoff = time.time() - keep_days * 86400
-                for path in files:
+            # v4.88：一次 scandir 把名字 / 时间 / 大小全拿到手。
+            # 以前是 folder.glob() + path.stat()：线上 474 份快照光 stat 就要 1 秒
+            # （Windows 上按路径 stat 每次约 2ms），再逐份读全文找标记，每落一份
+            # 快照都要卡一下；现在只有第一次见到的文件才读，之后全是内存查表。
+            entries = []
+            with os.scandir(folder) as it:
+                for ent in it:
+                    if not ent.name.endswith(".json"):
+                        continue
                     try:
-                        if path.stat().st_mtime >= cutoff:
-                            continue
-                        # 刚写的也别当天数线带走（同一份 5 分钟宽限）
-                        if path.stat().st_mtime >= grace_cut:
-                            continue
-                        path.unlink()
+                        st = ent.stat()
                     except OSError:
                         continue
-                files = sorted(folder.glob("*.json"))
-            if len(files) > min(keep, keep_dec):
-                groups = {"reply": [], "decision": []}
-                for path in files:
-                    groups["decision" if self._is_decision_file(path) else "reply"].append(path)
-                for name, cap in (("reply", keep), ("decision", keep_dec)):
-                    overflow = max(0, len(groups[name]) - cap)
-                    if overflow <= 0:
+                    entries.append((ent.name, st.st_mtime, st.st_size, Path(ent.path)))
+            entries.sort(key=lambda x: x[0])
+            if keep_days > 0:
+                cutoff = time.time() - keep_days * 86400
+                gone = set()
+                for name, mtime, _size, path in entries:
+                    if mtime >= cutoff:
                         continue
-                    for path in groups[name]:
-                        if overflow <= 0:
-                            break
-                        try:
-                            if path.stat().st_mtime >= grace_cut:
-                                continue
-                        except OSError:
-                            continue
-                        try:
-                            path.unlink()
-                            overflow -= 1
-                        except OSError:
-                            continue
+                    # 刚写的也别当天数线带走（同一份 5 分钟宽限）
+                    if mtime >= grace_cut:
+                        continue
+                    try:
+                        path.unlink()
+                        gone.add(name)
+                    except OSError:
+                        continue
+                if gone:
+                    entries = [e for e in entries if e[0] not in gone]
+            if keep_all > 0 and len(entries) > keep_all:
+                # entries 已按文件名（毫秒时间戳）正序 = 从旧到新，从头删到够为止。
+                # v4.90：不再分堆，三种快照共用这一条份数线。
+                overflow = len(entries) - keep_all
+                for _name, mtime, _size, path in entries:
+                    if overflow <= 0:
+                        break
+                    if mtime >= grace_cut:
+                        continue
+                    try:
+                        path.unlink()
+                        overflow -= 1
+                    except OSError:
+                        continue
         except Exception:
             logger.exception("[multi-decision] 清理请求记录失败")
 
@@ -2164,122 +2274,232 @@ class RequestLog:
             logger.exception(f"[multi-decision] 删除请求记录失败：{folder}")
             return 0
 
-    def clear_all(self, only_reply: bool = False) -> int:
+    def _snapshot_files(self) -> list:
+        """所有快照文件：requests/ 根下的旧快照 + 各会话子目录里的（v4.88）。"""
+        out = []
+        try:
+            out.extend(self.dir.glob("*.json"))
+        except Exception:
+            pass
+        try:
+            folders = [d for d in self.dir.iterdir() if d.is_dir()]
+        except Exception:
+            folders = []
+        for folder in folders:
+            try:
+                out.extend(folder.glob("*.json"))
+            except Exception:
+                continue
+        return out
+
+    def _clear_match(self, path, only_reply: bool = False,
+                     decisions_only: bool = False, trims_only: bool = False) -> bool:
+        """这份快照该不该被这次清理删掉（v4.88：三类快照共用一套判定）。
+
+        三类同目录、同命名，只能靠记录里的标记分；分类走 _kind_of 的记忆表，
+        第二次起不再读文件。三个开关互斥使用（调用方只传一个），都不传 = 全删。
+        """
+        if not (only_reply or decisions_only or trims_only):
+            return True
+        try:
+            st = path.stat()
+        except OSError:
+            return False
+        kind = self._kind_of(path, st.st_size, st.st_mtime)
+        if only_reply:
+            return kind == "reply"
+        if decisions_only:
+            return kind == "decision"
+        return kind == "trim"
+
+    def _ts_of(self, path) -> float:
+        """快照的 ts（记录的第一个键），读不出来退回文件 mtime。
+
+        v4.88：只读开头 4 KB 找 "ts"，不再为了一份上百 KB 的快照整份 json.loads——
+        「只清 N 天前」要扫几百份，整份解析纯属白读。
+        """
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                head = fh.read(4096)
+            m = re.search(r'"ts"\s*:\s*([0-9]+(?:\.[0-9]+)?)', head)
+            if m:
+                return float(m.group(1))
+        except (OSError, ValueError):
+            pass
+        try:
+            return float(path.stat().st_mtime)
+        except OSError:
+            return 0.0
+
+    def _forget_missing_names(self) -> None:
+        """把已经删掉的文件从「事件号 → 文件名」索引里摘掉。"""
+        for key in [k for k in self._names
+                    if not (self.dir / _safe_sid(k[0]) / self._names[k]).is_file()]:
+            self._names.pop(key, None)
+
+    def clear_all(self, only_reply: bool = False, decisions_only: bool = False,
+                  trims_only: bool = False) -> int:
         """清空所有会话的请求快照，返回删掉的文件数（用户 m13708 第 4 条）。
 
         v4.00（用户 m10782）：决策快照从「请求快照」里分出去了，缓存页的「回复
         快照」只该清回复那一半——only_reply=True 时留着决策快照，只删其余的。
-        
+        v4.88：裁切快照也单列一类了，only_reply 现在连裁切一起留着；
+        trims_only=True 反过来只删裁切快照。
 
         和 purge() 的区别：**不碰** stats/requests.jsonl 这本用量账。账本是
         「最近 24 小时请求数 / 回复数」的来源，缓存设置页清缓存不该让概览
         数字凭空归零；只有删会话（purge）才连账本一起清。
         """
         removed = 0
-        # 早期版本把快照直接写在 requests/ 根下，这里一并算（决策快照只出现在会话目录里）
-        try:
-            loose = list(self.dir.glob("*.json"))
-        except Exception:
-            loose = []
-        for path in loose:
+        if not (only_reply or decisions_only or trims_only):
+            # 全清：整目录删掉最快（早期版本写在 requests/ 根下的旧快照也一并算）
+            try:
+                loose = list(self.dir.glob("*.json"))
+            except Exception:
+                loose = []
+            for path in loose:
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    continue
+            try:
+                folders = [d for d in self.dir.iterdir() if d.is_dir()]
+            except Exception:
+                return removed
+            for folder in folders:
+                try:
+                    n = len(list(folder.glob("*.json")))
+                except Exception:
+                    n = 0
+                try:
+                    shutil.rmtree(folder)
+                    removed += n
+                except Exception:
+                    logger.exception(f"[multi-decision] 清理请求记录目录失败：{folder}")
+                    continue
+                for key in [k for k in self._names if _safe_sid(k[0]) == folder.name]:
+                    self._names.pop(key, None)
+            return removed
+        for path in self._snapshot_files():
+            if not self._clear_match(path, only_reply=only_reply,
+                                     decisions_only=decisions_only,
+                                     trims_only=trims_only):
+                continue
             try:
                 path.unlink()
                 removed += 1
             except OSError:
                 continue
-        try:
-            folders = [d for d in self.dir.iterdir() if d.is_dir()]
-        except Exception:
-            return removed
-        for folder in folders:
-            if only_reply:
-                try:
-                    files = list(folder.glob("*.json"))
-                except Exception:
-                    files = []
-                for path in files:
-                    if self._is_decision_file(path):
-                        continue
-                    try:
-                        path.unlink()
-                        removed += 1
-                    except OSError:
-                        continue
-                continue
-            try:
-                n = len(list(folder.glob("*.json")))
-            except Exception:
-                n = 0
-            try:
-                shutil.rmtree(folder)
-                removed += n
-            except Exception:
-                logger.exception(f"[multi-decision] 清理请求记录目录失败：{folder}")
-                continue
-            for key in [k for k in self._names if _safe_sid(k[0]) == folder.name]:
-                self._names.pop(key, None)
+        if removed:
+            self._forget_missing_names()
         return removed
 
     def clear_decisions(self) -> int:
         """只清决策快照，回复快照留着（用户 m10782：决策快照单独一类缓存）。"""
+        return self.clear_all(decisions_only=True)
+
+    def clear_trims(self) -> int:
+        """只清裁切快照（v4.88：裁切快照是第 13 类缓存，能单独清）。"""
+        return self.clear_all(trims_only=True)
+
+    def clear_before(self, cutoff: float, only_reply: bool = False,
+                     decisions_only: bool = False, trims_only: bool = False) -> int:
+        """删掉 cutoff 之前的快照，返回删掉的文件数（用户 m21482）。
+
+        only_reply / decisions_only / trims_only 和 clear_all 同一套口径：
+        三类快照同目录，只能按记录里的标记分开。记录里的 ts 读不出来时
+        用文件 mtime 兜底；都拿不到就留着，不猜。
+        """
         removed = 0
-        roots = []
-        try:
-            roots = list(self.dir.glob("*.json"))
-        except Exception:
-            roots = []
-        try:
-            folders = [d for d in self.dir.iterdir() if d.is_dir()]
-        except Exception:
-            folders = []
-        roots.extend([f for fd in folders for f in fd.glob("*.json")])
-        for path in roots:
-            if not self._is_decision_file(path):
+        for path in self._snapshot_files():
+            if not self._clear_match(path, only_reply=only_reply,
+                                     decisions_only=decisions_only,
+                                     trims_only=trims_only):
+                continue
+            ts = self._ts_of(path)
+            if ts <= 0 or ts >= cutoff:
                 continue
             try:
                 path.unlink()
                 removed += 1
             except OSError:
                 continue
+        if removed:
+            self._forget_missing_names()
         return removed
 
-    def usage(self) -> dict:
-        """按类别数磁盘占用：回复快照 / 决策快照各多少份、几个字节。
+    def snap_count(self, sid: str = "") -> int:
+        """这个会话盘上还剩多少份窗口快照（v4.90，用户 m01875 第 1 条）。
 
-        用户 m10782：缓存账本里这两类是两行，同目录、靠 decision_only 区分。
-        最坏情况（每会话几百份）也就读几 MB，调用方 /cache-stats 自己有 10 秒缓存。
+        走势图标题要跟缓存表那一行「窗口快照」对得上，就得数同一批文件。前端把
+        回复轮、决策轮、裁切标记拼起来数，总会因为「判定要回的决策轮不单独成柱」
+        少掉几十份，所以这里直接数目录，跟缓存表同一个口径。
         """
-        out = {"reply": [0, 0], "decision": [0, 0]}
+        if not sid:
+            return 0
+        folder = self.dir / _safe_sid(str(sid or "").strip())
+        try:
+            with os.scandir(folder) as it:
+                return sum(1 for ent in it if ent.name.endswith(".json"))
+        except OSError:
+            return 0
+
+    def usage(self, sid: str = "") -> dict:
+        """按类别数磁盘占用：回复快照 / 裁切快照 / 决策快照各多少份、几个字节。
+
+        用户 m10782：缓存账本里这几类是几行，同目录、靠 decision_only / trim_only 区分。
+        最坏情况（每会话几百份）也就读几 MB，调用方 /cache-stats 自己有 10 秒缓存。
+
+        sid 非空时只数这个会话的子目录（用户 m22090）；根目录下的旧快照没有
+        会话信息，单会话统计时不硬塞给它。
+        """
+        # v4.88：裁切快照单独一类——v4.78 起它有自己的份数线（跟窗口快照共用
+        # windows_keep），再算进「回复快照」会让那一行显示成超上限。
+        # v4.90（用户 m01133 第 2 条）：三种快照合成一个「窗口快照」概念，多给一格
+        # all = 三类之和，缓存表那一行直接用它。
+        out = {"reply": [0, 0], "trim": [0, 0], "decision": [0, 0], "all": [0, 0]}
+
+        def _add(folder):
+            # v4.88：scandir 一次拿全，别再逐份 path.stat()（Windows 上每次约 2ms）
+            try:
+                with os.scandir(folder) as it:
+                    for ent in it:
+                        if not ent.name.endswith(".json"):
+                            continue
+                        try:
+                            st = ent.stat()
+                        except OSError:
+                            continue
+                        slot = out[self._kind_of(Path(ent.path), st.st_size, st.st_mtime)]
+                        slot[0] += 1
+                        slot[1] += int(st.st_size or 0)
+                        out["all"][0] += 1
+                        out["all"][1] += int(st.st_size or 0)
+            except OSError:
+                return
+
+        if sid:
+            folder = self.dir / _safe_sid(str(sid or "").strip())
+            try:
+                _add(folder)
+            except Exception:
+                pass
+            return {k: {"count": v[0], "bytes": v[1]} for k, v in out.items()}
         # 早期版本把快照直接写在 requests/ 根下（没有会话子目录），那些一律算回复快照
         try:
-            loose = list(self.dir.glob("*.json"))
+            _add(self.dir)
         except Exception:
-            loose = []
-        for path in loose:
-            try:
-                size = int(path.stat().st_size or 0)
-            except OSError:
-                continue
-            slot = out["decision" if self._is_decision_file(path) else "reply"]
-            slot[0] += 1
-            slot[1] += size
+            pass
         try:
             folders = [d for d in self.dir.iterdir() if d.is_dir()]
         except Exception:
             folders = []
         for folder in folders:
             try:
-                files = list(folder.glob("*.json"))
+                _add(folder)
             except Exception:
                 continue
-            for path in files:
-                try:
-                    size = int(path.stat().st_size or 0)
-                except OSError:
-                    continue
-                slot = out["decision" if self._is_decision_file(path) else "reply"]
-                slot[0] += 1
-                slot[1] += size
         return {k: {"count": v[0], "bytes": v[1]} for k, v in out.items()}
 
     def list_sessions(self) -> list:
@@ -2341,10 +2561,159 @@ class RequestLog:
         except Exception:
             return total
 
+    def _row_of(self, path, data: dict, *, pbytes: int = 0, est=None,
+                prefix_chars: int = 0, total_chars: int = 0,
+                prefix_tokens: int = 0, total_tokens: int = 0,
+                previous_name: str = "", gap_seconds=None) -> dict:
+        """把一份快照文件投影成列表行（文件解析与行构造分开）。
+
+        v4.80（2026-11-07 性能）：从 list_rounds 里拆出来，给 list_rounds_light
+        的增量缓存复用。目录里留到几百份以后，轮询每 5 秒重算一次要读六百来份
+        JSON；其实每次只多一份新文件。行构造抽出来后，缓存可以只按
+        (文件名, mtime_ns, size) 命中，未变过的文件不再解析。
+        默认值对应「轻量行」：不做前缀/命中预估，payload_bytes 取记录里写好的。
+        """
+        return {
+
+            "name": path.name,
+            "ts": data.get("ts") or 0,
+            "replied": bool(data.get("replied")),
+            "failed": bool(data.get("failed")),
+            "outcome": data.get("outcome") or ("failed" if data.get("failed") else "replied" if data.get("replied") else "no_reply"),
+            "error": data.get("error") or "",
+            "reply_bubbles": data.get("reply_bubbles") or 0,
+            # 用户 2026-11-07：回复记录表要显示这一轮实际用的模型与渠道。
+            # 这两个键是 flush 时由引擎用 extra 写进快照的；老快照没有，给空串，
+            # 前端按「—」显示（后端不做迁移）。
+            "reply_model": str(data.get("reply_model") or ""),
+            # 用户 m00375 第 8 条：API 渠道（供应商实例名）。老快照没有这个键，给空串。
+            "reply_provider": str(data.get("reply_provider") or ""),
+            "reply_channel": str(data.get("reply_channel") or ""),
+            # v4.85（用户 m10425 第 8 条）：回复表的「回复内容」列。老快照没有这个
+            # 键，给空串，前端显示「—」。
+            "reply_text": str(data.get("reply_text") or ""),
+            "window_size": data.get("window_size") or 0,
+            "window_counted": data.get("window_counted") or 0,
+            "window_total": data.get("window_total") or 0,
+            # v3.22（用户 m42531）：窗口条数也分出「只数用户消息」的口径，
+            # 跟走势柱一致；含 bot 的总数仍留在 window_total 里给 title 用。
+            # v3.88（用户 m05012 第 2 条）：裁切快照按它自己的条数画（= 裁后）；
+            # v3.87 那两批快照存的是裁前
+            # 的 56 条，用 trim_after_user 兜回真实条数，柱高才一致。
+            # v3.89（用户 m05321 第 1 条）：快照现在含待发，条数按它自己算
+            # （trim_snapshot_user）；v3.89 以前的快照没这个键，退到
+            # trim_after_user（裁后窗口、不含待发）。
+            "window_user": (int(data.get("trim_snapshot_user") or 0)
+                            if (data.get("trim_only") and data.get("trim_snapshot_user"))
+                            else (int(data.get("trim_after_user") or 0)
+                                  if (data.get("trim_only") and data.get("trim_after_user"))
+                                  else self._user_count_with_incoming(data))),
+            # v4.57（用户 m29312）：决策读的是「窗口 + 待发」。列表要能把待发那批
+            # 一起报给走势柱，否则这一轮写 14、下一轮并窗后写 20，看着像中间被吞了。
+            # 只有决策轮才有「窗口之外」的待发；回复轮的 incoming 已经在窗口里了，
+            # 再加一遍就是重复计数。
+            "window_pending_count": (
+                len(data.get("incoming_messages") or [])
+                if (data.get("decision_only") is True
+                    or str(data.get("trigger_reason") or "") == "decision")
+                else 0
+            ),
+            "window_pending_user": (
+                _count_messages([
+                    m for m in (data.get("incoming_messages") or [])
+                    if str((m or {}).get("role") or "") == "user"
+                ])
+                if (data.get("decision_only") is True
+                    or str(data.get("trigger_reason") or "") == "decision")
+                else 0
+            ),
+            # v3.87（用户 m04715 第 1 条）：裁切快照的前后条数要带给前端，
+            # 走势柱的悬停说明要用；trim_only 用来认「这不是一轮请求」。
+            "trim_only": bool(data.get("trim_only")),
+            "trim_before": int(data.get("trim_before") or 0),
+            "trim_after": int(data.get("trim_after") or 0),
+            # v3.89（用户 m05321 第 1 条）：快照里有多少条是待发（悬停要写出来）
+            "trim_pending_count": int(data.get("trim_pending_count") or 0),
+            # v4.52：裁前裁后的计入条数 / 用户合计 / 谁触发的，悬停要用
+            "trim_counted_before": int(data.get("trim_counted_before") or 0),
+            "trim_counted_after": int(data.get("trim_counted_after") or 0),
+            "trim_user_total_before": int(data.get("trim_user_total_before") or 0),
+            "trim_user_total_after": int(data.get("trim_user_total_after") or 0),
+            "trim_trigger": data.get("trim_trigger") or "",
+            "trigger_reason": data.get("trigger_reason") or "",
+            "trigger_count": data.get("trigger_count") or 0,
+            "count_threshold": data.get("count_threshold") or 0,
+            "trigger_prob": float(data.get("trigger_prob") or 0.0),
+            "message_count": len(data.get("messages") or []),
+            "event_id": data.get("event_id") or "",
+            # v3.x（用户 2026-10-24 图4）：出错那一轮后来重试的结果补写在它自己
+            # 那份记录里，列表也带出来，前端不用点开就知道这轮最后补回来没有。
+            "watchdog_released": int(data.get("watchdog_released") or 0),
+            "total_chars": data.get("total_chars") or 0,
+            "payload_bytes": pbytes,
+            **payload_metrics(data),
+            # est_hit 为旧客户端保留；数值含义仍是 JSON 字符比例。
+            "est_hit": est,
+            "prefix_reuse_percent": est,
+            "prefix_reuse_chars": prefix_chars,
+            "prefix_reuse_total_chars": total_chars,
+            "prefix_reuse_tokens": prefix_tokens,
+            "prefix_reuse_total_tokens": total_tokens,
+            # v3.52（用户 m07864 第 4 条）：本轮新消息里带了几张图。
+            # 命中预估要按「这张图是不是这轮刚加的」折算成不参与缓存的 token。
+            "incoming_image_count": _count_image_parts(data.get("incoming_with_native") or []),
+            "prefix_reuse_previous": previous_name,
+            "gap_from_previous": gap_seconds,
+            "prefix_reuse_basis": "request_record_json_characters",
+            "prefix_reuse_is_token_prediction": False,
+            # v3.66（用户 m19536 第 6 条）：这一轮的轨迹就写在同一份文件里，
+            # 顺手带出来给 /requests 用——原来每行还要按 event_id 把整目录
+            # 重扫一遍（read_by_event 最坏 100 份），等于读两遍 14 MB。
+            # 读接口返回前 pop 掉，不进响应体。
+            # v3.91（用户 m05749）：进阶决策的快照。它不是一轮请求，页面上
+            # 要单独开一个「决策记录」页签，所以把结论与用量一并带出去。
+            "decision_only": bool(data.get("decision_only")),
+            "decision_reply": bool(data.get("decision_reply")),
+            "decision_reason": data.get("decision_reason") or "",
+            # v4.11（用户 m17596 第 6 条）：这一轮是不是决策判出来的。前端
+            # 触发列靠它把标签换成「决策触发」，原来只写进快照、没带到
+            # /requests 的行里，页面上一直没生效。
+            "decision_passed": bool(data.get("decision_passed")),
+            "decision_say": data.get("decision_say") or "",
+            "decision_source": data.get("decision_source") or "",
+            "decision_model": data.get("decision_model") or "",
+            # 用户 m00375 第 8 条：走第三方接口时决策模型只有模型名，渠道要另标。
+            # 只带 backend 这一个短字段，不把整块 jev 塞进列表。
+            "decision_backend": str((data.get("decision_jev") or {}).get("backend") or "")
+            if isinstance(data.get("decision_jev"), dict) else "",
+            "decision_via": data.get("decision_via") or "",
+            "decision_attempts": int(data.get("decision_attempts") or 0),
+            "decision_elapsed": float(data.get("decision_elapsed") or 0.0),
+            # 用户 m05124 第 8 条：决策轮的防抖等待（触发 → 真正开始判）。
+            "decision_debounce": float(data.get("decision_debounce") or 0.0),
+            "decision_tools": list(data.get("decision_tools") or []),
+            # v4.39（用户 m20816）：决策行带上「看图几张」，页面明细里能直接看到
+            # 这一轮模型到底有没有把图收到。
+            "decision_images": list(data.get("decision_images") or []),
+            "decision_image_count": int(data.get("decision_image_count") or 0),
+            "decision_images_fallback": bool(data.get("decision_images_fallback")),
+            "decision_images_fallback_error": str(data.get("decision_images_fallback_error") or "")[:300],
+            "decision_upstream_busy": bool(data.get("decision_upstream_busy")),
+            "decision_images_fallback_attempts": int(data.get("decision_images_fallback_attempts") or 0),
+            # v3.94（用户 m08398 图7/图8）：决策行也要跟回复记录一样给出
+            # token（入/出）与缓存命中，决策表才能照抄回复表的列。
+            "input_tokens": int(data.get("input_tokens") or 0),
+            "output_tokens": int(data.get("output_tokens") or 0),
+            "cached_tokens": int(data.get("cached_tokens") or 0),
+            "decision_system_names": list(data.get("decision_system_names") or []),
+            "_trace": data.get("trace") if isinstance(data.get("trace"), dict) else None,
+            # 用户 m02159 图6：模型写了话但没按 <msg> 包起来 → 这一轮算「未回复」。
+            "reply_unwrapped": _unwrapped_reply(data.get("trace")),
+        }
     def list_rounds(self, sid: str, limit: int = 20) -> list:
         """列出某会话最近几轮的摘要（不含完整消息，避免一次传太大）。"""
         try:
-            limit = max(1, min(int(limit or 20), 200))
+            limit = max(1, min(int(limit or 20), 1000))
         except (TypeError, ValueError):
             limit = 20
         folder = self.dir / _safe_sid(sid)
@@ -2434,128 +2803,12 @@ class RequestLog:
                     # 换算成近似 token 再当分子，跟真实 input_tokens 才有可比性。
                     total_tokens = _approx_tokens(cur_flat)
                     prefix_tokens = _approx_tokens(cur_flat[:prefix_chars])
-            out.append({
-                "name": path.name,
-                "ts": data.get("ts") or 0,
-                "replied": bool(data.get("replied")),
-                "failed": bool(data.get("failed")),
-                "outcome": data.get("outcome") or ("failed" if data.get("failed") else "replied" if data.get("replied") else "no_reply"),
-                "error": data.get("error") or "",
-                "reply_bubbles": data.get("reply_bubbles") or 0,
-                "window_size": data.get("window_size") or 0,
-                "window_counted": data.get("window_counted") or 0,
-                "window_total": data.get("window_total") or 0,
-                # v3.22（用户 m42531）：窗口条数也分出「只数用户消息」的口径，
-                # 跟走势柱一致；含 bot 的总数仍留在 window_total 里给 title 用。
-                # v3.88（用户 m05012 第 2 条）：裁切快照按它自己的条数画（= 裁后）；
-                # v3.87 那两批快照存的是裁前
-                # 的 56 条，用 trim_after_user 兜回真实条数，柱高才一致。
-                # v3.89（用户 m05321 第 1 条）：快照现在含待发，条数按它自己算
-                # （trim_snapshot_user）；v3.89 以前的快照没这个键，退到
-                # trim_after_user（裁后窗口、不含待发）。
-                "window_user": (int(data.get("trim_snapshot_user") or 0)
-                                if (data.get("trim_only") and data.get("trim_snapshot_user"))
-                                else (int(data.get("trim_after_user") or 0)
-                                      if (data.get("trim_only") and data.get("trim_after_user"))
-                                      else self._user_count_with_incoming(data))),
-                # v4.57（用户 m29312）：决策读的是「窗口 + 待发」。列表要能把待发那批
-                # 一起报给走势柱，否则这一轮写 14、下一轮并窗后写 20，看着像中间被吞了。
-                # 只有决策轮才有「窗口之外」的待发；回复轮的 incoming 已经在窗口里了，
-                # 再加一遍就是重复计数。
-                "window_pending_count": (
-                    len(data.get("incoming_messages") or [])
-                    if (data.get("decision_only") is True
-                        or str(data.get("trigger_reason") or "") == "decision")
-                    else 0
-                ),
-                "window_pending_user": (
-                    _count_messages([
-                        m for m in (data.get("incoming_messages") or [])
-                        if str((m or {}).get("role") or "") == "user"
-                    ])
-                    if (data.get("decision_only") is True
-                        or str(data.get("trigger_reason") or "") == "decision")
-                    else 0
-                ),
-                # v3.87（用户 m04715 第 1 条）：裁切快照的前后条数要带给前端，
-                # 走势柱的悬停说明要用；trim_only 用来认「这不是一轮请求」。
-                "trim_only": bool(data.get("trim_only")),
-                "trim_before": int(data.get("trim_before") or 0),
-                "trim_after": int(data.get("trim_after") or 0),
-                # v3.89（用户 m05321 第 1 条）：快照里有多少条是待发（悬停要写出来）
-                "trim_pending_count": int(data.get("trim_pending_count") or 0),
-                # v4.52：裁前裁后的计入条数 / 用户合计 / 谁触发的，悬停要用
-                "trim_counted_before": int(data.get("trim_counted_before") or 0),
-                "trim_counted_after": int(data.get("trim_counted_after") or 0),
-                "trim_user_total_before": int(data.get("trim_user_total_before") or 0),
-                "trim_user_total_after": int(data.get("trim_user_total_after") or 0),
-                "trim_trigger": data.get("trim_trigger") or "",
-                "trigger_reason": data.get("trigger_reason") or "",
-                "trigger_count": data.get("trigger_count") or 0,
-                "count_threshold": data.get("count_threshold") or 0,
-                "trigger_prob": float(data.get("trigger_prob") or 0.0),
-                "message_count": len(data.get("messages") or []),
-                "event_id": data.get("event_id") or "",
-                # v3.x（用户 2026-10-24 图4）：出错那一轮后来重试的结果补写在它自己
-                # 那份记录里，列表也带出来，前端不用点开就知道这轮最后补回来没有。
-                "watchdog_released": int(data.get("watchdog_released") or 0),
-                "total_chars": data.get("total_chars") or 0,
-                "payload_bytes": pbytes,
-                **payload_metrics(data),
-                # est_hit 为旧客户端保留；数值含义仍是 JSON 字符比例。
-                "est_hit": est,
-                "prefix_reuse_percent": est,
-                "prefix_reuse_chars": prefix_chars,
-                "prefix_reuse_total_chars": total_chars,
-                "prefix_reuse_tokens": prefix_tokens,
-                "prefix_reuse_total_tokens": total_tokens,
-                # v3.52（用户 m07864 第 4 条）：本轮新消息里带了几张图。
-                # 命中预估要按「这张图是不是这轮刚加的」折算成不参与缓存的 token。
-                "incoming_image_count": _count_image_parts(data.get("incoming_with_native") or []),
-                "prefix_reuse_previous": previous_name,
-                "gap_from_previous": gap_seconds,
-                "prefix_reuse_basis": "request_record_json_characters",
-                "prefix_reuse_is_token_prediction": False,
-                # v3.66（用户 m19536 第 6 条）：这一轮的轨迹就写在同一份文件里，
-                # 顺手带出来给 /requests 用——原来每行还要按 event_id 把整目录
-                # 重扫一遍（read_by_event 最坏 100 份），等于读两遍 14 MB。
-                # 读接口返回前 pop 掉，不进响应体。
-                # v3.91（用户 m05749）：进阶决策的快照。它不是一轮请求，页面上
-                # 要单独开一个「决策记录」页签，所以把结论与用量一并带出去。
-                "decision_only": bool(data.get("decision_only")),
-                "decision_reply": bool(data.get("decision_reply")),
-                "decision_reason": data.get("decision_reason") or "",
-                # v4.11（用户 m17596 第 6 条）：这一轮是不是决策判出来的。前端
-                # 触发列靠它把标签换成「决策触发」，原来只写进快照、没带到
-                # /requests 的行里，页面上一直没生效。
-                "decision_passed": bool(data.get("decision_passed")),
-                "decision_say": data.get("decision_say") or "",
-                "decision_source": data.get("decision_source") or "",
-                "decision_model": data.get("decision_model") or "",
-                "decision_via": data.get("decision_via") or "",
-                "decision_attempts": int(data.get("decision_attempts") or 0),
-                "decision_elapsed": float(data.get("decision_elapsed") or 0.0),
-                # 用户 m05124 第 8 条：决策轮的防抖等待（触发 → 真正开始判）。
-                "decision_debounce": float(data.get("decision_debounce") or 0.0),
-                "decision_tools": list(data.get("decision_tools") or []),
-                # v4.39（用户 m20816）：决策行带上「看图几张」，页面明细里能直接看到
-                # 这一轮模型到底有没有把图收到。
-                "decision_images": list(data.get("decision_images") or []),
-                "decision_image_count": int(data.get("decision_image_count") or 0),
-                "decision_images_fallback": bool(data.get("decision_images_fallback")),
-                "decision_images_fallback_error": str(data.get("decision_images_fallback_error") or "")[:300],
-                "decision_upstream_busy": bool(data.get("decision_upstream_busy")),
-                "decision_images_fallback_attempts": int(data.get("decision_images_fallback_attempts") or 0),
-                # v3.94（用户 m08398 图7/图8）：决策行也要跟回复记录一样给出
-                # token（入/出）与缓存命中，决策表才能照抄回复表的列。
-                "input_tokens": int(data.get("input_tokens") or 0),
-                "output_tokens": int(data.get("output_tokens") or 0),
-                "cached_tokens": int(data.get("cached_tokens") or 0),
-                "decision_system_names": list(data.get("decision_system_names") or []),
-                "_trace": data.get("trace") if isinstance(data.get("trace"), dict) else None,
-                # 用户 m02159 图6：模型写了话但没按 <msg> 包起来 → 这一轮算「未回复」。
-                "reply_unwrapped": _unwrapped_reply(data.get("trace")),
-            })
+            out.append(self._row_of(
+                path, data, pbytes=pbytes, est=est, prefix_chars=prefix_chars,
+                total_chars=total_chars, prefix_tokens=prefix_tokens,
+                total_tokens=total_tokens, previous_name=previous_name,
+                gap_seconds=gap_seconds,
+            ))
         return out
 
     def _rounds_sig(self, sid: str) -> tuple:
@@ -2575,27 +2828,80 @@ class RequestLog:
                 newest = mtime
         return (len(entries), newest)
 
-    def list_rounds_cached(self, sid: str, limit: int = 20) -> list:
+    def list_rounds_cached(self, sid: str, limit: int = 20, light: bool = False) -> list:
         """list_rounds 的缓存版：目录指纹没变就直接复用上次算好的摘要行。
 
         只给读接口用。写盘（flush / purge / clear_all）会改目录指纹（文件数或
         最新修改时间变），下一次读自然重建，不需要手动失效。
         返回浅拷贝：调用方会 pop 掉 _trace、往里补 token 字段，不能弄脏缓存。
+
+        v4.80（2026-11-07 性能）：light=True 走 list_rounds_light —— 按文件指纹
+        增量解析，只给走势图/列表用；它不做前缀预估那几列，别拿去渲染命中率。
         """
+        if light:
+            return self.list_rounds_light(sid, limit)
         try:
-            limit = max(1, min(int(limit or 20), 200))
+            limit = max(1, min(int(limit or 20), 1000))
         except (TypeError, ValueError):
             limit = 20
+        # v4.80：决策快照加深后一页可能要 300 份，缓存一次算到调用方要的深度，
+        # 下次要得更浅就直接切片（原来固定算 200，决策页永远看不到第 201 份）。
+        need = max(200, limit)
         sig = self._rounds_sig(sid)
         hit = self._rounds_cache.get(sid)
-        if hit is not None and hit[0] == sig:
-            rows = hit[1]
+        if hit is not None and hit[0] == sig and hit[1] >= limit:
+            rows = hit[2]
         else:
-            # 一次算满 200（list_rounds 的内部上限），后面的读都是切片，
-            # 换个 limit 也不必重算。
-            rows = self.list_rounds(sid, 200)
-            self._rounds_cache[sid] = (sig, rows)
+            rows = self.list_rounds(sid, need)
+            self._rounds_cache[sid] = (sig, need, rows)
         return [dict(x) for x in rows[:limit]]
+
+    def list_rounds_light(self, sid: str, limit: int = 20) -> list:
+        """light 版摘要行：按 (文件名, mtime_ns, size) 增量解析，只算轻量几列。
+
+        v4.80（2026-11-07 性能）：/requests 与 /decision-rounds 的走势图分支每 5 秒
+        各拉一次，目录里已有六百来份快照时，重算一次要读几十 MB JSON；而每次轮询
+        实际只多一份新文件。这里把每份文件的投影行缓存起来，只解析新增/改写过的那份。
+        行里不带 _trace、前缀复用与「命中预估」——这些要么调用方会 pop，要么需要拿
+        同类上一份的完整投影做比较，属于非轻量路。
+        """
+        try:
+            limit = max(1, min(int(limit or 20), 1000))
+        except (TypeError, ValueError):
+            limit = 20
+        folder = self.dir / _safe_sid(sid)
+        try:
+            entries = []
+            for ent in os.scandir(folder):
+                if not ent.name.endswith(".json"):
+                    continue
+                try:
+                    st = ent.stat()
+                except OSError:
+                    continue
+                entries.append((ent.name, st.st_mtime_ns, st.st_size))
+        except Exception:
+            return []
+        entries.sort(key=lambda x: x[0], reverse=True)
+        entries = entries[:limit]
+        cache = self._light_cache.setdefault(sid, {})
+        rows = []
+        for name, mtime_ns, size in entries:
+            key = (name, mtime_ns, size)
+            row = cache.get(key)
+            if row is None:
+                try:
+                    data = json.loads((folder / name).read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                row = self._row_of(folder / name, data)
+                cache[key] = row
+            rows.append(dict(row))
+        # 被裁掉的旧文件不再占内存（留一点余量，别每轮都重建字典）。
+        if len(cache) > len(entries) * 2 + 50:
+            alive = {(n, m, z) for n, m, z in entries}
+            self._light_cache[sid] = {k: v for k, v in cache.items() if k in alive}
+        return rows
 
     def read_round(self, sid: str, name: str) -> Optional[dict]:
         """读取一轮的完整记录。name 必须是纯文件名，防止路径穿越。"""

@@ -27,10 +27,13 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from .sids import bot_name
 
 # v4.65（用户 m36234）：这条链路以前用模块自己的 logger，而插件的文件日志只挂在
 # get_logger("multi_decision") 上——「决策带图失败」这类告警压根没写进 log.log，
@@ -46,6 +49,11 @@ try:  # 离线测试里 core 不一定在
 except Exception:  # pragma: no cover - 只在真机上有
     LLMRequest = None  # type: ignore
 
+try:  # 离线测试里 core 不一定在
+    from core.agent.tool import ToolResult  # type: ignore
+except Exception:  # pragma: no cover - 老框架/测试桩没有工具结果类型
+    ToolResult = None  # type: ignore
+
 
 def _comparison_snapshot(messages, dynamic: str = "") -> dict:
     """只旁路观察基础聊天；记录失败不得影响模型发送。"""
@@ -57,45 +65,76 @@ def _comparison_snapshot(messages, dynamic: str = "") -> dict:
         return {}
 
 
+# 2026-11-08（J）：最上面单独一块「角色设定」——先说清判断的人不是 bot 本身，它只负责判断。
+# 正文里要指代 bot 的地方写{{bot}}，装配时换成这个会话里它自己的昵称（没设就退全局名）。
+DECISION_ROLE = """### 角色设定
+我不是{{bot}}，我只负责判断这条群消息此刻要不要开口。要不要说话、说什么，都是{{bot}}的事。
+"""
+
 # 决策提示词默认稿。用户 m05902 要「可以预填充一些简单通用的」，所以这里写的是一份
 # 能直接用的判断规则，不是空壳；设置页首次打开时把这段当默认值显示。
 # 用户 m01209（图2/图3）要求：决策词写成通用、偏「节奏控制」的版本——群里本来就是
 # 话题选择性聊天，别人在说话不等于我不能接，判的是「这一句接进去会不会打断」。
 # 同时把「怎么答」抽成独立的一块（DEFAULT_DECISION_FORMAT），提示词里不再出现 say：
 # 决策那一步只决定回不回，不引导角色说什么。
-DEFAULT_DECISION_PROMPT = """你在判断：这条群消息，此刻我要不要开口。
-只管节奏——什么时候该接一句，什么时候该安静。跟具体聊什么、跟我是谁无关。
+# 2026-11-08（J）：判断规则只管回不回，凡带说话方向的措辞一律不要——原来的「接一句能
+# 顺着往下走」改成「插一句不会把话打断」，原来在「该接」里的「先弄清是什么意思」挪进
+# 「别接」，写成「拿不准在说什么就别硬接」。
+# 结构固定五段：该接 / 别接 / 是不是在跟我说 / 分寸 / 底线。
+DEFAULT_DECISION_PROMPT = """你在判断：这条群消息，此刻要不要开口。
+只判断回不回。说什么、怎么说、用什么语气，都不是这一步的事，留给下一步。
+看的是节奏：这一句接进去会不会打断，现在该不该有{{bot}}的声音。
 
 ### 该接
-- 有人 @ 我、叫我的名字，或者直接回复我的消息；
-- 正在聊的话题我有话可说，接一句能顺着往下走。群里本来就是几个人你一句我一句，
-  **别人在互相说话，不等于我不该插话**——看的是这句接进去会不会打断，不是有没有人在聊；
-- 有人提问还没人接，我正好能答；
-- 冷场有一阵了，我抛一句能让气氛重新活起来的话。
+- 有人 @{{bot}}、叫{{bot}}的名字或昵称、直接回复{{bot}}的消息——一条就够；
+- 有人自我宣告（「睡了」「晚安」「早」「来了」）——一条就够；
+- 有人情绪吐槽（「好累」「不想上班」）——同一个人说到第二条再接；
+- 两三个人在实质聊天，{{bot}}插一句不会把话打断。别人在互相说话，不等于不该插话；
+- 有人分享自己的经历；
+- 有人问了个完整的问题，还没人接；
+- 明显在玩梗、接梗、双关、谐音梗；
+- 三个人以上围着同一个话题聊得很热——偶尔插一句，不逐轮跟。
 
 ### 别接
-- 两个人正在点对点说一件具体的事（约时间、吵架、交接事情），我插进去只会打断；
-- 只是表情、「哈哈」「草」这类附和，没有可接的内容；
-- 广告、刷屏、无意义重复、纯链接；
-- 我上一句刚发出去没多久，再说就是刷屏；
-- 被人反复 @、反复点名，可翻来覆去只有「在吗」「理我」「叫你半天了」这种，没有实质的
-  问题或需求——可以拒回，不必每次都应付；等他把真正想说的说出来再接；
-- 完全看不懂在聊什么。
+- 两个人或几个人正在点对点说一件具体的事（约时间、吵架、交接事情、私人约定）；
+- 最近一条已经过去 5 分钟以上、中间没有新消息接着——不起话头；
+- 5 分钟内有人（包括{{bot}}自己）说过差不多的话——不重复；
+- 只是表情、「哈哈」「草」「6」这类附和，没有可接的内容；
+- 出现不认识的词、黑话、简称，拿不准在说什么——别硬接；
+- 消息里带链接：纯链接、链接加一句话、视频没有文字评论；
+- 小程序、卡片分享；
+- 被反复 @、反复点名，可翻来覆去只有「在吗」「人呢」「理我」这类，没有实质内容——可以拒回，不必每次都应付，等他说出真正想说的再接；
+- 广告、刷屏、无意义重复、完全看不懂在聊什么。
 
+### 这一句是不是在跟{{bot}}说
+- @{{bot}}、叫{{bot}}的名字或昵称、直接回复{{bot}}的消息 → 是；
+- 没有指向的「你」→ 不是；只有当「你」明显在接{{bot}}上一句时才算；
+- 「前辈」「大佬」这类泛称 → 不是；
+- 「bot」「机器人」→ 不是；
+- @的是别人 → 不是；
+- 几点钟不影响判断，凌晨深夜一样按上面走。
+
+### 分寸
+- 同一个人连着发的几条算一件事，别当成好几轮；
+- 同一个话题连着回不超过 3 轮；话题换了重新算；
+- 被追问时回一两轮就主动收；
+- 一模一样的话由不同人说出来，只当一次触发；
+- 上一轮答得不准，可以补一句，不算进连续轮数；
+- 不主动分析 5 分钟前的消息；旧消息只用来理解背景，除非被当前消息直接引用或追问。
+
+### 底线
 宁可少回，不要硬回；但话题合适时也不用等着被点名。"""
 
 # 「输出规则」独立一块（用户图3）。决策那一步只回一个判断，不替角色写台词。
+# 2026-11-08（J）：reason 里不再补建议——决策只给结论，怎么回是下一步的事；
+# 早前那条「理由里再补一条对回复的建议」按此撤掉。
 DEFAULT_DECISION_FORMAT = """### 怎么回答
 只输出一个 JSON 对象，不要写别的，不要代码块，不要解释：
 {"reply": true, "reason": "一句话理由，20 字以内，给用户看"}
 
-reason 是给用户看的一句话，两件事都要照顾到：
-1. 先说清为什么回 / 为什么不回（半句话就够）；
-2. 回的时候顺手补一条对这次回复有用的信息——对方真正想要的是什么、这一句该往哪个方向接
-   （例如「他在问配置，直接给一套能跑的」）。这句是给下一段写回复时的提示，不是要发出去的内容。
-
-不回就把 reply 写成 false，只有理由，不用补建议。
-不要在这里写整段台词「打算说什么」「要怎么回」——那是真正开口那一步的事。
+reason 只说为什么回 / 为什么不回，半句话就够。
+不写打算怎么回，不写往哪个方向接，不给建议——那是真正开口那一步的事。
+不回就把 reply 写成 false，理由照样写清楚。
 
 ### 一次只回一个人
 群里可能同时几个人在说话。回的时候挑最该回的那一个人，只对着他说；
@@ -148,28 +187,46 @@ def migrate_prompt(text):
     return got
 
 
-# 用户 m01209 图2：决策规则可以拆成几个小模块写。这三条是「＋ 新增模块」里能直接挑的
+# 用户 m01209 图2：决策规则可以拆成几个小模块写。这几条是「＋ 新增模块」里能直接挑的
 # 骨架，挑出来就是一块能改的正文，不用把整段判断规则全塞在一块里。
+# 2026-11-08（J）：骨架对齐默认稿的五个小标题，标题写法也跟默认稿一致（### ）。
 DECISION_SKELETONS = (
-    ("when-yes", "什么时候接", """该接：
-- 有人 @ 我、叫我的名字，或者直接回复我的消息；
-- 正在聊的话题我有话可说，接一句能顺着往下走。别人在互相说话，不等于我不该插话——看的是这句接进去会不会打断；
-- 有人提问还没人接，我正好能答；
-- 冷场有一阵了，我抛一句能让气氛重新活起来的话。"""),
-    ("when-no", "什么时候别接", """别接：
-- 两个人正在点对点说一件具体的事（约时间、吵架、交接事情），我插进去只会打断；
-- 只是表情、「哈哈」「草」这类附和，没有可接的内容；
-- 广告、刷屏、无意义重复、纯链接；
-- 我上一句刚发出去没多久，再说就是刷屏；
-- 被人反复 @、反复点名，可翻来覆去只有「在吗」「理我」「叫你半天了」这种，没有实质的问题或需求——可以拒回，不必每次都应付；
-- 完全看不懂在聊什么。"""),
-    ("rhythm", "节奏与分寸", """节奏：
-- 宁可少回，不要硬回；但话题合适时也不用等着被点名。
-- 别人在互相说话不是我该闭嘴的理由，只看这一句接进去会不会打断。
-- 一次只回一个人：几个人同时在说，就挑最该回的那个，只对着他说，别一条里挨个答一遍。
-- 连着两轮没人接，就先安静一阵，不要自己接自己。"""),
+    ("when-yes", "什么时候接", """### 该接
+- 有人 @{{bot}}、叫{{bot}}的名字或昵称、直接回复{{bot}}的消息——一条就够；
+- 有人自我宣告（「睡了」「晚安」「早」「来了」）——一条就够；
+- 有人情绪吐槽（「好累」「不想上班」）——同一个人说到第二条再接；
+- 两三个人在实质聊天，{{bot}}插一句不会把话打断。别人在互相说话，不等于不该插话；
+- 有人分享自己的经历；
+- 有人问了个完整的问题，还没人接；
+- 明显在玩梗、接梗、双关、谐音梗；
+- 三个人以上围着同一个话题聊得很热——偶尔插一句，不逐轮跟。"""),
+    ("when-no", "什么时候别接", """### 别接
+- 两个人或几个人正在点对点说一件具体的事（约时间、吵架、交接事情、私人约定）；
+- 最近一条已经过去 5 分钟以上、中间没有新消息接着——不起话头；
+- 5 分钟内有人（包括{{bot}}自己）说过差不多的话——不重复；
+- 只是表情、「哈哈」「草」「6」这类附和，没有可接的内容；
+- 出现不认识的词、黑话、简称，拿不准在说什么——别硬接；
+- 消息里带链接：纯链接、链接加一句话、视频没有文字评论；
+- 小程序、卡片分享；
+- 被反复 @、反复点名，可翻来覆去只有「在吗」「人呢」「理我」这类，没有实质内容——可以拒回，不必每次都应付，等他说出真正想说的再接；
+- 广告、刷屏、无意义重复、完全看不懂在聊什么。"""),
+    ("who", "是不是在跟我说", """### 这一句是不是在跟{{bot}}说
+- @{{bot}}、叫{{bot}}的名字或昵称、直接回复{{bot}}的消息 → 是；
+- 没有指向的「你」→ 不是；只有当「你」明显在接{{bot}}上一句时才算；
+- 「前辈」「大佬」这类泛称 → 不是；
+- 「bot」「机器人」→ 不是；
+- @的是别人 → 不是；
+- 几点钟不影响判断，凌晨深夜一样按上面走。"""),
+    ("pace", "分寸", """### 分寸
+- 同一个人连着发的几条算一件事，别当成好几轮；
+- 同一个话题连着回不超过 3 轮；话题换了重新算；
+- 被追问时回一两轮就主动收；
+- 一模一样的话由不同人说出来，只当一次触发；
+- 上一轮答得不准，可以补一句，不算进连续轮数；
+- 不主动分析 5 分钟前的消息；旧消息只用来理解背景，除非被当前消息直接引用或追问。"""),
+    ("bottom", "底线", """### 底线
+宁可少回，不要硬回；但话题合适时也不用等着被点名。"""),
 )
-
 
 # 「聊天规则提示词」默认稿。用户 m05902 要求注释里写清楚写什么（语气、喜欢聊什么），
 # 并预填一份简单的示例，所以这段既是说明也是模板。
@@ -181,7 +238,7 @@ DEFAULT_CHAT_RULES = """【说话语气】口语、短句，像群里一个正�
 
 
 TOOL_HEAD = """需要外部信息（查资料、算数、看时间之类）时可以调工具，最多 %d 轮。
-工具结果我会贴回给你，看到结果后再给最终判断。"""
+工具结果会贴回给你，看到结果后再给最终判断。"""
 
 
 # 模型回「回」的各种写法。判断句只认这些，其余一律当「不回」——宁可漏，不要硬回。
@@ -251,6 +308,51 @@ def _clean_user(text) -> str:
         return raw if not you else "[%s] %s（叫你）" % (m.group("time").strip(), nick)
     return "[%s] %s%s：%s" % (
         m.group("time").strip(), nick, "（叫你）" if you else "", body)
+
+
+# 2026-11-08（J）：决策注记不是它自己说的话。摊聊天记录时以前一律挂它的名字，
+# 看起来跟它真说过的一句一模一样；注记只留「[HH:MM] [对当前聊天消息的决策建议] …」这个长相。
+_NOTE_NAMES = ("对当前聊天消息的决策建议", "对以上聊天记录的决策建议")
+_NOTE_DECL = "[对当前聊天消息的决策建议] "
+_NOTE_TIME_RE = re.compile(r"^\s*\[\s*(\d{1,2}:\d{2})\s*\]\s*")
+_NOTE_DECL_RE = re.compile(r"^\s*\[(?:对当前聊天消息的决策建议|对以上聊天记录的决策建议)\]\s*")
+
+
+def _is_note_msg(msg) -> bool:
+    """这条窗口消息是不是我们自己塞进上下文的决策注记。"""
+    try:
+        if str(_field(msg, "role") or "").strip().lower() != "assistant":
+            return False
+        if bool(_field(msg, "dec")):
+            return True
+        if str(_field(msg, "name") or "").strip() in _NOTE_NAMES:
+            return True
+        text = _text_of(_field(msg, "content")).lstrip()
+    except Exception:
+        return False
+    if text.startswith("[决策记录]"):
+        return True
+    rest = _NOTE_TIME_RE.sub("", text)
+    if _NOTE_DECL_RE.match(rest):
+        return True
+    return rest.startswith(("建议回复", "建议不回", "判定要回", "判定不回"))
+
+
+def _note_line(line: str) -> str:
+    """注记行去掉名字，补上「[对当前聊天消息的决策建议]」这个声明。"""
+    s = str(line or "").strip()
+    if s.startswith("[决策记录]"):
+        # 老记录自带这个抬头，换成新的声明，不再叠一层。
+        s = s[len("[决策记录]"):].strip()
+    m = _NOTE_TIME_RE.match(s)
+    if m:
+        rest = s[m.end():]
+        if _NOTE_DECL_RE.match(rest):
+            return s
+        return "[%s] %s%s" % (m.group(1), _NOTE_DECL, rest)
+    if _NOTE_DECL_RE.match(s):
+        return s
+    return _NOTE_DECL + s
 
 
 _RE_MID = re.compile(r"\[message_id:\s*(-?\d+)\]|<msg\b[^>]*\bmessage_id=\"?(-?\d+)\"?", re.I)
@@ -412,7 +514,6 @@ def _image_data_url(path: str) -> str:
 class DecisionOptions:
     """一次决策要用的全部配置（从插件配置里读出来再传进来，便于单测）。"""
 
-    persona: str = ""
     chat_rules: str = DEFAULT_CHAT_RULES
     prompt: str = DEFAULT_DECISION_PROMPT
     tools: list = field(default_factory=list)
@@ -441,6 +542,22 @@ def options_from_config(get) -> DecisionOptions:
             v = min(hi, v)
         return v
 
+    # v4.90（发版前审计）：schema 里 decision_retry_delay 是 float、设置页也是
+    # step='any'，但一直走 _int 被截成整数（填 3.5 存进去变 3）。小数项单独走这个。
+    def _num(key, default, lo=0, hi=None):
+        try:
+            raw = get(key, default)
+            v = float(default if raw is None or raw is False or raw == "" else raw)
+        except Exception:
+            v = float(default)
+        # NaN / Inf 跟 _int 一样回退默认值，不能靠 max/min 夹成 0 或上限。
+        if not math.isfinite(v):
+            v = float(default)
+        v = max(lo, v)
+        if hi is not None:
+            v = min(hi, v)
+        return v
+
     tools = get("decision_tools", [])
     if isinstance(tools, str):
         try:
@@ -452,14 +569,13 @@ def options_from_config(get) -> DecisionOptions:
         tools = []
 
     return DecisionOptions(
-        persona=str(get("decision_persona", "") or "").strip(),
         chat_rules=str(get("decision_chat_rules", DEFAULT_CHAT_RULES) or ""),
         prompt=migrate_prompt(get("decision_prompt", DEFAULT_DECISION_PROMPT) or ""),
         tools=[str(x).strip() for x in tools if str(x).strip()],
         model=str(get("decision_model", "") or "").strip(),
         fallback=str(get("decision_fallback_model", "") or "").strip(),
         retry=_int("decision_retry", 2, 0, 5),
-        retry_delay=float(_int("decision_retry_delay", 3, 0, 60)),
+        retry_delay=_num("decision_retry_delay", 3, 0, 60),
         fail_switch=_int("decision_fail_switch", 2, 1, 10),
         cooldown=float(_int("decision_fallback_cooldown", 300, 30, 3600)),
         timeout=float(_int("decision_timeout", 60, 5, 300)),
@@ -748,17 +864,23 @@ class DecisionPhase:
 
     # ---------- 装配 ----------
 
+    def _bot_name(self, sid: str = "") -> str:
+        """2026-11-08（J）：提示词里的{{bot}}换成这个会话里它自己的昵称，没设就退全局名。"""
+        return bot_name(self.plugin, sid)
+
     def build_system(self, opt: DecisionOptions, persona: str, tools_help: str = "",
-                     identity: str = "") -> list:
+                     identity: str = "", sid: str = "") -> list:
         """按固定顺序拼 system 段，返回非空段列表（顺序即发送顺序）。"""
         parts = []
         p = (persona or "").strip()
         if p:
-            parts.append("【人设】\n" + p)
+            # v4.84（用户 m09179 第 4 条）：不再加「【人设】」抬头，人设文件自带标题。
+            parts.append(p)
         # v3.92（用户 m06951 第 6 条）：「聊天规则」不再进决策这一份——它只在真正开口那一轮
         # 起作用，改由 state/reply_prompt.py 插到回复系统提示词的人格段后面。
         # 决策这一份只剩「人设 → 判断规则 → 工具 → 身份环境」。
-        prompt = (opt.prompt or "").strip() or DEFAULT_DECISION_PROMPT
+        prompt = ((opt.prompt or "").strip() or DEFAULT_DECISION_PROMPT)
+        prompt = prompt.replace("{{bot}}", self._bot_name(sid))
         parts.append("【判断规则】\n" + prompt)
         if tools_help:
             parts.append("【可用工具】\n" + tools_help)
@@ -777,8 +899,13 @@ class DecisionPhase:
             rows.append("- " + name + ("：" + desc[0].strip() if desc else ""))
         return "\n".join(rows)
 
-    def transcript(self, messages) -> str:
-        """把窗口消息摊成聊天记录（内容原样，只去掉空行）。"""
+    def transcript(self, messages, sid: str = "") -> str:
+        """把窗口消息摊成聊天记录（内容原样，只去掉空行）。
+
+        2026-11-08（J）：bot 自己那几行以前统一写【我】，看不出是谁说的；改成它在这个会话里
+        的名字，跟群友那几行一样能认出说话的人。决策注记不是它说的话，不挂名字（同日）。
+        """
+        tag = "【%s】" % self._bot_name(sid)
         rows = []
         for m in messages or []:
             role = str(_field(m, "role") or "").strip().lower()
@@ -788,8 +915,9 @@ class DecisionPhase:
             if role == "system":
                 continue
             if role == "assistant":
+                note = _is_note_msg(m)
                 for line in _clean_bot(body):
-                    rows.append("【我】" + line)
+                    rows.append(_note_line(line) if note else (tag + line))
             else:
                 rows.append(_clean_user(body))
         return "\n".join(rows)
@@ -870,19 +998,33 @@ class DecisionPhase:
             "usage": usage,
         }
 
-    async def _run_tool(self, tool, args: dict) -> str:
+    async def _run_tool(self, tool, args: dict):
+        """跑一个工具，返回 (正文, 附件 refs)。
+
+        v4.69（用户 m00969）：工具可以返回 ToolResult。以前一律 str(got)，带图的
+        工具结果会变成一段 repr 文字——模型既看不到图，正文也读不懂。现在正文从
+        assemble_result() 取，media_refs 交给 _tool_loop 拼成一条 user 消息。
+        """
         try:
             got = tool.execute(**args)
             if asyncio.iscoroutine(got):
                 got = await got
         except Exception as exc:
-            return "工具执行失败：%s: %s" % (type(exc).__name__, exc)
+            return "工具执行失败：%s: %s" % (type(exc).__name__, exc), []
+        if ToolResult is not None and isinstance(got, ToolResult):
+            media = [dict(r) for r in (getattr(got, "media_refs", None) or [])
+                     if isinstance(r, dict) and r.get("path")]
+            try:
+                text = await got.assemble_result()
+            except Exception:
+                text = str(getattr(got, "text", "") or "")
+            return str(text or ""), media
         if isinstance(got, str):
-            return got
+            return got, []
         try:
-            return json.dumps(got, ensure_ascii=False)
+            return json.dumps(got, ensure_ascii=False), []
         except Exception:
-            return str(got)
+            return str(got), []
 
     async def _tool_loop(self, client, messages, tools, opt: DecisionOptions, budget: dict,
                          tool_cache: dict = None, reuse: bool = False) -> dict:
@@ -898,6 +1040,8 @@ class DecisionPhase:
         while last.get("ok") and last.get("tool_calls") and rounds < max(0, opt.tool_rounds):
             rounds += 1
             calls = []
+            media_all = []
+            media_names = []
             for raw in last["tool_calls"]:
                 if isinstance(raw, dict):
                     fn = raw.get("function") if isinstance(raw.get("function"), dict) else {}
@@ -918,17 +1062,43 @@ class DecisionPhase:
                 tool = names.get(name)
                 key = (name, json.dumps(args, ensure_ascii=False, sort_keys=True))
                 result = None
+                media = []
                 if reuse and tool_cache is not None and tool is not None and key in tool_cache:
-                    result = tool_cache[key]
+                    cached = tool_cache[key]
+                    if isinstance(cached, tuple) and len(cached) == 2:
+                        result, media = cached[0], list(cached[1] or [])
+                    else:
+                        result = cached
                 if result is None:
-                    result = await self._run_tool(tool, args) if tool else "没有这个工具：" + name
+                    if tool:
+                        result, media = await self._run_tool(tool, args)
+                    else:
+                        result, media = "没有这个工具：" + name, []
                     # 只复用「真跑成功了」的；工具报错允许重试时再试一次。
                     if (tool is not None and tool_cache is not None
                             and not result.startswith("工具执行失败：")):
-                        tool_cache[key] = result
+                        tool_cache[key] = (result, list(media))
+                if media:
+                    media_all.extend(media)
+                    if name not in media_names:
+                        media_names.append(name)
                 messages.append({"role": "tool", "tool_call_id": cid, "content": result[:4000]})
             messages.insert(len(messages) - len(calls),
-                            {"role": "assistant", "content": last.get("text") or "", "tool_calls": calls})
+                            {"role": "assistant", "content": last.get("text") or "",
+                             "tool_calls": calls})
+            # 带图的工具结果按框架 agent_executor 的形状补一条 user 消息：
+            # 部分 provider 拒绝 tool 角色带图，图片一律走 user（用户 m00969）。
+            if media_all:
+                parts = [{"type": "kira_image_ref", "path": str(m.get("path") or ""),
+                          "mime_type": str(m.get("mime_type") or m.get("mime")
+                                          or "image/jpeg")}
+                         for m in media_all if isinstance(m, dict) and m.get("path")]
+                if parts:
+                    messages.append({"role": "user", "content": [
+                        {"type": "text",
+                         "text": "Media returned by tool call(s): "
+                                 + ", ".join(media_names)},
+                        *parts]})
             budget["in"] += last.get("in", 0)
             budget["out"] += last.get("out", 0)
             budget["cached"] += last.get("cached", 0)
@@ -1029,12 +1199,9 @@ class DecisionPhase:
                      identity: str = "", images=None) -> dict:
         """跑一次决策。返回结构给 engine / 快照 / 页面共用。"""
         started = time.time()
+        # v4.89（用户 m14715 第 1 条）：决策页不再有「设置里那份人格」——人设只能由
+        # 提示词布局里的人格模块显式选文件，没选就是空的。
         persona = ""
-        if opt.persona:
-            try:
-                persona = await self.persona_text(opt.persona)
-            except Exception:
-                logger.exception("[multi-decision] 取人格失败，按无人格处理")
         tools = self.pick_tools(opt.tools)
         help_text = self.tools_help(tools)
         if tools:
@@ -1056,9 +1223,10 @@ class DecisionPhase:
             system_parts = [p["text"] for p in compiled["parts"] if not p.get("dynamic")]
             system_text = compiled["system"]
         else:
-            system_parts = self.build_system(opt, persona, help_text, identity or self.identity_text())
+            system_parts = self.build_system(opt, persona, help_text,
+                                             identity or self.identity_text(), sid)
             system_text = "\n\n".join(system_parts)
-        body = self.transcript(messages)
+        body = self.transcript(messages, sid)
         user_text = body or "（这段时间没人说话）"
         if dyn:
             user_text = user_text + "\n\n" + dyn

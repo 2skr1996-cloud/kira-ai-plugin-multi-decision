@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 from core.plugin import BasePlugin, logger, on, Priority, register
+from core.agent.tool import ToolResult
 
 from .decision.engine import DecisionEngine, _norm_phrase
 from .decision.output_guard import dedupe_reply, wrap_plain_reply
@@ -38,9 +39,43 @@ from .state.decision_phase import (
     options_from_config,
 )
 from .state.decision_log import DecisionLog
+# 用户 m06706：JEV 决策（专用 decision 类模型走 choice()），跟普通决策并列的一条链。
+from .state.jev_phase import DEFAULT_API_BASE as DEFAULT_JEV_API_BASE
+from .state.jev_phase import DEFAULT_API_MODEL as DEFAULT_JEV_API_MODEL
+from .state.jev_phase import DEFAULT_LOWER as DEFAULT_JEV_LOWER
+from .state.jev_phase import DEFAULT_UPPER as DEFAULT_JEV_UPPER
+from .state.jev_phase import DEFAULT_JEV_PROMPT as DEFAULT_JEV_PROMPT
+from .state.jev_phase import JevPhase
+from .state.jev_phase import api_chat_url as jev_api_chat_url
+from .state.jev_phase import api_endpoint as jev_api_endpoint
+from .state.jev_phase import check_api_base as jev_check_api_base
+from .state.jev_phase import clear_secret as jev_clear_secret
+from .state.jev_phase import endpoint_url as jev_endpoint_url
+from .state.jev_phase import list_api_models as jev_list_api_models
+from .state.jev_phase import load_secret as jev_load_secret
+from .state.jev_phase import load_secrets as jev_load_secrets
+from .state.link_title import LinkTitles
+from .state.jev_phase import make_api as jev_make_api
+from .state.jev_phase import normalize_api_id as normalize_jev_api_id
+from .state.jev_phase import parse_apis as jev_parse_apis
+from .state.jev_phase import mask_key as jev_mask_key
+from .state.jev_phase import normalize_action as normalize_jev_action
+from .state.jev_phase import normalize_backend as normalize_jev_backend
+from .state.jev_phase import normalize_protocol as normalize_jev_protocol
+from .state.jev_phase import options_from_config as jev_options_from_config
+from .state.jev_phase import save_secret as jev_save_secret
 from .decision.forward_fetch import (
+    display_proof_clear as forward_display_proof_clear,
     display_proof_for_mid as forward_display_proof_for_mid,
+    display_proof_stats as forward_display_proof_stats,
     fetch_forward_items,
+    media_for_mid as forward_media_for_mid,
+    media_db_clear as forward_media_clear,
+    media_db_stats as forward_media_stats,
+    set_display_proof_keep_days_fn as set_forward_proof_keep_days_fn,
+    set_display_proof_keep_fn as set_forward_proof_keep_fn,
+    set_media_db_keep_days_fn as set_forward_media_keep_days_fn,
+    set_media_db_limit_fn as set_forward_media_limit_fn,
 )
 from .state.display_projection import (
     content_text,
@@ -66,12 +101,22 @@ from .window.manager import (
     WindowManager,
     view_of,
     media_list,
+    media_render_begin,
+    media_render_resume,
+    media_render_state,
     public_media,
     _media_by_ids,
     _assistant_prefix,
     _sniff_image_mime,
+    _media_cache_root,
+    set_forward_media_fn,
+    forward_model_refs,
+    set_forward_policy_fn,
     round_kind,
     trim_owner_of,
+    prune_other_media,
+    clear_other_media,
+    _owners_remember,
 )
 from .window.split import regroup_images, expand_packed_messages
 from .window.trim import count_messages, count_user_messages
@@ -209,8 +254,26 @@ def _framework_bot_identity() -> dict:
     return {}
 
 
-def _disk_usage() -> dict:
-    """插件自己写出来的日志/缓存占了多少磁盘（用户 m30009 图5：要目录占用，不是进程内存）。"""
+_DISK_CACHE: dict = {"t": 0.0, "v": {}}
+
+
+def _disk_usage(ttl: float = 60.0) -> dict:
+    """插件自己写出来的日志/缓存占了多少磁盘（用户 m30009 图5：要目录占用，不是进程内存）。
+
+    用户第 4 条：概览卡已经改用缓存表（_mem_usage）的数字，这里只当兜底——它数的是
+    目录实际占用，会把转发图 fw_ / 推文图 tw_ / 未归属的图全算进 media_cache，和
+    缓存记录页的口径对不上，所以只在 _mem_usage 出错时才用。
+
+    v4.88：结果缓存 60 秒。这个函数要把整个插件数据目录走一遍（线上 2572 个文件 /
+    1.2 GB），而 /overview 被前端 5 秒轮询一次——以前每 5 秒就同步走一遍盘，
+    实测 200ms 上下，全卡在事件循环里，页面和收发消息都跟着顿一下。
+    占用不会秒级变化，60 秒足够；返回的是副本，调用方随便改。
+    """
+    now = time.time()
+    cached = _DISK_CACHE.get("v") or {}
+    if cached and (now - float(_DISK_CACHE.get("t") or 0.0)) < ttl:
+        return {"total_mb": cached.get("total_mb", 0.0),
+                "parts": [dict(p) for p in (cached.get("parts") or [])]}
     try:
         from core.utils.path_utils import get_data_path
         root = os.path.join(str(get_data_path()), "plugin_data", PLUGIN_ID)
@@ -224,26 +287,80 @@ def _disk_usage() -> dict:
         for name in sorted(os.listdir(root)):
             p = os.path.join(root, name)
             size = 0
+            # v4.85（用户 m10425 第 5 条）：顺便数一份文件个数——概览卡要照缓存记录那样列「数量」，
+            # 反正这里本来就要把每个目录走一遍，多记一个计数不额外读盘。
+            nfiles = 0
             if os.path.isdir(p):
-                for dirpath, _dirs, files in os.walk(p):
-                    for f in files:
-                        try:
-                            size += os.path.getsize(os.path.join(dirpath, f))
-                        except OSError:
-                            pass
+                # v4.88：用 os.scandir 递归，entry.stat() 是枚举目录时顺带拿到的，
+                # 比 os.walk + os.path.getsize 快两个数量级——Windows 上按路径 stat
+                # 每次约 2ms，2572 个文件就是 5 秒，而这里只要几十毫秒。
+                stack = [p]
+                while stack:
+                    cur = stack.pop()
+                    try:
+                        with os.scandir(cur) as it:
+                            for ent in it:
+                                try:
+                                    if ent.is_dir(follow_symlinks=False):
+                                        stack.append(ent.path)
+                                        continue
+                                    size += ent.stat(follow_symlinks=False).st_size
+                                    nfiles += 1
+                                except OSError:
+                                    pass
+                    except OSError:
+                        pass
             else:
                 try:
-                    size = os.path.getsize(p)
+                    size = os.stat(p).st_size
+                    nfiles = 1
                 except OSError:
                     size = 0
             total += size
             # v3.72（用户 m24260 第 11 条）：也带上字节数——几十 KB 的目录（窗口快照）
             # 四舍五入到一位小数会变成 0.0 MB，前端要靠 bytes 显示成 KB。
-            parts.append({"name": name, "mb": round(size / 1048576.0, 1), "bytes": size})
+            parts.append({"name": name, "mb": round(size / 1048576.0, 1), "bytes": size, "files": nfiles})
     except Exception:
         return {}
     parts.sort(key=lambda x: -x.get("bytes", 0))
-    return {"total_mb": round(total / 1048576.0, 1), "parts": parts[:8]}
+    result = {"total_mb": round(total / 1048576.0, 1), "parts": parts[:8]}
+    _DISK_CACHE["t"] = now
+    _DISK_CACHE["v"] = result
+    return {"total_mb": result["total_mb"], "parts": [dict(p) for p in result["parts"]]}
+
+
+#: 缓存表（_cache_kinds）的行 → 概览卡片 parts 的名字。
+#: 前端 web/index.html 的 MEM_GROUPS 按这几个名字分组（图片缓存 / 快照 / 窗口快照 /
+#: 消息日志 / 会话统计 / 摘要），名字不能改；没列在这里的行（未归属图片、其他图片
+#: 缓存、转发图片、转发原图记录、自动重试记录、私聊上下文存档）前端会并进「其他」。
+_MEM_PART_NAMES = {
+    "media": "media_cache",
+    "requests": "requests",
+    "decisions": "decisions",
+    "stats": "stats",
+    "summaries": "summaries",
+}
+
+
+def _mem_parts_from_kinds(kinds) -> list:
+    """把缓存表的行翻成概览卡片的 parts（名字按 _MEM_PART_NAMES 映射）。
+
+    用户第 4 条：概览卡和缓存记录页必须说同一件事，所以这里一个字节都不自己算，
+    直接照抄缓存表（_cache_kinds）的 count / bytes——两边永远同一口径。
+    """
+    parts = []
+    for row in kinds or []:
+        key = str(row.get("key") or "")
+        if not key:
+            continue
+        size = int(row.get("bytes") or 0)
+        parts.append({
+            "name": _MEM_PART_NAMES.get(key, key),
+            "mb": round(size / 1048576.0, 1),
+            "bytes": size,
+            "files": int(row.get("count") or 0),
+        })
+    return parts
 
 
 def _process_memory() -> dict:
@@ -319,7 +436,6 @@ PER_SESSION_KEYS = (
     "adaptive_rhythm_sigma",
     # v3.91（用户 m05749 / m05856）：进阶决策的两段式——先让模型读实时窗口判回不回，
     # 判回才走完整那一轮。这些都按群走：哪个群该不该回、回得多不多都不一样。
-    "decision_persona",
     "decision_chat_rules",
     "decision_prompt",
     "decision_tools",
@@ -332,6 +448,23 @@ PER_SESSION_KEYS = (
     "decision_timeout",
     "decision_fail_action",
     "decision_tool_rounds",
+    # 用户 m06706：JEV 决策跟普通决策一样按群一套——哪个群用专用模型、区间多宽都可以不同。
+    "jev_enabled",
+    "jev_model",
+    "jev_fallback_model",
+    "jev_lower",
+    "jev_upper",
+    "jev_action",
+    "jev_persona",
+    # 用户 m08123：接口来源也能按群分（一个群走宿主模型、另一个群走第三方接口）。
+    # 密钥不在这里——它单独落盘，永不进配置、不回页面。
+    "jev_backend",
+    "jev_api_base",
+    "jev_api_model",
+    # 用户 m08755：协议也按群分（同一个地址不同网关，有的只说 OpenAI 兼容）。
+    "jev_api_protocol",
+    # 用户 m09981：自定义接口可以是好几页，每页各存协议 / 地址 / 模型名（JSON 字符串）。
+    "jev_apis",
     "time_bands",
     "wake_words",
     "nicknames",
@@ -410,17 +543,34 @@ PER_SESSION_KEYS = (
     "decisions_keep_days",     # 消息日志保留天数
     "windows_keep_days",       # 窗口快照保留天数
     "windows_keep",            # 窗口快照份数（0 = 不限）
+    "window_show",             # 窗口快照在页面上显示多少条（v4.90，用户 m01875 第 1 条）
     "media_cache_limit",       # 图片缓存张数（每个群组各自的上限，非全目录总上限）
+    "media_other_limit",       # 其他图片（推文卡片图）张数（每个群组各自的上限）
     "media_cache_keep_days",   # 图片缓存保留天数
+    "media_other_keep_days",   # 其他图片（推文卡片图）保留天数
     # v3.66（用户 m19536 第 4 条）：上限拆成「群聊默认 / 私聊默认」两套——私聊的人少、
     # 刷得慢，用群聊那一套等于白占盘。这四个是私聊默认值，群聊仍用上面那些原键。
     "media_cache_limit_dm",    # 图片缓存张数（私聊默认）
+    "media_other_limit_dm",    # 其他图片（推文卡片图）张数（私聊默认）
     "trace_keep_dm",           # 每会话请求快照份数（私聊默认）
     # v4.00（用户 m10782）：决策快照单独一类缓存，份数线自己一套
     "decision_keep",           # 每会话决策快照份数
     "decision_keep_dm",        # 每会话决策快照份数（私聊默认）
     "windows_keep_dm",         # 窗口快照份数（私聊默认）
+    "window_show_dm",          # 窗口快照显示条数（私聊默认）
     "summaries_keep_dm",       # 中期摘要上限（私聊默认）
+    # v4.54（用户 m18227）：转发配图 / 转发原图凭证 / 重试记录也按会话设上限。
+    # 私聊窗口存档不设个数上限，也不放进单会话覆盖。
+    "forward_media_keep",      # 每个会话留多少条转发配图索引
+    "forward_proof_keep",      # 每个会话留多少条转发原图凭证
+    "retry_keep",              # 每个会话留多少条重试链
+    "forward_media_keep_days", # 转发配图索引保留天数
+    "forward_proof_keep_days", # 转发原图凭证保留天数
+    "retry_keep_days",         # 重试链保留天数
+    # 用户 m19210：这三类也按老规矩分「群聊默认 / 私聊默认」两套值。
+    "forward_media_keep_dm",   # 转发配图索引（私聊默认）
+    "forward_proof_keep_dm",   # 转发原图凭证（私聊默认）
+    "retry_keep_dm",           # 重试链（私聊默认）
 )
 
 # 整数项的取值范围，覆盖值也要守规矩（前端提交什么都有可能）。
@@ -442,6 +592,9 @@ _BOUNDS = {
     "decision_fallback_cooldown": (30, 3600),
     "decision_timeout": (5, 300),
     "decision_tool_rounds": (0, 5),
+    # 用户 m06706：JEV 的不确定区间按「百分比」存（40 / 60），运行时再归一到 0~1。
+    "jev_lower": (0, 100),
+    "jev_upper": (0, 100),
     "jitter_seconds": (0, None),
     "jitter_max_rounds": (1, 20),
     "burst_merge_seconds": (0, None),
@@ -474,13 +627,16 @@ _BOUNDS = {
     "trace_keep_dm": (1, 1000),
     "decision_keep_dm": (1, 1000),
     "windows_keep_dm": (0, 1000),
+    "window_show_dm": (1, 1000),
     "summaries_keep_dm": (0, 1000),
     # 用户 m11091 第 11 条：图片缓存的两条保留线，0 = 不限
     "media_cache_keep_days": (0, None),
+    "media_other_keep_days": (0, 3650),
     # 用户 m18059 第 3/4 条：缓存保留线可以单群覆盖，覆盖值一样要守住范围
     "trace_keep": (1, 1000),
     "decision_keep": (1, 1000),
     "windows_keep": (0, 1000),
+    "window_show": (1, 1000),
     # 用户 m13708 第 3/4 条：每类缓存各自的保留天数 / 上限，这类全局键同样要守住范围。
     # 天数类一律 0-3650（0 = 不限）；消息日志/窗口快照是按天文件，至少要留 1 天。
     "requests_keep_days": (0, 3650),
@@ -490,13 +646,32 @@ _BOUNDS = {
     "windows_keep_days": (1, 3650),
     "summaries_keep": (0, 1000),
     "summaries_keep_days": (0, 3650),
+    # v4.54（用户 m18227）：这三类缓存按会话设上限，0 = 不限。
+    # 私聊窗口存档不设上限：用户 m18819 要求有多少私聊就留多少。
+    "forward_media_keep": (0, 10000),
+    "forward_media_keep_dm": (0, 10000),
+    "media_other_limit": (0, 10000),
+    "media_other_limit_dm": (0, 10000),
+    "forward_proof_keep": (0, 5000),
+    "forward_proof_keep_dm": (0, 5000),
+    "retry_keep": (0, 5000),
+    "retry_keep_dm": (0, 5000),
+    # 用户 m19940：三类新缓存也加保留天数，0 = 不限。
+    "forward_media_keep_days": (0, 3650),
+    "forward_proof_keep_days": (0, 3650),
+    "retry_keep_days": (0, 3650),
     "stats_keep_days": (56, 3650),
+    # v4.90（发版前审计）：设置页写「最少 7 天」，但后端一直没夹这个键，
+    # 填 1 也能存进去，跟界面对不上。补上范围。
+    "stats_window_days": (7, 365),
     "summary_max_chars": (60, 4000),
     "summary_line_chars": (8, 200),
 }
 
 _ENUMS = {
     "trigger_mode": ("count", "probability", "adaptive"),
+    # 用户 m08755：自定义接口的协议，只收这两个值。
+    "jev_api_protocol": ("systemone", "openai"),
 }
 
 
@@ -717,6 +892,31 @@ def _as_int(value, default: int) -> int:
         return default
 
 
+def _snapshot_id(ts) -> str:
+    """一份快照的稳定编号（v4.71，用户 m01516 第 3 条）。
+
+    用户要「给每一个窗口快照都生成一个有规律的 ID」，以后按时间段找聊天记录时
+    能直接说「W20261106-090000 到 W20261106-120000 之间那几份」。编号只由快照
+    自己的时间戳算出来：不落盘、不新建文件、不重写老记录，所以历史快照也立刻
+    有号，重新载入不会变，按字符串排序就是时间顺序。
+    """
+    try:
+        t = float(ts)
+    except (TypeError, ValueError):
+        return ""
+    if t <= 0:
+        return ""
+    lt = time.localtime(t)
+    ms = int(round((t - int(t)) * 1000.0)) % 1000
+    return "W%s-%s-%03d" % (time.strftime("%Y%m%d", lt), time.strftime("%H%M%S", lt), ms)
+
+
+def _stamp_snap_ids(rows) -> None:
+    """给一批快照记录补上 snap_id（原地写；老记录同样算得出来）。"""
+    for it in rows or []:
+        if isinstance(it, dict):
+            it["snap_id"] = _snapshot_id(it.get("ts"))
+
 def _bounded_int(key: str, value, default: int) -> int:
     """读全局整数配置：先 _as_int 转型，再按 _BOUNDS 夹范围（用户 m13708 第 4 条）。
 
@@ -760,26 +960,46 @@ def _path_usage(folder, suffix: str = "", recursive: bool = False) -> tuple:
     return (count, size)
 
 
-def _jsonl_usage(folder, suffix: str = ".jsonl") -> tuple:
-    """数一个目录下 *.jsonl 的「记录条数」（非空行）与总字节，返回 (count, bytes)。
+def _jsonl_usage(folder, suffix: str = ".jsonl", sid: str = "") -> tuple:
+    """数一个目录下 *.jsonl 的「记录条数」（非空行）与字节，返回 (count, bytes)。
 
     用户 m13708 第 5 条：消息日志/窗口快照是一天一个文件、多会话混写，数文件
     个数会变成「有几天记录」——用户看到的就是「一个群那么多快照只有 5 份」。
     所以缓存页这类一律按非空行数算条数。
+
+    sid 非空时只算这个会话的记录（用户 m22090：单群设置里要看这个群自己的量）：
+    逐行读 sid 字段再累加，字节也只算这些行，不再把整份混写文件都记到它头上。
     """
     count = 0
     size = 0
+    want = normalize_sid(str(sid or "").strip()) if sid else ""
     try:
         items = list(Path(folder).glob("*" + suffix))
     except Exception:
         return (0, 0)
     for path in items:
         try:
-            size += int(path.stat().st_size or 0)
+            if not want:
+                size += int(path.stat().st_size or 0)
+                with path.open("r", encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        if line.strip():
+                            count += 1
+                continue
             with path.open("r", encoding="utf-8", errors="replace") as fh:
                 for line in fh:
-                    if line.strip():
-                        count += 1
+                    if not line.strip():
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    if normalize_sid(str(rec.get("sid") or "")) != want:
+                        continue
+                    count += 1
+                    size += len(line.encode("utf-8"))
         except OSError:
             continue
     return (count, size)
@@ -954,6 +1174,10 @@ class MultiDecisionPlugin(BasePlugin):
         # 只剩「[图片]」四个字，模型看不到。开关默认开。v4.40（用户 m21305）：张数
         # 不再单独设，跟回复同一个口径吃 history_images（默认 128）。
         self.decision_see_images = _as_bool(cfg.get("decision_see_images"), True)
+        # v4.85（用户 m10425 第 6 条）：JEV 那条链自己收不了图——decision 类模型只有
+        # choice()，没有图片入参；这个开关管的是「不确定 → 交给决策模型」那一次转交，
+        # 打开后转交的普通决策会带上这一轮的图。
+        self.jev_see_images = _as_bool(cfg.get("jev_see_images"), True)
         # v3.44（用户本轮第 2 条）：连发合并同样加开关，默认关——关着时同一人连发
         # 每条都照常计数；开了才按 burst_merge_seconds 合并。
         self.burst_merge_enabled = _as_bool(cfg.get("burst_merge_enabled"), False)
@@ -987,6 +1211,29 @@ class MultiDecisionPlugin(BasePlugin):
         # v3.52（用户 m08226 第 6 条）：进阶模式先只当「退避的前置开关」，
         # 模型 + 决策词那部分还在做（ui_schema.json 里的 default 也是 false）。
         self.advanced_enabled = _as_bool(cfg.get("advanced_enabled"), False)
+
+        # 用户 m06706：JEV 决策（接入的专用 decision 类模型，如 Jev）自己一整套配置。
+        # 跟 advanced_enabled 互斥，但两套配置各存各的——切换开关不清空对方的值，
+        # 用户想来回试随时能切回去。区间按百分比整数存（20 / 70），运行时再归一到 0~1。
+        self.jev_enabled = _as_bool(cfg.get("jev_enabled"), False)
+        self.jev_model = str(cfg.get("jev_model") or "").strip()
+        self.jev_fallback_model = str(cfg.get("jev_fallback_model") or "").strip()
+        self.jev_lower = _bounded_int("jev_lower", cfg.get("jev_lower"), int(round(DEFAULT_JEV_LOWER * 100)))
+        self.jev_upper = _bounded_int("jev_upper", cfg.get("jev_upper"), int(round(DEFAULT_JEV_UPPER * 100)))
+        self.jev_action = normalize_jev_action(cfg.get("jev_action"))
+        self.jev_prompt = str(cfg.get("jev_prompt") or "")
+        self.jev_persona = str(cfg.get("jev_persona") or "").strip()
+        # 用户 m08123：接口来源（framework 宿主 decision 模型 / custom 自定义第三方接口）。
+        # 地址与模型名按群可覆盖，密钥只全局一份。
+        self.jev_backend = normalize_jev_backend(cfg.get("jev_backend"))
+        # 原始值原样留着（不合法的地址、空模型名都别在这里悄悄洗掉）：
+        # 运行时会回落到官方地址 / jev-latest，但自检要能看见用户到底写了什么。
+        self.jev_api_base = str(cfg.get("jev_api_base") or "").strip()
+        self.jev_api_model = str(cfg.get("jev_api_model") or "").strip()
+        # 用户 m08755：地址后面接的是哪套协议（SystemOne / OpenAI 兼容）。
+        self.jev_api_protocol = str(cfg.get("jev_api_protocol") or "").strip().lower()
+        # 用户 m09981：自定义接口的页签列表（JSON 字符串，逐页协议 / 地址 / 模型名）。
+        self.jev_apis = str(cfg.get("jev_apis") or "").strip()
 
         # Q02：缺键跟设置页一致（默认开）；显式存 False 仍然关。
         self.rest_mode_enabled = _as_bool(cfg.get("rest_mode_enabled"), True)
@@ -1027,8 +1274,13 @@ class MultiDecisionPlugin(BasePlugin):
         # 用户 m06046 图2：600 张（那时是全目录共享一份）两天就攒满，每次收新图都会顺手
         # 删掉一张旧的，记录里刚出现过的图跟着没。默认放到 2000，配合 2 小时的保护期。
         self.media_cache_limit = max(1, _as_int(cfg.get("media_cache_limit"), 2000))
+        # 用户 m24364：其他图片（推文卡片图 tw_）也按每个群 / 私聊各自的上限留，
+        # 默认 40 张；0 = 不限。tw_ 的归属写在 media_owners.json 里。
+        self.media_other_limit = max(0, _as_int(cfg.get("media_other_limit"), 40))
         # 用户 m11091 第 11 条：图片缓存只留最近 N 天 / 最多 N MB，0 = 不限
         self.media_cache_keep_days = max(0, _as_int(cfg.get("media_cache_keep_days"), 56))
+        # 用户 m24990：其他图片也补保留天数，默认 30 天；0 = 不限。
+        self.media_other_keep_days = max(0, _as_int(cfg.get("media_other_keep_days"), 30))
         # v3.66（用户 m19536 第 5 条）：「缓存容量上限」这个总上限撤掉了——群聊默认 +
         # 私聊默认两套加起来就是总上限。配置里残留的旧值不再读取，属性留 0 给老代码兜底。
         self.media_cache_max_mb = 0
@@ -1042,6 +1294,18 @@ class MultiDecisionPlugin(BasePlugin):
         self.history_gif_grid = _as_bool(cfg.get("history_gif_grid"), True)
         self.history_gif_original = _as_bool(cfg.get("history_gif_original"), False)
         self.history_gif_first = _as_bool(cfg.get("history_gif_first"), False)
+        # 用户 2026-11-06：转发消息怎么进请求——off 不展开 / text 只给文字 /
+        # on_demand 默认只挂前几张，模型需要时用 view_forward 看完整内容。
+        self.forward_mode = str(cfg.get("forward_mode") or "on_demand").strip().lower()
+        if self.forward_mode not in ("off", "text", "on_demand"):
+            logger.warning(
+                f"[multi-decision] 无法识别的 forward_mode: {self.forward_mode!r}，回退 on_demand")
+            self.forward_mode = "on_demand"
+        # 风险开关：打开后转发里的图全部发给模型，请求体积可能很大。
+        self.forward_images_all = _as_bool(cfg.get("forward_images_all"), False)
+        # v4.70（用户 m01237）：转发里的动图八成是表情包，默认整档不发——
+        # 只丢动图，静态图照发，正文留 [图片] 占位；实时窗照旧显示。
+        self.forward_drop_gif = _as_bool(cfg.get("forward_drop_gif"), True)
         self.window_trim_threshold = max(1, _as_int(cfg.get("window_trim_threshold"), 60))
         # v3.85（用户 m04418 第 2 条）：撤掉「重启后回填条数」这条设置——群聊窗口
         # 热重载由寄存处接回、私聊另有 window_dm.json 存档，都不需要从框架记忆里回填。
@@ -1130,8 +1394,13 @@ class MultiDecisionPlugin(BasePlugin):
         self.media_cache_limit_dm = _bounded_int(
             "media_cache_limit_dm", cfg.get("media_cache_limit_dm"), 200
         )
+        # 用户 m24364：其他图片的私聊默认上限，同样是 40 张。
+        self.media_other_limit_dm = _bounded_int(
+            "media_other_limit_dm", cfg.get("media_other_limit_dm"), 40
+        )
+        # v4.90（用户 m01875 第 1 条）：私聊的显示条数跟群聊一样默认 100。
         self.trace_keep_dm = _bounded_int(
-            "trace_keep_dm", cfg.get("trace_keep_dm"), 50
+            "trace_keep_dm", cfg.get("trace_keep_dm"), 100
         )
         # 用户 m13708 第 3/4 条：每一类缓存的保留天数都做成设置项，语义统一
         # 「0 = 不限」（消息日志/窗口快照按天文件，至少要留 1 天）。默认值和以前
@@ -1153,29 +1422,75 @@ class MultiDecisionPlugin(BasePlugin):
         # v3.67（用户 m20117）：份数线默认群聊 100 / 私聊 20（用户自己填的那组值）。
         # v4.00（用户 m10782）：窗口快照现在既有回复轮、也有决策轮（决策接管这一轮
         # 也会记一条窗口），份数线从 100 / 20 提到 300 / 60——不然一天就被滚掉。
+        # v4.90（用户 m01133 第 2 条）：回复 / 裁切 / 决策三种快照合成一类，份数线只剩
+        # 这一条（以前三堆各按 100 / 200 / 300 裁，加起来跟走势图对不上）。
+        # v4.90（用户 m01875 第 1 条）：盘上留多少份跟页面上显示多少条分开——上限默认
+        # 300，显示默认 200（见下面的 window_show），多出来的那 100 份只当备份。
         self.windows_keep = _bounded_int(
             "windows_keep", cfg.get("windows_keep"), 300
         )
         self.windows_keep_dm = _bounded_int(
             "windows_keep_dm", cfg.get("windows_keep_dm"), 60
         )
+        # v4.90（用户 m01875 第 1 条）：走势图和快照列表最多画多少根。0 = 不限。
+        self.window_show = _bounded_int(
+            "window_show", cfg.get("window_show"), 200
+        )
+        self.window_show_dm = _bounded_int(
+            "window_show_dm", cfg.get("window_show_dm"), 200
+        )
         # v4.00（用户 m10782）：决策快照单独一类缓存，份数线自己一套。
+        # v4.90（用户 m01875 第 1 条）：它现在只是「决策记录页列多少条」，默认 100 / 100。
         self.decision_keep = _bounded_int(
             "decision_keep", cfg.get("decision_keep"), 100
         )
         self.decision_keep_dm = _bounded_int(
-            "decision_keep_dm", cfg.get("decision_keep_dm"), 50
+            "decision_keep_dm", cfg.get("decision_keep_dm"), 100
         )
         # 中期摘要（用户第 5 条：早期记录可以先清掉）：最多留多少个会话的摘要，
         # 以及最多留多少天，0 = 不限。
+        # v4.84（用户 m09179 第 9 条）：这三项挪到「缓存记录」页，默认值改成
+        # 群聊 150 / 私聊 50 / 保留 30 天（原来是 0 / 0 / 56，等于不限）。
         self.summaries_keep = _bounded_int(
-            "summaries_keep", cfg.get("summaries_keep"), 0
+            "summaries_keep", cfg.get("summaries_keep"), 150
         )
         self.summaries_keep_days = _bounded_int(
-            "summaries_keep_days", cfg.get("summaries_keep_days"), 56
+            "summaries_keep_days", cfg.get("summaries_keep_days"), 30
         )
         self.summaries_keep_dm = _bounded_int(
-            "summaries_keep_dm", cfg.get("summaries_keep_dm"), 0
+            "summaries_keep_dm", cfg.get("summaries_keep_dm"), 50
+        )
+        # v4.54（用户 m18227）：这几类缓存也进「缓存记录」，上限按每个群 / 私聊各自算，
+        # 默认值取最近实测用量的约 4 倍；0 = 不限。
+        self.forward_media_keep = _bounded_int(
+            "forward_media_keep", cfg.get("forward_media_keep"), 120
+        )
+        self.forward_proof_keep = _bounded_int(
+            "forward_proof_keep", cfg.get("forward_proof_keep"), 80
+        )
+        self.retry_keep = _bounded_int(
+            "retry_keep", cfg.get("retry_keep"), 120
+        )
+        # 用户 m19210：私聊默认按群聊的四分之一给，和群聊默认一起组成两套值；
+        # 私聊刷得慢、转发也少，这个量够用，又不会让每个私聊都占一大份。
+        self.forward_media_keep_dm = _bounded_int(
+            "forward_media_keep_dm", cfg.get("forward_media_keep_dm"), 30
+        )
+        self.forward_proof_keep_dm = _bounded_int(
+            "forward_proof_keep_dm", cfg.get("forward_proof_keep_dm"), 20
+        )
+        self.retry_keep_dm = _bounded_int(
+            "retry_keep_dm", cfg.get("retry_keep_dm"), 30
+        )
+        # 用户 m19940：三类新缓存也加 30 天保留线；0 = 不限。
+        self.forward_media_keep_days = _bounded_int(
+            "forward_media_keep_days", cfg.get("forward_media_keep_days"), 30
+        )
+        self.forward_proof_keep_days = _bounded_int(
+            "forward_proof_keep_days", cfg.get("forward_proof_keep_days"), 30
+        )
+        self.retry_keep_days = _bounded_int(
+            "retry_keep_days", cfg.get("retry_keep_days"), 30
         )
         # 会话统计（自适应阈值 / 用量账本）文件保留天数。v3.66（用户 m19536 第 1/3 条）：
         # 默认 56 天、下限锁 56，和消息日志一样只能往高调。
@@ -1232,6 +1547,7 @@ class MultiDecisionPlugin(BasePlugin):
             data_dir,
             keep=self.summaries_keep,
             keep_days=self.summaries_keep_days,
+            keep_dm=self.summaries_keep_dm,
         )
         self.store = StateStore(data_dir)
         # 用户 m13708 第 3 条：消息日志与窗口快照各自独立的保留天数。
@@ -1262,6 +1578,7 @@ class MultiDecisionPlugin(BasePlugin):
         )
         # 窗口恢复：群聊走寄存处（_keep.states，热重载接回、真重启丢），私聊另有
         # window_dm.json 存档（用户 m06348 第 6 条）。冷启动不从框架记忆回填旧历史。
+        # 用户 m18819：私聊窗口存档不设个数上限，有多少私聊就留多少。
         self.window = WindowManager(
             self,
             window_log=self._window_log,
@@ -1277,8 +1594,41 @@ class MultiDecisionPlugin(BasePlugin):
             # v4.00（用户 m10782）：决策快照与回复快照同目录，份数线分开算
             dec_keep=self.decision_keep,
             dec_keep_of=lambda sid: self.eff("decision_keep", sid),
+            # v4.78（用户 2026-11-07 第 3 条）：裁切快照不动决策/回复，属窗口快照那一类，
+            # 份数线跟窗口日志共用 windows_keep，不再跟回复快照抢名额。
+            trim_keep_of=lambda sid: self.eff("windows_keep", sid),
         )
+        # v4.87（用户 m11237 第 4 条）：裸链接卡片的真实标题，抓一次落盘缓存，
+        # 之后都走缓存；只认 B 站域名，抓不到就保持卡片上的通用文案。
+        self.link_titles = LinkTitles(data_dir)
         self.retry_history = RetryHistory(data_dir)
+        # v4.54（用户 m18227）：三类按会话缓冲的缓存把「有效上限」注入各自的裁剪点。
+        # 单群覆盖 > 全局默认；0 = 不限。
+        try:
+            set_forward_media_limit_fn(
+                lambda sid: self.eff("forward_media_keep", sid))
+            set_forward_proof_keep_fn(
+                lambda sid: self.eff("forward_proof_keep", sid))
+            set_forward_media_keep_days_fn(
+                lambda sid: self.eff("forward_media_keep_days", sid))
+            set_forward_proof_keep_days_fn(
+                lambda sid: self.eff("forward_proof_keep_days", sid))
+            self.retry_history.set_limit_fn(
+                lambda sid: self.eff("retry_keep", sid))
+            self.retry_history.set_keep_days_fn(
+                lambda sid: self.eff("retry_keep_days", sid))
+        except Exception:
+            logger.exception("[multi-decision] 注入缓存上限失败（已忽略）")
+        # 用户 2026-11-06：转发图默认只挂前几张，模型需要时用 view_forward 看完整内容。
+        try:
+            set_forward_media_fn(forward_media_for_mid)
+            set_forward_policy_fn(lambda: (
+                str(getattr(self, "forward_mode", "on_demand") or "on_demand"),
+                bool(getattr(self, "forward_images_all", False)),
+                bool(getattr(self, "forward_drop_gif", True)),
+            ))
+        except Exception:
+            logger.exception("[multi-decision] 注入转发图策略失败（已忽略）")
         self.engine.retry_history = self.retry_history
         self.tracer = Tracer(
             data_dir,
@@ -1346,6 +1696,8 @@ class MultiDecisionPlugin(BasePlugin):
         # 进阶决策（v3.91，用户 m05749）：两段式——先让模型看实时窗口决定回不回，
         # 判「回」才走完整的带系统提示词那一轮。
         self.decision_phase = DecisionPhase(self)
+        # 用户 m06706：JEV 那条链（decision 类模型走 choice()）跟普通决策并列，互相独立。
+        self.jev_phase = JevPhase(self)
         # v3.92（用户 m06951 第 6 条）：聊天规则不再塞进决策提示词，改成插进回复那一轮
         # 的系统提示词（人格段后面），这一份对象顺便缓存最近一次的原文给设置页预览。
         self.reply_prompt = ReplyPrompt(self)
@@ -1661,6 +2013,107 @@ class MultiDecisionPlugin(BasePlugin):
         except Exception:
             logger.exception("[multi-decision] 轨迹记录（收尾）异常（已吞掉）")
 
+    @register.tool(
+        "view_forward",
+        "查看一条合并转发的全部图片。消息里出现「[Forward …]」或「[合并转发]」时，"
+        "如果只看到前几张图、需要看完整内容就调用它，把这条转发的图都取回来。"
+        "动图会拼成一张九宫格，具体说明写在返回文字里。",
+        {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "外层消息的 message_id，就是正文里 [message_id: …] 那个数字",
+                },
+            },
+            "required": ["message_id"],
+        },
+    )
+    async def tool_view_forward(self, event, message_id: str = ""):
+        mid = str(message_id or "").strip()
+        if not mid:
+            return "缺少 message_id"
+        try:
+            raw_sid = self.window.raw_sid(event.sid) if self.window is not None else ""
+        except Exception:
+            raw_sid = ""
+        try:
+            sid = normalize_sid(getattr(event, "sid", "") or "")
+        except Exception:
+            sid = str(getattr(event, "sid", "") or "")
+        try:
+            gif_mode = self.window.gif_mode(sid) if self.window is not None else "grid"
+        except Exception:
+            gif_mode = "grid"
+        try:
+            refs = list(forward_media_for_mid(mid) or [])
+        except Exception:
+            refs = []
+        if not refs:
+            return "这条转发没有可用的图片缓存"
+        # v4.69（用户 m00969）：动图拼九宫格、大图压到 1280 再发，别把几十张原图
+        # GIF 原样塞进请求体；按当前会话 history_gif_* 那一档走。
+        # v4.70（用户 m01237）：开了「转发里的动图一律不发」就整张跳过动图，
+        # 只在返回文字里说一声；静态图照旧走九宫格/压小那一套。
+        drop_gif = bool(getattr(self, "forward_drop_gif", True))
+        got = forward_model_refs(raw_sid, mid, refs, gif_mode, drop_gif)
+        live = [r for r in got if r.get("path")]
+        notes = []
+        for r in got:
+            note = str(r.get("note") or "")
+            if note and note not in notes:
+                notes.append(note)
+        if not live:
+            if notes:
+                return "这条转发的图没有发给模型：" + "".join(notes)
+            return "这条转发的图片都取不到"
+        text = "这条转发共 %d 张图，已全部附上。%s" % (len(live), "".join(notes))
+        return ToolResult(
+            text=text,
+            media_refs=[{"type": "kira_image_ref", "path": r["path"],
+                         "mime_type": r["mime"]} for r in live],
+        )
+
+    def _trace_model_hint(self, event) -> str:
+        """这一轮真正拿去发请求的模型名（用户 m02939 第 2 条）。
+
+        框架的 LLMResponse 只有 token、没有模型身份，回复轮的轨迹于是全是空身份，
+        价目表把回复用量整片挂在「未记录模型」上。这里在请求阶段就把模型问出来：
+        先看 event.model_group 的第一个（agent_executor 就是拿它发请求，失败才往后换），
+        再问 provider_mgr 要默认 LLM —— 框架的 BuildRequestStage 也是这么兜底的，
+        拿到的是同一个客户端。都取不到返回空串，宁可继续记成「未记录模型」，
+        也不拿配置文件里的默认值去猜历史归属。
+        """
+        try:
+            group = list(getattr(event, "model_group", None) or [])
+        except Exception:
+            group = []
+        for one in group:
+            name = str(getattr(getattr(one, "model", None), "model_name", "") or "").strip()
+            if name:
+                return name[:80]
+        client = None
+        try:
+            fn = getattr(self.ctx, "get_default_llm_client", None)
+            if callable(fn):
+                client = fn()
+        except Exception:
+            client = None
+        if client is None:
+            try:
+                mgr = getattr(self.ctx, "provider_mgr", None)
+                if mgr is not None:
+                    client = mgr.get_default_llm()
+            except Exception:
+                client = None
+        try:
+            name = str(getattr(getattr(client, "model", None), "model_name", "") or "").strip()
+            if name:
+                return name[:80]
+        except Exception:
+            logger.debug("[multi-decision] 取本轮模型名失败（已吞掉）", exc_info=True)
+        return ""
+
     async def _trace_begin(self, event, request):
         if self.tracer is None:
             return
@@ -1676,7 +2129,8 @@ class MultiDecisionPlugin(BasePlugin):
             # 决策那一段单独交给轨迹，记录页才能写成「防抖 7s + 决策 5s + 12s」。
             jit = self.engine.round_jitter_at(sid) if sid else 0.0
             dec = self.engine.round_decision_at(sid) if sid else 0.0
-            self.tracer.begin(event, request, trigger_at=trig, debounce=jit, decision=dec)
+            self.tracer.begin(event, request, trigger_at=trig, debounce=jit, decision=dec,
+                              model_hint=self._trace_model_hint(event))
         except Exception:
             logger.exception("[multi-decision] 轨迹记录（请求）异常（已吞掉）")
 
@@ -1774,10 +2228,17 @@ class MultiDecisionPlugin(BasePlugin):
     _DM_DEFAULT_KEYS = frozenset(
         {
             "media_cache_limit",
+            "media_other_limit",
             "trace_keep",
             "decision_keep",
+            # v4.90（发版前审计）：窗口快照显示条数也分群聊 / 私聊两套默认值，
+            # 不加进来 eff("window_show", 私聊) 永远读不到 window_show_dm。
+            "window_show",
             "windows_keep",
             "summaries_keep",
+            "forward_media_keep",
+            "forward_proof_keep",
+            "retry_keep",
             "trigger_probability",
         }
     )
@@ -1800,7 +2261,7 @@ class MultiDecisionPlugin(BasePlugin):
         if key in _LOCKED_ON:
             return True
         default = getattr(self, key, None)
-        # v3.66：上限项在私聊里默认走「私聊默认」那一套（群聊两成），群聊仍用原键。
+        # v3.66：上限项在私聊里默认走「私聊默认」那一套，群聊仍用原键。
         if key in self._DM_DEFAULT_KEYS and self._is_dm_sid(sid):
             dm_default = getattr(self, key + "_dm", None)
             if dm_default is not None:
@@ -1812,6 +2273,14 @@ class MultiDecisionPlugin(BasePlugin):
         except Exception:
             logger.exception(f"[multi-decision] 读取 {sid} 的覆盖配置失败（已忽略）")
             return default
+        # 用户 m19210：私聊会话的单会话覆盖存在 *_dm 键上（设置页选中私聊时
+        # 画的就是这个键），但清理逻辑问的是原键。原键没有覆盖时再看 *_dm，
+        # 免得页面上改了私聊上限、实际裁剪还在用群聊默认值。
+        if value is None and key in self._DM_DEFAULT_KEYS and self._is_dm_sid(sid):
+            try:
+                value = self.overrides.value(sid, key + "_dm", None)
+            except Exception:
+                value = None
         if value is None:
             return default
         try:
@@ -2295,6 +2764,82 @@ class MultiDecisionPlugin(BasePlugin):
             if g("quota_day_enabled") and g("quota_max_per_day") < 1:
                 add("error", "quota_max_per_day", "每天配额打开但上限小于 1，会一条都不回。")
 
+        # 用户 m06706：JEV 模式开着却不给模型，每一轮都只会在失败分支里打转；
+        # 区间写反了更是永远判不出「不确定」。这里只提示，不改值。
+        if self.decision_mode(sid) == "jev":
+            _pages = jev_parse_apis(g("jev_apis") or "")
+            if not _pages:
+                # 老配置只有一份接口：当成第 1 页来看，行为跟以前一样。
+                _pages = [jev_make_api("1", normalize_jev_protocol(g("jev_api_protocol")),
+                                       str(g("jev_api_base") or "").strip(),
+                                       str(g("jev_api_model") or "").strip())]
+            try:
+                _secs = jev_load_secrets(getattr(self, "_data_dir", ""))
+            except Exception:
+                _secs = {}
+            for _pg in _pages:
+                _eid = normalize_jev_api_id(_pg.get("id") or "1")
+                _raw_base = str(_pg.get("base") or "").strip()
+                _base, _base_why = jev_check_api_base(_raw_base)
+                _proto = normalize_jev_protocol(_pg.get("protocol"))
+                _where = f"第 {_eid} 页"
+                if _raw_base and not _base:
+                    # 原因由 check_api_base 给，跟真正发请求时的拦截口径一致。
+                    add("error", "jev_apis",
+                        _where + "的接口地址不合法：" + (_base_why or "地址解析不了") + "。")
+                elif _base and _proto == "openai" and "/v1/systemone" in _base.lower():
+                    add("error", "jev_apis",
+                        _where + "选的是 OpenAI 兼容，地址里却带着 /v1/systemone；"
+                        "这条会打到 SystemOne 上去。")
+                if not str(_pg.get("model") or "").strip():
+                    add("warn", "jev_apis", _where + "没填模型名，失败时会一直打不通。")
+                elif (_proto == "openai"
+                      and str(_pg.get("model") or "").strip() == DEFAULT_JEV_API_MODEL):
+                    add("warn", "jev_apis",
+                        _where + f"的模型名还是 {DEFAULT_JEV_API_MODEL}（SystemOne 的默认名），"
+                        "OpenAI 兼容网关多数没有这个名字，点「获取」可以从清单里挑。")
+                if _raw_base and not str(((_secs.get(_eid) or {}).get("api_key")) or "").strip():
+                    add("error", "jev_apis",
+                        _where + "还没填密钥，每一轮都会失败（失败时按「决策失败时」处理，"
+                        "不会当成 0% 或 50%）。")
+            _model = str(g("jev_model") or "").strip()
+            _fb = str(g("jev_fallback_model") or "").strip()
+            if not _model:
+                add("error", "jev_model",
+                    "JEV 决策开着但没选模型：框架没有默认 decision 模型，必须自己挑一个。")
+            for _nm, _val in (("jev_model", _model), ("jev_fallback_model", _fb)):
+                if not _val:
+                    continue
+                if _val.startswith("custom:"):
+                    _cid = normalize_jev_api_id(_val.split(":", 1)[1])
+                    if not any(normalize_jev_api_id(p.get("id") or "1") == _cid
+                               for p in _pages):
+                        add("error", _nm,
+                            f"选中的自定义接口 {_cid} 已经不存在了，改选别的或重新加一页。")
+                    continue
+                if not self.jev_phase.available():
+                    add("error", "jev_enabled",
+                        "当前 KiraAI 版本没有 decision 类模型（需要 3.1.1 及以上），JEV 决策开了也不会工作。")
+                    break
+                try:
+                    _keys = {str(m.get("value") or "") for m in self._jev_models()}
+                except Exception:
+                    _keys = set()
+                if _keys and _val not in _keys:
+                    add("warn", _nm,
+                        ("主模型" if _nm == "jev_model" else "备用模型")
+                        + "不是启用中的 decision 类模型，这一轮会失败"
+                        + ("，主模型连续失败时也不会切过去。" if _nm != "jev_model" else "。"))
+
+            low, high = g("jev_lower"), g("jev_upper")
+            if not (0 <= low <= high <= 100):
+                add("error", "jev_lower",
+                    f"不确定区间 {low}%～{high}% 不合法：要 0 ≤ 下限 ≤ 上限 ≤ 100。")
+            if g("jev_action") == "decision":
+                add("warn", "jev_action",
+                    "不确定时选「交给决策模型」：命中区间会在这一轮再跑一次普通决策，"
+                    "用的是「决策提示词」那页的模型与提示词。")
+
         if g("backoff_enabled"):
             base = g("backoff_base_seconds")
             cap = g("backoff_max_seconds")
@@ -2471,6 +3016,77 @@ class MultiDecisionPlugin(BasePlugin):
             it["main"] = bool(main) and it["value"] == main
         return out
 
+    def jev_options(self, sid: str = ""):
+        """用户 m06706：JEV 那一套配置（每轮现读，改完立即生效）。
+
+        重试 / 间隔 / 连续失败切换 / 切回等待 / 超时 / 失败动作跟普通决策共用
+        decision_* 那几项（设置页只有一份，用户不用学两套）；开关、模型、备用、
+        区间、动作、人设是 jev_* 独立存的。
+        """
+        try:
+            opt = jev_options_from_config(lambda k, d=None: self._decision_get(k, d, sid))
+        except Exception:
+            logger.exception("[multi-decision] 读 JEV 配置失败，按默认值继续")
+            opt = jev_options_from_config(lambda k, d=None: d)
+        # 用户 m08123：自定义接口的密钥单独落盘（data/plugin_data/<插件>/jev_secret.json），
+        # 不进配置、不随 GET /config 下发，只在这里补进运行时选项。
+        try:
+            secrets = jev_load_secrets(getattr(self, "_data_dir", ""))
+        except Exception:
+            logger.debug("[multi-decision] 读 JEV 密钥失败（当没填）", exc_info=True)
+            secrets = {}
+        # 用户 m09981：每一页各有各的密钥；老的单份密钥已被 load_secrets 当成第 1 页。
+        pages = []
+        for item in list(opt.apis or []):
+            one = dict(item)
+            eid = normalize_jev_api_id(one.get("id") or "1")
+            one["id"] = eid
+            one["api_key"] = str((secrets.get(eid) or {}).get("api_key") or "")
+            pages.append(one)
+        opt.apis = pages
+        opt.api_key = str((secrets.get("1") or {}).get("api_key") or "")
+        return opt
+
+    def _jev_models(self) -> list:
+        """只列「启用提供商里的 decision 类模型」。
+
+        用户 m06706：普通决策仍然只列 llm/vlm，JEV 这里必须看 decision 分组——
+        它在 system_config.json 的 provider.model_config["decision"] 底下，不是 llm。
+        框架没有默认 decision 模型，所以列表空就是真空：页面要给诊断，不能给
+        「留空跟随默认」这种不存在的承诺。
+        """
+        try:
+            return self.jev_phase.models()
+        except Exception:
+            logger.debug("[multi-decision] 列 JEV 模型失败", exc_info=True)
+            return []
+
+    def decision_mode(self, sid: str = "") -> str:
+        """这一刻该走哪条决策链：off / llm / jev。
+
+        用户 m06706：互斥不能只靠前端。保存 API、单群覆盖、有效配置读取、运行入口
+        这四处都要落到同一个判定上，否则「全局开普通决策 + 这个群开 JEV」这种继承
+        场景就会两套都跑。手改配置文件写成双开时按 JEV 走，记一条警告，绝不双调。
+        """
+        try:
+            adv = bool(self.eff("advanced_enabled", sid))
+        except Exception:
+            adv = False
+        try:
+            jev = bool(self.eff("jev_enabled", sid))
+        except Exception:
+            jev = False
+        if adv and jev:
+            logger.warning(
+                "[multi-decision] %s 同时开了「决策模式」和「JEV 决策」，按 JEV 走（不会两套都跑）",
+                sid or "全局")
+            return "jev"
+        if jev:
+            return "jev"
+        if adv:
+            return "llm"
+        return "off"
+
     def _decision_messages(self, sid: str) -> list:
         """决策要读的那份聊天记录（窗口快照）。取不到就当空。"""
         try:
@@ -2562,32 +3178,29 @@ class MultiDecisionPlugin(BasePlugin):
             compiled = await layouts.assemble_decision(sid, opt)
             msgs = self._decision_messages(sid)
             tools = dp.pick_tools(opt.tools)
-            return dict(compiled, sid=sid, transcript=dp.transcript(msgs),
+            return dict(compiled, sid=sid, transcript=dp.transcript(msgs, sid),
                         tools=[{"name": str(getattr(t, "name", "")), "description": str(getattr(t, "description", ""))} for t in tools],
-                        persona_name=opt.persona, messages=len(msgs), identity=bool(layouts.identity_text(sid)))
+                        persona_name="", messages=len(msgs), identity=bool(layouts.identity_text(sid)))
+        # v4.90（用户 m14715 第 1 条）：decision_persona 已删除，DecisionOptions 里也没有
+        # persona 字段了，这里不再去取人格原文——人格段由提示词布局（prompt_layouts）负责。
         persona = ""
-        if opt.persona:
-            try:
-                persona = await dp.persona_text(opt.persona)
-            except Exception:
-                logger.exception("[multi-decision] 预览取人格失败")
         tools = dp.pick_tools(opt.tools)
         help_text = dp.tools_help(tools)
         if tools:
             help_text = (TOOL_HEAD % max(1, opt.tool_rounds)) + "\n" + help_text
         ident = self._decision_identity()
-        parts = dp.build_system(opt, persona, help_text, ident)
+        parts = dp.build_system(opt, persona, help_text, ident, sid)
         msgs = self._decision_messages(sid)
         return {
             "ok": True,
             "sid": sid,
             "parts": parts,
             "system": "\n\n".join(parts),
-            "transcript": dp.transcript(msgs),
+            "transcript": dp.transcript(msgs, sid),
             "tools": [{"name": str(getattr(t, "name", "")),
                        "description": str(getattr(t, "description", ""))} for t in tools],
             "persona": persona,
-            "persona_name": opt.persona,
+            "persona_name": "",
             "messages": len(msgs),
             "identity": bool(ident),
         }
@@ -2650,6 +3263,24 @@ class MultiDecisionPlugin(BasePlugin):
             return {"ok": False, "code": "INVALID_LAYOUT", "error": str(exc)}
         except OSError as exc:
             logger.exception("[multi-decision] 保存模块提示词失败，保留原配置")
+            return {"ok": False, "code": "SAVE_FAILED", "error": str(exc)}
+
+    @_api("POST", "/prompt-notice")
+    async def api_prompt_notice_dismiss(self, body: dict):
+        """2026-11-08（J）：关掉「默认提示词更新了」那条提示。
+
+        只关这一版默认稿：换一版默认稿（指纹变了）还会再提一次。
+        """
+        try:
+            kind, sid = body.get("kind", "decision"), str(body.get("sid") or "").strip()
+            result = self.prompt_layouts.dismiss_notice(kind, sid)
+            if not result.get("ok"):
+                return result
+            return await self.prompt_layouts.payload(kind, sid)
+        except (ValueError, TypeError) as exc:
+            return {"ok": False, "code": "INVALID_LAYOUT", "error": str(exc)}
+        except OSError as exc:
+            logger.exception("[multi-decision] 关闭默认稿更新提示失败")
             return {"ok": False, "code": "SAVE_FAILED", "error": str(exc)}
 
     @_api("POST", "/prompt-tools")
@@ -2719,7 +3350,7 @@ class MultiDecisionPlugin(BasePlugin):
             "tools": dp.tool_catalog(),
             "models": self._decision_models(),
             "config": {
-                "persona": opt.persona,
+                "persona": "",
                 "chat_rules": opt.chat_rules,
                 "prompt": opt.prompt,
                 "tools": list(opt.tools or []),
@@ -2736,6 +3367,226 @@ class MultiDecisionPlugin(BasePlugin):
             "defaults": {"chat_rules": DEFAULT_CHAT_RULES, "prompt": DEFAULT_DECISION_PROMPT},
             "status": dp.status(),
         }
+
+    @_api("GET", "/jev-options")
+    async def api_jev_options(self, sid: str = ""):
+        """用户 m06706：JEV 页要的模型清单（只有 decision 类）+ 生效配置 + 宿主诊断。
+
+        跟 /decision-options 分开：那边给的是 llm/vlm 的普通决策模型，这里给的是
+        decision 类。区间按百分比回给页面（40 / 60），内部还是 0~1。
+        """
+        sid = str(sid or "").strip()
+        opt = self.jev_options(sid)
+        try:
+            mode = self.decision_mode(sid)
+        except Exception:
+            mode = "off"
+        return {
+            "ok": True,
+            "sid": sid,
+            "models": self._jev_models(),
+            # 用户 m09981：自定义接口可以有好几页，页面按这个列表画页签。
+            "apis": [
+                {
+                    "id": str(one.get("id") or "1"),
+                    "protocol": normalize_jev_protocol(one.get("protocol")),
+                    "base": str(one.get("base") or ""),
+                    "model": str(one.get("model") or ""),
+                    "endpoint": jev_endpoint_url(one.get("protocol"),
+                                                 str(one.get("base") or "")),
+                    "api_key_set": bool(one.get("api_key")),
+                    "api_key_masked": jev_mask_key(str(one.get("api_key") or "")),
+                }
+                for one in (opt.apis or [])
+            ],
+            "enabled": bool(opt.enabled),
+            "mode": mode,
+            "config": {
+                "model": opt.model,
+                "fallback": opt.fallback,
+                "backend": normalize_jev_backend(opt.backend),
+                "api_base": opt.api_base,
+                # 用户 m08755 衍生：两套协议目标路径不同，报给页面的也得跟着换。
+                "api_endpoint": (jev_api_chat_url(opt.api_base)
+                                 if normalize_jev_protocol(opt.protocol) == "openai"
+                                 else jev_api_endpoint(opt.api_base)),
+                "api_model": opt.api_model,
+                "api_protocol": normalize_jev_protocol(opt.protocol),
+                "api_key_set": bool(opt.api_key),
+                "api_key_masked": jev_mask_key(opt.api_key),
+                "lower": opt.lower,
+                "upper": opt.upper,
+                "lower_percent": int(round(opt.lower * 100)),
+                "upper_percent": int(round(opt.upper * 100)),
+                "action": opt.action,
+                "persona": opt.persona,
+                "retry": opt.retry,
+                "retry_delay": opt.retry_delay,
+                "fail_switch": opt.fail_switch,
+                "cooldown": opt.cooldown,
+                "timeout": opt.timeout,
+                "fail_action": opt.fail_action,
+            },
+            "defaults": {
+                "prompt": DEFAULT_JEV_PROMPT,
+                "lower_percent": int(round(DEFAULT_JEV_LOWER * 100)),
+                "upper_percent": int(round(DEFAULT_JEV_UPPER * 100)),
+                "action": "no_reply",
+                "backend": "framework",
+                "api_base": DEFAULT_JEV_API_BASE,
+                "api_model": DEFAULT_JEV_API_MODEL,
+                "api_protocol": "systemone",
+                "apis": [],
+            },
+            "status": self.jev_phase.status(),
+        }
+
+    @_api("POST", "/jev-key")
+    async def api_jev_key(self, body: dict = None):
+        """存 / 清自定义接口的密钥（用户 m08123）。
+
+        密钥永远不回页面：存完只回 api_key_set 与打码后的尾巴四位。
+        body 里 api_key 为空字符串 = 清除。
+        """
+        body = body if isinstance(body, dict) else {}
+        raw_key = body.get("api_key")
+        _data_dir = getattr(self, "_data_dir", "")
+        # 用户 m09981：密钥按页签分开存，body.id 不传就当第 1 页（兼容老页面）。
+        eid = normalize_jev_api_id(body.get("id") or body.get("eid") or "1")
+        if raw_key is None:
+            # 只传了 api_base：不碰密钥，单独改地址（地址本身也是配置项，这里只是兜底）
+            return {"ok": True, "id": eid, "api_key_set": bool(
+                jev_load_secret(_data_dir, eid).get("api_key")), "skipped": True}
+        key_text = str(raw_key).strip()
+        try:
+            if not key_text:
+                ok = jev_clear_secret(_data_dir, eid)
+                return {"ok": bool(ok), "id": eid, "api_key_set": False, "masked": "",
+                        "error": "" if ok else "删除密钥失败"}
+            if not jev_save_secret(_data_dir, key_text,
+                                   str(body.get("api_base") or "").strip(), eid):
+                return {"ok": False, "error": "保存密钥失败（插件数据目录不可写）",
+                        "api_key_set": False}
+            return {"ok": True, "id": eid, "api_key_set": True, "masked": jev_mask_key(key_text)}
+        except Exception as exc:
+            logger.exception("[multi-decision] 保存 JEV 密钥失败")
+            return {"ok": False, "id": eid, "error": "%s: %s" % (type(exc).__name__, exc),
+                    "api_key_set": False}
+
+    @_api("GET", "/jev-preview")
+    async def api_jev_preview(self, sid: str = ""):
+        """装配一次但**不发请求**：JEV 页的「组合预览」与自检都走它。
+
+        用户 m06706：预览必须跟真实发送同源，所以这里直接调 assemble_jev，
+        不另拼一份提示词——否则「预览看着对、真发出去不对」这种坑又要踩一次。
+        """
+        sid = str(sid or "").strip()
+        if not sid:
+            try:
+                sid = self._decision_pick_sid()
+            except Exception:
+                sid = ""
+        try:
+            opt = self.jev_options(sid)
+            layouts = self.prompt_layouts
+            compiled = await layouts.assemble_jev(sid, opt)
+            msgs = self._decision_messages(sid)
+            return dict(compiled, ok=True, sid=sid, messages=len(msgs),
+                        transcript=self.decision_phase.transcript(msgs, sid),
+                        lower=opt.lower, upper=opt.upper, action=opt.action,
+                        model=opt.model, fallback=opt.fallback)
+        except Exception as exc:
+            logger.exception("[multi-decision] JEV 预览失败")
+            return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc), "parts": [], "system": ""}
+
+    @_api("POST", "/jev-test")
+    async def api_jev_test(self, sid: str = ""):
+        """立刻跑一次真 JEV 判定（真调 decision 模型）。
+
+        用户 m06706：跟 /decision-test 一样只把结果回给页面——不写窗口、不发言、
+        不进决策记录，转交也关掉（测试按钮不该顺手多调一次普通决策）。
+        """
+        sid = str(sid or "").strip()
+        try:
+            opt = self.jev_options(sid)
+            got = await self.jev_phase.decide(
+                sid, self._decision_messages(sid), opt,
+                normal_opt=None, allow_transfer=False)
+        except Exception as exc:
+            logger.exception("[multi-decision] JEV 测试失败")
+            return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc), "result": {}}
+        return {"ok": True, "result": got}
+
+    @_api("GET", "/jev-api-models")
+    async def api_jev_api_models(self, base: str = "", id: str = "", protocol: str = ""):
+        """替用户去第三方接口要一次模型清单（用户 m08755 的「自动获取」）。
+
+        用户 m09981：按页签取——传 id 就用那一页的地址与密钥；不传当第 1 页。
+        用户 m10825：SystemOne 没有清单接口，按协议直接回内置候选；OpenAI 兼容才问 /models。
+        只读：拿不到就回空清单 + 原因，页面据此提示手填，不影响任何已存配置。
+        """
+        want_id = str(id or "").strip()
+        eid = normalize_jev_api_id(want_id or "1")
+        raw = str(base or "").strip()
+        try:
+            pages = jev_parse_apis(self._decision_get("jev_apis", ""))
+        except Exception:
+            pages = []
+        page = next((p for p in pages
+                     if normalize_jev_api_id(p.get("id") or "1") == eid), None)
+        if not raw:
+            if page is not None:
+                raw = str(page.get("base") or "").strip()
+                if not raw:
+                    # 这一页还没填地址，不能拿别的页去顶（用户 m09981 的多页签）。
+                    return {"ok": False, "models": [], "url": "",
+                            "error": "第 %s 页还没填接口地址" % eid}
+            elif want_id or pages:
+                return {"ok": False, "models": [], "url": "",
+                        "error": "配置里找不到第 %s 页" % eid}
+        if not raw:
+            # 只有完全没指定页、也没有多页配置时，才回落老的单接口地址。
+            raw = str(self._decision_get("jev_api_base", "") or "").strip()
+        proto_raw = str(protocol or "").strip()
+        if not proto_raw:
+            proto_raw = str((page or {}).get("protocol") or "").strip()
+        if not proto_raw:
+            proto_raw = str(self._decision_get("jev_api_protocol", "") or "").strip()
+        proto = normalize_jev_protocol(proto_raw)
+        try:
+            key = str(jev_load_secret(getattr(self, "_data_dir", ""), eid).get("api_key") or "")
+        except Exception:
+            key = ""
+        try:
+            models, url, error = jev_list_api_models(raw, key, protocol=proto)
+        except Exception as exc:
+            logger.exception("[multi-decision] 获取第三方模型清单失败")
+            return {"ok": False, "models": [], "url": "",
+                    "error": "%s: %s" % (type(exc).__name__, exc)}
+        return {"ok": bool(models), "models": models, "url": url, "error": error,
+                "protocol": proto, "builtin": proto == "systemone"}
+
+    @_api("GET", "/window-text")
+    async def api_window_text(self, sid: str = ""):
+        """摊出某个会话当前的实时窗原文（JEV 页「实时窗」模块用它填正文）。
+
+        用户 m08755：实时窗要读真正的窗口，测试才能用当前最新的聊天内容。
+        """
+        sid = str(sid or "").strip()
+        if not sid:
+            try:
+                sid = self._decision_pick_sid()
+            except Exception:
+                sid = ""
+        try:
+            msgs = self._decision_messages(sid)
+        except Exception:
+            msgs = []
+        try:
+            text = self.decision_phase.transcript(msgs, sid) if msgs else ""
+        except Exception:
+            text = ""
+        return {"ok": True, "sid": sid, "messages": len(msgs), "text": text}
 
     @_api("GET", "/decision-preview")
     async def api_decision_preview(self, sid: str = ""):
@@ -2769,11 +3620,10 @@ class MultiDecisionPlugin(BasePlugin):
     # 同名再挂一个只会被后注册的盖掉——日志里能看到 /decisions 注册了两遍。
     # 决策记录换成 /decision-rounds（v3.91，用户 m05749）。
     @_api("GET", "/decision-rounds")
-    async def api_decision_rounds(self, sid: str, limit: int = 20):
+    async def api_decision_rounds(self, sid: str, limit: int = 20, light: int = 0):
         """决策记录：跟回复记录同一套模板，只是 ① 换成决策用的提示词。"""
-        import asyncio
 
-        return await asyncio.to_thread(self._requests_payload, sid, limit, "decision")
+        return await asyncio.to_thread(self._requests_payload, sid, limit, "decision", bool(light))
 
     @_api("GET", "/band-stats")
     async def api_band_stats(self, sid: str = "", week: str = ""):
@@ -2901,7 +3751,7 @@ class MultiDecisionPlugin(BasePlugin):
         }
 
     @_api("GET", "/overview")
-    async def api_overview(self):
+    async def api_overview(self, light: int = 0):
         """概览：今日统计 + 各会话运行时状态。"""
         sessions = []
         try:
@@ -2974,8 +3824,7 @@ class MultiDecisionPlugin(BasePlugin):
                 # 冷跑一次是实打实的读盘：线上 24 小时窗口里 161 份 json、最大一份 200 KB，
                 # 实测约 0.7 秒。直接在事件循环里同步扫会把 bot 收发消息堵住，
                 # 所以丢进线程算——stats_recent / retry_events 只读文件、不碰共享状态，
-                # 换线程安全；asyncio 走局部 import 是为了不动 main.py 顶部的导入区。
-                import asyncio
+                # 换线程安全。
 
                 def _scan_recent():
                     # v3.48（用户 m06761 第 1 条）：两个来源各缺一块——消息日志只记
@@ -3027,7 +3876,6 @@ class MultiDecisionPlugin(BasePlugin):
             if cache and (time.time() - cache[0]) < 60:
                 today["decisions"] = dict(cache[1] or {})
             elif self.request_log is not None:
-                import asyncio
 
                 dec = await asyncio.to_thread(self.request_log.decision_stats, 24)
                 if isinstance(dec, dict):
@@ -3068,7 +3916,24 @@ class MultiDecisionPlugin(BasePlugin):
                 today["cost"] = self.pricing.summarize(today.get("tokens") or {})
         except Exception:
             logger.debug("[multi-decision] 计算最近 24 小时花费失败", exc_info=True)
-        mem = _disk_usage()
+        # light=1：概览卡片只用 tokens 的汇总与 kinds，不用逐模型 usage；
+        # 设置页更是只要 sessions / aliases / hidden。把 models 剥掉，
+        # 一份 overview 从 ~94KB 降到 ~12KB。
+        if light:
+            _tk = today.get("tokens")
+            if isinstance(_tk, dict):
+                _tk.pop("models", None)
+        # 用户第 4 条：概览卡和缓存记录页必须说同一件事，所以这里直接用缓存表
+        # （_cache_kinds）的数字，不再走 _disk_usage 的目录统计——那个会把转发图
+        # fw_ / 推文图 tw_ / 未归属的图全算进 media_cache（线上 1086 MB），而缓存页
+        # 的「图片缓存」只算能归属到会话的聊天图（697 MB），两边差 388 MB。
+        # 冷跑一次要扫几万个文件，丢线程算，别把 5 秒轮询堵在事件循环里；
+        # _cache_kinds_cached 自己有 10 秒缓存，和 /cache-stats 共用同一份结果。
+        try:
+            mem = await asyncio.to_thread(self._mem_usage)
+        except Exception:
+            logger.exception("[multi-decision] 统计插件数据占用失败，退回目录统计")
+            mem = await asyncio.to_thread(_disk_usage)
         try:
             if self.window is not None:
                 states = getattr(self.window, "_states", {}) or {}
@@ -3138,6 +4003,7 @@ class MultiDecisionPlugin(BasePlugin):
             self._window_log.read_recent(want, sid=sid, day=day) if self._window_log else []
         )
         items = [i for i in items if not self._is_hidden(str(i.get("sid", "")))]
+        _stamp_snap_ids(items)
         return {
             "items": items,
             "total": len(items),
@@ -3146,17 +4012,26 @@ class MultiDecisionPlugin(BasePlugin):
             "keep": keep,
         }
 
-    async def _refresh_forward_display_proofs(self, raw_sid, native_rows):
-        """Bounded display-only proof refresh; never hydrate model/window messages."""
+    async def _refresh_forward_display_proofs(self, raw_sid, native_rows, budget: float = 3.0):
+        """Bounded display-only proof refresh; never hydrate model/window messages.
+
+        返回 first` 表示这次只跑完了 budget 秒、还有候选没试（调用方可以丢到后台续跑）。
+        v4.76：点柱子的接口只给 0.6 秒，抓不到就先返回，剩下的交给后台任务，
+        否则一个取不到转发内容的 mid 会把整页拖到 3 秒以上。
+        """
         if not isinstance(raw_sid, str) or not isinstance(native_rows, dict):
-            return
+            return False
         parts = raw_sid.rsplit(":", 2)
         if len(parts) != 3 or not parts[0] or parts[1] not in ("gm", "dm") or not parts[2]:
             return
         manager = getattr(getattr(self, "ctx", None), "adapter_mgr", None)
         if manager is None:
             return
-        deadline = time.monotonic() + 3.0
+        try:
+            budget = max(0.0, float(budget))
+        except (TypeError, ValueError):
+            budget = 3.0
+        deadline = time.monotonic() + budget
         # None marks in-flight; numbers are short failure deadlines only. Never
         # evict an in-flight operation or retain a permanent negative result.
         now = time.monotonic()
@@ -3186,7 +4061,7 @@ class MultiDecisionPlugin(BasePlugin):
                 if len(candidates) == 2:
                     break
         if not candidates:
-            return
+            return False
         try:
             adapters = manager.get_adapters()
             adapter = adapters.get(parts[0]) if isinstance(adapters, dict) else None
@@ -3195,10 +4070,14 @@ class MultiDecisionPlugin(BasePlugin):
                 return
         except Exception:
             return
+        pending = False
         for mid in candidates:
             key = (raw_sid, mid)
             remaining = deadline - time.monotonic()
             if remaining <= 0 or key in attempts:
+                # 预算用完了、这个还没开始抓：交给后台续跑。
+                if key not in attempts:
+                    pending = True
                 continue
             # Full means conservatively skip, not evict active or cooled keys.
             if len(attempts) >= 128:
@@ -3219,6 +4098,19 @@ class MultiDecisionPlugin(BasePlugin):
                     attempts.pop(key, None)
                 else:
                     attempts[key] = time.monotonic() + 30.0
+        return pending
+
+    def _spawn_forward_proof_refresh(self, raw_sid, owner_rows) -> None:
+        """后台把这次没抓完的转发内容补上，下一次读这条快照自然就有。"""
+        try:
+            task = asyncio.create_task(self._refresh_forward_display_proofs(raw_sid, owner_rows))
+        except RuntimeError:
+            return
+        tasks = getattr(self, "_proof_tasks", None)
+        if tasks is None:
+            tasks = self._proof_tasks = set()
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
 
 
     @_api("GET", "/quote-lookup")
@@ -3248,7 +4140,10 @@ class MultiDecisionPlugin(BasePlugin):
 
         # No negative cache: a not-yet-written native record is retried next GET.
         native_rows = await asyncio.to_thread(read_native_rows, raw_sid, want)
-        await self._refresh_forward_display_proofs(raw_sid, native_rows)
+        # v4.88：引用查询一次点击要打 4~6 次，转发证明只给 0.6 秒，剩下的丢后台续跑
+        # （和点柱子 /request 一个口径），否则一个取不到转发内容的 mid 就拖 3 秒。
+        if await self._refresh_forward_display_proofs(raw_sid, native_rows, budget=0.6):
+            self._spawn_forward_proof_refresh(raw_sid, native_rows)
         projected = project_items(
             [{"message_id": mid} for mid in want], raw_sid, native_rows,
             public_media=quote_public_media, text_of_content=content_text,
@@ -3274,7 +4169,11 @@ class MultiDecisionPlugin(BasePlugin):
                             "media": display["own_media"], "display": display}
         left = set(want) - set(out)
         try:
-            rounds = self.request_log.list_rounds(sid, limit=80) if left and self.request_log is not None else []
+            # v4.88：以前这里用不带缓存的 list_rounds（每次读 81 份快照、约 8MB），
+            # 一次点击打 4~6 次引用查询就是几百毫秒。换成带目录指纹缓存的版本。
+            _cached = getattr(self.request_log, "list_rounds_cached", None)
+            _read = _cached or self.request_log.list_rounds
+            rounds = _read(sid, limit=80) if left and self.request_log is not None else []
         except Exception:
             rounds = []
         xml_pat = re.compile(
@@ -3582,8 +4481,21 @@ class MultiDecisionPlugin(BasePlugin):
         h["ok"] = True
         return h
 
+    @_api("GET", "/link-title")
+    async def api_link_title(self, url: str = ""):
+        """裸链接卡片的真实标题（v4.87，用户 m11237 第 4 条）。
+
+        只认 B 站链接；抓到一次就落盘，之后都走缓存，抓不到返回 ok=False，
+        前端保持卡片上的通用文案。
+        """
+        try:
+            return await asyncio.to_thread(self.link_titles.title_of, url)
+        except Exception as exc:
+            logger.debug("[multi-decision] 取链接标题失败 %s：%s: %s", url, type(exc).__name__, exc)
+            return {"ok": False, "detail": "%s: %s" % (type(exc).__name__, exc)}
+
     @_api("GET", "/context-sessions")
-    async def api_context_sessions(self):
+    async def api_context_sessions(self, light: int = 0):
         """「上下文」页左栏：有窗口或有请求记录的会话。"""
         seen = {}
         try:
@@ -3759,6 +4671,23 @@ class MultiDecisionPlugin(BasePlugin):
         # v3.66（用户 m19536 第 9 条）：左栏按谁最近活跃谁排第一；前端本来就按
         # 「群聊 / 私聊」分两段渲染，排好序后两段各自有序，不用前端再排。
         items.sort(key=lambda r: r.get("last_active") or 0, reverse=True)
+        # light=1：每秒的状态轮询只要运行状态那几个字段，
+        # 不要 eff 全量、silent_eta、r24 统计、窗口条数这些。
+        # 一份 11KB 的响应能压到 2KB 左右，1 秒一拍省很多。
+        if light:
+            keep = {
+                "sid", "busy", "queued", "busy_since", "busy_seconds",
+                "stalled", "last_error", "retry_count", "retry_in",
+                "muted", "muted_skipped", "last_mark", "last_mark_ago",
+                "counter", "threshold", "trigger_mode",
+            }
+            for it in items:
+                eff = it.get("eff") or {}
+                it["eff"] = {"session_enabled": eff.get("session_enabled")}
+                for key in list(it.keys()):
+                    if key not in keep and key != "eff":
+                        it.pop(key, None)
+            return {"items": items, "health": self._health_summary()}
         return {
             "items": items,
             "aliases": self.aliases.all() if self.aliases else {},
@@ -3900,6 +4829,31 @@ class MultiDecisionPlugin(BasePlugin):
             # 价目表里没有的模型按 0 元算（用户 2026-10-24 第 5 条：「识别到了新的
             # 也默认成0元」）：前端看到 null 会显示成空、看起来像「没定价」，给 0
             # 就直观多了——用户照着 0 改数就行。
+            # 用户 m00375 第 6 条：渠道以前只认响应对象上的 provider_name，框架根本
+            # 不填，第三方接口（custom:xxx）也不在框架配置里，整列都是「来源未记录」。
+            # 这里按 provider_id / 模型名回框架配置里查一次，查不到才留空。
+            _prov = str(stat.get("provider_name") or "").strip()
+            if not _prov:
+                _pid = str(stat.get("provider_id") or "").strip()
+                _mid = str(stat.get("model_id") or "").strip()
+                if not _pid and ":" in name:
+                    _pid, _, _mid = name.partition(":")
+                if _pid == "custom":
+                    _prov = "自定义接口"
+                elif self.tracer is not None:
+                    try:
+                        _prov = self.tracer.provider_label(
+                            _pid, str(stat.get("model_name") or _mid or name))
+                    except Exception:
+                        _prov = ""
+                    # 模型 id 本身可能带冒号（框架里 WorkBuddy 那个就叫 cn:deepseek-v4.1-flash），
+                    # 按冒号拆出来的 pid 在配置里查不到，provider_label 会直接返回空。
+                    # 这时拿整名再当模型名找一次，别让这一行白着。
+                    if not _prov:
+                        try:
+                            _prov = self.tracer.provider_label("", name)
+                        except Exception:
+                            _prov = ""
             rows.append(
                 {
                     "model": name,
@@ -3917,7 +4871,7 @@ class MultiDecisionPlugin(BasePlugin):
                     "model_name": str(stat.get("model_name") or
                                       ("快速决策模型" if name == "fast" else name)),
                     "provider_id": str(stat.get("provider_id") or ""),
-                    "provider_name": str(stat.get("provider_name") or ""),
+                    "provider_name": _prov,
                     "model_id": str(stat.get("model_id") or ""),
                     "identity_source": str(stat.get("identity_source") or "legacy_unknown"),
                     "peak": price.get("peak") or {
@@ -3984,6 +4938,9 @@ class MultiDecisionPlugin(BasePlugin):
         输入框直接绑这个键）、保留天数（days + days_key）、是否按会话独立
         （per_session）、能否清空（clearable）。
 
+        用户 m22090：带 sid 时每行的 count / bytes 也按这个会话统计，不再返回全局
+        总量；不带 sid 才是全局。
+
         计数口径（用户第 5 条：「一个群那么多快照只有 5 份」）：
         - 请求快照 / 调用轨迹是每会话一个子目录、一秒一份，数文件数即份数；
         - 消息日志 / 窗口快照一天一个 .jsonl、多会话混写，必须数**非空行数**（记录条数），
@@ -4014,7 +4971,8 @@ class MultiDecisionPlugin(BasePlugin):
                  limit=0, limit_key: str = "", limit_unit: str = "",
                  limit_follow: str = "", days=0, days_key: str = "",
                  per_session: bool = False, clearable: bool = True,
-                 limit_dm=0, limit_key_dm: str = ""):
+                 limit_dm=0, limit_key_dm: str = "", limit_fixed: bool = False,
+                 global_only: bool = False):
             size = int(size or 0)
             out.append({
                 "key": key,
@@ -4028,77 +4986,181 @@ class MultiDecisionPlugin(BasePlugin):
                 "limit_key": limit_key,
                 "limit_unit": limit_unit,
                 "limit_follow": limit_follow,
-                # 上限分两套：limit 是群聊默认，limit_dm 是私聊默认（默认为群聊的两成）
+                # 上限分两套：limit 是群聊默认，limit_dm 是私聊默认（各类默认值见 __init__）
                 "limit_dm": int(limit_dm or 0),
                 "limit_key_dm": limit_key_dm,
                 "days": int(days or 0),
                 "days_key": days_key,
                 "per_session": bool(per_session),
                 "clearable": bool(clearable),
+                "limit_fixed": bool(limit_fixed),
+                # v4.84（用户 m09738）：这一类的上限 / 天数只按全局算（后端只吃全局值），
+                # 选中某个会话时这两格画成只读，别让人以为改了会生效。
+                "global_only": bool(global_only),
             })
 
         # 图片缓存：上限 / 天数由媒体缓存自己那三条管，按张数算
         media = {"count": 0, "bytes": 0}
         try:
             if self.window is not None:
-                media = self.window.media_cache_stats() or media
+                media = self.window.media_cache_stats(sid) or media
         except Exception:
             pass
         _row("media", "图片缓存", "张",
-             "群友发过的图片副本，原图被框架删了也能显示；上限是每个群组各自的上限",
+             "保存聊天里出现过的图片，原图被清理后也能继续显示；只算能归属到会话的聊天图。",
              media.get("count"), media.get("bytes"),
              limit=_eff("media_cache_limit"), limit_key="media_cache_limit", limit_unit="张",
              limit_dm=_dm("media_cache_limit"), limit_key_dm="media_cache_limit_dm",
              days=_eff("media_cache_keep_days"), days_key="media_cache_keep_days")
+        if not sid:
+            # 用户 m23021：全局把「能归属的聊天图 / 未归属 / 其他图」拆开，
+            # 单群视图只显示自己的聊天图，不再把转发图、归档图混进来。
+            # 用户 m23831：数量为 0 的行不再占位置，清完就自动消失。
+            if media.get("unknown_count"):
+                _row("media_unknown", "未归属图片", "张",
+                     "旧缓存里找不到所属会话的聊天图；不会算进单群统计，随图片缓存一起清理。",
+                     media.get("unknown_count"), media.get("unknown_bytes"),
+                     clearable=False)
+        # 用户 m24364：推文图也按会话归属，所以单群 / 私聊视图同样要露出这一行，
+        # 否则只能改全局默认，改不了这个群自己的上限。数量为 0 也保留，方便先设上限。
+        _row("media_other", "其他图片缓存", "张",
+             "推文卡片等不属于聊天图片的图；按每个群 / 私聊各自的上限和保留天数保留，"
+             "超出上限或超过天数的先删最早的；0 = 不限。",
+             media.get("other_count"), media.get("other_bytes"),
+             limit=_eff("media_other_limit"), limit_key="media_other_limit",
+             limit_unit="张/会话",
+             limit_dm=_dm("media_other_limit"),
+             limit_key_dm="media_other_limit_dm",
+             days=_eff("media_other_keep_days"),
+             days_key="media_other_keep_days")
 
-        # v4.00（用户 m10782）：「请求快照」改名「回复快照」，决策快照单独一行。
-        # 两者同目录（requests/<sid>/*.json）、同命名，靠记录里的 decision_only 区分，
-        # 所以计数要走 request_log.usage() 拆一遍，不能再 _path_usage 一把梭。
-        req_usage = {"reply": {"count": 0, "bytes": 0},
-                     "decision": {"count": 0, "bytes": 0}}
+        # v4.90（用户 m01133 第 2 条）：回复 / 裁切 / 决策三种快照合成一个「窗口快照」概念。
+        # 它们本来就是同一种东西——当时的窗口存档，同一个目录（requests/<sid>/*.json）、
+        # 同一个命名，只是存下来的时机不同（回完一轮 / 判完一次 / 裁了一刀）。
+        # 以前拆成三行，三行加起来跟走势图上的柱子数永远对不上，用户看不出哪个数才是真的。
+        # 现在只留一行：份数线统一走 windows_keep（群 200 / 私 100），天数走 requests_keep_days。
+        # 裁切日志（windows/*.jsonl）只是走势图橙色标记的索引，不再单独占一行。
+        req_usage = {"all": {"count": 0, "bytes": 0}}
         try:
             if self.request_log is not None:
-                req_usage = self.request_log.usage() or req_usage
+                req_usage = self.request_log.usage(sid) or req_usage
         except Exception:
             logger.exception("[multi-decision] 统计快照占用失败")
-        reply_cell = req_usage.get("reply") or {}
-        dec_cell = req_usage.get("decision") or {}
-        _row("requests", "回复快照", "份",
-             "每轮回复的完整消息和调用轨迹，查漏消息、查裁切时看",
-             reply_cell.get("count"), reply_cell.get("bytes"),
-             limit=_eff("trace_keep"), limit_key="trace_keep", limit_unit="份/会话",
-             limit_dm=_dm("trace_keep"), limit_key_dm="trace_keep_dm",
-             days=_eff("requests_keep_days"),
-             days_key="requests_keep_days", per_session=True)
-        # 决策快照与回复快照共用 requests_keep_days 那条天数线（同一个目录、同一批文件）
-        _row("decision_snapshots", "决策快照", "份",
-             "每次决策模型判一遍就留一份，看它当时读到什么、凭什么这么判",
-             dec_cell.get("count"), dec_cell.get("bytes"),
-             limit=_eff("decision_keep"), limit_key="decision_keep", limit_unit="份/会话",
-             limit_dm=_dm("decision_keep"), limit_key_dm="decision_keep_dm",
-             days=_eff("requests_keep_days"),
-             days_key="requests_keep_days", per_session=True)
-
-        win_root = getattr(self._window_log, "dir", None)
-        win_count, win_bytes = _jsonl_usage(win_root) if win_root else (0, 0)
-        _row("windows", "窗口快照", "条",
-             "每轮窗口怎么变的：新进几条、裁掉几条、待发什么",
-             win_count, win_bytes,
-             # 用户 m18059 第 3 条：窗口快照补一条份数线（0 = 不限），前端按这个键做输入框
-             limit=_eff("windows_keep"), limit_key="windows_keep", limit_unit="条/会话",
+        all_cell = req_usage.get("all") or {}
+        _row("requests", "窗口快照", "份",
+             "每一轮回复、每一次决策、每一次裁切都会存一份当时的窗口，方便回看有没有漏消息或被裁掉。",
+             all_cell.get("count"), all_cell.get("bytes"),
+             limit=_eff("windows_keep"), limit_key="windows_keep", limit_unit="份/会话",
              limit_dm=_dm("windows_keep"), limit_key_dm="windows_keep_dm",
-             days=_eff("windows_keep_days"),
-             days_key="windows_keep_days", per_session=True)
+             days=_eff("requests_keep_days"),
+             days_key="requests_keep_days", per_session=True)
 
-        # v3.67（用户 m20117）：中期摘要不再进缓存账本——它是窗口那边的功能，
-        # 上限 / 天数三个键已经挪到「窗口设置」页，这里只留真正占缓存盘的五类。
+        # 中期摘要也进缓存账本（用户 m17828）：设置仍在「窗口」页，这里只统计、
+        # 不给单独的上限 / 天数框，避免同一个设置出现两处。
+        summary_count = 0
+        summary_bytes = 0
+        try:
+            if self.summaries is not None:
+                all_summaries = self.summaries.all() or {}
+                if sid:
+                    # 用户 m22090：单群设置里只算这个群自己的摘要。
+                    want = self._cache_sid_key(sid)
+                    for owner, item in all_summaries.items():
+                        if self._cache_sid_key(owner) != want:
+                            continue
+                        summary_count = 1
+                        if isinstance(item, str):
+                            text = item
+                        else:
+                            try:
+                                text = json.dumps(item, ensure_ascii=False)
+                            except Exception:
+                                text = str(item)
+                        summary_bytes = len(text.encode("utf-8"))
+                        break
+                else:
+                    summary_count = len(all_summaries)
+                    summary_path = getattr(self.summaries, "path", None)
+                    if summary_path is not None and Path(summary_path).exists():
+                        # 按文件实际大小记账，和其它缓存一样算磁盘占用，不按摘要正文字数估。
+                        summary_bytes = int(Path(summary_path).stat().st_size or 0)
+        except Exception:
+            logger.exception("[multi-decision] 统计中期摘要占用失败")
+        # v4.84（用户 m09738）：上限与保留天数直接长在「中期摘要」这一行上，
+        # 不再在表格下面单列三行（那三行是上一版临时补的，用户要求并进这一行）。
+        _row("summaries", "中期摘要", "条",
+             "对话太长时，把较早的内容压缩成摘要，尽量不丢上下文。",
+             summary_count, summary_bytes,
+             limit=_eff("summaries_keep"), limit_key="summaries_keep", limit_unit="份",
+             limit_dm=_dm("summaries_keep"), limit_key_dm="summaries_keep_dm",
+             days=_eff("summaries_keep_days"), days_key="summaries_keep_days",
+             # 摘要库只吃全局值（Summaries 构造时拿的是全局 keep / keep_days），
+             # 选中某个会话时这两格不能改，画成只读。
+             global_only=True)
+
+        # v4.54（用户 m18227）：转发配图 / 转发原图凭证 / 重试记录 / 私聊窗口存档
+        # 也进缓存账本。前三类按每个群 / 私聊各自的上限裁（0 = 不限）；
+        # 用户 m18819：私聊窗口存档不设个数上限，只统计占用。
+        fwd_media = {"count": 0, "refs": 0, "bytes": 0}
+        try:
+            fwd_media = forward_media_stats(sid) or fwd_media
+        except Exception:
+            logger.exception("[multi-decision] 统计转发配图缓存失败")
+        _row("forward_media", "转发图片", "条",
+             "保存合并转发里的图片，之后翻到这条消息时还能看到。",
+             fwd_media.get("count"), fwd_media.get("bytes"),
+             limit=_eff("forward_media_keep"), limit_key="forward_media_keep",
+             limit_dm=_dm("forward_media_keep"), limit_key_dm="forward_media_keep_dm",
+             limit_unit="条/会话", per_session=True,
+             days=_eff("forward_media_keep_days"),
+             days_key="forward_media_keep_days")
+
+        fwd_proof = {"count": 0, "bytes": 0}
+        try:
+            fwd_proof = forward_display_proof_stats(sid) or fwd_proof
+        except Exception:
+            logger.exception("[multi-decision] 统计转发原图凭证失败")
+        _row("forward_proof", "转发原图记录", "条",
+             "记录每张转发图片来自哪条消息，避免图片错位或丢失。",
+             fwd_proof.get("count"), fwd_proof.get("bytes"),
+             limit=_eff("forward_proof_keep"), limit_key="forward_proof_keep",
+             limit_dm=_dm("forward_proof_keep"), limit_key_dm="forward_proof_keep_dm",
+             limit_unit="条/会话", per_session=True,
+             days=_eff("forward_proof_keep_days"),
+             days_key="forward_proof_keep_days")
+
+        retry_stats = {"count": 0, "events": 0, "bytes": 0}
+        try:
+            if self.retry_history is not None:
+                retry_stats = self.retry_history.stats(sid) or retry_stats
+        except Exception:
+            logger.exception("[multi-decision] 统计重试记录失败")
+        _row("retry_history", "自动重试记录", "条",
+             "保存自动重试的过程和结果，方便查看哪次成功、哪次失败。",
+             retry_stats.get("count"), retry_stats.get("bytes"),
+             limit=_eff("retry_keep"), limit_key="retry_keep",
+             limit_dm=_dm("retry_keep"), limit_key_dm="retry_keep_dm",
+             limit_unit="条/会话", per_session=True,
+             days=_eff("retry_keep_days"),
+             days_key="retry_keep_days")
+
+        dm_win = {"count": 0, "messages": 0, "bytes": 0}
+        try:
+            if self.window is not None:
+                dm_win = self.window.dm_cache_stats(sid) or dm_win
+        except Exception:
+            logger.exception("[multi-decision] 统计私聊窗口存档失败")
+        _row("window_dm", "私聊上下文存档", "个",
+             "保存每个私聊的对话上下文，重启或更新后还能接着聊。",
+             dm_win.get("count"), dm_win.get("bytes"))
+
         # v3.64（用户 m18870）：调用轨迹并进请求快照，不再单列一行
         # v3.66（用户 m19536 第 2 条）：消息日志挪到会话统计上面——这两类都不设上限、
         # 只按天数滚，排在一起看更顺。
         dec_root = getattr(self._log, "dir", None)
-        dec_count, dec_bytes = _jsonl_usage(dec_root) if dec_root else (0, 0)
+        dec_count, dec_bytes = _jsonl_usage(dec_root, sid=sid) if dec_root else (0, 0)
         _row("decisions", "消息日志", "条",
-             "每条消息、每次触发和结算各记一行，只记时间、会话、结果",
+             "记录每条消息的发言时间（精确到秒）、所属会话和触发结果，不保存聊天正文。",
              dec_count, dec_bytes,
              days=_eff("decisions_keep_days"),
              days_key="decisions_keep_days", per_session=True)
@@ -4108,8 +5170,11 @@ class MultiDecisionPlugin(BasePlugin):
         stats_bytes = 0
         stats_dir = getattr(self.stats, "dir", None)
         if stats_dir:
+            want_stats = self._cache_sid_key(sid) if sid else ""
             try:
                 for path in Path(stats_dir).glob("*.json"):
+                    if want_stats and self._cache_sid_key(path.stem) != want_stats:
+                        continue
                     try:
                         stats_bytes += int(path.stat().st_size or 0)
                         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -4118,15 +5183,70 @@ class MultiDecisionPlugin(BasePlugin):
                         continue
             except Exception:
                 pass
-            led_count, led_bytes = _jsonl_usage(stats_dir, ".jsonl")
+            led_count, led_bytes = _jsonl_usage(stats_dir, ".jsonl", sid=sid)
             stats_count += led_count
             stats_bytes += led_bytes
         _row("stats", "会话统计", "条",
-             "自适应阈值要用的账：收了多少条、回了多少次、花了多少 token",
+             "统计每个会话收到多少消息、回复多少次、消耗多少 token，用来自动调整回复频率。"
+             "清空会重置自适应统计和用量账本。",
              stats_count, stats_bytes,
              days=_eff("stats_keep_days"),
-             days_key="stats_keep_days", clearable=False)
+             days_key="stats_keep_days",
+             # 统计的保留天数同样只吃全局值（self.stats_keep_days），会话里改不了。
+             global_only=True)
         return out
+
+    def _cache_kinds_cached(self, sid: str = "") -> list:
+        """_cache_kinds 的 10 秒缓存版（和 /cache-stats 共用同一份结果）。
+
+        概览卡 5 秒轮询一次，缓存表要扫几万个文件 + 逐个 json.loads，不能每次都重算；
+        10 秒和 /cache-stats 自己的缓存同一个节奏，两边拿到的就是同一份数字。
+        按 sid 分开存：设置页选中某个群时缓存的是那个群的数字，概览卡要的是全局
+        （sid=""），两边互不顶掉，否则每 5 秒就会重扫一遍。
+        返回的是副本，调用方随便改。
+        """
+        now = time.time()
+        cache = getattr(self, "_cache_kinds_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._cache_kinds_cache = cache
+        # 顺手把过期的清掉，字典不会越攒越大；概览在子线程、缓存页在事件循环，
+        # 两边可能同时动这个字典，遍历撞上插入就跳过——缓存而已，不值得抛异常。
+        try:
+            for key in [k for k, v in cache.items() if (now - v[0]) >= 10]:
+                cache.pop(key, None)
+        except RuntimeError:
+            pass
+        hit = cache.get(sid)
+        if hit:
+            return [dict(row) for row in hit[1]]
+        kinds = self._cache_kinds(sid)
+        cache[sid] = (now, kinds)
+        return [dict(row) for row in kinds]
+
+    def _mem_usage(self) -> dict:
+        """概览卡右上角「插件数据」：直接复用缓存记录页那套统计（用户第 4 条）。
+
+        以前这里走 _disk_usage() 把 plugin_data/<插件>/ 整个目录走一遍，media_cache
+        那一项把 fw_ / tw_ / archive / derived / 未归属的图全算进去（线上 1086 MB），
+        而缓存记录页的「图片缓存」只算能归属到会话的聊天图（697 MB），两边差了
+        388 MB，用户看到的就是「概览说 1117 MB、缓存页说 729 MB」。
+
+        现在一个字节都不自己算：parts 就是 _cache_kinds() 的行（名字按
+        _MEM_PART_NAMES 映射成前端认的那几个），total 是它们的和，所以概览卡和
+        缓存记录页永远同一口径。代价是「插件数据」不再等于目录实际占用——不在
+        缓存表里的东西（配置文件、prompt 模板、裁切日志 windows/、以及转发图
+        fw_ 的图片本体，缓存表只按索引记 0.03 MB）不计入；这些要么不是缓存，
+        要么缓存页本来就不算，两边一致比「目录总大小」更重要。
+
+        性能：_cache_kinds_cached() 有 10 秒缓存，和 /cache-stats 共用，5 秒轮询
+        不会每次都扫全目录；真扫的时候也丢线程（调用方 asyncio.to_thread）。
+        """
+        kinds = self._cache_kinds_cached("")
+        parts = _mem_parts_from_kinds(kinds)
+        total = sum(int(p.get("bytes") or 0) for p in parts)
+        parts.sort(key=lambda x: -int(x.get("bytes") or 0))
+        return {"total_mb": round(total / 1048576.0, 1), "parts": parts}
 
     #: 消息日志 / 窗口快照按天混写，拆「每会话占用」要逐行读盘。目录大到这个尺寸就不拆了
     #: （缓存设置页是点开就看的，不能为了统计卡十几秒），在上面的 partial 里说明哪类没拆。
@@ -4374,7 +5494,7 @@ class MultiDecisionPlugin(BasePlugin):
         if cache and cache[0] == sid and (time.time() - cache[1]) < 10:
             return cache[2]
         try:
-            kinds = self._cache_kinds(sid)
+            kinds = self._cache_kinds_cached(sid)
         except Exception:
             logger.exception("[multi-decision] 统计缓存失败")
             return {"ok": False, "detail": "统计失败，详情看日志"}
@@ -4398,87 +5518,180 @@ class MultiDecisionPlugin(BasePlugin):
             # 每条：sid / requests{count,bytes,mb} / decisions{...} / windows{...} / bytes / mb
             "sessions": per_session.get("sessions") or [],
             "session_total": int(per_session.get("session_total") or 0),
-            # task-8 第 2 条：五类里如果有哪类因为体积太大没拆到会话（decisions/windows），
+            # task-8 第 2 条：六类里如果有哪类因为体积太大没拆到会话（decisions/windows），
             # 在这里点名，页面可以提示「这一类的占用没算进会话行」。
             "sessions_partial": per_session.get("partial") or [],
             "limits": {
                 "media_cache_limit": int(getattr(self, "media_cache_limit", 0) or 0),
                 "media_cache_keep_days": int(getattr(self, "media_cache_keep_days", 0) or 0),
+                "media_other_keep_days": int(getattr(self, "media_other_keep_days", 0) or 0),
                 # v3.66（用户 m19536 第 4 条）：四个上限的「私聊默认」
                 "media_cache_limit_dm": int(getattr(self, "media_cache_limit_dm", 0) or 0),
+                "media_other_limit": int(getattr(self, "media_other_limit", 0) or 0),
+                "media_other_limit_dm": int(getattr(self, "media_other_limit_dm", 0) or 0),
                 "trace_keep_dm": int(getattr(self, "trace_keep_dm", 0) or 0),
                 "decision_keep_dm": int(getattr(self, "decision_keep_dm", 0) or 0),
                 "windows_keep_dm": int(getattr(self, "windows_keep_dm", 0) or 0),
+                # v4.90（用户 m01875 第 1 条）：显示条数也按群聊 / 私聊两套下发
+                "window_show": int(getattr(self, "window_show", 0) or 0),
+                "window_show_dm": int(getattr(self, "window_show_dm", 0) or 0),
                 # 用户 m13708 第 3/4 条：新增 7 个保留键，前端按同名键回填输入框
                 "requests_keep_days": int(getattr(self, "requests_keep_days", 0) or 0),
                 "decisions_keep_days": int(getattr(self, "decisions_keep_days", 0) or 0),
                 "windows_keep_days": int(getattr(self, "windows_keep_days", 0) or 0),
                 "stats_keep_days": int(getattr(self, "stats_keep_days", 0) or 0),
-                # v3.67（用户 m20117）：中期摘要的三个键挪去窗口设置页，不再进缓存账本
+                # v4.54（用户 m18227）：新增三类按会话的上限
+                "forward_media_keep": int(getattr(self, "forward_media_keep", 0) or 0),
+                "forward_media_keep_dm": int(getattr(self, "forward_media_keep_dm", 0) or 0),
+                "forward_proof_keep": int(getattr(self, "forward_proof_keep", 0) or 0),
+                "forward_proof_keep_dm": int(getattr(self, "forward_proof_keep_dm", 0) or 0),
+                "retry_keep": int(getattr(self, "retry_keep", 0) or 0),
+                "retry_keep_dm": int(getattr(self, "retry_keep_dm", 0) or 0),
+                "forward_media_keep_days": int(getattr(self, "forward_media_keep_days", 0) or 0),
+                "forward_proof_keep_days": int(getattr(self, "forward_proof_keep_days", 0) or 0),
+                "retry_keep_days": int(getattr(self, "retry_keep_days", 0) or 0),
+                # v3.67（用户 m20117）：中期摘要的三个键挪去窗口设置页；缓存页只统计占用
             },
         }
         self._cache_stats_cache = (sid, time.time(), payload)
         return payload
 
     @_api("POST", "/cache-clear")
-    async def api_cache_clear(self, kind: str = "media"):
-        """按类型清空插件自己的缓存（用户 m13708 第 4 条：每类都能单独清）。
+    async def api_cache_clear(self, kind: str = "media", days: int = 0):
+        """按类型清缓存（用户 m13708 第 4 条；m21482 加「只清 7 天前」和「全部」）。
 
-        kind：media / requests / decision_snapshots / decisions / windows / summaries。
-        默认 media，老前端不传参数时行为和以前一样（只清图片副本，不碰框架的
-        session_media）。统一返回 {ok, kind, removed, mb}，removed 的口径和
-        _cache_kinds 的 unit 一致（张 / 份 / 条 / 个会话）。
+        kind：media / media_other / requests / decision_snapshots / trims / decisions /
+        windows / summaries / forward_media / forward_proof / retry_history /
+        window_dm / stats；kind="all" 表示除 stats 外的所有可清理类型一起清。
+        days=0 清全部；days>0 只清早于 days 天的记录。
 
-        两条硬规矩：
-        ① 清 requests **不动** stats/requests.jsonl 与 stats/tokens.jsonl
-           两本用量账——否则概览里的「24 小时请求数 / token 数」会凭空归零；
-        ② stats 不清：它是自适应阈值的账本，删了阈值要从头学起。
+        清 requests **不动** stats/requests.jsonl 与 stats/tokens.jsonl
+        两本用量账；清 stats 才会动它们。
         """
         if self.window is None:
             return {"ok": False, "detail": "插件还没初始化完"}
         kind = str(kind or "media").strip() or "media"
-        if kind == "stats":
-            return {
-                "ok": False,
-                "kind": kind,
-                "detail": "会话统计是自适应阈值的账本，不提供清空",
-            }
+        try:
+            days = max(0, int(days or 0))
+        except (TypeError, ValueError):
+            days = 0
+        cutoff = time.time() - days * 86400 if days > 0 else None
+        if kind == "traces":
+            return {"ok": False, "kind": kind,
+                    "detail": "调用轨迹已经并进窗口快照，清「窗口快照」即可"}
+        # v4.90（用户 m01133 第 2 条）：三种快照合成一类，缓存表只剩「窗口快照」一行。
+        # decision_snapshots / trims / windows 留着当旧名字的别名，老页面点进来照样能清。
+        clearable = ("media", "media_other", "requests", "decision_snapshots",
+                     "trims", "windows", "summaries", "forward_media",
+                     "forward_proof", "retry_history", "window_dm", "decisions",
+                     "stats")
+        # 「全部」不含会话统计：统计是自适应阈值的账本，清空会重置自适应与用量账，
+        # 只能从它自己那一行单独清（按钮提示也写着「会话统计除外」）。
+        if kind == "all":
+            kinds = [k for k in clearable if k != "stats"]
+        elif kind in clearable:
+            kinds = [kind]
+        else:
+            return {"ok": False, "kind": kind, "detail": "未知的缓存类型"}
+
+        def _clear_one(name: str) -> int:
+            if name == "media":
+                out = (self.window.clear_media_cache_before(cutoff)
+                       if cutoff is not None else self.window.clear_media_cache())
+                return int((out or {}).get("removed") or 0)
+            if name == "requests":
+                # v4.90：三种快照合成一类，清「窗口快照」就是全清（回复 + 决策 + 裁切），
+                # 连裁切日志一起带走——日志是走势图橙色标记的索引，快照没了留着它只会
+                # 让图上多出一堆点不开的橙柱。
+                n = 0
+                if self.request_log:
+                    n += int(self.request_log.clear_before(cutoff)
+                             if cutoff is not None else self.request_log.clear_all())
+                if self._window_log:
+                    n += int(self._window_log.clear_before(cutoff)
+                             if cutoff is not None else self._window_log.clear_all())
+                return n
+            if name == "decision_snapshots":
+                # 旧名字的别名：现在跟「窗口快照」是同一件事
+                if not self.request_log:
+                    return 0
+                return int(self.request_log.clear_before(cutoff, decisions_only=True)
+                           if cutoff is not None else self.request_log.clear_decisions())
+            if name == "trims":
+                # 旧名字的别名：裁切快照现在也是「窗口快照」的一部分
+                if not self.request_log:
+                    return 0
+                return int(self.request_log.clear_before(cutoff, trims_only=True)
+                           if cutoff is not None else self.request_log.clear_trims())
+            if name == "windows":
+                # 旧名字的别名：裁切日志
+                if not self._window_log:
+                    return 0
+                return int(self._window_log.clear_before(cutoff)
+                           if cutoff is not None else self._window_log.clear_all())
+            if name == "summaries":
+                if not self.summaries:
+                    return 0
+                return int(self.summaries.clear_before(cutoff)
+                           if cutoff is not None else self.summaries.clear_all())
+            if name == "forward_media":
+                return int(forward_media_clear(cutoff))
+            if name == "forward_proof":
+                return int(forward_display_proof_clear(cutoff))
+            if name == "retry_history":
+                return int(self.retry_history.clear(cutoff)) if self.retry_history else 0
+            if name == "window_dm":
+                return int(self.window.clear_dm_before(cutoff)
+                           if cutoff is not None else self.window.clear_dm_all())
+            if name == "decisions":
+                if not self._log:
+                    return 0
+                return int(self._log.clear_before(cutoff)
+                           if cutoff is not None else self._log.clear_all())
+            if name == "media_other":
+                cache = _media_cache_root()
+                return int(clear_other_media(cache, cutoff)) if cache else 0
+            if name == "stats":
+                if not self.stats:
+                    return 0
+                return int(self.stats.clear_before(cutoff)
+                           if cutoff is not None else self.stats.clear_all())
+            return 0
+
         # 清之前先扫一遍体积：删完就不知道腾出多少空间了
         try:
             before = {str(k.get("key")): int(k.get("bytes") or 0) for k in self._cache_kinds()}
         except Exception:
             before = {}
+        removed = 0
+        failed = []
+        for name in kinds:
+            try:
+                removed += _clear_one(name)
+            except Exception:
+                failed.append(name)
+                logger.exception(f"[multi-decision] 清空缓存失败（kind={name}）")
+        # 用清理前后同一口径的体积差算腾出多少；直接拿 before 会把「只清 7 天前」
+        # 没删掉的部分也算进去，数字会虚高。
         try:
-            if kind == "media":
-                out = self.window.clear_media_cache() or {}
-                return {
-                    "ok": bool(out.get("ok", True)),
-                    "kind": kind,
-                    "removed": int(out.get("removed") or 0),
-                    "mb": round(float(out.get("mb") or 0.0), 2),
-                }
-            if kind == "requests":
-                # v4.00（用户 m10782）：决策快照已单列一类，清「回复快照」时留着它
-                removed = int(self.request_log.clear_all(only_reply=True)) if self.request_log else 0
-            elif kind == "decision_snapshots":
-                removed = int(self.request_log.clear_decisions()) if self.request_log else 0
-            elif kind == "traces":
-                return {"ok": False, "kind": kind,
-                        "detail": "调用轨迹已经并进回复快照，清「回复快照」即可"}
-            elif kind == "decisions":
-                removed = int(self._log.clear_all()) if self._log else 0
-            elif kind == "windows":
-                removed = int(self._window_log.clear_all()) if self._window_log else 0
-            elif kind == "summaries":
-                removed = int(self.summaries.clear_all()) if self.summaries else 0
-            else:
-                return {"ok": False, "kind": kind, "detail": "未知的缓存类型"}
+            after = {str(k.get("key")): int(k.get("bytes") or 0)
+                     for k in self._cache_kinds()}
+            mb = round(sum(max(0, int(before.get(name) or 0) - int(after.get(name) or 0))
+                           for name in kinds) / 1048576.0, 2)
         except Exception:
-            logger.exception(f"[multi-decision] 清空缓存失败（kind={kind}）")
-            return {"ok": False, "kind": kind, "detail": "清空失败，详情看日志"}
-        mb = round(int(before.get(kind) or 0) / 1048576.0, 2)
-        logger.info(f"[multi-decision] 已清空缓存 {kind}：{removed} 条，约 {mb} MB")
-        return {"ok": True, "kind": kind, "removed": removed, "mb": mb}
+            mb = 0.0
+        self._cache_stats_cache = None
+        # 用户第 4 条：概览卡现在也吃这份缓存表，清完必须一起失效，否则最多 10 秒
+        # 还显示清理前的体积。
+        self._cache_kinds_cache = {}
+        # v4.88：清完缓存立刻让磁盘占用重新算一遍，否则概览卡最多 60 秒还显示旧体积。
+        _DISK_CACHE["t"] = 0.0
+        if failed:
+            return {"ok": False, "kind": kind, "removed": removed, "mb": mb,
+                    "days": days, "failed": failed,
+                    "detail": "部分缓存清理失败，详情看日志"}
+        logger.info(f"[multi-decision] 已清理缓存 {kind}（{days or '全部'}）：{removed} 条，约 {mb} MB")
+        return {"ok": True, "kind": kind, "removed": removed, "mb": mb, "days": days}
 
     @_api("GET", "/overrides")
     async def api_overrides(self, sid: str = ""):
@@ -4526,6 +5739,17 @@ class MultiDecisionPlugin(BasePlugin):
                 continue
             if coerced != base:
                 cleaned[key] = coerced
+        # 用户 m06706：「决策模式」和「JEV 决策」只能开一个。前端已经互斥，这里再兜一次
+        # 直接打接口 / 手改配置的情况——同一份提交里两个都开就拒绝；只开了一个、
+        # 另一个是从全局继承来的，就给这个群写一条显式的「关」，别让它变成双开。
+        req_adv, req_jev = cleaned.get("advanced_enabled"), cleaned.get("jev_enabled")
+        if req_adv is True and req_jev is True:
+            return {"ok": False, "code": "MODE_CONFLICT",
+                    "detail": "「决策模式」和「JEV 决策」只能开一个"}
+        if req_jev is True and self.eff("advanced_enabled", sid):
+            cleaned["advanced_enabled"] = False
+        if req_adv is True and self.eff("jev_enabled", sid):
+            cleaned["jev_enabled"] = False
         was_enabled = self.eff("session_enabled", sid) is not False
         result = self.overrides.set(sid, cleaned)
         now_enabled = self.eff("session_enabled", sid) is not False
@@ -4751,16 +5975,16 @@ class MultiDecisionPlugin(BasePlugin):
         return {"items": items}
 
     @_api("GET", "/requests")
-    async def api_requests(self, sid: str, limit: int = 20):
+    async def api_requests(self, sid: str, limit: int = 20, light: int = 0, trim: int = 0):
         """某会话最近几轮的请求摘要。"""
         # v3.66（用户 m19536 第 6 条）：整表计算以前直接跑在事件循环里，线上要重读
         # 100 份 / 14 MB 的请求快照、实测 2.5 秒。页面每 5 秒轮询它一次，等于把服务
         # 反复堵住两秒——用户点「设置」「首页」时任何请求都排在后面，就是「有时卡很久」。
         # 现在两件事：① 整表计算丢进线程，不占事件循环；② 摘要行走 list_rounds_cached，
         # 目录指纹（文件数 + 最新修改时间）没变就直接复用，只有新落一轮才重算。
-        import asyncio
 
-        return await asyncio.to_thread(self._requests_payload, sid, limit)
+        return await asyncio.to_thread(self._requests_payload, sid, limit, "request",
+                                       bool(light), bool(trim))
 
     def _mark_reply_state(self, sid: str, rows: list) -> None:
         """给判定「要回」的决策轮标一句：之后那一轮回复到底怎么了。
@@ -4825,18 +6049,89 @@ class MultiDecisionPlugin(BasePlugin):
             else:
                 it["reply_state"] = "empty"
 
-    def _requests_payload(self, sid: str, limit: int = 20, kind: str = "request") -> dict:
+    def _cached_rows(self, sid: str, limit: int, light: bool = False) -> list:
+        """取摘要行（v4.80）。轻量路优先；只认两个参数的假 log（测试夹具）自动回退。"""
+        log = getattr(self, "request_log", None)
+        getter = getattr(log, "list_rounds_cached", None) if log is not None else None
+        if not callable(getter):
+            return []
+        if light:
+            try:
+                return list(getter(sid, limit, light=True) or [])
+            except TypeError:
+                pass
+        return list(getter(sid, limit) or [])
+
+    def _snap_keep_of(self, sid: str = "") -> int:
+        """「窗口快照」的份数上限（v4.90，用户 m01133 第 2 条）。
+
+        回复轮、决策轮、裁切三种快照合成一类之后，盘上总共只留这么多份，
+        走势图也只画这么多根——以前三路各按各的上限取，画出来三百多根，
+        跟缓存表里那一行永远对不上。0 = 不限。
+        """
+        try:
+            return max(0, int(self.eff("windows_keep", sid) or 0))
+        except Exception:
+            return 0
+
+    def _snap_total_of(self, sid: str = "") -> int:
+        """这个会话盘上还剩多少份窗口快照（v4.90，用户 m01875 第 1 条）。
+
+        走势图标题要跟缓存表那一行「窗口快照」对得上，就得数同一批文件。前端把
+        回复轮、决策轮、裁切标记拼起来数，总会因为「判定要回的决策轮不单独成柱」
+        少掉几十份，所以这里直接数目录。
+        """
+        log = getattr(self, "request_log", None)
+        fn = getattr(log, "snap_count", None) if log is not None else None
+        if not callable(fn):
+            return 0
+        try:
+            return max(0, int(fn(sid) or 0))
+        except Exception:
+            return 0
+
+    def _snap_show_of(self, sid: str = "") -> int:
+        """「窗口快照」在页面上显示多少条（v4.90，用户 m01875 第 1 条）。
+
+        盘上留多少份由 windows_keep 决定，这里只管走势图和快照列表画多少根——
+        两个数分开之后，上限调到 300 也不会让页面一下子长出一百根柱子。0 = 不限。
+        """
+        try:
+            return max(0, int(self.eff("window_show", sid) or 0))
+        except Exception:
+            return 0
+
+    def _requests_payload(self, sid: str, limit: int = 20, kind: str = "request",
+                          light: bool = False, with_trims: bool = False) -> dict:
         """api_requests 的计算体。只读盘与内存，放线程里跑是安全的。"""
         # 用户 m13250 第 2 条：请求页标题要跟着「保留请求数」走，所以 limit<=0 就按保留数给满，
         # 顺便把 keep 一起回给前端（标题写「最近 N 次请求（上限 M 次）」用）。
-        keep = self.request_log_rounds
-        if limit is None or limit <= 0:
+        # v4.90（发版前审计）：回复记录页的条数上限原来只吃全局 trace_keep，
+        # 私聊的 trace_keep_dm 存进去没人读。改成按会话取，私聊那份才生效。
+        try:
+            keep = int(self.eff("trace_keep", sid) or 0) or self.request_log_rounds
+        except Exception:
+            keep = self.request_log_rounds
+        # v4.80：limit<=0 = 「按上限给满」。这个意图要在进分支前记下来，否则先被
+        # 回复上限（100）顶掉，决策分支里就再也看不到「要满」了。
+        _wants_all = limit is None or limit <= 0
+        if _wants_all:
             limit = keep
         # v3.91（用户 m05749）：决策记录与回复记录同一个目录、靠 decision_only 分账，
         # 所以多取几倍再筛，否则筛完只剩几条。决策项不走请求那一套（没有轨迹 / 重试链）。
         if str(kind or "request") == "decision":
+            # v4.80（用户 2026-11-07 第 1 条）：决策快照上限默认是回复的 3 倍，
+            # 页面的 keep 与取数深度都要按决策那一份走，否则永远只看得到前 100 条。
+            try:
+                _dec_keep = int(self.eff("decision_keep", sid) or 0)
+            except Exception:
+                _dec_keep = 0
+            if _dec_keep > 0:
+                keep = _dec_keep
+                if _wants_all:
+                    limit = keep
             take = max(int(limit) * 4, 120)
-            rows = self.request_log.list_rounds_cached(sid, take) if self.request_log else []
+            rows = self._cached_rows(sid, take, light=bool(light))
             # v3.94（用户 m08398 图7/图8）：决策行照回复记录的列给数据——
             # 真实模型名（配置键换成「供应商 / 模型名」）、token（入/出）、缓存命中。
             labels = {}
@@ -4848,6 +6143,15 @@ class MultiDecisionPlugin(BasePlugin):
                         labels[val] = str(m.get("label") or "")
                         if m.get("fast"):
                             fast_label = val
+                # 用户 m06706：JEV 用的是 decision 类模型，不在上面那份 llm/vlm 清单里，
+                # 不补进来记录页就只剩一串 pid:mid。
+                try:
+                    for m in self._jev_models():
+                        val = str(m.get("value") or "")
+                        if val and val not in labels:
+                            labels[val] = str(m.get("label") or "")
+                except Exception:
+                    logger.debug("[multi-decision] JEV 模型名映射失败", exc_info=True)
             except Exception:
                 logger.debug("[multi-decision] 决策模型名映射失败", exc_info=True)
             out = []
@@ -4864,7 +6168,15 @@ class MultiDecisionPlugin(BasePlugin):
                 key = str(it.get("decision_model") or "")
                 if not key or key in ("fast", "default"):
                     key = fast_label or key
-                it["model_label"] = labels.get(key) or (key if key else "跟随默认")
+                # 用户 m06706：JEV 转交时 decision_model 是「JEV 模型 → 普通决策模型」，
+                # 两段分别换成真名，别让页面显示两串 provider:model。
+                _parts = [p.strip() for p in key.split("→")] if key else []
+                it["model_label"] = (" → ".join(labels.get(p) or (p or "跟随默认") for p in _parts)
+                                     if _parts else "跟随默认")
+                # 用户 m00375 第 8 条：走第三方接口时决策模型只有模型名，渠道没标。
+                # 这里单独给一格渠道名，前端在模型前面加「自定义接口 · 」。
+                it["model_channel"] = ("自定义接口"
+                                       if str(it.get("decision_backend") or "") == "custom" else "")
                 in_tok = int(it.get("input_tokens") or 0)
                 cac = int(it.get("cached_tokens") or 0)
                 it["tokens"] = {
@@ -4890,20 +6202,84 @@ class MultiDecisionPlugin(BasePlugin):
             # 判要回/判不回之后真正发生的裁切都没法标在决策柱上。这里补上同一套绑定。
             picked = out[:int(limit)]
             self._attach_round_trims(sid, picked)
-            return {"items": picked, "keep": keep, "kind": "decision"}
+            _stamp_snap_ids(picked)
+            if light:
+                # 走势图只读这些字段；其余（图片、轨迹、token、模型名、payload 估算等）
+                # 一律不传，避免每 5 秒把几百 KB 的明细重新拉一遍。
+                keep_keys = {
+                    "name", "ts", "event_id", "outcome", "failed", "error",
+                    "replied", "reply_state", "reply_unwrapped",
+                    "decision_reply", "decision_reason",
+                    "retry_history", "trims_after", "trim_only",
+                    "window_size", "window_counted", "window_total",
+                    "window_user", "window_pending_count", "window_pending_user",
+                    "trim_before", "trim_after", "trim_pending_count",
+                    "trim_counted_before", "trim_counted_after",
+                    "trim_user_total_before", "trim_user_total_after",
+                    "trim_trigger", "snap_id",
+                }
+                for it in picked:
+                    for key in list(it.keys()):
+                        if key not in keep_keys:
+                            it.pop(key, None)
+            return {"items": picked, "keep": keep, "kind": "decision",
+                    "snap_keep": self._snap_keep_of(sid),
+                    "snap_show": self._snap_show_of(sid),
+                    "snap_total": self._snap_total_of(sid)}
         # v3.91：决策快照跟请求快照同一个目录，回复记录里不该冒出「进阶决策」那些行，
         # 所以多取一些、把 decision_only 滤掉再截断。
+        _with_trims = bool(with_trims)
         _take = max(int(limit) * 2, 200)
-        items = self.request_log.list_rounds_cached(sid, _take) if self.request_log else []
+        # v4.80（用户 2026-11-07 第 3 条）：走势图要的是「盘上还留着的每一次回复/裁切快照」，
+        # 回复记录页那套 100 行截断不能套到它身上——盘上还有的快照画不出柱子，两次裁切
+        # 中间就像是断了一大片。这里按「回复上限 + 裁切上限（= 窗口快照上限）」给满。
+        _bar_cap = int(limit)
+        if _with_trims and light:
+            try:
+                _trim_cap = int(self.eff("windows_keep", sid) or 0)
+            except Exception:
+                _trim_cap = 0
+            _bar_cap = max(int(limit), 1) + max(_trim_cap, 0)
+            _take = max(_take, _bar_cap * 3, 1000)
+        items = self._cached_rows(sid, _take, light=bool(light))
         # v4.07（用户 m13302）：窗口裁切快照不是一次真实请求——裁切发生在请求组装之前、
-        # 没有模型调用，混在回复记录里既占行也把「本页合计」的命中率带偏。它仍在
-        # 走势柱上（橙色柱子）和当前窗口页看得到，这里只负责别让它占回复记录。
+        # 没有模型调用，混在回复记录里既占行也把「本页合计」的命中率带偏。
+        # v4.73（用户 m02417）：可这一刀也把裁切快照从走势图上抹掉了——走势图的柱子只认
+        # 这份列表，空闲巡检裁的那一次没有对应轮次，橙色只能贴回上一轮，看着像「没生成快照」。
+        # 现在走势图那条路带 trim=1 单独要它们（各自成一根青柱，点开是裁前那一份完整 ②），
+        # 回复记录列表仍按上面的口径不给。
         items = [it for it in items
                  if not bool(it.get("decision_only"))
-                 and not bool(it.get("trim_only"))
-                 and str(it.get("outcome") or "") != "trim"][:int(limit)]
+                 and (_with_trims or (not bool(it.get("trim_only"))
+                                      and str(it.get("outcome") or "") != "trim"))][:_bar_cap]
         # 列表里就把 token、用时与命中带上，不用点开每一轮才知道花了多少
         for it in items:
+            # v4.79（2026-11-07 性能）：裁切快照不是一次请求，没有轨迹、没有重试、也没有
+            # token。以前这一行照样走下面的 _trace_of 回落，而裁切记录恰恰是唯一不带
+            # trace 的那类文件 → read_by_event 把整个会话目录（200 份 / 20MB）重扫一遍，
+            # 单行 1.3~1.5 秒；走势图每 5 秒带 trim=1 拉一次，10 份裁切就是十几秒，
+            # 还把线程池占满，连带 /window、/decision-rounds 排队。这里直接按裁切行收尾。
+            if self._is_trim_row(it):
+                it.pop("_trace", None)
+                it["failed"] = False
+                it["error"] = ""
+                it["replied"] = False
+                it["elapsed"] = None
+                it["elapsed_trigger"] = None
+                it["elapsed_debounce"] = None
+                it["elapsed_decision"] = None
+                it["elapsed_send"] = None
+                it["send_count"] = None
+                it["elapsed_llm"] = None
+                it["steps"] = 0
+                continue
+            if light:
+                # v4.80（2026-11-07 性能）：轻量行走增量缓存，没有 _trace；走势图
+                # 不读轨迹，这里绝不能回落 _trace_of —— 那会把整个目录重扫一遍。
+                it.pop("_trace", None)
+                it["retry_history"] = self._retry_summary(sid, it)
+                it["retry_of"] = self._retry_link(sid, it)
+                continue
             # v3.66：轨迹跟请求快照同文件，list_rounds 已顺手带出；原来每行还要
             # 按 event_id 把整个目录重扫一遍（read_by_event 最坏 100 份）。
             trace = it.pop("_trace", None)
@@ -5032,6 +6408,9 @@ class MultiDecisionPlugin(BasePlugin):
                 link["attempt_index"] = self._retry_attempt_index(it, items)
         # 上一轮实测命中只放进悬停提示，不再参与计算（v3.19 离线评估：参与反而更差）
         for idx, it in enumerate(items):
+            if light:
+                # v4.80：轻量路没有前缀列，命中预估需要它，整块跳过。
+                continue
             prev_it = items[idx + 1] if idx + 1 < len(items) else None
             prev = None
             if prev_it is not None:
@@ -5064,7 +6443,80 @@ class MultiDecisionPlugin(BasePlugin):
             # v3.22 第 5 条：公式不动，但把「这一轮为什么低/高」算成一句话给悬停用
             it["hit_note"] = self._hit_note(it, prev_it)
         self._attach_round_trims(sid, items)
-        return {"items": items, "sid": sid, "keep": keep}
+        _stamp_snap_ids(items)
+        # v4.74（用户 m02687）/ v4.75（用户 m02928）：同一刀别画两根柱子——橙色已经挂在
+        # 「触发裁切」那根柱子上，写了这次裁了多少；裁切快照自己再占一根青柱，悬停里的
+        # 数字一模一样，看着就是重复。被某一轮认领掉的裁切不再单独成柱；没有轮次认领的
+        # （走出走势图那段时间的裁切）照旧一根。
+        # 认领要看两套轮次：判要回之后才落的那一刀，橙标挂在决策轮上（api_decision_rounds
+        # 也调 _attach_round_trims），只扫本页的请求轮会把它漏掉，橙色柱子后面还跟一根
+        # 一模一样的青柱。
+        if _with_trims:
+            try:
+                _owned_cuts = self._drawn_cuts(sid, items, limit)
+            except Exception:
+                logger.debug("[multi-decision] 取已有橙标的裁切失败", exc_info=True)
+                _owned_cuts = []
+            if _owned_cuts:
+                def _cut_drawn_as_bar(_row) -> bool:
+                    _name = str(_row.get("name") or "")
+                    _ts = float(_row.get("ts") or 0.0)
+                    _cb = int(_row.get("trim_counted_before") or 0)
+                    for _cut in _owned_cuts:
+                        _sn = str(_cut.get("snap_name") or "")
+                        if _sn:
+                            if _name and _sn == _name:
+                                return True
+                            continue
+                        # 老记录没有 snap_name：按时间与裁前条数配对
+                        _cts = float(_cut.get("ts") or 0.0)
+                        _ccb = int(_cut.get("counted_before") or 0)
+                        if _name and abs(_cts - _ts) <= 5.0 and (not _cb or _ccb == _cb):
+                            return True
+                    return False
+                items = [it for it in items
+                         if not (self._is_trim_row(it) and _cut_drawn_as_bar(it))]
+        # 用户 m00375 第 8 条：v4.85 之前写的快照没有 reply_provider，回复记录里
+        # 同一列就会一半有渠道一半没有。这里按模型名回查一次供应商实例名补上；
+        # 查不到就留空，页面照旧只显示模型名，绝不编一个。
+        if any(not str(it.get("reply_provider") or "").strip()
+               and str(it.get("reply_model") or "").strip() for it in items):
+            try:
+                _labels = self.tracer.provider_label_map()
+            except Exception:
+                _labels = {}
+            if _labels:
+                for it in items:
+                    if str(it.get("reply_provider") or "").strip():
+                        continue
+                    _rm = str(it.get("reply_model") or "").strip()
+                    if _rm and _labels.get(_rm):
+                        it["reply_provider"] = _labels[_rm]
+        if light:
+            # 走势图只要这些字段；回复记录页拉全量时再带 messages/raw 等大字段。
+            # reply_model / reply_channel 是用户 2026-11-07 要的「这一轮用的模型与
+            # 渠道」，两个短字符串，light 也带上，免得两条路拿到的行长得不一样。
+            keep_keys = {
+                "name", "ts", "event_id", "outcome", "failed", "error",
+                "replied", "reply_state", "reply_unwrapped",
+                "decision_reply", "decision_reason",
+                "retry_history", "trims_after", "trim_only",
+                "window_size", "window_counted", "window_total",
+                "window_user", "window_pending_count", "window_pending_user",
+                "trim_before", "trim_after", "trim_pending_count",
+                "trim_counted_before", "trim_counted_after",
+                "trim_user_total_before", "trim_user_total_after",
+                "trim_trigger", "snap_id",
+                "reply_model", "reply_provider", "reply_channel", "reply_text",
+            }
+            for it in items:
+                for key in list(it.keys()):
+                    if key not in keep_keys:
+                        it.pop(key, None)
+        return {"items": items, "sid": sid, "keep": keep,
+                "snap_keep": self._snap_keep_of(sid),
+                "snap_show": self._snap_show_of(sid),
+                "snap_total": self._snap_total_of(sid)}
 
     @staticmethod
     def _hit_estimate_with_images(item: dict, base=None):
@@ -5200,11 +6652,17 @@ class MultiDecisionPlugin(BasePlugin):
 
         v300/v301/v302 的测试用只实现 read_round 的假 log，取不到列表就当空（不报错）。
         """
-        getter = getattr(self.request_log, "list_rounds", None)
+        # v4.76：优先用带目录指纹缓存的那份；它返回浅拷贝，改 retry_history 不会弄脏缓存。
+        getter = getattr(self.request_log, "list_rounds_cached", None)
+        if not callable(getter):
+            getter = getattr(self.request_log, "list_rounds", None)
         rows = []
         if callable(getter):
             try:
-                rows = list(getter(sid, limit) or [])
+                try:
+                    rows = list(getter(sid, limit, light=True) or [])
+                except TypeError:
+                    rows = list(getter(sid, limit) or [])
             except Exception:
                 rows = []
         for row in rows:
@@ -5353,6 +6811,87 @@ class MultiDecisionPlugin(BasePlugin):
         """event_id 认不出来时，这次裁切该挂在哪一轮。"""
         return trim_owner_of(rounds, cut)
 
+    _CUT_OWNER_GAP = 180.0
+
+    def _resolve_cut_owner(self, universe: list, cut: dict):
+        """这一刀归哪一轮。
+
+        v4.75（用户 m02928）：老记录里 event_id 会串到一两个小时前那一轮上去（空闲巡检
+        裁的那一刀还记着上一轮的 event_id），以前只认 id、不看时间，就把这刀硬塞给那一
+        轮，它自己那根柱子反被当成重复的抹掉。现在 id 对得上还得时间挨着，否则退回按
+        时间就近归属（trim_owner_of，自带 180 秒上限）。
+        """
+        eid = str(cut.get("event_id") or "")
+        if eid:
+            try:
+                cts = float(cut.get("ts") or 0.0)
+            except (TypeError, ValueError):
+                cts = 0.0
+            best = None
+            for x in universe:
+                if str(x.get("event_id") or "") != eid:
+                    continue
+                try:
+                    rts = float(x.get("ts") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if rts > cts + 5.0 or (cts - rts) > self._CUT_OWNER_GAP:
+                    continue
+                if best is None or rts > float(best.get("ts") or 0.0):
+                    best = x
+            if best is not None:
+                return best
+        return self._trim_owner_by_time(universe, cut)
+
+    def _drawn_cuts(self, sid: str, items: list, limit: int) -> list:
+        """这一页和决策页上已经有橙标的那几刀。
+
+        v4.75（用户 m02928）：去重以前只看本页请求轮手里的 trims_after，可裁切也会挂在
+        决策轮上（判要回之后才落刀的），那些刀在决策页画橙、在请求页又留一根青柱。
+        这里把两套轮次合起来算同一份归属，谁认领了就算谁画过。
+        """
+        rounds = [x for x in items if not self._is_trim_row(x)]
+        universe = list(rounds)
+        dec_page: list = []
+        try:
+            if self.request_log is not None:
+                # v4.80：决策快照加深到 300 后，认领裁切的决策轮也可能在 200 份之外。
+                try:
+                    _dec_keep = int(self.eff("decision_keep", sid) or 0)
+                except Exception:
+                    _dec_keep = 0
+                _deep = max(int(limit) * 2, 200, (_dec_keep or 0) * 2)
+                rows = self._cached_rows(sid, _deep, light=True)
+                for x in rows:
+                    if self._is_trim_row(x):
+                        continue
+                    universe.append(x)
+                dec_page = [x for x in rows
+                            if not self._is_trim_row(x)
+                            and self._round_kind(x) == "decision"][:max(int(limit), _dec_keep or 0)]
+        except Exception:
+            logger.debug("[multi-decision] 取决策轮用于裁切去重失败", exc_info=True)
+            dec_page = []
+        if self._window_log is None:
+            return []
+
+        def _key_of(_item) -> tuple:
+            try:
+                _ts = round(float(_item.get("ts") or 0.0), 3)
+            except (TypeError, ValueError):
+                _ts = 0.0
+            return (_ts, self._round_kind(_item))
+
+        drawn_keys = {_key_of(x) for x in rounds} | {_key_of(x) for x in dec_page}
+        out = []
+        for cut in self._window_log.read_recent(1000, sid=sid):
+            owner = self._resolve_cut_owner(universe, cut)
+            if owner is None:
+                continue
+            if _key_of(owner) in drawn_keys:
+                out.append(cut)
+        return out
+
     def _attach_round_trims(self, sid: str, items: list) -> None:
         """先在后端绑定裁切，前端倒序/翻页不再改变归属。
 
@@ -5363,7 +6902,6 @@ class MultiDecisionPlugin(BasePlugin):
         """
         ordered = sorted(items, key=lambda x: float(x.get("ts") or 0))
         rounds = [x for x in ordered if not self._is_trim_row(x)]
-        by_event = {str(x.get("event_id")): x for x in rounds if x.get("event_id")}
         for item in ordered:
             item["trims_after"] = []
         if not ordered or self._window_log is None:
@@ -5371,25 +6909,19 @@ class MultiDecisionPlugin(BasePlugin):
         universe = list(rounds)
         try:
             if self.request_log is not None:
-                for x in (self.request_log.list_rounds_cached(sid, 400) or []):
+                # v4.80：决策轮加深后，裁切可能是 200 份以前的决策轮落下的。
+                try:
+                    _dk = int(self.eff("decision_keep", sid) or 0)
+                except Exception:
+                    _dk = 0
+                for x in self._cached_rows(sid, max(400, (_dk or 0) * 2), light=True):
                     if self._is_trim_row(x):
                         continue
                     universe.append(x)
         except Exception:
             logger.debug("[multi-decision] 取两套轮次用于裁切归属失败", exc_info=True)
         for cut in self._window_log.read_recent(1000, sid=sid):
-            eid = str(cut.get("event_id") or "")
-            if eid:
-                owner = by_event.get(eid)
-                if owner is None:
-                    # 有 event_id 就只认这个 id：它可能落在别的页，先到全量轮次里找。
-                    owner = next(
-                        (x for x in universe
-                         if str(x.get("event_id") or "") == eid),
-                        None,
-                    )
-            else:
-                owner = self._trim_owner_by_time(universe, cut)
+            owner = self._resolve_cut_owner(universe, cut)
             if owner is not None and not any(owner is x for x in rounds):
                 # 认出来的那一轮不在当前页：换成这一页里同一条（同一时刻、同一类）
                 key = (round(float(owner.get("ts") or 0), 3), round_kind(owner))
@@ -5429,274 +6961,321 @@ class MultiDecisionPlugin(BasePlugin):
     async def api_request_detail(self, sid: str, name: str):
         """一轮的完整上下文（模型实际看到的内容）+ 这一轮的调用轨迹。"""
         # 决策 / 裁切这类特殊快照缺字段时别把整页打成 500，页面至少能显示原因（v3.91）。
+        # v4.76（用户 m05225）：这些同步计算原本全压在事件循环上（实测 1.8–2.6 秒），
+        # 期间 5 秒轮询（/window、/decision-rounds、/windows）与 /quote-lookup 一起排队，
+        # 看着就像「点一下要等几秒」。拆成 head / 原生消息 / tail 三段，同步段统统丢进线程。
         try:
-            data = self.request_log.read_round(sid, name) if self.request_log else None
-            if not isinstance(data, dict):
-                return {"ok": False, "detail": "记录不存在"}
-            if data.get("sid") and normalize_sid(data["sid"]) != normalize_sid(sid):
-                return {"ok": False, "detail": "记录会话不匹配"}
-            rec = copy.deepcopy(data)
-            # v4.26（用户 m22251）：② 的「命中 / 不命中 / 本轮输入」边界改成按上一次回复
-            # 的位置切，老快照里存的是旧口径，详情返回前按同一份基准重算一遍。
-            try:
-                if self.request_log is not None:
-                    rec.update(self.request_log.recalc_cache(sid, name, data) or {})
-            except Exception:
-                logger.debug("[multi-decision] 重算缓存边界失败", exc_info=True)
-            # Raw request input is independent of every display-only transformation.
-            rec["request_input"] = copy.deepcopy({
-                key: data.get(key) for key in (
-                    "messages", "assembled", "system_prompt", "system_static",
-                    "system_relocated", "user_prompt", "user_prompt_parts",
-                )
-            })
-            rec.update(payload_metrics(data))
-            trace = self._trace_of(sid, data)
-            rec.update(self._round_outcome(rec, trace))
-            rec["retry_history"] = self._retry_summary(sid, rec)
-            _rows = self._rounds_with_retry(sid, 50)
-            rec["retry_of"] = self._retry_link(sid, rec)
-            if isinstance(rec["retry_of"], dict):
-                rec["retry_of"]["attempt_index"] = self._retry_attempt_index(rec, _rows)
-            # 这一轮如果是「出错原轮」，把后来那次重试的结果与回复挂到下面（只读拼接）
-            rec["retry_outcome"] = self._retry_outcome_of(rec, _rows)
-            # A normalized SID cannot identify a bot. Use only an original raw SID
-            # for this session, preferring the live window; never reverse-guess one.
-            raw_sid = ""
-            for candidate in ([self.window.raw_sid(sid)] if self.window is not None else []) + [
-                    data.get("raw_sid"), data.get("session_id"), data.get("sid")]:
-                if (isinstance(candidate, str) and len(candidate.split(":")) >= 3
-                        and candidate.split(":")[-2] in ("gm", "dm")
-                        and normalize_sid(candidate) == normalize_sid(sid)):
-                    raw_sid = candidate
-                    break
-            who = self.window._bot_name(sid) if self.window is not None else ""
-            # 用户本轮第 3 条：② 历史消息只画历史那段。老写法取完整 messages，
-            # 本轮那条（stage 已切进 incoming_messages）会在这里再画一遍，
-            # 于是 ② 和 ③ 看着像同一条 @ 出现两次。有 history_messages 就优先用它。
-            # 只有「没这个字段/类型不对」才退回完整 messages；显式空列表就是空历史，
-            # 不能当成缺失再画一遍本轮消息。
-            history_source = data.get("history_messages")
-            if not isinstance(history_source, list):
-                history_source = data.get("messages")
-            if not isinstance(history_source, list):
-                history_source = []
-            history_source = copy.deepcopy(history_source)
-            # Proof must precede regroup/split and view_of's compatibility cache fill.
-            history_proof = raw_forward_proof_items(history_source)
-            try:
-                history_source = regroup_images(history_source)
-            except Exception as exc:
-                logger.debug("[multi-decision] 记录里的图片归位失败: %s", exc)
-            # v4.01（用户 m11166 图4）：决策快照的 user_prompt_parts 存的是整段聊天记录
-            # （transcript），当「本轮新消息」拼进快照就会多出一条两千多字的大杂烩，
-            # 等于把 ② 历史消息整段又抄了一遍。决策轮真正的新消息只有 incoming_messages。
-            incoming = []
-            if rec.get("decision_only"):
-                for line in data.get("incoming_messages") or []:
-                    # 存的是框架消息（{role, content}），老版本可能是裸字符串，两种都收
-                    _txt = ((line.get("content") or line.get("text") or "")
-                            if isinstance(line, dict) else line)
-                    if isinstance(_txt, list):
-                        _txt = content_text(_txt)
-                    if isinstance(_txt, str) and _txt.strip():
-                        incoming.append({"text": _txt})
-            else:
-                incoming = [p for p in rec.get("user_prompt_parts") or []
-                            if isinstance(p, dict) and p.get("name") == "message"]
-                if not incoming and rec.get("user_prompt"):
-                    incoming = [{"text": rec["user_prompt"]}]
-            new_msgs = [{"role": "user", "content": p.get("text") or ""} for p in incoming]
-            incoming_proof = (raw_forward_proof_items(data.get("incoming_messages") or [])
-                              if rec.get("decision_only") else
-                              [dict(p, content=p.get("text") or "") for p in incoming])
-            prompt_proof = [dict(p, content=p.get("text") or "") if isinstance(p, dict)
-                            else {"content": p or ""} for p in data.get("user_prompt_parts") or []]
-            history = expand_packed_messages(history_source)
-            new_msgs = expand_packed_messages(new_msgs)
-            rec["history_display_messages"] = view_of(history, bot_name=who, raw_sid=raw_sid)
-            rec["incoming_display_messages"] = view_of(new_msgs, bot_name=who, raw_sid=raw_sid)
-            # One-to-one display aliases keep original request indexes stable in the UI.
-            rec["display_messages"] = view_of(data.get("messages") or [], bot_name=who, raw_sid=raw_sid)
-            rec["display_user_prompt_parts"] = view_of(
-                [{"role": "user", "content": (p.get("text") if isinstance(p, dict) else p) or ""}
-                 for p in rec.get("user_prompt_parts") or []], bot_name=who, raw_sid=raw_sid)
-            # Native attachments are injected by the host after ON_LLM_REQUEST.
-            # Display their exact recorded projection without rewriting raw prompt text.
-            projected_media = None
-            if data.get("metric_stage") == "native_projection":
-                projected_media = {}
-                for part in data.get("native_projection") or []:
-                    if not isinstance(part, dict) or not isinstance(part.get("text"), str):
-                        continue
-                    projected_media[part["text"]] = [
-                        {"path": ref["path"], "mime": ref.get("mime_type") or ""}
-                        for ref in part.get("refs") or []
-                        if isinstance(ref, dict) and ref.get("type") == "kira_image_ref"
-                        and isinstance(ref.get("path"), str)
-                    ]
-                for field in ("incoming_display_messages", "display_user_prompt_parts"):
-                    for item in rec[field]:
-                        raw = item.get("raw")
-                        item["media"] = copy.deepcopy(projected_media.get(raw, [])) if isinstance(raw, str) else []
-                        item["media_source"] = "native_projection"
-            # Project after native_projection's aggregate overlay and before either
-            # snapshot captures these aliases. Each source has its own original proof;
-            # a cache-filled view (or another alias with the same mid) proves nothing.
-            owner_proofs = {
-                "history_display_messages": history_proof,
-                "incoming_display_messages": incoming_proof,
-                "display_messages": raw_forward_proof_items(data.get("messages") or []),
-                "display_user_prompt_parts": prompt_proof,
-            }
-            owner_ids, owner_seen = [], set()
-            owner_items = [item for field in owner_proofs for item in rec[field]]
-            owner_items += [{"content": item.get("raw") or item.get("full_text") or item.get("text") or ""}
-                            for item in (trace or {}).get("sent") or [] if isinstance(item, dict)]
-            for item in owner_items:
-                mid = display_message_id(item, text_of_content=content_text)
-                if mid and mid not in owner_seen:
-                    owner_seen.add(mid)
-                    owner_ids.append(mid)
-                if len(owner_ids) >= 900:
-                    break
-            owner_rows = await asyncio.to_thread(read_native_rows, raw_sid, owner_ids)
-            await self._refresh_forward_display_proofs(raw_sid, owner_rows)
-
-            def project_request_view(items, proof):
-                return project_items(items, raw_sid, owner_rows, public_media=public_media,
-                                     text_of_content=content_text, forward_proof_items=proof,
-                                     forward_display_proof_for_mid=forward_display_proof_for_mid)
-
-            for field, proof in owner_proofs.items():
-                rec[field] = project_request_view(rec[field], proof)
-            # Compatibility fields retain full content; reverse-resolved media is display only.
-            rec["messages"] = [dict(m, media=media_list(m.get("content"), raw_sid),
-                                    **({"who": who} if m.get("role") == "assistant" and who else {}))
-                               if isinstance(m, dict) else m for m in rec.get("messages") or []]
-            rec["user_prompt_media_parts"] = [
-                copy.deepcopy(projected_media.get(p.get("text") if isinstance(p, dict) else p, []))
-                if projected_media is not None
-                else media_list(p.get("text") if isinstance(p, dict) else p, raw_sid)
-                for p in rec.get("user_prompt_parts") or []
-            ]
-            snapshot_msgs = history + new_msgs
-            rec["request_snapshot"] = {
-                "ts": rec.get("ts") or 0, "event_id": rec.get("event_id") or "",
-                "scope": "request_input",
-                "messages": rec["history_display_messages"] + rec["incoming_display_messages"],
-                "size": len(snapshot_msgs), "counted": count_messages(snapshot_msgs),
-                # v3.23（用户 m45720）：标题要写出「含 bot X 条」，这里先把用户侧条数落盘，
-                # bot 条数 = counted - user_counted，前端不用自己猜。
-                "user_counted": count_user_messages(snapshot_msgs),
-                "history_counted": count_messages(history), "incoming_counted": count_messages(new_msgs),
-            }
-            eid = str(rec.get("event_id") or "")
-            verified = bool(eid and trace and str(trace.get("event_id") or "") == eid
-                            and normalize_sid(str(trace.get("sid") or "")) == normalize_sid(sid)
-                            and normalize_sid(str(rec.get("sid") or "")) == normalize_sid(sid))
-            sent_msgs = []
-            sent_meta = []
-            if (verified and not rec["failed"] and not trace.get("failed")
-                    and rec.get("outcome") not in ("pending", "running")
-                    and trace.get("outcome") not in ("pending", "running", "error", "failed")):
-                for item in trace.get("sent") or []:
-                    if not isinstance(item, dict) or item.get("ok") is not True:
-                        continue
-                    raw = item.get("raw")
-                    has_raw = isinstance(raw, str) and bool(raw.strip())
-                    text = raw if has_raw else item.get("full_text", item.get("text") or "")
-                    if not isinstance(text, str) or not text.strip() or text.lstrip().startswith("[ProviderError]"):
-                        continue
-                    # Old clipped traces cannot supply a truthful complete reply.
-                    if not has_raw and "full_text" not in item and re.search(r"\n…（共 \d+ 字，已截断）$", text):
-                        continue
-                    # Enrich only the raw display fallback, never the persisted request/trace.
-                    stamp = ""
-                    sent_ts = item.get("ts")
-                    if isinstance(sent_ts, (int, float)) and not isinstance(sent_ts, bool) and sent_ts > 0:
-                        try:
-                            stamp = time.strftime("%H:%M", time.localtime(sent_ts))
-                        except (ValueError, OverflowError, OSError):
-                            sent_ts = None
-                    else:
-                        sent_ts = None
-                    display_raw = text
-                    complete_raw = has_raw and bool(re.match(
-                        r"^\s*\[\d{1,2}:\d{2}(?::\d{2})?\]\s*<msg\b[^>]*>\s*\[[^\]]+\]", text))
-                    if not complete_raw:
-                        try:
-                            sent_name = item.get("name") or item.get("who")
-                            if not isinstance(sent_name, str) or not sent_name.strip():
-                                sent_name = self.bot_name_for(sid)
-                            sent_name = str(sent_name or "").strip()
-                        except Exception:
-                            sent_name = ""
-                        display_raw = _assistant_prefix(text, sent_name, stamp)
-                    sent_msgs.append({"role": "assistant", "content": text})
-                    sent_meta.append((display_raw, sent_ts, raw if has_raw else None))
-            rec["sent_display_messages"] = view_of(sent_msgs, bot_name=who, raw_sid=raw_sid)
-            for display, (display_raw, sent_ts, original_raw) in zip(rec["sent_display_messages"], sent_meta):
-                display["raw"] = display_raw
-                if original_raw is not None:
-                    display["raw_original"] = original_raw
-                if sent_ts is not None:
-                    display["ts"] = sent_ts
-            rec["sent_display_messages"] = project_request_view(rec["sent_display_messages"], sent_msgs)
-            # 用户 m35137：点柱子看的是「这一轮的窗口快照」，以前不分回复轮 / 决策轮，
-            # 一律拿 request_snapshot（history + 打包成一整段的 user_prompt）来拼。
-            # 回复轮那 11 条待发在 user_prompt 里就是一段文本，拼进快照只剩 1 条；
-            # 这一轮写下的决策注记又不在 history 里，整条丢掉 —— 看着像「丢了 11 条和 1 次注记」。
-            # 回复轮改用真正发出去的 messages（历史 + 本轮全部新消息，含注记），决策轮不变。
-            _ws_disp = rec["request_snapshot"]["messages"]
-            _ws_raw = snapshot_msgs
-            if not rec.get("decision_only"):
-                _ws_all_disp = rec.get("display_messages") or []
-                if len(_ws_all_disp) > len(_ws_disp):
-                    _ws_disp = _ws_all_disp
-                _ws_all_raw = data.get("messages") or []
-                if isinstance(_ws_all_raw, list) and len(_ws_all_raw) > len(_ws_raw):
-                    _ws_raw = _ws_all_raw
-            rec["window_snapshot"] = dict(rec["request_snapshot"],
-                scope="completed_round", messages=_ws_disp + rec["sent_display_messages"],
-                size=len(_ws_raw) + len(sent_msgs), counted=count_messages(_ws_raw + sent_msgs),
-                user_counted=count_user_messages(_ws_raw + sent_msgs),
-                sent_counted=count_messages(sent_msgs), sent_identity_verified=verified)
-            # v4.01（用户 m11166 图4）：这一轮的判定本身也得落进快照。平时那条注记只由
-            # window/manager.py 的 _with_decision_notes 在出口拼，不写盘、不进快照，
-            # 于是点紫柱看这一轮的窗口时，「凭什么这么判」的理由完全看不到。
-            if rec.get("decision_only"):
-                try:
-                    snap = rec["window_snapshot"]
-                    try:
-                        _stamp = time.strftime("%H:%M", time.localtime(float(rec.get("ts") or 0)))
-                    except (ValueError, OverflowError, OSError):
-                        _stamp = ""
-                    _why = str(rec.get("decision_reason") or "").strip()
-                    _say = str(rec.get("decision_say") or "").strip()
-                    _head = "建议回复" if rec.get("decision_reply") else "建议不回"
-                    _body = "[决策记录] " + ((_stamp + " ") if _stamp else "") + _head
-                    if _why:
-                        _body += "（" + _why + "）"
-                    if _say:
-                        _body += "；打算说：" + _say
-                    _note = {"role": "assistant", "name": "对当前聊天消息的决策建议",
-                             "content": _body}
-                    _shown = project_request_view(view_of([_note], bot_name=who, raw_sid=raw_sid), [_note])
-                    if _shown:
-                        item0 = dict(_shown[0])
-                        item0["decnote"] = True
-                        item0["name"] = "对当前聊天消息的决策建议"
-                        item0["who"] = "对当前聊天消息的决策建议"
-                        snap["messages"].append(item0)
-                        snap["size"] = int(snap.get("size") or 0) + 1
-                        snap["counted"] = int(snap.get("counted") or 0) + 1
-                except Exception:
-                    logger.debug("[multi-decision] 决策注记补进快照失败", exc_info=True)
-            return {"ok": True, "record": rec, "trace": trace}
+            stage = await asyncio.to_thread(self._request_detail_head, sid, name)
+            if not stage.get("ok"):
+                return stage
+            owner_rows = await asyncio.to_thread(read_native_rows, stage["raw_sid"], stage["owner_ids"])
+            # 只等 0.6 秒：转发内容取不到不该让整页卡三秒，剩下的丢后台（v4.76）。
+            if await self._refresh_forward_display_proofs(stage["raw_sid"], owner_rows, budget=0.6):
+                self._spawn_forward_proof_refresh(stage["raw_sid"], owner_rows)
+            return await asyncio.to_thread(self._request_detail_tail, stage, owner_rows)
         except Exception as exc:
             logger.exception("[multi-decision] 读单轮快照失败 %s/%s", sid, name)
             return {"ok": False, "detail": "%s: %s" % (type(exc).__name__, exc)}
+
+    def _request_detail_head(self, sid: str, name: str) -> dict:
+        """读快照、算判定与展示投影（除原生消息库之外的全部前置工作）。"""
+        media_render_begin()
+        data = self.request_log.read_round(sid, name) if self.request_log else None
+        if not isinstance(data, dict):
+            return {"ok": False, "detail": "记录不存在"}
+        if data.get("sid") and normalize_sid(data["sid"]) != normalize_sid(sid):
+            return {"ok": False, "detail": "记录会话不匹配"}
+        rec = copy.deepcopy(data)
+        # v4.26（用户 m22251）：② 的「命中 / 不命中 / 本轮输入」边界改成按上一次回复
+        # 的位置切，老快照里存的是旧口径，详情返回前按同一份基准重算一遍。
+        try:
+            if self.request_log is not None:
+                rec.update(self.request_log.recalc_cache(sid, name, data) or {})
+        except Exception:
+            logger.debug("[multi-decision] 重算缓存边界失败", exc_info=True)
+        # Raw request input is independent of every display-only transformation.
+        rec["request_input"] = copy.deepcopy({
+            key: data.get(key) for key in (
+                "messages", "assembled", "system_prompt", "system_static",
+                "system_relocated", "user_prompt", "user_prompt_parts",
+            )
+        })
+        rec.update(payload_metrics(data))
+        # v4.86（用户 m10425 第 4 条）：轨迹本来就写在这份快照里（列表那条路也是这么取的），
+        # 直接取比按 event_id 把整个目录扫一遍快得多——裁切快照一份轨迹都没有，以前
+        # 每点一次都要白扫最多 300 份 JSON（实测多花 160ms 上下）。
+        trace = None
+        _embedded = data.get("trace")
+        if isinstance(_embedded, dict) and self.tracer is not None:
+            _eid = str(data.get("event_id") or "")
+            if _eid and str(_embedded.get("event_id") or "") == _eid:
+                try:
+                    trace = self.tracer._decorate(copy.deepcopy(_embedded))
+                except Exception:
+                    logger.debug("[multi-decision] 内嵌轨迹装饰失败", exc_info=True)
+                    trace = None
+        if trace is None and not self._is_trim_row(data):
+            trace = self._trace_of(sid, data)
+        rec.update(self._round_outcome(rec, trace))
+        rec["retry_history"] = self._retry_summary(sid, rec)
+        _rows = self._rounds_with_retry(sid, 50)
+        rec["retry_of"] = self._retry_link(sid, rec)
+        if isinstance(rec["retry_of"], dict):
+            rec["retry_of"]["attempt_index"] = self._retry_attempt_index(rec, _rows)
+        # 这一轮如果是「出错原轮」，把后来那次重试的结果与回复挂到下面（只读拼接）
+        rec["retry_outcome"] = self._retry_outcome_of(rec, _rows)
+        # A normalized SID cannot identify a bot. Use only an original raw SID
+        # for this session, preferring the live window; never reverse-guess one.
+        raw_sid = ""
+        for candidate in ([self.window.raw_sid(sid)] if self.window is not None else []) + [
+                data.get("raw_sid"), data.get("session_id"), data.get("sid")]:
+            if (isinstance(candidate, str) and len(candidate.split(":")) >= 3
+                    and candidate.split(":")[-2] in ("gm", "dm")
+                    and normalize_sid(candidate) == normalize_sid(sid)):
+                raw_sid = candidate
+                break
+        who = self.window._bot_name(sid) if self.window is not None else ""
+        # 用户本轮第 3 条：② 历史消息只画历史那段。老写法取完整 messages，
+        # 本轮那条（stage 已切进 incoming_messages）会在这里再画一遍，
+        # 于是 ② 和 ③ 看着像同一条 @ 出现两次。有 history_messages 就优先用它。
+        # 只有「没这个字段/类型不对」才退回完整 messages；显式空列表就是空历史，
+        # 不能当成缺失再画一遍本轮消息。
+        history_source = data.get("history_messages")
+        if not isinstance(history_source, list):
+            history_source = data.get("messages")
+        if not isinstance(history_source, list):
+            history_source = []
+        history_source = copy.deepcopy(history_source)
+        # Proof must precede regroup/split and view_of's compatibility cache fill.
+        history_proof = raw_forward_proof_items(history_source)
+        try:
+            history_source = regroup_images(history_source)
+        except Exception as exc:
+            logger.debug("[multi-decision] 记录里的图片归位失败: %s", exc)
+        # v4.01（用户 m11166 图4）：决策快照的 user_prompt_parts 存的是整段聊天记录
+        # （transcript），当「本轮新消息」拼进快照就会多出一条两千多字的大杂烩，
+        # 等于把 ② 历史消息整段又抄了一遍。决策轮真正的新消息只有 incoming_messages。
+        incoming = []
+        if rec.get("decision_only"):
+            for line in data.get("incoming_messages") or []:
+                # 存的是框架消息（{role, content}），老版本可能是裸字符串，两种都收
+                _txt = ((line.get("content") or line.get("text") or "")
+                        if isinstance(line, dict) else line)
+                if isinstance(_txt, list):
+                    _txt = content_text(_txt)
+                if isinstance(_txt, str) and _txt.strip():
+                    incoming.append({"text": _txt})
+        else:
+            incoming = [p for p in rec.get("user_prompt_parts") or []
+                        if isinstance(p, dict) and p.get("name") == "message"]
+            if not incoming and rec.get("user_prompt"):
+                incoming = [{"text": rec["user_prompt"]}]
+        new_msgs = [{"role": "user", "content": p.get("text") or ""} for p in incoming]
+        incoming_proof = (raw_forward_proof_items(data.get("incoming_messages") or [])
+                          if rec.get("decision_only") else
+                          [dict(p, content=p.get("text") or "") for p in incoming])
+        prompt_proof = [dict(p, content=p.get("text") or "") if isinstance(p, dict)
+                        else {"content": p or ""} for p in data.get("user_prompt_parts") or []]
+        history = expand_packed_messages(history_source)
+        new_msgs = expand_packed_messages(new_msgs)
+        rec["history_display_messages"] = view_of(history, bot_name=who, raw_sid=raw_sid)
+        rec["incoming_display_messages"] = view_of(new_msgs, bot_name=who, raw_sid=raw_sid)
+        # One-to-one display aliases keep original request indexes stable in the UI.
+        rec["display_messages"] = view_of(data.get("messages") or [], bot_name=who, raw_sid=raw_sid)
+        rec["display_user_prompt_parts"] = view_of([{"role": "user", "content": (p.get("text") if isinstance(p, dict) else p) or ""}
+             for p in rec.get("user_prompt_parts") or []], bot_name=who, raw_sid=raw_sid)
+        # Native attachments are injected by the host after ON_LLM_REQUEST.
+        # Display their exact recorded projection without rewriting raw prompt text.
+        projected_media = None
+        if data.get("metric_stage") == "native_projection":
+            projected_media = {}
+            for part in data.get("native_projection") or []:
+                if not isinstance(part, dict) or not isinstance(part.get("text"), str):
+                    continue
+                projected_media[part["text"]] = [
+                    {"path": ref["path"], "mime": ref.get("mime_type") or ""}
+                    for ref in part.get("refs") or []
+                    if isinstance(ref, dict) and ref.get("type") == "kira_image_ref"
+                    and isinstance(ref.get("path"), str)
+                ]
+            for field in ("incoming_display_messages", "display_user_prompt_parts"):
+                for item in rec[field]:
+                    raw = item.get("raw")
+                    item["media"] = copy.deepcopy(projected_media.get(raw, [])) if isinstance(raw, str) else []
+                    item["media_source"] = "native_projection"
+        # Project after native_projection's aggregate overlay and before either
+        # snapshot captures these aliases. Each source has its own original proof;
+        # a cache-filled view (or another alias with the same mid) proves nothing.
+        owner_proofs = {
+            "history_display_messages": history_proof,
+            "incoming_display_messages": incoming_proof,
+            "display_messages": raw_forward_proof_items(data.get("messages") or []),
+            "display_user_prompt_parts": prompt_proof,
+        }
+        owner_ids, owner_seen = [], set()
+        owner_items = [item for field in owner_proofs for item in rec[field]]
+        owner_items += [{"content": item.get("raw") or item.get("full_text") or item.get("text") or ""}
+                        for item in (trace or {}).get("sent") or [] if isinstance(item, dict)]
+        for item in owner_items:
+            mid = display_message_id(item, text_of_content=content_text)
+            if mid and mid not in owner_seen:
+                owner_seen.add(mid)
+                owner_ids.append(mid)
+            if len(owner_ids) >= 900:
+                break
+        render_memo = media_render_state()
+
+        return {"ok": True, "sid": sid, "name": name, "data": data, "rec": rec, "trace": trace,
+                "render_memo": render_memo,
+                "raw_sid": raw_sid, "who": who, "projected_media": projected_media,
+                "owner_proofs": owner_proofs, "owner_ids": owner_ids,
+                "history": history, "new_msgs": new_msgs}
+
+    def _request_detail_tail(self, stage: dict, owner_rows) -> dict:
+        """原生消息到手后，把快照 / 窗口 / 回复一起投影出来。"""
+        media_render_resume(stage.get("render_memo"))
+        sid = stage["sid"]
+        name = stage["name"]
+        data = stage["data"]
+        rec = stage["rec"]
+        trace = stage["trace"]
+        raw_sid = stage["raw_sid"]
+        who = stage["who"]
+        projected_media = stage["projected_media"]
+        owner_proofs = stage["owner_proofs"]
+        history = stage["history"]
+        new_msgs = stage["new_msgs"]
+        def project_request_view(items, proof):
+            return project_items(items, raw_sid, owner_rows, public_media=public_media,
+                                 text_of_content=content_text, forward_proof_items=proof,
+                                 forward_display_proof_for_mid=forward_display_proof_for_mid)
+
+        for field, proof in owner_proofs.items():
+            rec[field] = project_request_view(rec[field], proof)
+        # Compatibility fields retain full content; reverse-resolved media is display only.
+        rec["messages"] = [dict(m, media=media_list(m.get("content"), raw_sid),
+                                **({"who": who} if m.get("role") == "assistant" and who else {}))
+                           if isinstance(m, dict) else m for m in rec.get("messages") or []]
+        rec["user_prompt_media_parts"] = [
+            copy.deepcopy(projected_media.get(p.get("text") if isinstance(p, dict) else p, []))
+            if projected_media is not None
+            else media_list(p.get("text") if isinstance(p, dict) else p, raw_sid)
+            for p in rec.get("user_prompt_parts") or []
+        ]
+        snapshot_msgs = history + new_msgs
+        rec["request_snapshot"] = {
+            "ts": rec.get("ts") or 0, "event_id": rec.get("event_id") or "",
+            "scope": "request_input",
+            "messages": rec["history_display_messages"] + rec["incoming_display_messages"],
+            "size": len(snapshot_msgs), "counted": count_messages(snapshot_msgs),
+            # v3.23（用户 m45720）：标题要写出「含 bot X 条」，这里先把用户侧条数落盘，
+            # bot 条数 = counted - user_counted，前端不用自己猜。
+            "user_counted": count_user_messages(snapshot_msgs),
+            "history_counted": count_messages(history), "incoming_counted": count_messages(new_msgs),
+        }
+        eid = str(rec.get("event_id") or "")
+        verified = bool(eid and trace and str(trace.get("event_id") or "") == eid
+                        and normalize_sid(str(trace.get("sid") or "")) == normalize_sid(sid)
+                        and normalize_sid(str(rec.get("sid") or "")) == normalize_sid(sid))
+        sent_msgs = []
+        sent_meta = []
+        if (verified and not rec["failed"] and not trace.get("failed")
+                and rec.get("outcome") not in ("pending", "running")
+                and trace.get("outcome") not in ("pending", "running", "error", "failed")):
+            for item in trace.get("sent") or []:
+                if not isinstance(item, dict) or item.get("ok") is not True:
+                    continue
+                raw = item.get("raw")
+                has_raw = isinstance(raw, str) and bool(raw.strip())
+                text = raw if has_raw else item.get("full_text", item.get("text") or "")
+                if not isinstance(text, str) or not text.strip() or text.lstrip().startswith("[ProviderError]"):
+                    continue
+                # Old clipped traces cannot supply a truthful complete reply.
+                if not has_raw and "full_text" not in item and re.search(r"\n…（共 \d+ 字，已截断）$", text):
+                    continue
+                # Enrich only the raw display fallback, never the persisted request/trace.
+                stamp = ""
+                sent_ts = item.get("ts")
+                if isinstance(sent_ts, (int, float)) and not isinstance(sent_ts, bool) and sent_ts > 0:
+                    try:
+                        stamp = time.strftime("%H:%M", time.localtime(sent_ts))
+                    except (ValueError, OverflowError, OSError):
+                        sent_ts = None
+                else:
+                    sent_ts = None
+                display_raw = text
+                complete_raw = has_raw and bool(re.match(
+                    r"^\s*\[\d{1,2}:\d{2}(?::\d{2})?\]\s*<msg\b[^>]*>\s*\[[^\]]+\]", text))
+                if not complete_raw:
+                    try:
+                        sent_name = item.get("name") or item.get("who")
+                        if not isinstance(sent_name, str) or not sent_name.strip():
+                            sent_name = self.bot_name_for(sid)
+                        sent_name = str(sent_name or "").strip()
+                    except Exception:
+                        sent_name = ""
+                    display_raw = _assistant_prefix(text, sent_name, stamp)
+                sent_msgs.append({"role": "assistant", "content": text})
+                sent_meta.append((display_raw, sent_ts, raw if has_raw else None))
+        rec["sent_display_messages"] = view_of(sent_msgs, bot_name=who, raw_sid=raw_sid)
+        for display, (display_raw, sent_ts, original_raw) in zip(rec["sent_display_messages"], sent_meta):
+            display["raw"] = display_raw
+            if original_raw is not None:
+                display["raw_original"] = original_raw
+            if sent_ts is not None:
+                display["ts"] = sent_ts
+        rec["sent_display_messages"] = project_request_view(rec["sent_display_messages"], sent_msgs)
+        # 用户 m35137：点柱子看的是「这一轮的窗口快照」，以前不分回复轮 / 决策轮，
+        # 一律拿 request_snapshot（history + 打包成一整段的 user_prompt）来拼。
+        # 回复轮那 11 条待发在 user_prompt 里就是一段文本，拼进快照只剩 1 条；
+        # 这一轮写下的决策注记又不在 history 里，整条丢掉 —— 看着像「丢了 11 条和 1 次注记」。
+        # 回复轮改用真正发出去的 messages（历史 + 本轮全部新消息，含注记），决策轮不变。
+        _ws_disp = rec["request_snapshot"]["messages"]
+        _ws_raw = snapshot_msgs
+        if not rec.get("decision_only"):
+            _ws_all_disp = rec.get("display_messages") or []
+            if len(_ws_all_disp) > len(_ws_disp):
+                _ws_disp = _ws_all_disp
+            _ws_all_raw = data.get("messages") or []
+            if isinstance(_ws_all_raw, list) and len(_ws_all_raw) > len(_ws_raw):
+                _ws_raw = _ws_all_raw
+        rec["window_snapshot"] = dict(rec["request_snapshot"],
+            scope="completed_round", messages=_ws_disp + rec["sent_display_messages"],
+            size=len(_ws_raw) + len(sent_msgs), counted=count_messages(_ws_raw + sent_msgs),
+            user_counted=count_user_messages(_ws_raw + sent_msgs),
+            sent_counted=count_messages(sent_msgs), sent_identity_verified=verified)
+        # v4.01（用户 m11166 图4）：这一轮的判定本身也得落进快照。平时那条注记只由
+        # window/manager.py 的 _with_decision_notes 在出口拼，不写盘、不进快照，
+        # 于是点紫柱看这一轮的窗口时，「凭什么这么判」的理由完全看不到。
+        if rec.get("decision_only"):
+            try:
+                snap = rec["window_snapshot"]
+                try:
+                    _stamp = time.strftime("%H:%M", time.localtime(float(rec.get("ts") or 0)))
+                except (ValueError, OverflowError, OSError):
+                    _stamp = ""
+                _why = str(rec.get("decision_reason") or "").strip()
+                _say = str(rec.get("decision_say") or "").strip()
+                _head = "建议回复" if rec.get("decision_reply") else "建议不回"
+                _body = "[决策记录] " + ((_stamp + " ") if _stamp else "") + _head
+                if _why:
+                    _body += "（" + _why + "）"
+                if _say:
+                    _body += "；打算说：" + _say
+                _note = {"role": "assistant", "name": "对当前聊天消息的决策建议",
+                         "content": _body}
+                _shown = project_request_view(view_of([_note], bot_name=who, raw_sid=raw_sid), [_note])
+                if _shown:
+                    item0 = dict(_shown[0])
+                    item0["decnote"] = True
+                    item0["name"] = "对当前聊天消息的决策建议"
+                    item0["who"] = "对当前聊天消息的决策建议"
+                    snap["messages"].append(item0)
+                    snap["size"] = int(snap.get("size") or 0) + 1
+                    snap["counted"] = int(snap.get("counted") or 0) + 1
+            except Exception:
+                logger.debug("[multi-decision] 决策注记补进快照失败", exc_info=True)
+        return {"ok": True, "record": rec, "trace": trace}
 
     def _trace_of(self, sid: str, data: dict):
         """找这一轮对应的轨迹：优先 event_id，旧记录按时间就近。"""
@@ -5740,7 +7319,7 @@ class MultiDecisionPlugin(BasePlugin):
         re.I,
     )
 
-    def _tweet_img(self, url: str) -> str:
+    def _tweet_img(self, url: str, sid: str = "") -> str:
         """把推文里的图（头像、视频封面）抓一份存进插件自己的 media_cache。
 
         浏览器直连 pbs.twimg.com 会卡到超时（用户 m12833 实测：curl 通、页面
@@ -5759,6 +7338,11 @@ class MultiDecisionPlugin(BasePlugin):
         key = "tw_" + hashlib.sha1(u.encode("utf-8")).hexdigest()[:24]
         for ext in (".jpg", ".png", ".webp", ".gif"):
             if (folder / (key + ext)).is_file():
+                # 命中旧文件也要补记归属：同一张推文图可能被别的群先抓过。
+                try:
+                    _owners_remember(folder, key + ext, sid, "twitter")
+                except Exception:
+                    logger.debug("[multi-decision] 记录推文图归属失败", exc_info=True)
                 return "plugin_data/%s/media_cache/%s%s" % (PLUGIN_ID, key, ext)
         try:
             folder.mkdir(parents=True, exist_ok=True)
@@ -5784,19 +7368,48 @@ class MultiDecisionPlugin(BasePlugin):
             elif "gif" in ctype:
                 ext = ".gif"
             (folder / (key + ext)).write_bytes(blob)
+            try:
+                _owners_remember(folder, key + ext, sid, "twitter")
+            except Exception:
+                logger.debug("[multi-decision] 记录推文图归属失败", exc_info=True)
+            try:
+                prune_other_media(folder)
+            except Exception:
+                logger.debug("[multi-decision] 裁剪推文图缓存失败", exc_info=True)
             return "plugin_data/%s/media_cache/%s%s" % (PLUGIN_ID, key, ext)
         except Exception as exc:
             logger.debug("[multi-decision] 推文配图没取到 %s：%s", u[:80], type(exc).__name__)
             return ""
 
+    def _tweet_remember(self, out: dict, sid: str) -> None:
+        """把已缓存推文卡里的图补记到 media_owners（用户 m24364）。
+
+        服务端缓存命中时不会重新走 _tweet_img，图片归属就丢了；这里按返回的
+        avatar / media[].thumb 文件名补一次，同一个群重复调用不会重复加。
+        """
+        if not sid or not isinstance(out, dict) or not out.get("ok"):
+            return
+        try:
+            from core.utils.path_utils import get_data_path
+
+            folder = Path(str(get_data_path())) / "plugin_data" / PLUGIN_ID / "media_cache"
+            names = []
+            for rel in [out.get("avatar")] + [one.get("thumb") for one in (out.get("media") or [])]:
+                name = Path(str(rel or "")).name
+                if name.startswith("tw_") and name not in names:
+                    names.append(name)
+            for name in names:
+                _owners_remember(folder, name, sid, "twitter")
+        except Exception:
+            logger.debug("[multi-decision] 补记推文图归属失败", exc_info=True)
+
     @_api("GET", "/tweet")
-    async def api_tweet(self, u: str = ""):
+    async def api_tweet(self, u: str = "", sid: str = ""):
         """一条推文的展示数据：作者、正文、图片、互动数。
 
         前端把正文里的推文链接换成带 data-tw 的骨架卡，渲染完再回来问一次，
         把卡片填满。取不到就返回 ok=False，前端留着「打不开」的样子，不猜内容。
         """
-        import asyncio
         import json as _json
         import urllib.request as _ur
 
@@ -5812,6 +7425,7 @@ class MultiDecisionPlugin(BasePlugin):
         # 成功的一小时够用（同一条推文整页重绘时别再打一次外网）；
         # 失败的只记 90 秒，免得网络一抖就把「取不到」钉死
         if prev and now - prev[0] < (1800 if (prev[1] or {}).get("ok") else 90):
+            self._tweet_remember(prev[1], sid)
             return prev[1]
 
         def _work():
@@ -5868,10 +7482,10 @@ class MultiDecisionPlugin(BasePlugin):
             }
             # 图一律由后端代取：浏览器直连 pbs.twimg.com 会卡到超时（用户 m12833
             # 实测 curl 通、页面 20 秒后 ERR_TIMED_OUT），取不到的干脆不给 src。
-            out["avatar"] = self._tweet_img(out.get("avatar") or "")
+            out["avatar"] = self._tweet_img(out.get("avatar") or "", sid)
             kept = []
             for one in out.get("media") or []:
-                one["thumb"] = self._tweet_img(one.get("thumb") or "")
+                one["thumb"] = self._tweet_img(one.get("thumb") or "", sid)
                 if one["thumb"]:
                     kept.append(one)
             out["media"] = kept
@@ -5888,7 +7502,7 @@ class MultiDecisionPlugin(BasePlugin):
         return out
 
     @_api("GET", "/media")
-    async def api_media(self, path: str = ""):
+    async def api_media(self, path: str = "", sid: str = ""):
         """把 session_media 里的图片原样吐出去，页面才能显示别人发的表情和图片。
 
         path 是框架写进 content 的相对路径（相对 data 目录）。
@@ -5926,7 +7540,7 @@ class MultiDecisionPlugin(BasePlugin):
             # 按索引/同名副本找一次，找到就改读副本；不能因为原路径没了就画
             # 「图片已清理」。仍然找不到才 404。
             try:
-                got = public_media(rel)
+                got = public_media(rel, sid=sid)
             except Exception as exc:
                 logger.debug("[multi-decision] 媒体副本回退失败：%s: %s", type(exc).__name__, exc)
                 got = {}
@@ -5953,10 +7567,10 @@ class MultiDecisionPlugin(BasePlugin):
                 return Response(status_code=413, content=b"")
             # 读盘放到线程里：这是 async handler，同步读大文件会把整个事件循环卡住，
             # 机器人跟着不回复（审查报告）。
-            # 用户 m08158：这里以前少了 import asyncio（别处都是局部 import），
-            # 一调用就 NameError，被下面的 except 吞成「图片读取失败」，
-            # 页面上每张图都显示「图片已清理」。
-            import asyncio
+            # 用户 m08158：这里以前少了 import asyncio，一调用就 NameError，
+            # 被下面的 except 吞成「图片读取失败」，页面上每张图都显示「图片已清理」。
+            # v4.88：局部 import 全删了，统一用模块顶部那一个（局部 import 会让
+            # asyncio 变成整个函数的局部名，条件分支没走到时后面就 UnboundLocalError）。
 
             blob = await asyncio.to_thread(target.read_bytes)
         except Exception as exc:
@@ -6000,7 +7614,6 @@ class MultiDecisionPlugin(BasePlugin):
         blob = None
         try:
             if target.is_file() and target.stat().st_size > 0:
-                import asyncio
 
                 blob = await asyncio.to_thread(target.read_bytes)
         except Exception:
@@ -6030,7 +7643,6 @@ class MultiDecisionPlugin(BasePlugin):
                 return data
 
             try:
-                import asyncio
 
                 blob = await asyncio.to_thread(_grab)
             except Exception as exc:

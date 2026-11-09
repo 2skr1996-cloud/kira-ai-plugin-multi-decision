@@ -118,6 +118,84 @@
     "default": "allow",
     "hint": "allow = 照常回复，block = 这轮不回。"
   },
+  "jev_enabled": {
+    "name": "JEV 决策",
+    "type": "switch",
+    "default": false,
+    "hint": "使用接入的专用决策模型（如 Jev）判断是否回复。与「决策模式」只能开一个。"
+  },
+  "jev_model": {
+    "name": "JEV 决策模型",
+    "type": "string",
+    "default": "",
+    "hint": "只列启用提供商里的 decision 类模型；框架没有默认 decision 模型，必须自己选。"
+  },
+  "jev_fallback_model": {
+    "name": "JEV 备用模型",
+    "type": "string",
+    "default": "",
+    "hint": "主模型连续失败后切它；留空 = 不切。它同样必须是 decision 类模型。"
+  },
+  "jev_lower": {
+    "name": "不确定区间下限",
+    "type": "integer",
+    "default": 25,
+    "hint": "设置页用下拉选，默认 25。回复概率低于它 = 不回复，要小于等于上限。"
+  },
+  "jev_upper": {
+    "name": "不确定区间上限",
+    "type": "integer",
+    "default": 75,
+    "hint": "设置页用下拉选，默认 75。回复概率高于它 = 回复；落在上下限之间（含两端）算不确定，按「不确定时」处理。"
+  },
+  "jev_action": {
+    "name": "不确定时",
+    "type": "string",
+    "default": "no_reply",
+    "hint": "reply = 回复，no_reply = 不回复，decision = 交给决策模型（会多一次普通决策调用）。"
+  },
+  "jev_see_images": {
+    "name": "JEV 决策看图",
+    "type": "switch",
+    "default": true,
+    "hint": "JEV 自己只看文字（decision 类模型收不了图）；打开这个，JEV 判成「不确定 → 交给决策模型」时那次普通决策会带上图。"
+  },
+  "jev_persona": {
+    "name": "JEV 人格",
+    "type": "string",
+    "default": "",
+    "hint": "留空 = 跟决策用同一个人格。"
+  },
+  "jev_backend": {
+    "name": "JEV 接口来源（旧配置）",
+    "type": "string",
+    "default": "framework",
+    "hint": "现在走哪条路由模型下拉决定；这个键只在老配置没有 jev_apis、模型键为空时兜底。framework = 宿主 decision 类模型，custom = 第 1 页自定义接口。"
+  },
+  "jev_api_base": {
+    "name": "自定义接口地址（第 1 页 / 旧配置）",
+    "type": "string",
+    "default": "",
+    "hint": "现在每页地址存在 jev_apis；这个键只在 jev_apis 为空时作为第 1 页来源。只填到站点的 api 前缀，插件按协议自己补路径。必须 https，不能带账号密码、查询参数，不能指向本机或内网。"
+  },
+  "jev_api_model": {
+    "name": "自定义接口模型名（第 1 页 / 旧配置）",
+    "type": "string",
+    "default": "jev-latest",
+    "hint": "现在每页模型名存在 jev_apis；这个键只在 jev_apis 为空时作为第 1 页来源。第三方接口要求的 model 字段。"
+  },
+  "jev_api_protocol": {
+    "name": "自定义接口协议（第 1 页 / 旧配置）",
+    "type": "string",
+    "default": "systemone",
+    "hint": "现在每页协议存在 jev_apis，新页默认 systemone；这个键只在 jev_apis 为空时作为第 1 页来源。systemone 打 /v1/systemone，openai 打 /chat/completions。"
+  },
+  "jev_apis": {
+    "name": "自定义接口（多页）",
+    "type": "string",
+    "default": "",
+    "hint": "设置页「自定义第三方接口」里那几页的协议、地址、模型名，按 JSON 存；平时在页面上加页/改页，不用手改这里。密钥另外存，不在这。"
+  },
   "adaptive_step": {
     "name": "每轮最多调几个点",
     "type": "integer",
@@ -404,6 +482,25 @@
     "default": true,
     "hint": "等距抽最多 9 帧拼成一张九宫格，后面跟一句说明（第几张是从哪抽的）。默认这档，体积和内容最平衡。"
   },
+  "forward_mode": {
+    "name": "转发消息处理",
+    "type": "enum",
+    "options": ["off", "text", "on_demand"],
+    "default": "on_demand",
+    "hint": "默认按需查看：只挂前 3 张图，模型需要时自己调工具看完整内容。"
+  },
+  "forward_images_all": {
+    "name": "转发图片全部请求",
+    "type": "switch",
+    "default": false,
+    "hint": "打开后转发里的图全部发给模型。一条几十张的转发可能让请求涨到十几 MB，只在确实需要时开。"
+  },
+  "forward_drop_gif": {
+    "name": "转发里的动图一律不发",
+    "type": "switch",
+    "default": true,
+    "hint": "转发里的动图（表情包居多）完全不发给模型，正文留 [图片] 占位；静态图照常。实时窗照旧显示原图。"
+  },
   "window_trim_threshold": {
     "name": "裁切触发阈值",
     "type": "integer",
@@ -446,6 +543,24 @@
     "default": 200,
     "hint": "每个私聊最多留多少张图，超了从最旧的删。"
   },
+  "media_other_limit": {
+    "name": "其他图片上限（每个群组）",
+    "type": "integer",
+    "default": 40,
+    "hint": "推文卡片等不属于聊天图片的图，每个群组各自留多少张；0 = 不限。"
+  },
+  "media_other_limit_dm": {
+    "name": "其他图片上限（私聊）",
+    "type": "integer",
+    "default": 40,
+    "hint": "推文卡片等不属于聊天图片的图，每个私聊留多少张；0 = 不限。"
+  },
+  "media_other_keep_days": {
+    "name": "其他图片保留天数",
+    "type": "integer",
+    "default": 30,
+    "hint": "推文卡片等不属于聊天图片的图保留多少天，超期从最旧的删；0 = 不限。"
+  },
   "media_cache_keep_days": {
     "name": "缓存保留天数",
     "type": "integer",
@@ -483,40 +598,52 @@
     "hint": "这一行同时管管理员的名字与 QQ 号：第一行填名字，第二行填 QQ 号，可以加多位。"
   },
   "trace_keep": {
-    "name": "回复快照上限（群聊）",
+    "name": "回复记录显示条数（群聊）",
     "type": "integer",
     "default": 100,
-    "hint": "每个群最多留多少份回复快照，一份带一次回复的完整轨迹。"
+    "hint": "回复记录页最多列多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
   },
   "trace_keep_dm": {
-    "name": "回复快照上限（私聊）",
+    "name": "回复记录显示条数（私聊）",
     "type": "integer",
-    "default": 50,
-    "hint": "每个私聊最多留多少份回复快照。"
+    "default": 100,
+    "hint": "私聊的回复记录页最多列多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
   },
   "requests_keep_days": {
     "name": "快照保留天数",
     "type": "integer",
     "default": 56,
-    "hint": "超过这么多天的回复快照和决策快照自动删掉，0 = 不限。"
+    "hint": "超过这么多天的窗口快照自动删掉，0 = 不限。"
   },
   "decision_keep": {
-    "name": "决策快照上限（群聊）",
+    "name": "决策记录显示条数（群聊）",
     "type": "integer",
     "default": 100,
-    "hint": "每个群最多留多少份决策快照，一份是决策模型这一轮读到的全部内容和它的判断。"
+    "hint": "决策记录页最多列多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
   },
   "decision_keep_dm": {
-    "name": "决策快照上限（私聊）",
+    "name": "决策记录显示条数（私聊）",
     "type": "integer",
-    "default": 50,
-    "hint": "每个私聊最多留多少份决策快照。"
+    "default": 100,
+    "hint": "私聊的决策记录页最多列多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
   },
   "decisions_keep_days": {
     "name": "消息日志保留天数",
     "type": "integer",
     "default": 56,
     "hint": "最少 56 天，只能调高——自适应要用这段时间的数据。全局按整天文件清理，这一栏就是那条硬上限：给某个群/私聊设得更长，也不会超过全局天数。"
+  },
+  "window_show": {
+    "name": "窗口快照显示条数（群聊）",
+    "type": "integer",
+    "default": 200,
+    "hint": "走势图和快照列表最多画多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
+  },
+  "window_show_dm": {
+    "name": "窗口快照显示条数（私聊）",
+    "type": "integer",
+    "default": 200,
+    "hint": "私聊的走势图和快照列表最多画多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
   },
   "windows_keep_days": {
     "name": "窗口快照保留天数",
@@ -528,30 +655,30 @@
     "name": "窗口快照上限（群聊）",
     "type": "integer",
     "default": 300,
-    "hint": "每个群最多留多少份窗口快照（回复轮和决策轮各记一份），0 = 不限。"
+    "hint": "每个群最多留多少份窗口快照——回复轮、决策轮、裁切那一刻各存一份，都算在这里，0 = 不限。"
   },
   "windows_keep_dm": {
     "name": "窗口快照上限（私聊）",
     "type": "integer",
     "default": 60,
-    "hint": "每个私聊最多留多少份窗口快照，0 = 不限。"
+    "hint": "每个私聊最多留多少份窗口快照，回复轮、决策轮、裁切那一刻各存一份，都算在这里，0 = 不限。"
   },
   "summaries_keep": {
     "name": "中期摘要上限（群聊）",
     "type": "integer",
-    "default": 0,
+    "default": 150,
     "hint": "最多留多少个群的摘要，0 = 不限。"
   },
   "summaries_keep_dm": {
     "name": "中期摘要上限（私聊）",
     "type": "integer",
-    "default": 0,
+    "default": 50,
     "hint": "最多留多少个私聊的摘要，0 = 不限。"
   },
   "summaries_keep_days": {
     "name": "中期摘要保留天数",
     "type": "integer",
-    "default": 56,
+    "default": 30,
     "hint": "摘要留多久自动删，0 = 不限。"
   },
   "stats_keep_days": {
@@ -559,6 +686,60 @@
     "type": "integer",
     "default": 56,
     "hint": "最少 56 天，只能调高——自适应要用这段时间的数据。"
+  },
+  "forward_media_keep": {
+    "name": "转发图片上限（群聊）",
+    "type": "integer",
+    "default": 120,
+    "hint": "每个群最多保留多少条转发图片记录，默认 120；0 = 不限。"
+  },
+  "forward_media_keep_dm": {
+    "name": "转发图片上限（私聊）",
+    "type": "integer",
+    "default": 30,
+    "hint": "每个私聊最多保留多少条转发图片记录，默认 30；0 = 不限。"
+  },
+  "forward_media_keep_days": {
+    "name": "转发图片保留天数",
+    "type": "integer",
+    "default": 30,
+    "hint": "超过这么多天的转发图片记录自动删掉，0 = 不限。"
+  },
+  "forward_proof_keep": {
+    "name": "转发原图记录上限（群聊）",
+    "type": "integer",
+    "default": 80,
+    "hint": "每个群最多保留多少条「图片来自哪条消息」的记录，默认 80；0 = 不限。"
+  },
+  "forward_proof_keep_dm": {
+    "name": "转发原图记录上限（私聊）",
+    "type": "integer",
+    "default": 20,
+    "hint": "每个私聊最多保留多少条「图片来自哪条消息」的记录，默认 20；0 = 不限。"
+  },
+  "forward_proof_keep_days": {
+    "name": "转发原图记录保留天数",
+    "type": "integer",
+    "default": 30,
+    "hint": "超过这么多天的转发原图记录自动删掉，0 = 不限。"
+  },
+  "retry_keep": {
+    "name": "自动重试记录上限（群聊）",
+    "type": "integer",
+    "default": 120,
+    "hint": "每个群最多保留多少条自动重试记录，默认 120；正在重试的不会被删，0 = 不限。"
+  },
+  "retry_keep_dm": {
+    "name": "自动重试记录上限（私聊）",
+    "type": "integer",
+    "default": 30,
+    "hint": "每个私聊最多保留多少条自动重试记录，默认 30；正在重试的不会被删，0 = 不限。"
+  },
+  "retry_keep_days": {
+    "name": "自动重试记录保留天数",
+    "type": "integer",
+    "default": 30,
+    "hint": "超过这么多天的自动重试记录自动删掉；正在重试的不会被删，0 = 不限。"
   },
   "retry_max": {
     "name": "自动重试次数",
