@@ -293,12 +293,13 @@ html[data-theme="dark"] .scard.on{background:rgba(96,165,250,.16);}
 /* v3.15：三列时每列约 430px，行内控件收窄，说明用省略号兜住 */
 /* v3.42（用户 m03616 第 3 条）：第三列不再写死 96px —— 改成按内容宽，行高统一 38px、
    控件统一 32px 高。开关行和数字框行的右边缘仍然对齐成一条竖线，也不会有的行下面空一截。 */
-.setgrp[data-split="3"] .setrow.inline{grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px;padding:7px 12px;min-height:38px;align-items:center;}
+.setgrp[data-split="3"] .setrow.inline{grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px;padding:2px 12px;min-height:38px;align-items:center;}
 .setgrp[data-split="3"] .setrow.inline .ctl > input[type=text],
 .setgrp[data-split="3"] .setrow.inline .ctl > select{width:108px;min-width:0;height:var(--ipt-h);padding:4px 10px;font-size:var(--ipt-fs);}
 /* v3.17（用户 m40932）：一列里可以放两组（基础页左列 = 身份 + 重试）。
-   组与组之间拉开距离并用一条细线分开，看起来仍是同一栏的两个小节。 */
-.setgrp[data-split] .col .sub + .sub{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);}
+   组与组之间拉开距离，看起来仍是同一栏的两个小节。
+   用户 m17928：中间那条细线去掉——只留间距，不再画分隔线。 */
+.setgrp[data-split] .col .sub + .sub{margin-top:10px;padding-top:8px;}
 .setgrp[data-split] .col .sub[data-compact="1"] .setrow{padding:7px 14px;}
 /* v3.43：数字框不再按分栏改宽度（原来两列 200px、三列 108px、参数行 78px 三套数），
    统一尺寸见文件上面 :root 里的 --ipt-w / .ipt 那一段。 */
@@ -320,7 +321,7 @@ html[data-theme="dark"] .scard.on{background:rgba(96,165,250,.16);}
 .setgrp[data-page="basic"][data-split="2"] .setrow{padding:4px 8px;border-radius:8px;
   border-bottom-color:rgba(16, 24, 40, .07);}
 .setgrp[data-page="basic"][data-split="2"] .setrow:hover{background:var(--soft);}
-.setgrp[data-page="basic"][data-split="2"] .setrow.inline{padding:4px 8px;column-gap:12px;}
+.setgrp[data-page="basic"][data-split="2"] .setrow.inline{padding:2px 8px;column-gap:12px;}
 .setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl > input[type=text]{height:32px;padding:4px 11px;}
 /* v3.45（用户 m05552 第 4 条）：基础页控件统一——右列固定 200px，
    文本框与下拉框占满这一列、数字框统一 96px，三者同为 32px 高、右边缘对齐；
@@ -331,7 +332,8 @@ html[data-theme="dark"] .scard.on{background:rgba(96,165,250,.16);}
 .setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl > input[type=text],
 .setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl > select{width:100%;height:32px;box-sizing:border-box;}
 /* 行高统一到 34px，左右两列的每一行在同一条水平线上（右列开关行也照样居中） */
-.setgrp[data-page="basic"][data-split="2"] .setrow.inline{min-height:34px;align-items:center;}
+/* 用户 m18041：行高统一到 36px（原来 34 只是下限，32px 输入框 + 4px 内边距实际撑到 41）。 */
+.setgrp[data-page="basic"][data-split="2"] .setrow.inline{min-height:38px;align-items:center;}
 /* v3.61（用户 m17581 第 11 条）：基础页控件列统一 200px 并贴右。
    之前 .ctl 一会被 :294 拉满、一会又被 .setrow.inline .ctl{width:auto} 拉回 auto，
    同一列里昵称框 183、外号胶囊 103、数字框 96 三种宽度，右列「唤醒」那三行的开关
@@ -352,8 +354,7 @@ html[data-theme="dark"] .scard.on{background:rgba(96,165,250,.16);}
 .setgrp[data-page="basic"][data-split="2"] .setrow.inline .nm{font-size:13px;line-height:1.45;}
 .setgrp[data-page="basic"][data-split="2"] .chips{padding:0;}
 .setgrp[data-page="basic"][data-split="2"] .chip{padding:2px 10px;}
-.setgrp[data-page="basic"][data-split="2"] .col .sub + .sub{margin-top:10px;padding-top:10px;
-  border-top:1px dashed var(--line);}
+.setgrp[data-page="basic"][data-split="2"] .col .sub + .sub{margin-top:8px;padding-top:6px;}
 .setgrp[data-page="basic"][data-split="2"] .sub .rows [data-row]:last-child{border-bottom:none;}
 .setgrp[data-page="basic"][data-split="2"] .col > .sub{flex:0 0 auto;min-width:0;display:flex;flex-direction:column;}
 /* 用户 m05828 第 5 条：右列现在是两块（主要开关 + 唤醒），不再整列铺满。
@@ -361,7 +362,7 @@ html[data-theme="dark"] .scard.on{background:rgba(96,165,250,.16);}
    只有一行的「主要开关」撑成半屏高、那一行悬在中间，上下各留一大块白。改成按内容排。 */
 .setgrp[data-page="basic"][data-split="2"] .col[data-col="right"] > .sub{flex:0 0 auto;}
 .setgrp[data-page="basic"][data-split="2"] .col[data-col="right"] .rows{display:block;}
-.setgrp[data-page="basic"][data-split="2"] .col[data-col="right"] .setrow{padding:8px 8px;}
+.setgrp[data-page="basic"][data-split="2"] .col[data-col="right"] .setrow{padding:2px 8px;}
 html[data-theme="dark"] .setgrp[data-page="basic"][data-split="2"] .col{background:rgba(255,255,255,.05);
   border-color:rgba(255,255,255,.11);box-shadow:none;}
 html[data-theme="dark"] .setgrp[data-page="basic"][data-split="2"] .setrow{border-bottom-color:rgba(255,255,255,.075);}
@@ -388,7 +389,7 @@ html[data-theme="dark"] .setgrp[data-page="basic"][data-split="2"] .setrow:hover
    名称与控件不让位。休息时段是「开关 + 两个下拉」的合并行，说明仍单独占一条
    （见下面 .restpair 那条），否则两个下拉和说明挤不进一行。
    v3.42（用户 m03616 第 3 条）：控件列改成按内容宽 + 行高 38px，跟同列其它行齐平。 */
-.setgrp[data-split="3"] .setrow.inline:not(.restpair){grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px;padding:7px 0;min-height:38px;align-items:center;}
+.setgrp[data-split="3"] .setrow.inline:not(.restpair){grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px;padding:2px 0;min-height:38px;align-items:center;}
 .setgrp[data-split="3"] .setrow.inline:not(.restpair) .nm{grid-column:1;grid-row:1;white-space:nowrap;line-height:1.45;}
 .setgrp[data-split="3"] .setrow.inline:not(.restpair) .ds{grid-column:2;grid-row:1;font-size:12px;line-height:1.5;}
 .setgrp[data-split="3"] .setrow.inline:not(.restpair) .ctl{grid-column:3;grid-row:1;}
@@ -423,7 +424,7 @@ html[data-theme="dark"] .setgrp[data-split="3"] .col.off{background:rgba(255,255
 .setgrp[data-split="3"] .setrow.inline.restpair{grid-template-columns:auto minmax(0,1fr) auto;
   /* 左右内边距归零：同列的其它行是 padding:7px 0（见上面 :not(.restpair) 那条），
      这行原来吃的是通用规则的 12px，右边的「08:00」比上下两行的开关/数字框缩进 12px，对不齐。 */
-  column-gap:10px;padding:7px 0;align-items:center;}
+  column-gap:10px;padding:2px 0;align-items:center;}
 .setgrp[data-split="3"] .setrow.inline.restpair .nm{grid-column:1;grid-row:1;white-space:nowrap;line-height:1.45;}
 .setgrp[data-split="3"] .setrow.inline.restpair .ds{grid-column:2;grid-row:1;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis;font-size:12px;line-height:1.5;}
@@ -443,7 +444,7 @@ html[data-theme="dark"] .setgrp[data-split="3"] .col.off{background:rgba(255,255
 /* v3.44（用户 m04471 第 5 条）：开关 + 数字框并成一行的通用行（抖动 / 连发合并 / 两处闲时兜底）。
    排列跟普通模式的参数行一致：名称 + 说明在左，数字框与开关在右，开关永远最右。 */
 .setgrp[data-split="3"] .setrow.inline.pairrow{grid-template-columns:auto minmax(0,1fr) auto;
-  column-gap:10px;padding:7px 0;align-items:center;}
+  column-gap:10px;padding:2px 0;align-items:center;}
 .setgrp[data-split="3"] .setrow.inline.pairrow .nm{grid-column:1;grid-row:1;white-space:nowrap;line-height:1.45;}
 .setgrp[data-split="3"] .setrow.inline.pairrow .ds{grid-column:2;grid-row:1;font-size:12px;line-height:1.5;}
 .setgrp[data-split="3"] .setrow.inline.pairrow .ctl{grid-column:3;grid-row:1;}
@@ -534,7 +535,9 @@ html[data-theme="dark"] .setgrp[data-split="band"] .col.off{background:rgba(255,
   background:var(--accent);opacity:.6;}
 .setgrp:not([data-split]) > h3::after{content:"";flex:1 1 auto;height:1px;
   background:linear-gradient(90deg,var(--line),transparent);}
-.setgrp:not([data-split]) .setrow{padding:7px 10px;border-radius:8px;border-bottom-color:rgba(16,24,40,.07);}
+/* 用户 m18041：单列页（窗口设置）行高跟分栏页对齐到 38px，内边距 7→2。 */
+.setgrp:not([data-split]) .setrow{padding:2px 10px;border-radius:8px;border-bottom-color:rgba(16,24,40,.07);}
+.setgrp:not([data-split]) .setrow.inline{min-height:38px;align-items:center;}
 .setgrp:not([data-split]) .setrow:hover{background:var(--soft);}
 .setgrp:not([data-split]) .rows [data-row]:last-child{border-bottom:none;}
 html[data-theme="dark"] .setgrp:not([data-split]){background:rgba(255,255,255,.05);
@@ -925,8 +928,7 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   /* v3.71（用户第 7 条）：动态调整那几项平铺在曲线说明下面一行，字号 / 颜色跟 .bd-note 同款 */
   /* v3.72（用户第 7 条）：这一行要能一行塞下——框压到 52px、数字靠右、单位放进框内右侧、
      行距收紧；开关关着的项压暗（.dimv） */
-  .bd-adaptive{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;margin-top:8px;padding-top:7px;
-    border-top:1px dashed var(--line);}
+  .bd-adaptive{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;margin-top:8px;padding-top:7px;}
   .bd-adaptive.dim{opacity:.5;pointer-events:none;}
   .bd-adaptive .ad-item{display:flex;align-items:center;gap:4px;white-space:nowrap;font-size:12.5px;color:var(--muted);}
   .bd-adaptive .ad-lb{font-size:12.5px;color:var(--muted);}
@@ -1072,12 +1074,12 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .ptable th:first-child,.ptable td:first-child{text-align:left;}
   .ptable input[type=number]{text-align:center;}
   /* 用户 m00153：一行固定两行高——单价普通/高峰两行、时段固定两段两行；
-     高峰价与周末谷价各占一列，时段仍在最右，九列。 */
+     高峰价与周末谷价各占一列，时段仍在最右；缓存命中率后面是「费用」，共十一列。 */
   .pricing{overflow-x:visible;min-width:0;}
   .ptable,.ptable thead,.ptable tbody{display:block;width:100%;}
   .ptable tr{display:grid;grid-template-columns:
       minmax(150px,1.45fr) repeat(3,minmax(84px,.9fr)) minmax(84px,.8fr) minmax(92px,.88fr)
-      minmax(72px,.62fr) minmax(56px,.44fr) minmax(64px,.5fr) minmax(196px,.95fr);align-items:center;}
+      minmax(72px,.62fr) minmax(64px,.56fr) minmax(56px,.44fr) minmax(64px,.5fr) minmax(196px,.95fr);align-items:center;}
   /* 用户 m00669：格子各自的下边框会跟着格子高度错位，看起来像断开的灰线——统一去掉，行分隔交给 tr。 */
   .ptable th,.ptable td{min-width:0;padding:7px 5px;border-top:0;border-bottom:0;}
   .ptable tbody tr{border-top:1px solid var(--line);}
@@ -1106,6 +1108,11 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .ptable .pt .pl{color:var(--muted);}
   .ptable .ph{font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums;}
   .ptable .ph .pdim{color:var(--muted);font-weight:400;}
+  /* 用户本轮：第 8 列「费用」——当前区间这一行花了多少钱；数字写法与顶部总计同一套（数字 + 小号单位）。 */
+  .ptable .pcostc{font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap;}
+  .ptable .pcostc .pcf-u{font-size:10.5px;font-weight:400;color:var(--muted);margin-left:1px;}
+  .ptable .pcostc .pcf-e{font-size:10.5px;font-weight:400;color:var(--muted);margin-right:1px;}
+  .ptable .pcostc .pdim{color:var(--muted);font-weight:400;}
   /* 用户 m00153：两个开关各占一列，单元格里只放勾选框，含义由列头说明。 */
   .ptable .psw{text-align:center;}
   .ptable .psw input[type=checkbox]{width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--accent);}
@@ -1116,7 +1123,7 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
     /* 中等窗口先撤统计两列，保证单价与时段不被挤扁。 */
   @media(max-width:1240px) and (min-width:621px){
     .ptable tr{grid-template-columns:minmax(132px,1.35fr) repeat(3,minmax(80px,.9fr))
-      minmax(68px,.6fr) minmax(52px,.44fr) minmax(60px,.5fr) minmax(188px,.95fr);}
+      minmax(68px,.6fr) minmax(64px,.56fr) minmax(52px,.44fr) minmax(60px,.5fr) minmax(188px,.95fr);}
     .ptable tr>:nth-child(5),.ptable tr>:nth-child(6){display:none;}
   }
   @media(max-width:620px){
@@ -1130,10 +1137,12 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
     .ptable .pu{grid-column:1/3;text-align:left;}
     .ptable .pu small{display:inline;margin-left:6px;}
     .ptable .psw{display:flex;align-items:center;justify-content:flex-start;gap:6px;font-size:11px;color:var(--muted);}
-    .ptable .psw:nth-child(8):before{content:"高峰价";}
-    .ptable .psw:nth-child(9):before{content:"周末谷价";}
+    .ptable .psw:nth-child(9):before{content:"高峰价";}
+    .ptable .psw:nth-child(10):before{content:"周末谷价";}
     .ptable .ph{display:flex;align-items:baseline;gap:6px;justify-content:flex-start;font-weight:600;}
     .ptable .ph:before{content:"缓存命中率";color:var(--muted);font-size:11px;font-weight:400;}
+    .ptable .pcostc{display:flex;align-items:baseline;gap:4px;justify-content:flex-start;grid-column:2/4;font-weight:600;}
+    .ptable .pcostc:before{content:"费用";color:var(--muted);font-size:11px;font-weight:400;}
     .ptable .pschedule{grid-column:1/-1;}
     .pschedule .ptimes{justify-content:flex-start;}
   }
@@ -1219,33 +1228,11 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   /* 表格没覆盖到的缓存设置（后端少给一类时）补成普通行，空的时候不占位 */
   .cachebox .cextra{margin:0 0 2px;}
   .cachebox .cextra:empty{display:none;}
-  /* v4.90（用户 m01875 第 1 条）：回复 / 决策 / 窗口快照各自「页面上列多少条」单独一张
-     卡片——它们只管显示，磁盘留多少由「窗口快照上限」决定，跟左边那张缓存表不是一回事，
-     混在表格下面两行里容易被当成又一条上限。
-     v4.9x（用户本轮图1）：卡片从表格下面挪到表格右边并排，宽度是表格的一半（见 .cmain）。 */
-  .cachebox .showcard{margin:0;width:100%;min-width:0;box-sizing:border-box;
-    border:1px solid var(--line);border-radius:12px;background:var(--card);padding:10px 12px 12px;}
-  .cachebox .showcard .shd{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin:0 0 6px;}
-  .cachebox .showcard .shd b{font-size:13px;font-weight:600;}
-  .cachebox .showcard .shd span{color:var(--muted);font-size:11.5px;line-height:1.5;}
-  /* 卡片只占表格一半宽：一行放不下「名称 + 群聊框 + 私聊框」时自动折成两行，别把框挤出卡片 */
-  .cachebox .showcard .showrow{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;padding:6px 0;}
-  .cachebox .showcard .showrow + .showrow{border-top:1px dashed var(--line);}
-  .cachebox .showcard .showrow .snm{flex:1 1 auto;min-width:0;font-size:12.5px;line-height:1.35;}
-  .cachebox .showcard .showrow .snm i{display:block;color:var(--muted);font-size:11px;
-    font-style:normal;line-height:1.45;margin-top:1px;}
-  .cachebox .showcard .showrow .sf{display:inline-flex;align-items:center;gap:5px;flex:0 1 auto;
-    min-width:0;color:var(--muted);font-size:11.5px;white-space:nowrap;}
-  /* 两个框包成一组：一行放不下时整组折到第二行，不会出现「名称+群聊 / 私聊」这种半截折行 */
-  .cachebox .showcard .showrow .sfs{display:flex;align-items:center;gap:10px;flex:0 1 auto;min-width:0;}
-  .cachebox .showcard .ipt{position:relative;display:inline-flex;align-items:center;flex:0 1 64px;
-    min-width:0;}
-  .cachebox .showcard .ipt > input[type=number]{width:100%;min-width:0;height:26px;padding:0 7px;
-    border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text);
-    font-size:12.5px;text-align:right;font-variant-numeric:tabular-nums;}
-  .cachebox .showcard .ipt > input[type=number]:focus{outline:0;border-color:var(--accent);}
-  .cachebox .showcard .ipt > input[type=number]::-webkit-inner-spin-button,
-  .cachebox .showcard .ipt > input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
+  /* 用户 m17752：回复 / 决策 / 窗口快照各自「页面上列多少条」从缓存记录页右边那张卡片
+     搬到基础设置左列——它们只管显示，磁盘留多少由「窗口快照上限」决定，跟缓存占用不是一回事。
+     三行各带「群聊 / 私聊」两个数字框，200px 的固定控件列放不下，按内容撑开、仍贴右。 */
+  .setgrp[data-page="basic"][data-split="2"] .setrow.inline.showrow .ctl{width:auto;min-width:0;}
+  .setgrp[data-page="basic"][data-split="2"] .setrow.inline.showrow .ctl .ipt{width:64px;flex:0 0 64px;}
   /* 用户 m10749 第 1 条：被另一档顶掉的那个配额开关——灰着、点不动，值仍留着 */
   .setrow.dim .sw2 input:disabled ~ .tr{opacity:.5;}
   .setrow.dim .sw2 input:disabled ~ .st{opacity:.6;}
@@ -1284,8 +1271,9 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
    单独占一行，直接当行名用；.rows 只有这一行，上边距去掉，跟别的组之间的分隔线照旧。 */
 .setgrp[data-split] .col .sub.sect > .rows{grid-template-columns:1fr;margin-top:0;}
 /* v4.08：min-height 必须带上 .setrow.inline 才压得过 .setgrp[data-split="3"] .setrow.inline
-   那条 38px（特异性 0,4,0）——否则决策模式那行只有开关、会矮成 38px。 */
-.sub.sect .setrow.inline.rowline{grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px;min-height:46px;}
+   那条 38px（特异性 0,4,0）——否则决策模式那行只有开关、会矮成 38px。
+   用户 m18041：同页其它行已经压到 38px，这里跟着降到 38，整页行高一致。 */
+.sub.sect .setrow.inline.rowline{grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px;min-height:38px;}
 .sub.sect .rowline #pseudo-nm{display:none;}
 /* v4.08（用户 m16927 第 1 条）：这两行原来是「13px/600 小标题 + 状态词」，跟上面的普通行
    （14.5px 常规字 + 默认角标）不是一个格式，用户要「统一」。名字现在走普通行那套：.gt 那层
@@ -1297,19 +1285,19 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
 /* v4.36（用户 m02314）：说明和胶囊都压短后，这一行又回到一行装下；折行只是窄屏兜底。 */
 .setrow.inline .ds.dsw{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;overflow:visible;white-space:normal;}
 .setrow.inline .ds.dsw .dtxt{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.setrow .warnpill{display:inline-flex;align-items:center;flex:0 0 auto;padding:2px 9px;
+.warnpill{display:inline-flex;align-items:center;flex:0 0 auto;padding:2px 9px;
   border-radius:7px;font-size:11.5px;line-height:1.55;white-space:nowrap;
   color:#b45309;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.38);}
-html[data-theme="dark"] .setrow .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
+html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
   border-color:rgba(251,191,36,.35);}
-  /* v3.93（用户 m07570 图1）：分栏里的小标题（高级设置）。一条虚线把它上面那几组
-     和老组分开，字比组名小一号、颜色压一档，看起来是「节」不是「组」。 */
+.setgrp h3 .warnpill{margin-left:8px;}
+  /* v3.93（用户 m07570 图1）：分栏里的小标题（高级设置），字比组名小一号、颜色压一档，
+     看起来是「节」不是「组」。用户 m17928：上面那条虚线去掉，只靠间距分开。 */
   /* v4.09（用户 m17145 第 1 条）：sect 块现在自己带行（节奏 / 决策两行并进来了），
      间距与标题回到普通小节那一套——以前它只有一行标题，才需要把边距压小。 */
-  .sub.sect{margin-top:14px;padding-top:12px;border-top:1px dashed var(--line);}
-  /* 用户 m01961：「进阶模式」这一节排在右列最上面，上面没有内容时那条虚线会悬在列顶，
-     看着像一条多出来的线——列里的第一节不画它。 */
-  .split2 > .col > .sub.sect:first-child{border-top:0;padding-top:0;margin-top:0;}
+  .sub.sect{margin-top:10px;padding-top:8px;}
+  /* 用户 m01961：列里的第一节不额外留白。 */
+  .split2 > .col > .sub.sect:first-child{padding-top:0;margin-top:0;}
 /* v3.92（用户 m06951 第 5~7 条）：提示词页——左设置、右预览，右栏吸顶。
    v4.10（本轮美化）：整页收紧。基线这条 .pp-tabs 保留（测试拿它当锚点），紧跟着覆盖成分段控件：
    两个 54px 蓝块 → 一条 34px 的胶囊条，标题与副标题同行。 */
@@ -1478,11 +1466,16 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
 .pp-prev .dpre.tall{flex:1 1 auto;min-height:150px;max-height:none;}
 .pp-prev .psegbox{flex:0 0 auto;}
 /* v4.85（用户 m10425 第 2 条）：左边「编辑方式」那排改成和右边「完整系统提示词」一样的卡头——
-   一样的内边距、一样的标题字号、一样的下边框，两栏不再一个像表单、一个像卡头。 */
-.pp-left .pm-editor>.pm-toolbar{position:sticky;top:0;z-index:3;background:var(--card);
-  margin:-10px -12px 8px;padding:8px 12px;border-bottom:1px solid var(--line);}
+   一样的内边距、一样的标题字号、一样的下边框，两栏不再一个像表单、一个像卡头。
+   m07137：再把高度、底色、按钮样式也对齐：控件 22px、底色跟卡片一致、按钮无边框。 */
+.pp-left .pm-editor>.pm-toolbar{position:sticky;top:0;z-index:3;background:var(--bg);
+  margin:-10px -12px 0;padding:8px 12px;border-bottom:1px solid var(--line);}
 .pp-left .pm-editor>.pm-toolbar .pm-tb-h{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;
   margin:0;display:flex;align-items:center;}
+.pp-left .pm-editor>.pm-toolbar .dipt{height:22px;font-size:11.5px;}
+.pp-left .pm-editor>.pm-toolbar .dmini{height:22px;padding:0 7px;font-size:11px;
+  border-color:transparent;background:transparent;}
+.pp-left .pm-editor>.pm-toolbar .dmini:hover{border-color:var(--line);background:var(--card);color:var(--accent);}
 @media (max-width:640px){.pm-module-head{flex-wrap:wrap;}.pm-meta{padding-left:8px;}.pm-body{padding-left:8px;}}
 /* m01209：三个页签、模板卡片页、动态尾段分隔条、身份只读标记；顺手把整页再收紧一点。 */
 .pp-tab{padding:0 12px;height:30px;}
@@ -1766,7 +1759,7 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     .pm-module-head .pm-src{min-width:0;}
   }
   @media (min-width:621px) and (max-width:1023px){
-    .ptable{min-width:740px;}
+    .ptable{min-width:810px;}
   }
   /* ---- 手机竖屏（≤640）：设置行 / 数据行改成上下堆叠，控件占满整行 ---- */
   @media (max-width:640px){
@@ -1932,7 +1925,16 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
       keys: ["bot_name", "nicknames"], custom: "admins" },
     // v3.45（用户 m05552 第 4 条）：看门狗超时也进「重试」组，放第一条——它管的是「多久
     // 没等到结算就当这轮失败」，是重试链的起点；写死 180 秒时卡一次要等到 3 分钟才重试。
+    // 用户 m07859：重试 / 重试间隔 / 单次超时只留这一份，决策链和回复链都读它，
+    // 提示词页那两张卡里不再各留一份。
     { p: "basic", t: "重试", split: 2, col: "left", keys: ["watchdog_seconds", "retry_max", "retry_delay"] },
+    // 用户 m17752：缓存记录页右边那张「页面显示条数」卡片搬到这儿，跟在「重试」下面——
+    // 它管的是页面上列多少条，跟缓存占用不是一回事，摆在缓存页反而像又一条上限。
+    // 左列「身份 + 重试」本来就只占上半屏，放这儿正好把空填上。
+    { p: "basic", t: "页面显示条数", split: 2, col: "left", custom: "show",
+      note: "只影响页面上列多少条，磁盘上留多少份由「窗口快照上限」决定",
+      keys: ["trace_keep", "trace_keep_dm", "decision_keep", "decision_keep_dm",
+             "window_show", "window_show_dm"] },
     // v3.30（用户 m47796 第 4 条）：@ 拆成一行两个开关——「艾特触发」可点，
     // 用户 m00347：必回三个开关正式启用（不再灰着）——触发＝叫到算一次触发，
     // 必回＝跳过模型判断直接回。
@@ -2037,7 +2039,10 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     // 用户 m01961：左边那行「决策模式」搬到右边来，右边补一条「进阶模式」小标题——
     // 退避模式本来就排在进阶模式那一列下面（v3.53），这次把标题补回去。
     // 标题与这一行同处一个 .sub（v4.09 的 sect 合并），不会多出两层虚线内边距。
-    { p: "trigger", t: "进阶模式", col: "dev", split: 3, sect: 1 },
+    { p: "trigger", t: "进阶模式", col: "dev", split: 3, sect: 1,
+      // 用户 m18050：原来两行行尾各挂一枚「多一次调用，「提示词」页设置」胶囊，重复又占宽；
+      // 现在整句搬到这个小节标题右侧，逗号去掉。
+      warn: "多一次调用「提示词」页设置" },
     // v3.92（用户 m06951 第 4 条）：进阶模式改名「决策模式」，开关从提示词页搬回设置页，
     // 跟节奏模式一样「标题 + 开关」一行——这两行说的都是「这一轮怎么决定回不回」。
     // 提示词页只留人格 / 判断提示词 / 模型 / 工具那些设置（见那页顶上的两个子页签）。
@@ -2048,16 +2053,14 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
       // v4.36（用户 m02314）：说明和胶囊都压到一行装得下——「使用快速模型进行决策」+「多一次调用，「提示词」页设置」。
       // v4.67（用户 m02347）：把「使用模型」补成「使用快速模型」，默认就是快速模型，写明更直观。
       note: "使用快速模型进行决策",
-      // v4.08（用户 m16927 第 3 条）：后半句（多一次调用 / 提示词在哪）从说明里拿出来，
-      // 单独渲染成行尾的琥珀胶囊，跟「动态调整」那条 .ad-warn 一个样式。
-      warn: "多一次调用，「提示词」页设置",
+      // 用户 m18050：这句提醒已搬到「进阶模式」小节标题右侧，行尾不再重复。
       keys: ["advanced_enabled"] },
     // 用户 m06706：JEV 决策——用接入的专用决策模型（如 Jev）走 choice() 判要不要开口，
     // 不让它写正文。与上面那条「决策模式」互斥：开一个当场关另一个（saveNow 成对存），
     // 但两边各自的模型 / 提示词 / 区间都留着，来回切不用重配。
     { p: "trigger", t: "JEV 决策", col: "dev", split: 3, rowline: 1,
       note: "用专用决策模型判断是否回复",
-      warn: "多一次调用，「提示词」页设置",
+      // 用户 m18050：提醒已搬到「进阶模式」标题右侧。
       keys: ["jev_enabled"] },
     // v3.36：进阶模式还是占位块，等真做出来再补内容。
     // v3.37：节奏不再跨栏，它回到第三列（三列等宽）。
@@ -2093,7 +2096,7 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     // 两列网格是「按顺序从左到右填」：偶数位落左列、奇数位落右列，所以要隔一个插一个杂项，
     // 右列才是「历史里保留几张原图 / 保护工具调用组 / 裁切点选择方式」。
     { p: "window", t: "窗口", keys: ["window_keep", "history_images", "window_trim_threshold",
-        "protect_tool_groups", "window_buffer"] },
+        "protect_tool_groups", "window_buffer", "window_drop_tools"] },
     // v4.45（用户 m22611）：历史里的动图怎么发给模型，三档互斥、默认九帧拼图；
     // 三个都不开＝跳过（图上不来，正文只留 [图片]）。判定在后端 _gif_mode。
     { p: "window", t: "动图设置",
@@ -2517,8 +2520,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
     return h;
   }
 
-  function dnum(k, unit){
-    var v = dVal(k, "");
+  // 用户 m13442 第 4 条：新加的键在用户还没存过之前 configCache 里没有，
+  // 这时按 schema 的默认值显示，别让输入框空着（空着在单群模式下等于「跟随全局」）。
+  function dnum(k, unit, dft){
+    var v = dVal(k, dft === undefined ? "" : dft);
     return "<input class='dipt num' type='number' data-k='" + esc(k) + "' value='" + esc(v) + "'>" +
       (unit ? "<span class='dunit'>" + esc(unit) + "</span>" : "");
   }
@@ -2560,13 +2565,14 @@ var DM_SPECIAL = { trigger_probability: 1 };
         row("备用模型", "<select class='dipt' data-k='decision_fallback_model' id='dec-fb'>" +
           dModelOpts(String(dVal("decision_fallback_model", "")), "不设备用") + "</select>",
           "主模型连续失败到「连续失败切换」那个次数，才切到它。") +
-        row("重试", dnum("decision_retry", "次"), "同一个模型失败后最多再试几次。") +
-        // v4.85（用户 m10425 第 7 条）：连续失败切换挪到重试间隔前面。
-        row("连续失败切换", dnum("decision_fail_switch", "次"), "连着几轮决策失败，就把主模型换成备用。") +
-        row("重试间隔", dnum("decision_retry_delay", "秒"), "两次重试之间等多久。") +
-        row("切回主模型等待", dnum("decision_fallback_cooldown", "秒"), "用备用模型撑过这段时间，再试回主模型。") +
-        row("单次超时", dnum("decision_timeout", "秒"), "一次决策最多等多久，超时按失败算。") +
-        row("工具最多几轮", dnum("decision_tool_rounds", "轮"), "决策时允许连着调几次工具。") +
+        // 用户 m08678：决策页保留自己的一套，默认值与回复一致，可各自调整。
+        row("连续失败切换", dnum("decision_fail_switch", "次", 2), "连着几轮失败，就把主模型换成备用。") +
+        row("切回主模型等待", dnum("decision_fallback_cooldown", "秒", 300), "用备用模型撑过这段时间，再试回主模型。") +
+        row("最大代理循环次数", dnum("decision_tool_loop", "轮", 5), "最多调用几轮工具，最后判断那一轮不算。") +
+        row("单轮工具调用上限", dnum("decision_tool_calls_per_turn", "个", 5), "一轮里最多调几个工具，多出来的不执行。") +
+        row("工具调用超时", dnum("decision_tool_timeout", "秒", 180), "单个工具最多等多久，0 = 不限制。") +
+        row("工具输出上限", dnum("decision_tool_output_tokens", "token", 10000), "工具结果最多留多少，超了保留首尾，0 = 不限制。") +
+        // 用户 m07859：重试 / 重试间隔 / 单次超时不再各留一份，统一在「基础设置 · 重试」里改。
       "</div><div class='drows cols2'>" +
         row("决策失败时", "<select class='dipt' data-k='decision_fail_action' id='dec-fail'>" +
           "<option value='allow'" + (act === "allow" ? " selected" : "") + ">跳过决策调用回复</option>" +
@@ -2576,6 +2582,38 @@ var DM_SPECIAL = { trigger_probability: 1 };
           (dVal("decision_see_images", true) ? " checked" : "") +
           "><span class='tr'></span>" + ST_SW + "</label>",
           "决策模型也看一眼这一轮消息里的图。它本身得是能看图的模型；万一上游不认图，会自动退回纯文字再判一次。") +
+      "</div></div>";
+  }
+
+  // 用户 m13442 第 4 条：框架「代理设置」里那四项改由插件接管，回复这边单独一张卡，
+  // 跟决策那张各存各的——决策调工具和回复调工具本来就不是一回事。
+  // 用户 m06995 第 2 项：回复这条链也补齐模型与看图，跟决策卡一一对应，
+  // 只少「决策失败时」——回复没有「跳过决策」这回事。
+  function replyToolBlockHtml(){
+    function row(label, ctl, hint){
+      return "<div class='drow'><label class='dlb' title='" + esc(hint) + "'>" + esc(label) +
+        "<i class='di' title='" + esc(hint) + "'>i</i></label>" + ctl + "</div>";
+    }
+    return "<div class='dcard'>" +
+      "<div class='drows cols2'>" +
+        row("回复模型", "<select class='dipt' data-k='reply_model' id='rep-model'>" +
+          dModelOpts(String(dVal("reply_model", "")), "跟随默认模型") + "</select>",
+          "真正写回复的那个模型。留空 = 用框架的默认模型。") +
+        row("备用模型", "<select class='dipt' data-k='reply_fallback_model' id='rep-fb'>" +
+          dModelOpts(String(dVal("reply_fallback_model", "")), "不设备用") + "</select>",
+          "主模型连续失败到「连续失败切换」那个次数，才切到它。") +
+        // 用户 m07859：重试 / 重试间隔 / 单次超时统一在「基础设置 · 重试」里改，这里不再重复。
+        row("连续失败切换", dnum("reply_fail_switch", "次", 2), "连着几轮回复失败，就把主模型换成备用。") +
+        row("切回主模型等待", dnum("reply_fallback_cooldown", "秒", 300), "用备用模型撑过这段时间，再试回主模型。") +
+        row("最大代理循环次数", dnum("reply_tool_rounds", "轮", 5), "回复时最多调用几轮工具，最后写回复那一轮不算。") +
+        row("单轮工具调用上限", dnum("reply_tool_calls_per_turn", "个", 5), "一轮里最多调几个工具，多出来的不执行。") +
+        row("工具调用超时", dnum("reply_tool_timeout", "秒", 180), "单个工具最多等多久，0 = 不限制。") +
+        row("工具输出上限", dnum("reply_tool_output_tokens", "token", 10000), "工具结果最多留多少，超了保留首尾，0 = 不限制。") +
+      "</div><div class='drows cols2'>" +
+        row("回复看图", "<label class='sw2'><input type='checkbox' data-k='reply_see_images'" +
+          (dVal("reply_see_images", true) ? " checked" : "") +
+          "><span class='tr'></span>" + ST_SW + "</label>",
+          "回复模型也看一眼历史与本轮消息里的图。关掉后只发文字，图片位置留 [图片] 占位。") +
       "</div></div>";
   }
 
@@ -2756,6 +2794,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
         row("备用模型", "<select class='dipt' data-k='jev_fallback_model' id='jev-fb'>" +
           jevModelOpts(String(dVal("jev_fallback_model", "")), "不设备用") + "</select>",
           "主模型连续失败到「连续失败切换」那个次数才切到它；它可以是另一条路的模型。") +
+        row("连续失败切换", dnum("jev_fail_switch", "次", 2), "连着几轮 JEV 判断失败，就把主模型换成备用。") +
+        row("切回主模型等待", dnum("jev_fallback_cooldown", "秒", 300), "用备用模型撑过这段时间，再试回主模型。") +
         row("不确定区间", "<div class='jev-range'>" +
           "<span class='jev-unit'>" + dsel("jev_lower", 25) + "<span class='jev-pct'>%</span></span>" +
           "<span class='jev-range-sep'>~</span>" +
@@ -2921,9 +2961,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
   }
 
   function dtoolsBlockHtml(){
-    var hint = "勾选的工具作为原生工具发送，是否写入 system 由工具模块决定；模型要调就真的去调，最多连着「工具最多几轮」。清单来自框架现有的工具。";
+    var hint = "勾选的工具作为原生工具发送，是否写入 system 由工具模块决定；模型要调就真的去调，最多连着调几轮由「回复提示词」页的「最大代理循环次数」决定。";
     return "<div class='dcard'><div class='dhead'>决策可用的工具<i class='di' title='" + esc(hint) + "'>i</i>" +
-      "<span class='dhead-x'>最多 <b id='dec-rounds-hint'>2</b> 轮</span></div>" +
+      "<span class='dhead-x'>最多 <b id='dec-rounds-hint'>5</b> 轮</span></div>" +
       "<input type='hidden' data-k='decision_tools' id='dec-tools' value='" + esc(JSON.stringify(dPickedRaw())) + "'>" +
       "<div class='dtools' id='dec-tools-box'>" + dToolsInner() + "</div></div>";
   }
@@ -3196,7 +3236,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
     return "<details class='pm-tools-fold'>" +
       "<summary class='pm-sum'><span>工具清单</span>" +
       "<span class='pm-tools-sum' id='pp-toolsum-" + s.kind + "'>已选 " + picked.length + " / " + list.length + "</span></summary>" +
-      "<div class='pm-tools'><div class='pm-tools-head'>勾哪个就把哪个写进这一段，同时它也成了模型能调的工具。</div>" +
+      "<div class='pm-tools'><div class='pm-tools-head'>" + (s.kind === "reply"
+        ? "勾哪个就把哪个写进这一段，回复链也只挂这几个工具（全不勾＝一个都不挂）。新装插件带的工具会自动勾上。"
+        : "勾哪个就把哪个写进这一段，决策链也只挂这几个工具（全不勾＝一个都不挂）。新工具要自己勾。") + "</div>" +
       list.map(function(t){
         var name = String(t.name || "");
         var on = picked.indexOf(name) >= 0;
@@ -3696,7 +3738,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     });
   }
 
-  function ppLoad(s, discard){
+  function ppLoad(s, discard, warm){
     if(s.loading) return s.loading;
     var edit = s.editSeq;
     s.error = ""; s.seq += 1;
@@ -3724,7 +3766,16 @@ var DM_SPECIAL = { trigger_probability: 1 };
       // 用户 m08755：JEV 页一打开就把真实实时窗取一次，测试才有内容可用。
       // 用户 m09506：决策 / 回复页的实时窗也要真实内容，三页都取。
       if(!s.rtFetched){ s.rtFetched = true; ppLoadWindowText(s).then(function(){ ppRenderEditor(s); }); }
-      return s.referencesPending ? ppRefreshReferences(s) : ppPreview(s);
+      if(s.referencesPending) return ppRefreshReferences(s);
+      // 预热另一页只为填「＋ 新增」下拉，用不到预览，别为它重排一遍 system。
+      if(warm) return null;
+      // 服务端随布局一起给的预览就是这份布局的结果：补骨架 key 只改前端认模块用的 key，
+      // 服务端装配文本模块时根本不读它（state/prompt_layout.py 归一化时把 text 的 key 清空），
+      // 所以正文不会变，直接用它，不再为同一份布局重排一次。
+      if(replace && s.preview && typeof s.preview.system === "string"){
+        s.previewPending = false; ppPaintPreview(s); return s.preview;
+      }
+      return ppPreview(s);
     }).catch(function(err){
       s.loading = null; s.previewPending = false; s.error = "读取失败（草稿保留）：" + err.message; ppRenderEditor(s); ppPaintPreview(s);
       return s.referencesPending ? ppRefreshReferences(s) : null;
@@ -3841,9 +3892,11 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(sum) sum.textContent = "已选 " + cur.length + " / " + (s.toolChoices || []).length;
     var box = scope ? scope.querySelector("[data-pm-tool='" + name + "']") : null;
     if(box && box.parentNode && box.parentNode.classList) box.parentNode.classList.toggle("on", !!on);
-    ppRequest("/prompt-tools", {names: cur}).then(function(d){
+    // 用户 m11103：决策链和回复链各存各的，存的时候要带上这是哪一页。
+    ppRequest("/prompt-tools", {kind: s.kind, names: cur}).then(function(d){
       if(Array.isArray(d.names)) s.toolsSelected = d.names.map(String);
-      s.notice = "工具清单已存，下一次判断就用新的。"; ppPaintStatus(s); ppPreview(s);
+      s.notice = (s.kind === "reply" ? "回复工具已存，下一次回复就用新的。" : "决策工具已存，下一次判断就用新的。");
+      ppPaintStatus(s); ppPreview(s);
     }).catch(function(err){
       s.error = "工具清单没存上：" + err.message; ppPaintStatus(s);
     });
@@ -4101,7 +4154,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       "<div class='pp-pane' data-pane='jev'" + (pane === "jev" ? "" : " hidden") + "><div class='pp-left'>" +
       promptEditorBlockHtml("jev") + jevBlockHtml() + "</div><div class='pp-right'>" + promptPrevBlockHtml("jev") + "</div></div>" +
       "<div class='pp-pane' data-pane='reply'" + (pane === "reply" ? "" : " hidden") + "><div class='pp-left'>" +
-      promptEditorBlockHtml("reply") + "</div><div class='pp-right'>" + promptPrevBlockHtml("reply") + "</div></div>" +
+      promptEditorBlockHtml("reply") + replyToolBlockHtml() + "</div><div class='pp-right'>" + promptPrevBlockHtml("reply") + "</div></div>" +
       "<div class='pp-pane pp-pane-wide' data-pane='templates'" + (pane === "templates" ? "" : " hidden") + ">" +
       ppTplPageHtml() + "</div></div>";
   }
@@ -4146,16 +4199,18 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 用户 m06706：JEV 页的自定义模块也要能被另外两页的下拉读到，所以它去预热决策那页。
     var st = ppState(kind === "decision" ? "reply" : "decision");
     if(!st || st.loaded || st.loading) return;
-    ppLoad(st, false).then(function(){ if(curPage === "prompt" && ppPane === kind) ppRenderEditor(ppState(kind)); }, function(){});
+    ppLoad(st, false, true).then(function(){ if(curPage === "prompt" && ppPane === kind) ppRenderEditor(ppState(kind)); }, function(){});
   }
   function ppAutoPreview(){
     if(curPage !== "prompt") return;
     ppLayout();
-    ppWarmOther(ppPane);
     if(ppPane === "templates"){ ppEnsureTplStates(); ppTplRender(); return; }
     var s = ppState(ppPane);
     ppRenderEditor(s); ppPaintPreview(s);
-    return s.loaded ? ppPreview(s) : ppLoad(s,false);
+    var p = s.loaded ? ppPreview(s) : ppLoad(s,false);
+    // 另一页只用来填「＋ 新增」下拉：等当前页首屏出来再读，别跟首屏抢请求。
+    Promise.resolve(p).then(function(){ ppWarmOther(ppPane); }, function(){ ppWarmOther(ppPane); });
+    return p;
   }
 
   // 数据比页面晚到时的补填：只重画 option / 勾选清单，不动已经填了一半的 textarea。
@@ -4166,10 +4221,16 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(ms) ms.innerHTML = dModelOpts(ms.value || String(dVal("decision_model", "")), "跟随默认模型");
     var fs = document.getElementById("dec-fb");
     if(fs) fs.innerHTML = dModelOpts(fs.value || String(dVal("decision_fallback_model", "")), "不设备用");
+    // 用户 m17507：回复设置里的「回复模型 / 备用模型」以前只在页面重画时填一次，
+    // 模型清单比页面晚到就永远只剩「跟随默认模型 / 不设备用」两个空选项，选不了。
+    var rm = document.getElementById("rep-model");
+    if(rm) rm.innerHTML = dModelOpts(rm.value || String(dVal("reply_model", "")), "跟随默认模型");
+    var rf = document.getElementById("rep-fb");
+    if(rf) rf.innerHTML = dModelOpts(rf.value || String(dVal("reply_fallback_model", "")), "不设备用");
     var tb = document.getElementById("dec-tools-box");
     if(tb) tb.innerHTML = dToolsInner();
     var rh = document.getElementById("dec-rounds-hint");
-    if(rh) rh.textContent = String(dVal("decision_tool_rounds", 2));
+    if(rh) rh.textContent = String(Math.max(0, dVal("reply_tool_rounds", 5)));
   }
 
   function loadDecisionOptions(){
@@ -5229,7 +5290,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
           (mg.keys || []).forEach(function(k){ used[k] = 1; });
           sectRows += rowLineHtml(mg);
         });
-        var sectSub = "<div class='sub sect'><h3><span class='gt'>" + esc(g.t) + "</span></h3>" +
+        // 用户 m18050：小节标题右侧也能挂一枚琥珀提醒（进阶模式那句「多一次调用」）。
+        var sectWarn = g.warn ? ("<span class='warnpill'>" + esc(g.warn) + "</span>") : "";
+        var sectSub = "<div class='sub sect'><h3><span class='gt'>" + esc(g.t) + "</span>" + sectWarn + "</h3>" +
                       (sectRows ? ("<div class='rows'>" + sectRows + "</div>") : "") + "</div>";
         if(g.split){
           var sn0 = g.split, sCol0 = g.col || "";
@@ -5257,7 +5320,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         used[k] = 1;
         // v3.54：配额（两行「开关+数字框」）与缓存记录（先表后设置）都由 custom 块整块画，
         // 这里只把键标成已用，免得它们再渲染一份重复行。
-        if(g.custom === "quota" || g.custom === "cache") return;
+        if(g.custom === "quota" || g.custom === "cache" || g.custom === "show") return;
         // v3.33：开关与清单合成一个两行块，别各占一行
         if(k === "phrase_filter_enabled") return;
         if(k === "phrase_filter_list"){ rows += phraseRowHtml(); return; }
@@ -5293,6 +5356,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(g.custom === "pricing"){ rows += pricingBlockHtml(); }
       // v3.54（用户本轮第 3 条）：配额两行——开关 + 数字框 + 一句说明，见 quotaRowsHtml。
       if(g.custom === "quota"){ rows += quotaRowsHtml(); }
+      // 用户 m17752：显示条数三行（回复记录 / 决策记录 / 窗口快照），每行右侧两个数字框。
+      if(g.custom === "show"){ rows += showRowsHtml(); }
       // v3.54（用户本轮第 4 条）：缓存整块——表格 + 合计 + 没进表的兜底行 + 按类型清空（v3.56 起这一页叫「缓存记录」）。
       // 三个上限行也在 cacheBlockHtml 里画（表格要排在最前面），所以 keys 那轮只标已用。
       if(g.custom === "cache"){ rows += cacheBlockHtml(); }
@@ -5871,6 +5936,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // 每提交一次都会热重载插件，逐项提交会把插件反复重启。
   var saveTimer = null, saving = false, saveAgain = false;
   var saveEditVersion = 0, saveScopeVersion = 0, saveAckVersion = -1;
+  // 2026-11-12（用户 m09483）：恢复默认的摘要要等保存回包之后再写，
+  // 否则会被「已自动保存 N 项覆盖」顶掉，用户只看到覆盖数、以为恢复默认没生效。
+  var resetNote = "";
+  function clearResetNoteSoon(){
+    var rn = resetNote;
+    setTimeout(function(){ if(resetNote === rn) resetNote = ""; }, 5000);
+  }
   function settingsScopeChanged(){
     saveScopeVersion += 1;
     saveAgain = false;
@@ -5892,7 +5964,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
   function saveNow(){
     saveEditVersion += 1;
     if(saveTimer){ clearTimeout(saveTimer); saveTimer = null; }
-    saveSettings();
+    return saveSettings();
   }
 
   // v3.71（用户 m23596 第 4 条）：离开页面前把还没提交的那次保存补发出去。
@@ -5960,23 +6032,64 @@ var DM_SPECIAL = { trigger_probability: 1 };
     PAGES.forEach(function(p){ if(p.id === pageId) t = p.t; });
     return t;
   }
+  // 2026-11-12（用户 m09483）：恢复默认要按「用户眼前的值」判断有没有变，
+  // 也要把默认值写进会话覆盖与缓存表的取值来源，否则重画后还是旧值。
+  function pageValOf(k){
+    var node = document.querySelector("#settings [data-k='" + String(k).replace(/'/g, "\\'") + "']");
+    if(node){
+      var t = (schemaCache[k] || {}).type || "string";
+      if(t === "switch" || t === "boolean" || t === "bool") return !!node.checked;
+      var v = String(node.value == null ? "" : node.value).trim();
+      return v === "" ? null : v;
+    }
+    if(configCache && Object.prototype.hasOwnProperty.call(configCache, k)) return configCache[k];
+    return null;
+  }
+  function pageValSame(a, b){
+    var an = (a === null || a === undefined || a === ""), bn = (b === null || b === undefined || b === "");
+    if(an || bn) return an && bn;
+    if(typeof a === "boolean" || typeof b === "boolean") return !!a === !!b;
+    var na = Number(a), nb = Number(b);
+    if(isFinite(na) && isFinite(nb)) return na === nb;
+    return String(a) === String(b);
+  }
   function resetPageDefaults(){
-    if(!schemaCache || !configCache) return 0;
-    var list = pageKeyList(), done = 0, miss = 0;
+    if(!schemaCache || !configCache) return { done: 0, changed: [], saved: null };
+    var list = pageKeyList(), done = 0, changed = [];
     list.forEach(function(k){
       var f = schemaCache[k];
-      if(!f || f.default === undefined || f.default === null){ miss += 1; return; }
+      if(!f || f.default === undefined || f.default === null) return;
       // LOCKED（window_enabled）这类恒开项不跟着默认值走，免得点一下把它关掉
       if(LOCKED[k]) return;
-      try{ configCache[k] = JSON.parse(JSON.stringify(f.default)); }
-      catch(e){ configCache[k] = f.default; }
+      // 会话模式下不在白名单里的键是全局项（页面上也置灰），这一页恢复默认不该动它
+      if(scopeSid && scopeKeys && scopeKeys.indexOf(k) < 0) return;
+      var def;
+      try{ def = JSON.parse(JSON.stringify(f.default)); }
+      catch(e){ def = f.default; }
+      var before = pageValOf(k);
+      configCache[k] = def;
+      if(scopeSid){
+        // 会话覆盖也要跟着改：缓存表读的是 /overrides 快照，只改 configCache 的话
+        // 重画出来还是旧值，提交回去后端又把「等于全局值」的项丢掉，点了等于没点。
+        if(overrideCache) overrideCache[k] = def;
+        if(cacheScopeOv){
+          if(!cacheScopeOv.override) cacheScopeOv.override = {};
+          cacheScopeOv.override[k] = def;
+          if(cacheScopeOv.effective) cacheScopeOv.effective[k] = def;
+        }
+      }
       done += 1;
+      if(!pageValSame(before, def)) changed.push({ k: k, from: before, to: def });
     });
-    if(!done) return 0;
+    if(!done) return { done: 0, changed: [], saved: null };
     renderSettings();   // 表单按新值重画，免得控件还显示旧值
     dirty = true;
-    saveNow();          // 同其它离散编辑一起登记版本，再走原自动保存
-    return done;
+    var saved = saveNow();   // 同其它离散编辑一起登记版本，再走原自动保存
+    // 保存完按后端真值再画一次：等于全局值的项后端不会存，别在表格上留一个假的「单独」胶囊
+    if(scopeSid && saved && saved.then){
+      saved.then(function(){ if(cacheScopeSid) loadCacheScope(); });
+    }
+    return { done: done, changed: changed, saved: saved };
   }
 
   // 最近一次「用户改了一项」的时刻。热重载会清空内存里的窗口，所以不能每改一项
@@ -6033,11 +6146,14 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(sid){
         overrideCache = d.override || {};
         var n = Object.keys(overrideCache).length;
-        if(msg) msg.textContent = n ? ("已自动保存 " + n + " 项覆盖（立即生效）") : "已恢复跟随全局";
+        var base = n ? ("已自动保存 " + n + " 项覆盖（立即生效）") : "已恢复跟随全局";
+        if(msg) msg.textContent = resetNote ? (resetNote + " · " + base) : base;
+        if(resetNote) clearResetNoteSoon();
         setSub(sidLabel(sid) + " · 已覆盖 " + n + " 项 · 其余跟随全局（改完自动保存，不用重载）");
       }else{
         configCache = values;
-        if(msg) msg.textContent = "已自动保存";
+        if(msg) msg.textContent = resetNote ? (resetNote + " · 已自动保存") : "已自动保存";
+        if(resetNote) clearResetNoteSoon();
       }
       checkConfig();
       ppReferencesSaved(sid, promptRefEpoch);
@@ -6860,8 +6976,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(mEl) mEl.textContent = t ? cacheSize(t.mb) : "—";
   }
   function cacheBlockHtml(){
-    // v4.9x（用户本轮图1）：表格和「页面显示条数」卡片左右并排——左列 flex:2 放表格，
-    // 右列 flex:1 放卡片，卡片宽度正好是表格的一半；#cache-msg / #cache-extra 仍跟着表格走。
+    // 用户 m17752：右边那张「页面显示条数」卡片搬去基础设置了，这里只剩表格一列。
     return "<div class='cachebox' id='cache-box'>" +
       "<div class='cmain'>" +
       "<div class='cmain-l'>" +
@@ -6886,7 +7001,6 @@ var DM_SPECIAL = { trigger_probability: 1 };
       "<div class='chint' id='cache-msg'></div>" +
       "<div class='cextra' id='cache-extra'></div>" +
       "</div>" +
-      "<div class='cmain-r' id='cache-side'></div>" +
       "</div>" +
       "</div>";
   }
@@ -6899,38 +7013,33 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // 所以这里不再列它们——列了反而会在表格下面多出三行重复的（用户 m09738）。
   // v4.90（用户 m01133 第 2 条）：三种快照合成一个「窗口快照」，表格里只剩一行；
   // 回复 / 决策记录页各自列多少条不再管磁盘留存，降级成显示条数。
-  // v4.90（用户 m01875 第 1 条）：这些显示条数不再补成表格下面的普通行，改成右边一张
-  // 半宽卡片（见 showCardHtml），群聊 / 私聊两个框并排，一眼看出「只是显示」。
+  // 用户 m17752：这些显示条数后来搬去了基础设置左列（见 showRowsHtml），缓存页只剩表格。
   var CACHE_SET_KEYS = ["media_cache_limit", "media_cache_keep_days",
     "media_other_limit", "media_other_limit_dm", "media_other_keep_days",
     "forward_media_keep", "forward_proof_keep", "retry_keep",
     "forward_media_keep_days", "forward_proof_keep_days", "retry_keep_days"];
-  // 卡片里三行：回复记录 / 决策记录 / 窗口快照，每行「群聊 + 私聊」两个数字框。
+  // 基础设置里那三行：回复记录 / 决策记录 / 窗口快照，每行「群聊 + 私聊」两个数字框。
   var SHOW_ROWS = [
     {t: "回复记录", k: "trace_keep", kd: "trace_keep_dm", d: "回复记录页最多列多少条"},
     {t: "决策记录", k: "decision_keep", kd: "decision_keep_dm", d: "决策记录页最多列多少条"},
     {t: "窗口快照", k: "window_show", kd: "window_show_dm", d: "走势图和快照列表最多画多少条"}
   ];
-  function showCardHtml(){
-    var rows = SHOW_ROWS.map(function(r){
+  // 用户 m17752：原来缓存记录页右边那张卡片，现在长在基础设置左列里——三行普通行，
+  // 名称 + 说明 + 右侧「群聊 / 私聊」两个数字框，跟「配额」那两行同一套写法。
+  function showRowsHtml(){
+    return SHOW_ROWS.map(function(r){
       var f = schemaCache[r.k] || {}, fd = schemaCache[r.kd] || {};
-      return "<div class='showrow' data-row='" + esc(r.k) + "'>" +
-        "<div class='snm'>" + esc(r.t) + defaultBadge(f, r.k) +
-          "<i>" + esc(r.d) + "</i></div>" +
-        "<div class='sfs'>" +
-          "<label class='sf'>群聊" + fieldControl(r.k, f, configCache[r.k]) + "</label>" +
-          "<label class='sf'>私聊" + fieldControl(r.kd, fd, configCache[r.kd]) + "</label>" +
-        "</div>" +
-        "</div>";
+      return "<div class='setrow inline showrow' data-row='" + esc(r.k) + "'>" +
+        "<div class='nm'>" + esc(r.t) + defaultBadge(f, r.k) + "</div>" +
+        "<div class='ds'>" + esc(r.d) + "</div>" +
+        "<div class='ctl pair'>" +
+          "<span class='nspan'><b>群聊</b>" + fieldControl(r.k, f, configCache[r.k]) + "</span>" +
+          "<span class='nspan'><b>私聊</b>" + fieldControl(r.kd, fd, configCache[r.kd]) + "</span>" +
+        "</div></div>";
     }).join("");
-    return "<div class='showcard'>" +
-      "<div class='shd'><b>页面显示条数</b>" +
-        "<span>只影响页面上列多少条，磁盘上留多少份由「窗口快照上限」决定。</span></div>" +
-      rows + "</div>";
   }
   function cacheExtraHtml(kinds){
     var box = document.getElementById("cache-extra");
-    var side = document.getElementById("cache-side");
     var covered = {};
     (kinds || []).forEach(function(it){
       if(!it) return;
@@ -6945,9 +7054,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(!f || covered[k]) return;
       out += rowHtml(k, f);
     });
-    // v4.9x（用户本轮图1）：显示条数卡片挪到表格右边那一列，不再跟在兜底行后面
     if(box) box.innerHTML = out;
-    if(side) side.innerHTML = showCardHtml();
   }
 
   function setCacheMsg(text, cls){
@@ -7029,8 +7136,6 @@ var DM_SPECIAL = { trigger_probability: 1 };
       // 会话模式下不显示全局补充行：这几个键能不能按会话单独设，后端说了算，别在这乱写
       var ex = document.getElementById("cache-extra");
       if(ex) ex.innerHTML = "";
-      var sd = document.getElementById("cache-side");
-      if(sd) sd.innerHTML = "";
     }else{
       cacheExtraHtml(d.kinds);
     }
@@ -7167,10 +7272,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
       setCacheTotal(null);
       // 接口整个失败时也得让人改：全局模式下把四行设置补在表格下面（会话模式下这些键归会话管，不补）
       var ex0 = document.getElementById("cache-extra");
-      var sd0 = document.getElementById("cache-side");
       if(cacheScopeSid){
         if(ex0) ex0.innerHTML = "";
-        if(sd0) sd0.innerHTML = "";
       }else{
         cacheExtraHtml(null);
       }
@@ -7334,6 +7437,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
     }).join("");
   }
 
+  // 用户本轮：价目表「费用」列与顶部总计共用这一套钱数写法（两位小数、千分位），不另造一份。
+  function priceMoneyText(v){
+    var n = Number(v || 0);
+    if(!isFinite(n)) n = 0;
+    return n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
   // 用户 m10749 第 3 条：区间总花费。cost 为 null（后端统计失败）时显示「—」；
   // 有模型没在价目表里时补一行小字，说明这些按 0 元算。
   // 用户本轮第 6 条：数字在前、单位在后（原来单位粘在数字前面，读起来像代号）——
@@ -7346,7 +7456,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     }
     var total = Number(c.total || 0);
     var cur = String(c.currency == null ? "" : c.currency);
-    var num = total.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    var num = priceMoneyText(total);
     var html = "<span class='clab'>" + esc(label) + "共</span>" +
                "<span class='cnum'>" + esc(num) + "</span>" +
                (cur ? "<span class='cunit'>" + esc(cur) + "</span>" : "");
@@ -7488,6 +7598,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(silent){
         var costEl = document.getElementById("p-cost");
         if(costEl) costEl.innerHTML = priceCostHtml();
+        paintCostCells(box);
       }else paintPricing();
     }).catch(function(e){
       if(seq !== pricingLoadSeq) return;
@@ -7512,13 +7623,68 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var inp = Number(r.input) || 0, hit = Number(r.cached) || 0;
     if(!(inp > 0)) return "<span class='pdim' title='这段时间没有输入 token'>—</span>";
     var pct = Math.max(0, Math.min(100, hit / inp * 100));
-    return "<span title='" + esc("缓存 " + fmtNum(hit) + " / 入 " + fmtNum(inp)) + "'>" + pct.toFixed(1) + "%</span>";
+    return "<span title='" + esc("缓存 " + fmtNum(hit) + " / 完整 prompt " + fmtNum(inp) + "（未命中 " + fmtNum(inp - hit) + " + 缓存 " + fmtNum(hit) + "）") + "'>" + pct.toFixed(1) + "%</span>";
+  }
+
+  // 用户本轮：第 8 列「费用」——这一行模型在当前区间（24 小时 / 7 天 / 30 天）花了多少钱。
+  // 边界：cost 为 null（后端统计失败）→「—」；模型不在 cost.parts 里（这段没用量）→「—」；
+  // part.unset（没填单价，按 0 元算）→「未定价」；part.approximate → 数字后面跟「≈」。
+  // 精确金额、回复 / 决策拆分、含不含高峰价都放 title，跟同页其它列一个写法。
+  function partCostTitle(part){
+    var c = pricingCost;
+    var cur = String((c && c.currency != null) ? c.currency : "");
+    if(!c) return "这段时间的花费没统计出来（后端统计失败）";
+    if(!part) return "这段时间没有用量，也没有花费";
+    if(part.unset) return "这个模型没在价目表里填单价，花费按 0 元算";
+    var exact = function(v){
+      var n = Number(v || 0);
+      if(!isFinite(n)) n = 0;
+      return (Math.round(n * 10000) / 10000).toFixed(4);
+    };
+    var tip = priceRangeLabel(pricingHours) + "这个模型花了 " + exact(part.cost) + (cur ? " " + cur : "") +
+              "；回复 " + exact(part.reply_cost) + " / 决策 " + exact(part.decision_cost);
+    tip += Number(part.peak_cost) > 0 ? "；含高峰价 " + exact(part.peak_cost) : "；不含高峰价";
+    if(part.approximate) tip += "；近似估算：历史记录无逐次请求时间，按记录时间应用当前价目";
+    return tip;
+  }
+
+  function partCostHtml(part){
+    var c = pricingCost;
+    if(!c || !part) return "<span class='pdim'>—</span>";
+    if(part.unset) return "<span class='pdim'>未定价</span>";
+    var cur = String(c.currency == null ? "" : c.currency);
+    // 用户 m17492 图4：≈ 是「这个数不精确」的前缀，写在数字前面（≈0.08元），
+    // 写在后面像单位一样跟着，读起来是「0.08 元约」。
+    return (part.approximate ? "<span class='pcf-e' title='近似估算'>≈</span>" : "") +
+           "<span class='pcf-n'>" + esc(priceMoneyText(part.cost)) + "</span>" +
+           (cur ? "<span class='pcf-u'>" + esc(cur) + "</span>" : "");
+  }
+
+  // 静默刷新（保存价目后只换花费、不重画整张表）时同步这一列，别让顶部总计已经变了、行里还是旧数。
+  function paintCostCells(box){
+    if(!box) return;
+    var parts = Object.create(null);
+    if(pricingCost && pricingCost.parts) pricingCost.parts.forEach(function(p){
+      if(p && p.model != null) parts[p.model] = p;
+    });
+    Array.prototype.forEach.call(box.querySelectorAll("tr[data-pmodel]"), function(tr){
+      var cell = tr.querySelector("td.pcostc");
+      if(!cell) return;
+      var part = parts[tr.getAttribute("data-pmodel")] || null;
+      cell.innerHTML = partCostHtml(part);
+      cell.title = partCostTitle(part);
+    });
   }
 
   function paintPricing(){
     var box = document.getElementById("pricing-box");
     if(!box) return;
     var focus = pricingFocus(box);
+    // 用户本轮：费用列按 model 直接查 cost.parts，先建一份映射（parts 是按花费降序的数组）。
+    var costParts = Object.create(null);
+    if(pricingCost && pricingCost.parts) pricingCost.parts.forEach(function(p){
+      if(p && p.model != null) costParts[p.model] = p;
+    });
     var rows = (pricingCache || []).map(function(r, i, arr){
       var d = pricingDraft[r.model] || {};
       var p = pricingPeak(Object.assign(pricingPeak(r.peak), d.peak || {}));
@@ -7528,6 +7694,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
       var source = r.provider_name || r.provider_id || "来源未记录";
       // v4.9x（用户本轮图2 后半句）：最后一行下面补一根灰线，把价目表收个口（只加最后一行）
       var lastCls = (i === arr.length - 1) ? " class='plast'" : "";
+      // 用户 m11550：输入只算没命中的那一截，缓存单列——跟上游后台的「输入 / 缓存」口径一致。
+      // 后端 r.input 是完整 prompt（含缓存），计价公式要用它，所以这里减掉再显示。
+      var unc = Math.max(0, (Number(r.input) || 0) - (Number(r.cached) || 0));
       return "<tr" + lastCls + " data-pmodel='" + esc(r.model) + "'>" +
         "<td class='pm' title='" + esc(r.model) + "'><span class='pmc'>" +
           "<button type='button' class='pdel' data-pdel='" + esc(r.model) + "' title='从价目表删除这个模型（要点两次确认）'>删除</button>" +
@@ -7538,20 +7707,25 @@ var DM_SPECIAL = { trigger_probability: 1 };
         "<td class='pu'><span class='puc'><span class='pl'>请求 " + esc(fmtNum(r.calls)) + "</span>" +
           "<span class='pl'>决策 " + esc(fmtNum(r.decision_rounds)) + "</span>" +
           "<span class='pl'>回复 " + esc(fmtNum(r.reply_rounds)) + "</span></span></td>" +
-        "<td class='pt'><span class='puc'><span class='pl' title='" + esc("输入 " + fmtNum(r.input)) + "'>输入 " + esc(fmtBig(r.input)) + "</span>" +
+        "<td class='pt'><span class='puc'><span class='pl' title='" + esc("输入 " + fmtNum(unc) + "（未命中）") + "'>输入 " + esc(fmtBig(unc)) + "</span>" +
           "<span class='pl' title='" + esc("缓存 " + fmtNum(r.cached)) + "'>缓存 " + esc(fmtBig(r.cached)) + "</span>" +
           "<span class='pl' title='" + esc("输出 " + fmtNum(r.output)) + "'>输出 " + esc(fmtBig(r.output)) + "</span></span></td>" +
         "<td class='ph'>" + hitRateHtml(r) + "</td>" +
+        // 用户本轮：紧跟缓存命中率的「费用」列——这一行在当前区间的花费。
+        "<td class='pcostc' title='" + esc(partCostTitle(costParts[r.model] || null)) + "'>" +
+          partCostHtml(costParts[r.model] || null) + "</td>" +
         "<td class='psw'><input type='checkbox' data-pfield='peak.enabled' title='勾选后高峰时段按高峰价计费'" + (p.enabled ? " checked" : "") + "></td>" +
         "<td class='psw'><input type='checkbox' data-pfield='peak.weekends' title='勾选后周末全天按普通价计费'" + (!p.weekends ? " checked" : "") + "></td>" +
         "<td class='pschedule'>" + pricingPeriodsHtml(p) + "</td></tr>";
     }).join("");
-    if(!rows) rows = "<tr><td colspan='10' class='pempty'>还没有用过的模型。插件跑过一轮之后这里会自动出现——模型名是自动识别的，不用手动添加。</td></tr>";
+    if(!rows) rows = "<tr><td colspan='11' class='pempty'>还没有用过的模型。插件跑过一轮之后这里会自动出现——模型名是自动识别的，不用手动添加。</td></tr>";
     box.innerHTML =
       "<div class='ptop'><span class='prange' id='p-range'>" + priceRangeHtml() + "</span>" +
         "<span class='pcost' id='p-cost'>" + priceCostHtml() + "</span></div>" +
       "<table class='ptable'><thead><tr><th>模型 / 来源</th><th>输入单价</th><th>缓存命中单价</th><th>输出单价</th>" +
-        "<th>请求</th><th>token</th><th>缓存命中率</th><th>高峰价</th><th>周末谷价</th>" +
+        "<th>请求</th><th>token</th><th>缓存命中率</th>" +
+        "<th title='这一行模型在所选区间内的花费（用量 × 价目）；没填单价的模型显示「未定价」'>费用</th>" +
+        "<th>高峰价</th><th>周末谷价</th>" +
         // v4.85（用户 m10425 第 3 条）：高峰时段按哪个时区算，只放在表头的悬浮提示里。
         "<th title='按服务端本地时间" + (pricingTimezone ? "（" + esc(pricingTimezone) + "）" : "") +
         "解释，含起不含止，可跨午夜'>高峰时段</th></tr></thead><tbody>" + rows + "</tbody></table>" +
@@ -8846,9 +9020,18 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var ok = await mdConfirm("把「" + nm + "」这一页的设置项全部恢复默认值？（只重置这一页，别的页不动）",
                              {danger: true, ok: "恢复"});
     if(!ok) return;
-    var n = resetPageDefaults();
+    var res = resetPageDefaults();
     var msg = document.getElementById("set-msg");
-    if(msg) msg.textContent = n ? ("已把「" + nm + "」" + n + " 项恢复默认") : "这一页没有可恢复的默认值";
+    if(!res.done){
+      if(msg) msg.textContent = "这一页没有可恢复的默认值";
+      return;
+    }
+    // 摘要要等保存回包之后再写：saveSettings 成功时会把这一行换成「已自动保存 N 项覆盖」，
+    // 用户只看到覆盖数，还以为恢复默认没生效（用户 m09483 就是这么被绕进去的）。
+    resetNote = res.changed.length
+      ? ("已恢复默认 " + res.done + " 项（" + res.changed.length + " 项有变化）")
+      : ("已恢复默认 " + res.done + " 项（本来就是默认值）");
+    if(msg) msg.textContent = resetNote;
   };
   // v3.67（用户 m20117 第 6 条）：点顶部卡片 = 换作用范围（原来那个下拉框的 onchange 就是这段）。
   document.getElementById("set-cards").addEventListener("click", async function(e){

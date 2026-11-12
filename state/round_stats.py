@@ -49,6 +49,9 @@ def _absorb(rounds: dict, row) -> None:
     """把一行（消息日志的 round_end 或请求记录的一轮）并进 rounds[key]。"""
     if not isinstance(row, dict):
         return
+    # 用户 m17492 图5/图6：别的插件的工具完成通知不是一轮请求，别并进 24 小时统计。
+    if row.get("notice"):
+        return
     key = round_key(row)
     cur = rounds.get(key)
     if cur is None:

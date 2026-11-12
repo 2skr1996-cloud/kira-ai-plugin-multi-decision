@@ -29,8 +29,9 @@ from typing import Any, List, Optional
 from core.logging_manager import get_logger
 
 from ..state.sids import normalize_sid
-from .buffer import (WindowState, clone_message, ids_of, merge_framework_messages,
-                     merge_trusted_messages, split_emoji_marks)
+from .buffer import (WindowState, clone_message, drop_tool_rounds, ids_of,
+                     merge_framework_messages, merge_trusted_messages,
+                     split_emoji_marks)
 from .split import (expand_packed_messages, regroup_images, with_owned_images,
                     mention_results, normalize_mention_content)
 from .summary import body_of, build_lines, drop_overlap, merge_summary
@@ -796,6 +797,135 @@ def _refs_from_chain(chain, root: Path) -> list:
                     "mime": str(el.get("mime") or "") or _sniff_image_mime(target)})
     return out
 
+
+#: 用户 m20315 第 1 条：异步工具（nai 出图这类）自己把图发进群里，框架的
+#: message_history 会把它记成一条 direction='outgoing' 的记录；bot 自己的回复
+#: 一定带 llm_message_id，工具发的没有。所以从完成通知那一刻往回走，遇到第一条
+#: 带 llm_message_id 的出站记录就停，中间那些纯图记录就是这一轮的产出。
+_TOOL_MEDIA_LOOKBACK = 300.0
+_TOOL_MEDIA_LIMIT = 9
+
+
+def recent_tool_media(raw_sid: str, until: float = 0.0, skip=()) -> list:
+    """取「工具刚发出去的那批图」，给工具回调那条 assistant 挂上（用户 m20315）。"""
+    raw_sid = str(raw_sid or "").strip()
+    if not raw_sid:
+        return []
+    root = _data_root()
+    if root is None:
+        return []
+    db = root / "data.db"
+    try:
+        if not db.is_file():
+            return []
+        import sqlite3
+
+        end = float(until or 0.0) or time.time()
+        con = sqlite3.connect("file:%s?mode=ro" % db.as_posix(), uri=True, timeout=1.0)
+        try:
+            rows = con.execute(
+                "SELECT chain, llm_message_id FROM messages"
+                " WHERE session_id=? AND direction='outgoing'"
+                " AND timestamp>=? AND timestamp<=?"
+                " ORDER BY timestamp DESC LIMIT 40",
+                (raw_sid, end - _TOOL_MEDIA_LOOKBACK, end + 1.0),
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        logger.debug("[multi-decision] 读工具出站图失败（已忽略）", exc_info=True)
+        return []
+    skip = {str(p or "").replace("\\", "/") for p in (skip or ())}
+    out, seen = [], set()
+    for chain, llm_id in rows or []:
+        if str(llm_id or "").strip():
+            break  # 到 bot 自己的回复了，再往前不是这一批工具产出
+        for ref in _refs_from_chain(chain, root):
+            rel = ref["path"]
+            if rel in seen or rel in skip:
+                continue
+            seen.add(rel)
+            out.append(ref)
+            if len(out) >= _TOOL_MEDIA_LIMIT:
+                return out
+    return out
+
+
+def tool_media_from_records(records, root, until: float = 0.0, skip=()) -> list:
+    """从框架消息历史里挑出「工具刚发出去的那批图」（用户 m20315 第 1 条）。
+
+    和 recent_tool_media 同一套判断，只是数据来自 ctx.message_history——那是框架
+    自己的连接池，不受「另开一个只读连接读 WAL」的限制（真机上那样开常常直接
+    报 file is not a database）。records 必须是从新到旧。
+    """
+    if root is None:
+        return []
+    end = float(until or 0.0) or time.time()
+    skip = {str(p or "").replace("\\", "/") for p in (skip or ())}
+    out, seen = [], set()
+    for rec in records or ():
+        try:
+            if str(getattr(rec, "direction", "") or "") != "outgoing":
+                continue
+            ts = float(getattr(rec, "timestamp", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if ts and (ts < end - _TOOL_MEDIA_LOOKBACK or ts > end + 1.0):
+            continue
+        # bot 自己的回复一定带 llm_message_id，工具发的没有。已经收到图之后再遇到
+        # 它，说明这一批到头了；还没收到就继续往前找（完成通知可能晚于回复）。
+        if out and str(getattr(rec, "llm_message_id", "") or "").strip():
+            break
+        chain = getattr(rec, "_serialized_chain", None)
+        if chain is None:
+            chain = getattr(rec, "chain", None)
+        for ref in _refs_from_chain(chain, root):
+            rel = ref["path"]
+            if rel in seen or rel in skip:
+                continue
+            seen.add(rel)
+            out.append(ref)
+            if len(out) >= _TOOL_MEDIA_LIMIT:
+                return out
+    return out
+
+
+def _tool_note_text(content) -> str:
+    """工具回调的正文：list content 只取 text part，别把图片占位算进正文。"""
+    if isinstance(content, list):
+        return "".join(str(p.get("text") or "") for p in content
+                       if isinstance(p, dict) and str(p.get("type") or "") == "text")
+    return str(content or "")
+
+
+def _tool_note_payload(content: str, refs) -> object:
+    """工具回调的 content：没图就是纯文本，有图就拼成带 kira_image_ref 的 list。"""
+    parts = [{"type": "text", "text": content}]
+    for ref in refs or ():
+        if not isinstance(ref, dict):
+            continue
+        rel = str(ref.get("path") or "").strip().replace("\\", "/")
+        if not rel:
+            continue
+        parts.append({"type": "kira_image_ref", "path": rel,
+                      "mime_type": str(ref.get("mime") or "") or "image/png",
+                      "detail": "high"})
+    return parts if len(parts) > 1 else content
+
+
+def _attached_media_paths(messages) -> set:
+    """窗口里已经挂过的图，别重复挂到新的工具回调上。"""
+    out = set()
+    for m in messages or []:
+        content = _get(m, "content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and str(part.get("type") or "") == "kira_image_ref":
+                rel = str(part.get("path") or "").strip().replace("\\", "/")
+                if rel:
+                    out.add(rel)
+    return out
 
 
 
@@ -3027,10 +3157,44 @@ def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list
             item["decnote"] = True
             item["name"] = _DEC_NOTE_NAME
             item["who"] = _DEC_NOTE_NAME
+        # 工具回调（用户 m18435 第 2 条）：标题就是工具名，正文剥掉
+        # 「[HH:MM] 【工具回调 xxx】」这一截，时刻单拎成 at，其余按普通
+        # assistant 消息画。模型看到的那份仍带声明，这里只影响显示。
+        elif role == "assistant" and is_tool_note(msg):
+            _m3 = _TIME_HEAD_RE.match(text)
+            _body = text
+            if _m3:
+                item["at"] = _m3.group(1)
+                _body = text[_m3.end():]
+            _body = _TOOL_NOTE_DECL_RE.sub("", _body)
+            item["text"] = _body
+            item["chars"] = visible_chars(_body)
+            item["raw"] = _body
+            if not item.get("at"):
+                _ts = _get(msg, "ts")
+                try:
+                    if _ts:
+                        item["at"] = time.strftime("%H:%M", time.localtime(float(_ts)))
+                except Exception:
+                    pass
+            item["toolnote"] = True
+            item["name"] = str(_get(msg, "name") or "")
+            item["who"] = item["name"]
+            # 用户 m20315 图1：工具回调带的图就是它自己的（nai 发出去的那张），
+            # 不能画成「归属未确认的附件」。这里补一份自有投影，前端照普通消息画。
+            if media:
+                item["display"] = {
+                    "own_media_known": True,
+                    "own_media": [dict(r) for r in media if isinstance(r, dict)],
+                    "unassigned_media": [],
+                    "own_body": _body,
+                    "direct_reply": None,
+                    "source": "tool_note",
+                }
         # 谁说的：只给 assistant 用，前端拿它当卡片标题。
         # 名字**不能**塞进 content——模型会照着历史格式学，把 [桃华] 写进
         # 自己的输出里（用户 m29392 图1 就是这么来的）。role 才是给模型看的信号。
-        if role == "assistant" and bot_name and not item.get("decnote"):
+        if role == "assistant" and bot_name and not item.get("decnote") and not item.get("toolnote"):
             item["who"] = bot_name
         # v4.22（用户 m21783）：文件卡信息带出到页面（只影响显示）
         _files = msg.get("files") if isinstance(msg, dict) else getattr(msg, "files", None)
@@ -3356,6 +3520,79 @@ def _minute_axis(clocks) -> List[Any]:
 
 
 
+# 用户 m17492 图5/图6：别的插件（比如 nai 出图）完成后会发一条 is_notice 通知事件，
+# 框架把它格式化成「[15:12] Notice [group_id: N, user_id: N] | 」，正文是空的。
+# 那不是谁说的话，进窗口只会变成一条没头没尾的 user 消息（实时窗里那行红框，
+# 灰色快照的结尾也是它），所以入窗前一律剔掉。
+_NOTICE_SHELL_RE = re.compile(
+    r"^\[(?:\s*\d{1,2}:\d{2}\s*"
+    r"|[A-Z][a-z]{2}\s+\d{1,2}\s+\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s+[A-Z][a-z]{2})?)\]"
+    r"\s*Notice\s*\[(?:group_id|user_id):[^\]]*\]\s*\|")
+
+
+def is_notice_shell_text(text) -> bool:
+    """这段正文是不是「只有一句通知头、没有实际内容」。"""
+    body = str(text or "").strip()
+    if not body:
+        return False
+    head = _NOTICE_SHELL_RE.match(body)
+    if head is None:
+        return False
+    return not body[head.end():].strip()
+
+
+def notice_shell_ts(text, now=None) -> float:
+    """通知壳头上的 [HH:MM] 换成时间戳（拿不到就 0）。
+
+    用户 m20315 第 2 条：通知壳要和工具回调合成一条 assistant，时间就用通知
+    到达的那一刻——工具回调的 ts 决定它自己的 [HH:MM]，不能按前后 user 推。
+    """
+    body = str(text or "").strip()
+    head = _TIME_HEAD_RE.match(body)
+    if head is not None:
+        stamp = head.group(1)
+    else:
+        # 框架原生格式是「[Nov 10 2026 21:08 Tue]」：_commit_tool_notes 在
+        # _strip_group_tags 压时间戳之前就会看到它，这里也要认。
+        long_head = _TS_RE.match(body)
+        if long_head is None:
+            return 0.0
+        stamp = long_head.group(4)
+    try:
+        hh, mm = (int(x) for x in stamp.split(":")[:2])
+    except (TypeError, ValueError):
+        return 0.0
+    now = float(now or time.time())
+    base = time.localtime(now)
+    try:
+        ts = time.mktime((base.tm_year, base.tm_mon, base.tm_mday, hh, mm, 0, 0, 0, -1))
+    except (OverflowError, ValueError):
+        return 0.0
+    # 跨零点：23:59 的通知在 00:01 处理，按今天算会跑到未来，退回前一天。
+    if ts - now > 12 * 3600:
+        ts -= 86400
+    return ts
+
+
+
+def is_notice_shell(msg) -> bool:
+    """这条消息是不是空的通知壳。"""
+    try:
+        return is_notice_shell_text(text_of_content(_get(msg, "content")))
+    except Exception:
+        return False
+
+
+def strip_notice_shells(messages) -> List[Any]:
+    """剔掉空的通知壳（返回新列表，不改入参）。"""
+    out = []
+    for msg in messages or []:
+        if is_notice_shell(msg):
+            continue
+        out.append(msg)
+    return out
+
+
 def is_decision_note(msg) -> bool:
     """这条消息是不是我们自己塞进上下文的决策记录（v3.97，用户 m09615 图6~图8）。
 
@@ -3387,6 +3624,47 @@ def is_decision_note(msg) -> bool:
     # 2026-10-31（用户 m05138）：新注记改写成「建议回复／建议不回」，旧记录继续认。
     return (t.startswith("建议回复") or t.startswith("建议不回")
             or t.startswith("判定要回") or t.startswith("判定不回"))
+
+
+# 用户 m18435 第 2 条：别的插件（比如 nai 出图）跑完，会把结果作为一条
+# name="<工具>_completion" 的 Prompt 挂进下一轮请求。以前 commit_round 只认
+# name=="message"，这份结果哪儿都没留下——实时窗里只剩那句被剔掉的空 Notice 头，
+# 用户看不到工具到底返回了什么。现在把它记成一条带工具名的 assistant 消息，
+# 名字就叫「工具回调·nai_studio」，前端拿它当卡片标题。
+_TOOL_NOTE_PREFIX = "工具回调·"
+#: 正文开头的「【工具回调 xxx】」声明，只给模型看，出口（view_of）剥掉。
+_TOOL_NOTE_DECL_RE = re.compile(r"^\s*【工具回调[^】]*】\s*")
+
+
+def tool_note_name(tool: str) -> str:
+    """工具回调消息的名字：工具回调·<工具名>。"""
+    return _TOOL_NOTE_PREFIX + str(tool or "").strip()
+
+
+def is_tool_note(msg) -> bool:
+    """这条消息是不是某个工具的回调结果（用户 m18435 第 2 条）。
+
+    三条路认：自带 tnote 标记、名字是「工具回调·x」、或者正文以
+    「【工具回调 x】」开头。最后一条是为了框架记忆回吐——那边只留 role/content，
+    name 和 tnote 都没了，只剩这句声明还能认出来（不然下一轮就重复并入一条）。
+    """
+    try:
+        role = str(_get(msg, "role") or "")
+        name = str(_get(msg, "name") or "")
+        text = str(text_of_content(_get(msg, "content")) or "")
+    except Exception:
+        return False
+    if role != "assistant":
+        return False
+    if bool(_get(msg, "tnote")):
+        return True
+    if name.startswith(_TOOL_NOTE_PREFIX):
+        return True
+    body = text.lstrip()
+    head = _TIME_HEAD_RE.match(body)
+    if head:
+        body = body[head.end():].lstrip()
+    return bool(_TOOL_NOTE_DECL_RE.match(body))
 
 
 #: 图片消息里的 [HH:MM] 与 [user_nickname: X]（v4.39，用户 m20816）。
@@ -3456,7 +3734,10 @@ def stamp_assistant_time(messages) -> List[Any]:
         # 但用它自己的 ts（判定那一刻），不按前后 user 推；同一个 ts 每轮算出来一样，前缀不抖。
         stamp = ""
         is_note = is_decision_note(msg)
-        if is_note:
+        # 用户 m18435 第 2 条：工具回调也是 assistant，但它发生在「那一刻」，
+        # 不能按前后 user 推——异步工具的结果可能比触发它的用户消息晚好几分钟。
+        is_tool = (not is_note) and is_tool_note(msg)
+        if is_note or is_tool:
             try:
                 _nts = _get(msg, "ts")
                 if _nts:
@@ -4213,7 +4494,13 @@ def attach_window_images(messages, raw_sid: str, keep: int = 128,
         if record is None:
             direct = [p for p in content if isinstance(p, dict) and _part_type(p) in IMAGE_TYPES] if isinstance(content, list) else []
             # 接收时留的源优先于框架重新落盘的图；反查只补没有自留源的消息。
-            candidates = (media_map or {}).get(mid) or direct or bulk.get(mid) or []
+            # 用户 m18251：显式给了空表就是「这条不挂图」，不能再回落到正文自带的图
+            # 或反查表，否则转发按策略裁到 0 张时又会被整包图顶回来。
+            _map = media_map or {}
+            if mid in _map:
+                candidates = list(_map.get(mid) or [])
+            else:
+                candidates = direct or bulk.get(mid) or []
             slots, seen = [], set()
             for candidate in candidates:
                 if not isinstance(candidate, dict):
@@ -4225,7 +4512,9 @@ def attach_window_images(messages, raw_sid: str, keep: int = 128,
                 pinned = _pin_model_refs([candidate], text, raw_sid)
                 slots.append({"source": dict(candidate), "ref": pinned[0] if pinned else None})
             refs = [slot["ref"] for slot in slots if slot["ref"] is not None]
-            if refs:
+            if refs or mid in _map:
+                # 用户 m18251：显式空表也要建记录（refs 为空），这样正文里残留的图片
+                # 槽位会被丢掉，而不是原样留在请求里。
                 record = {"refs": refs, "slots": slots, "notes": set()}
                 sources[mid] = record
         elif record.get("slots"):
@@ -4783,6 +5072,8 @@ class WindowManager:
         self._backfill_note_ts(st)
         msgs = strip_observe(st.messages)
         msgs = strip_error_messages(msgs)
+        # 用户 m17492 图5/图6：出口再兜一次，老窗口里残留的通知壳不上页面。
+        msgs = strip_notice_shells(msgs)
         # v4.03（用户 m11947）：注记就在窗口本体里，页面照着画，不再重插。
         msgs = shrink_timestamps(msgs)
         msgs = self._prefix_assistant(msgs, sid)
@@ -5221,7 +5512,23 @@ class WindowManager:
         # v3.97（用户 m09615 图6~图8）：决策注记是 assistant 身份进上下文的，
         # 框架会把它当历史吐回来；窗口本体里已经有自己那条（commit_decision），
         # 再并进来就成了同一条决策出现好几遍，这里一律剔掉。
-        clean = [m for m in clean if not is_decision_note(m)]
+        # 工具回调同理：窗口本体里有自己那条（commit_tool_note），框架再吐回来就重复。
+        clean = [m for m in clean if not is_decision_note(m) and not is_tool_note(m)]
+        # 用户 m17492 图5/图6：别的插件的通知事件（空正文的 Notice 头）也不是谁说的话，
+        # 别让它进窗口；已经躺在窗口本体里的老记录也顺手清掉。
+        clean = strip_notice_shells(clean)
+        if st.messages:
+            kept = strip_notice_shells(st.messages)
+            if len(kept) != len(st.messages):
+                st.messages = kept
+        # v4.92（用户 m13535、m13870）：开关打开时，窗口里已经躺着的工具往返也一并清掉，
+        # 不必等下一轮裁切把它们挤出去（那之前每轮请求都要背着几万字符）。默认不摘。
+        drop_tools = self._bool_eff("window_drop_tools", sid, False)
+        if drop_tools:
+            kept, gone_tool = drop_tool_rounds(st.messages)
+            if gone_tool:
+                st.messages = kept
+                logger.debug("[multi-decision] 窗口清掉工具往返 %d 条", gone_tool)
         # 待发里攒着的群消息框架记忆里没有（没触发 agent 就不写记忆），
         # 必须在清空之前自己并进窗口，否则它们会凭空消失（v2.28）
         st.skipped_incoming = 0
@@ -5233,7 +5540,7 @@ class WindowManager:
         # 锚点改成最后一条非注记消息。
         anchor = None
         for _m in reversed(st.messages):
-            if not is_decision_note(_m):
+            if not is_decision_note(_m) and not is_tool_note(_m):
                 anchor = _m
                 break
         added = merge_framework_messages(
@@ -5241,6 +5548,7 @@ class WindowManager:
             require_anchor=sid.startswith("gm:"), trusted_messages=extra,
             mention_names=self.mention_names(sid),
             mention_normalizer=lambda content: self.normalize_mentions(sid, content),
+            drop_tools=drop_tools,
         )
         # 框架 assemble 会把整批图片都挂到最后一条 user 上（用户 m26465），
         # 入窗后按 path 里的 message_id 哈希把图挪回原主。只修被改到的消息。
@@ -5298,6 +5606,66 @@ class WindowManager:
                         sid, added, st.size())
         return added
 
+    def commit_tool_note(self, sid: str, tool: str, body: str, ts: float = 0.0,
+                         refs=None) -> int:
+        """把别的插件回调的工具结果记成一条带工具名的 assistant 消息（用户 m18435 第 2 条）。
+
+        nai 出图这类插件是异步的：发起那轮只拿到「已提交」，真正的结果几十秒后
+        以一条 name="<工具>_completion" 的 Prompt 挂进下一轮请求。以前这条结果
+        完全没进窗口，实时窗里只剩那句空的 Notice 头，看不出工具返回了什么。
+
+        正文前面带一句「【工具回调 <工具>】」，给模型一个「这是工具给的、不是我说的话」
+        的信号；出口 view_of 会把这句声明剥掉，标题用消息名。
+        """
+        st = self.state(sid)
+        tool = str(tool or "").strip()
+        text = str(body or "").strip()
+        if st is None or not tool or not text:
+            return 0
+        name = tool_note_name(tool)
+        content = "【工具回调 " + tool + "】" + text
+        # 同一份结果别叠两遍：框架重放请求、或者一轮里同一工具报了两次同样的东西。
+        for prev in st.messages[-8:]:
+            if (str(_get(prev, "name") or "") == name
+                    and _tool_note_text(_get(prev, "content")).strip() == content):
+                return 0
+        try:
+            at = float(ts or 0.0) or time.time()
+        except (TypeError, ValueError):
+            at = time.time()
+        # 用户 m20315 第 1 条：异步工具（nai 出图这类）自己把图发进群里，框架的
+        # message_history 记着那条出站记录。图不跟着这条回调进上下文，模型就只
+        # 看到「第 1 张画好了」，看不到画。refs 显式给了就用给的，没给才去库里找。
+        if refs is None:
+            try:
+                refs = recent_tool_media(self.raw_sid(sid), at,
+                                         skip=_attached_media_paths(st.messages))
+            except Exception:
+                refs = []
+                logger.debug("[multi-decision] %s 取工具出站图失败（已忽略）", sid, exc_info=True)
+        else:
+            # 调用方（引擎）已经从框架历史里取好了，这里只补一道「窗口里已经有了
+            # 就别再挂一遍」的过滤。
+            try:
+                skip = _attached_media_paths(st.messages)
+                refs = [r for r in refs
+                        if isinstance(r, dict)
+                        and str(r.get("path") or "").replace("\\", "/") not in skip]
+            except Exception:
+                refs = list(refs or ())
+        payload = _tool_note_payload(content, refs)
+        st.messages.append({
+            "role": "assistant",
+            "name": name,
+            "content": payload,
+            "tnote": True,
+            "ts": at,
+        })
+        logger.info("[multi-decision] %s 工具回调入窗：%s（%d 字%s）", sid, name, len(text),
+                    "，%d 张图" % len(refs) if refs else "")
+        self.settle_decision_notes(sid)
+        return 1
+
     def commit_round(self, sid: str, prompts, media_by_id=None) -> int:
         """把本轮真正发出去的消息记进窗口（v2.53：每轮都记）。
 
@@ -5312,11 +5680,22 @@ class WindowManager:
         st = self.state(sid)
         have = ids_of(st.messages)
         out = []
+        # 用户 m18435 第 2 条：工具结果（name="<工具>_completion"）先单独收起来，
+        # 本轮消息并进窗口之后再落一条「工具回调」assistant。
+        completions = []
         for p in prompts or []:
-            if (getattr(p, "name", "") or "") != "message":
+            _nm = getattr(p, "name", "") or ""
+            if _nm.endswith("_completion"):
+                completions.append((_nm[: -len("_completion")], getattr(p, "content", "")))
+                continue
+            if _nm != "message":
                 continue
             content = getattr(p, "content", "")
             if content in ("", None):
+                continue
+            # 用户 m17492 图5/图6：通知事件的本轮输入就是一句空的 Notice 头，
+            # 它不是谁说的话，别当成一条 user 消息并进窗口。
+            if is_notice_shell_text(content):
                 continue
             content = self.normalize_mentions(sid, content)
             refs = [r for mid in ids_of([{"role": "user", "content": content}])
@@ -5329,12 +5708,15 @@ class WindowManager:
                 continue
             out.append(msg)
             have |= ids
-        if not out:
-            return 0
-        st.messages.extend(clone_message(m) for m in out)
-        logger.debug(f"[multi-decision] {sid} 本轮 {len(out)} 条消息并入窗口")
+        if out:
+            st.messages.extend(clone_message(m) for m in out)
+            logger.debug(f"[multi-decision] {sid} 本轮 {len(out)} 条消息并入窗口")
+        # 工具回调紧跟在本轮消息后面：异步工具的结果就是这一轮的产出。
+        _tools = 0
+        for _tool, _body in completions:
+            _tools += self.commit_tool_note(sid, _tool, _body)
         self.settle_decision_notes(sid)
-        return len(out)
+        return len(out) + _tools
 
     def prepare_messages(self, sid: str, messages, keep=None, media_by_id=None,
                          hint_tools: bool = True) -> List[Any]:
@@ -5361,10 +5743,16 @@ class WindowManager:
         for mid, refs in (media_by_id or {}).items():
             extra.setdefault(str(mid), refs)
         # 转发图：默认只挂前几张，模型需要时用 view_forward 看完整内容（用户 2026-11-06）。
+        # 用户 m18251：待发/本轮预填的 media_refs 是「这条消息里所有图」（收消息时为
+        # 了页面显示把转发子图也全存了），不能让它顶掉转发策略——否则按需模式下整包
+        # 58 张全挂进请求，32MB 直接 413。转发消息一律走 forward_refs_plan。
+        _fwd_sigs = {}
         for _i, _msg in enumerate(msgs):
             _text = text_of_content(_get(_msg, "content"))
             _mid = _mid_of_text(_text)
-            if not _mid or _mid in extra:
+            if not _mid:
+                continue
+            if _mid in extra and "[Forward" not in _text:
                 continue
             # 幂等：先剥掉上一次调用留下的提示，再按这次的实际张数重插。以前是直接
             # 追加，snapshot 与回复装配各调一次，同一句提示就进了请求原文两遍。
@@ -5375,13 +5763,27 @@ class WindowManager:
                 msgs[_i] = _msg
             _refs, _dropped, _fmode = forward_refs_plan(_text, _mid)
             if _fmode in ("", "off", "text"):
+                # 用户 m18251：关掉 / 只给文字时，预填的整包图也不能漏进来。
+                if _fmode in ("off", "text"):
+                    extra[_mid] = []
                 continue
             try:
                 _total = len(_FORWARD_MEDIA_FN(_mid) or []) if _FORWARD_MEDIA_FN else 0
             except Exception:
                 _total = 0
-            if _refs:
-                extra[_mid] = _refs
+            # 用户 m18251：转发消息一律以策略为准，不再沿用预填的整包图。索引还没建好
+            # （一张都查不到）时不知道总数，但也不能把整包图挂上，最多留前几张预览。
+            if _refs or _total > 0:
+                _plan = list(_refs)
+            else:
+                _plan = list(extra.get(_mid) or [])[:_FORWARD_IMAGE_PREVIEW]
+            extra[_mid] = _plan
+            _sig = tuple(str((r or {}).get("path") or "") for r in _plan)
+            _fwd_sigs[_mid] = _sig
+            _rec = sources.get(_mid)
+            if _rec is not None and _rec.get("fwd_sig") != _sig:
+                # 策略变了（或上一轮按整包图建过记录）：丢掉旧记录，按这次的计划重建。
+                sources.pop(_mid, None)
             # 没挂完的图、按设置丢掉的动图都要说一声，不然模型以为就这几张。
             _left = max(0, _total - _dropped - len(_refs))
             _notes = []
@@ -5410,7 +5812,12 @@ class WindowManager:
             if mid not in active:
                 sources.pop(mid, None)
         want = self._int_eff("history_images", sid, 128) if keep is None else int(keep)
-        return attach_window_images(msgs, raw_sid, want, self._gif_mode(sid), extra, sources)
+        out = attach_window_images(msgs, raw_sid, want, self._gif_mode(sid), extra, sources)
+        for _mid, _sig in _fwd_sigs.items():
+            _rec = sources.get(_mid)
+            if isinstance(_rec, dict):
+                _rec["fwd_sig"] = _sig
+        return out
 
     def prepared_media_counts(self, sid: str, messages) -> dict:
         """Fixed source coverage for these prepared messages, before GIF/quota policy.
@@ -5487,6 +5894,10 @@ class WindowManager:
         # v4.03（用户 m11947）：决策注记已经是窗口本体里的一条真实消息
         # （commit_decision 一次性写进去），出口只做格式，不再往中间插。
         # 出口统一兜底：窗口里任何一条是 dict 都会让框架 assemble_prompt 崩
+        # v4.92（用户 m13535、m13870）：开关打开时，刚打开、这一轮还没 collect 过，
+        # 出口也得挡住，页面看到的和发出去的才是同一份。默认不挡。
+        if self._bool_eff("window_drop_tools", sid, False):
+            msgs, _gone_tool = drop_tool_rounds(msgs)
         return self._fix_tool_pairs([self._as_openai(m) for m in msgs])
 
     def decision_snapshot(self, sid: str) -> List[Any]:
@@ -5497,9 +5908,10 @@ class WindowManager:
         本体也还没并进来；以前只给 snapshot，窗口一空就读到空记录，于是判出
         「没人说话」。这里按 collect 时同一套格式把待发接在窗口后面。
 
-        转发提示一律 hint_tools=False：决策链的 tool_set 只来自 decision_tools
-        配置（默认空），没挂 view_forward 就不能叫模型去调它。哪天把 view_forward
-        勾进 decision_tools，这里要跟着改成 True。
+        转发提示挂不挂 view_forward 看提示词页那份勾选（用户 m11103：工具由用户
+        自己勾，不再由框架统一塞）：勾了就提示模型去调，没勾就只报「还有 N 张图
+        没发」——决策链的 tool_set 只来自 decision_tools，没挂的工具叫模型去调
+        只会白费一轮。
         """
         base = self.snapshot(sid, prepare=False)
         st = self._states.get(sid)
@@ -5510,15 +5922,32 @@ class WindowManager:
         except Exception:
             logger.exception("[multi-decision] 取待发失败（决策按窗口判）")
             return base
+        hint = self._decision_hint_tools()
         if not pend:
-            return self.prepare_messages(sid, base, hint_tools=False)
+            return self.prepare_messages(sid, base, hint_tools=hint)
         pend = shrink_timestamps(pend)
         pend = self._prefix_assistant(pend, sid)
         pend = stamp_assistant_time(pend)
         out = list(base)
         for m in pend:
             out.append(self._as_openai(m))
-        return self.prepare_messages(sid, out, hint_tools=False)
+        return self.prepare_messages(sid, out, hint_tools=hint)
+
+    def _decision_hint_tools(self) -> bool:
+        """决策链这一轮到底挂没挂 view_forward（用户 m11103：工具由提示词页勾选决定）。
+
+        勾了就提示模型「需要看就调用 view_forward」，没勾就不提——决策链的 tool_set
+        只来自 decision_tools 那份名单，没挂的工具叫模型去调只会白费一轮。
+        """
+        try:
+            layouts = getattr(self.plugin, "prompt_layouts", None)
+            if layouts is None:
+                return False
+            picked = layouts.selected_tools()
+        except Exception:
+            logger.debug("[multi-decision] 读决策工具勾选失败，转发提示按没挂工具写", exc_info=True)
+            return False
+        return "view_forward" in [str(x).strip() for x in (picked or [])]
 
     def decision_incoming(self, sid: str) -> list:
         """决策这一轮真正新来的那批：还挂在「待发」里的消息（v3.97，用户 m09615 图9）。
@@ -5803,7 +6232,8 @@ class WindowManager:
                 continue
             # v4.03（用户 m11947）：注记的名字是「对当前聊天消息的决策建议」，
             # 再套一层【桃华】之后正文就不再以 [决策记录] 开头，认不出来了。
-            if is_decision_note(msg):
+            # 工具回调同理：标题是工具名，套上【桃华】就成了 bot 自己说的话。
+            if is_decision_note(msg) or is_tool_note(msg):
                 out.append(msg)
                 continue
             cur = clone_message(msg)

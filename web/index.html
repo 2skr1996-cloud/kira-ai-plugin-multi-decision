@@ -155,6 +155,11 @@ button.icon.danger:hover{color:#fff;background:var(--bad);border-color:var(--bad
 .sw .tr:after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:.18s;}
 .sw.on .tr{background:var(--accent);}
 .sw.on .tr:after{transform:translateX(18px);}
+/* 折叠柱子开关（用户 m02038 第 1 条）：比通用开关大一号，白色圆改成椭圆，
+   椭圆里直接写「展开 / 折叠」，就不用再在外面写「折叠柱子」四个字了。 */
+.sw.sw-fold .tr{width:58px;height:24px;}
+.sw.sw-fold .tr:after{width:34px;height:20px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:600;color:var(--text);letter-spacing:.02em;content:"展开";}
+.sw.sw-fold.on .tr:after{content:"折叠";transform:translateX(20px);}
 .sw.on{color:var(--text);}
 .sw.busy{opacity:.5;pointer-events:none;}
 /* 首帧引导：booting 期间禁用过渡，缓存态直接落位，刷新不再播放「自动重开」动画 */
@@ -181,12 +186,14 @@ html.plugin-on #sw-plugin .tr:after{transform:translateX(18px);}
 .card .v{font-size:22px;font-weight:600;margin-top:2px;font-variant-numeric:tabular-nums;}
 .card .v small{font-size:12px;font-weight:400;color:var(--muted);margin-left:4px;}
 /* v4.68（用户 m02807）：回复 / 决策两格的主值行是三段「30次 / 17秒 / 命中87%」，
-   22px 装不下，压到 17px；斜杠用淡色小一号，别抢数字的注意力。 */
-.card .v .vm{font-size:17px;font-weight:600;letter-spacing:0;}
-.card .v .vsep{color:var(--muted);font-weight:400;font-size:14px;margin:0 5px;}
+   22px 装不下，压到 17px；斜杠用淡色小一号，别抢数字的注意力。
+   用户 m14836 图3：17px 跟旁边几张卡的 22px 差得太明显，提到 21px（226px 卡宽下实测 213px，
+   还留 13px 余量）；斜杠再收一点，窄屏折行时也不会顶到边。 */
+.card .v .vm{font-size:21px;font-weight:600;letter-spacing:0;}
+.card .v .vsep{color:var(--muted);font-weight:400;font-size:13px;margin:0 4px;}
 .card .metric-sep{font-size:16px;font-weight:400;color:var(--muted);margin:0 9px;}
 /* 副行一律不折行（用户 m02080 图2）：原来插件数据那行会掉到第二行，卡片被撑高、右边还剩一大片空 */
-.card .sub{font-size:11px;line-height:15px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.card .sub{font-size:11px;line-height:15px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.2px;}
 /* v4.84（用户 m09179 第 1 条）→ v4.86（用户 m11062）：插件数据卡试过「右侧七行小清单」，
    卡片被顶得比旁边六张高、字号还得压小；现在回到和其他卡一样的「标题 / 主值 / 副行」三行，
    副行只列最大的两类 + 其余合计，多的类目不再硬塞。 */
@@ -253,6 +260,29 @@ html[data-theme="dark"] .tag.cut{background:rgba(6,182,212,.22);color:#67e8f9;}
   display:flex;align-items:center;justify-content:center;}
 .list .it .avw::before{content:attr(data-ch);position:absolute;inset:0;display:flex;align-items:center;justify-content:center;}
 .list .it .avw img{width:100%;height:100%;object-fit:cover;display:block;position:relative;z-index:1;}
+/* 群组折叠（用户 m02038 第 9 条）：分组标题最右侧一个按钮，收起后整组卡片换成
+   一排固定大小的圆头像，头像外圈用竖条那四档颜色提示运行状态。 */
+.list .grp{display:flex;align-items:center;gap:6px;}
+.list .grp .gt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.list .grp .grpb{width:20px;height:20px;padding:0;margin-left:auto;flex:none;border:0;background:none;
+  color:var(--muted);cursor:pointer;opacity:.6;transition:opacity .12s,transform .15s;display:flex;align-items:center;justify-content:center;}
+.list .grp .grpb svg{width:15px;height:15px;}
+.list .grp .grpb:hover{opacity:1;}
+.list .grp .grpb.on{transform:rotate(-90deg);}
+.list .avgrid{display:flex;flex-wrap:wrap;gap:9px;padding:10px 13px 12px;border-bottom:1px solid var(--line);}
+.list .avcell{width:38px;height:38px;border-radius:50%;padding:2px;box-sizing:border-box;cursor:pointer;
+  border:2px solid transparent;transition:border-color .15s,transform .12s;}
+.list .avcell:hover{transform:scale(1.08);}
+.list .avcell .avw{width:100%;height:100%;border-radius:50%;overflow:hidden;position:relative;
+  background:linear-gradient(135deg,#a5b4fc,#818cf8);color:#fff;font-size:13px;font-weight:600;line-height:1;
+  display:flex;align-items:center;justify-content:center;}
+.list .avcell .avw::before{content:attr(data-ch);position:absolute;inset:0;display:flex;align-items:center;justify-content:center;}
+.list .avcell .avw img{width:100%;height:100%;object-fit:cover;display:block;position:relative;z-index:1;}
+.list .avcell.ok{border-color:#10b981;animation:avPulse 1.6s ease-in-out infinite;}
+.list .avcell.wait{border-color:#3b82f6;}
+.list .avcell.bad{border-color:#e5484d;}
+.list .avcell.idle{border-color:#c4cad5;}
+@keyframes avPulse{0%,100%{opacity:1}50%{opacity:.45}}
 .list .it .body{min-width:0;}
 .list .it .nm-row{display:flex;align-items:center;gap:6px;}
 .list .it .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15.5px;font-weight:600;letter-spacing:.1px;}
@@ -354,12 +384,12 @@ html[data-theme="dark"] .list .it .cfg.st .chip.on.hi-dec{background:rgba(167,13
 .msg .more:hover{text-decoration:underline;}
 /* ---- 视图模式：美化 / 对照 / 原文 ---- */
 .vsw{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--card);}
-.vsw button{border:0;background:transparent;color:var(--muted);font:inherit;font-size:12.5px;padding:5px 11px;cursor:pointer;}
+.vsw button{border:0;background:transparent;color:var(--muted);font:inherit;font-size:12px;padding:3px 8px;line-height:1.2;cursor:pointer;}
 .vsw button+button{border-left:1px solid var(--line);}
 .vsw button.on{background:var(--accent);color:#fff;font-weight:600;}
 /* 上下文页两页切换（实时窗口 / 最近请求），放在标题行里 */
 .pane-sw{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--soft);}
-.pane-sw button{border:0;background:transparent;color:var(--muted);font:inherit;font-size:14px;padding:6px 16px;cursor:pointer;letter-spacing:.02em;min-width:76px;text-align:center;}
+.pane-sw button{border:0;background:transparent;color:var(--muted);font:inherit;font-size:13px;padding:3px 12px;line-height:1.2;cursor:pointer;letter-spacing:.02em;min-width:68px;text-align:center;}
 .pane-sw button+button{border-left:1px solid var(--line);}
 .pane-sw button.on{background:var(--card);color:var(--text);font-weight:600;}
 .trend-lg{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);font-weight:400;}
@@ -374,6 +404,10 @@ html[data-theme="dark"] .list .it .cfg.st .chip.on.hi-dec{background:rgba(167,13
 .trend-lg .tb.live{background:#10b981;}
 .trend-lg .hint{font-weight:400;margin-left:4px;}
 .trend-hd .snap-back{margin-left:10px;border-color:#10b981;color:#0e9f6e;}
+/* 用户 m00942 第 4 条：快照编号点一下复制，做成能看出可点的等宽小片。 */
+.trend-hd .snap-id{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;padding:1px 6px;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--text);cursor:pointer;user-select:none;}
+.trend-hd .snap-id:hover{border-color:var(--accent);color:var(--accent);}
+.trend-hd .snap-id.done{border-color:#10b981;color:#0e9f6e;}
 .trend .bar.live{background:#10b981;}
 .trend .bar.sel{outline:2px solid var(--text);outline-offset:1px;border-radius:2px;}
 .trend .bar.live.sel{outline-color:#10b981;}
@@ -488,8 +522,9 @@ html[data-theme="dark"] .mgrp-hd .gh-nm.dec-name{color:#c4b5fd;}
 .mc-bd{padding:9px 12px;}
 .mc-bd .seg{margin-bottom:8px;}
 .mc-bd .seg:last-child{margin-bottom:0;}
-.emoji{display:inline-flex;align-items:center;vertical-align:-4px;margin-right:3px;}
-.emoji .em-img{width:20px;height:20px;display:block;}
+.emoji{display:inline-flex;align-items:center;vertical-align:-7px;margin-right:3px;}
+/* 用户 m17492 图3：表情缩略图 20px 太小，跟正文一比像个小方块，放大到 26px。 */
+.emoji .em-img{width:26px;height:26px;display:block;}
 .emoji .em-txt{display:none;font-size:12px;color:var(--muted);}
 .emoji.miss .em-img{display:none;}
 .emoji.miss .em-txt{display:inline;}
@@ -905,7 +940,10 @@ tr.round-row td.res{white-space:nowrap;}
 /* 用户 2026-11-08 图7：结果格里的胶囊外面还套着一圈虚线——.res 本来是聊天正文块的样式
    （border:1px dashed），套到表格单元格上就成了四边虚线，跟决策记录那边不一致。
    表格里的 .res 只留胶囊，边框去掉；内边距不动，行高不变。 */
-tr.round-row td.res{border:0;}
+tr.round-row td.res{border:0;border-bottom:1px solid var(--line);}
+tr.round-row:last-child td.res{border-bottom:none;}
+/* 用户 m13442 图1：回复内容一长就换行，整行被撑高。单行省略，完整正文在 title 里。 */
+#ctx-rounds td.rtxt .ell{display:block;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 /* v4.71（用户 m01516 第 3 条）：快照编号——时间格下面一行小字，等宽，跟时间分得开 */
 #ctx-rounds td.num .snapid{display:block;font-size:10.5px;line-height:1.35;color:var(--muted);
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:-.2px;margin-top:1px;}
@@ -919,7 +957,7 @@ html[data-theme="dark"] .rsub.wait{color:#fcd34d;}
 tr.round-detail td{background:rgba(127,127,127,.05);padding:6px 12px 10px 24px;}
 /* 用户 2026-11-08 图6：展开快照后整行被撑成两行。详情行本身是独立 tr、colspan 也对，
    问题是详情内容（.hint 长句、.lg 图例、.mini 按钮）参与了表格的内在宽度计算——展开后浏览器
-   重排 12 列列宽，回复内容/回复模型两列被压窄就换行，整行高度翻倍。
+   重排 13 列列宽，回复内容/回复模型两列被压窄就换行，整行高度翻倍。
    给详情行的直接子元素加 inline-size 包含，让它们不再影响列宽：展开前后列宽、行高完全一致。 */
 tr.round-detail td > *{contain:inline-size;}
 tr.round-detail .mini{font-size:11.5px;padding:2px 9px;border-radius:999px;border:1px solid var(--line);
@@ -927,8 +965,12 @@ tr.round-detail .mini{font-size:11.5px;padding:2px 9px;border-radius:999px;borde
 tr.round-detail .mini:hover{color:var(--accent);border-color:var(--accent);}
 tr.round-detail .mini .tag{margin-right:6px;}
 /* ---- 上下文页 ---- */
-.sec-hd{display:flex;align-items:center;gap:10px;padding:8px 12px 8px 10px;background:var(--soft);border-bottom:1px solid var(--line);font-size:13px;font-weight:600;}
+/* 用户 m14026 第 1 条：右栏这条底要跟左边「群聊」分组标题对齐（9+20+7+1=37px），
+   以前内容只有 34.6px，两栏并排时右边矮一截。 */
+.sec-hd{display:flex;align-items:center;gap:8px;min-height:37px;padding:5px 10px 5px 8px;background:var(--soft);border-bottom:1px solid var(--line);font-size:12.5px;font-weight:600;}
 .sec-hd .grow{flex:1;}
+/* 用户 m14026 第 4 条：切到记录页时只把窗口主体藏起来（DOM 留着），切回来直接显示。 */
+#ctx-window.win-off > :not(.sec-hd){display:none !important;}
 /* 请求表除第一列（时间）外全部居中（用户 m33573 图3：左边一溜左对齐、右边一溜右对齐，
    看着对不齐）。id 选择器权重高于 .lft，所以原来那些 class 不用逐个删。 */
   /* v3.94（用户 m08398 图1）：窗口顶上那条「最近一次判定」横幅整块删掉了，
@@ -946,6 +988,90 @@ tr.round-detail .mini .tag{margin-right:6px;}
   #ctx-rounds .tbl th, #ctx-rounds .tbl td{text-align:center;}
 #ctx-rounds .tbl th:first-child, #ctx-rounds .tbl td:first-child{text-align:left;}
 #ctx-rounds .tbl tr.round-detail td{text-align:left;}
+/* 用户 m14836 图1：12 列的自然宽度在 1080p 下是 1831px，容器只有 1543px，
+   「缓存命中 / 触发类型」两列被切到屏幕外；回复模型那格只剩 76px，
+   「blame · gemini-3.8-flash-high」折成 5 行，整行被撑到 121px。
+   改成固定布局 + 百分比列宽：任何窗口宽度都按比例缩，不再横向溢出。 */
+#ctx-rounds .tbl table{table-layout:fixed;}
+#ctx-rounds .tbl th, #ctx-rounds .tbl td{padding:8px 6px;vertical-align:middle;}
+#ctx-rounds .tbl thead th{white-space:normal;line-height:1.35;}
+#ctx-rounds .tbl thead th:nth-child(1){width:7%;}     /* 时间 */
+#ctx-rounds .tbl thead th:nth-child(2){width:5.2%;}   /* 结果 */
+#ctx-rounds .tbl thead th:nth-child(3){width:16.5%;}  /* 回复内容 / 决策理由 */
+#ctx-rounds .tbl thead th:nth-child(4){width:6.5%;}   /* 渠道 */
+#ctx-rounds .tbl thead th:nth-child(5){width:9%;}     /* 回复模型 / 决策模型 */
+#ctx-rounds .tbl thead th:nth-child(6){width:4.4%;}   /* 防抖用时 */
+#ctx-rounds .tbl thead th:nth-child(7){width:4.6%;}   /* 用时 */
+#ctx-rounds .tbl thead th:nth-child(8){width:6.4%;}   /* 窗口条数 */
+#ctx-rounds .tbl thead th:nth-child(9){width:9%;}     /* token */
+#ctx-rounds .tbl thead th:nth-child(10){width:9.6%;}  /* 体积估算 */
+#ctx-rounds .tbl thead th:nth-child(11){width:7.8%;}  /* 命中预估 */
+#ctx-rounds .tbl thead th:nth-child(12){width:7.8%;}  /* 缓存命中 */
+#ctx-rounds .tbl thead th:nth-child(13){width:6.2%;}  /* 触发类型 */
+/* 用户 m15537 第 4 条：渠道从模型格里拆出来单独一列（在模型列左边），
+   模型格只剩模型名，不用再挤两行。 */
+#ctx-rounds td.chc{font-size:11.5px;line-height:1.35;color:var(--muted);overflow-wrap:anywhere;}
+/* 用户 m16262 图5：模型名太长时以前按字符硬折行（gemini-3.8-flash- / high），
+   现在整格只占一行，超出部分省略号截掉，完整名字挂在 td 的 title 上。
+   .mn 用 flex：名字那段可收缩（省略号），「备用」小标签不收缩，始终露在外面。 */
+#ctx-rounds td.mdl .mn{display:flex;align-items:baseline;gap:3px;min-width:0;line-height:1.35;}
+#ctx-rounds td.mdl .mn .mnt{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#ctx-rounds td.mdl .mn .tag{flex:none;}
+/* 用户 m15537 第 3 条：多步命中折成一句「3 步 42.1%」，不再排成网格拉长整行。 */
+#ctx-rounds td .steps{display:inline;font-size:11.5px;line-height:1.5;}
+/* token 格原来是「数字绝对居中 + 步数胶囊挂在格子右边缘外面」，格子一窄胶囊就压到下一列
+   （体积估算）上，读起来像「3722 步」。改成普通流：数字和胶囊都在格子里居中排，放不下就折行。 */
+#ctx-rounds .tbl td.tokc{position:static;}
+#ctx-rounds .tbl td.tokc .tokw{position:static;left:auto;top:auto;transform:none;white-space:normal;display:inline;}
+#ctx-rounds .tbl td.tokc .stp{position:static;left:auto;top:auto;transform:none;margin-left:4px;display:inline-block;}
+/* 决策表的「窗口条数」比回复表长（多一个「· 待发N」），99px 装不下就折行，别顶出格子。
+   用户 m15537：渠道列插到模型列左边后，窗口条数从第 7 列挪到第 8 列，规则跟着走。 */
+#ctx-rounds .tbl tr.round-row td:nth-child(8){white-space:normal;}
+/* 用户 m14836 图1：窗口从 1080p 往下缩时，13 列按百分比一起缩，但「时间 / 结果 / token / 体积」
+   这几格是 nowrap 的，缩到 1500px 以下就顶出格子（实测 1600 宽有 62 个格子溢出）。
+   这里统一放开换行、字号降一档，宁可多折一行也不横向溢出；多步网格退回单列，
+   token 的绝对居中改回普通流，免得数字和步数胶囊互相压。 */
+@media (max-width:1700px){
+  #ctx-rounds .tbl th, #ctx-rounds .tbl td{padding:7px 4px;font-size:12px;}
+  #ctx-rounds .tbl tr.round-row td.num,
+  #ctx-rounds .tbl tr.round-row td.res,
+  #ctx-rounds .tbl tr.round-row td .sub{white-space:normal;}
+  #ctx-rounds .tbl tr.round-row td.tokc{position:static;}
+  #ctx-rounds .tbl tr.round-row td.tokc .tokw{position:static;left:auto;top:auto;transform:none;
+    white-space:normal;display:inline;}
+  #ctx-rounds .tbl tr.round-row td.tokc .stp{position:static;left:auto;top:auto;transform:none;
+    margin-left:4px;display:inline-block;}
+  /* 窄一档时把「结果 / 防抖 / token」几格放宽一点，免得「请求成功」胶囊和「防抖用时」表头折成两行。 */
+  #ctx-rounds .tbl thead th:nth-child(1){width:7.4%;}
+  #ctx-rounds .tbl thead th:nth-child(2){width:6.4%;}
+  #ctx-rounds .tbl thead th:nth-child(3){width:12.8%;}
+  #ctx-rounds .tbl thead th:nth-child(4){width:6.6%;}
+  #ctx-rounds .tbl thead th:nth-child(5){width:9.2%;}
+  #ctx-rounds .tbl thead th:nth-child(6){width:5%;}
+  #ctx-rounds .tbl thead th:nth-child(9){width:8%;}
+  #ctx-rounds .tbl thead th:nth-child(10){width:9.6%;}
+  #ctx-rounds .tbl thead th:nth-child(11){width:8.7%;}
+  #ctx-rounds .tbl thead th:nth-child(12){width:8.7%;}
+  #ctx-rounds .tbl thead th:nth-child(13){width:6.6%;}
+}
+/* 再窄一档（≤1200）：13 列在 720px 里每列只剩 55px，「1m42s」这种数字会顶出格子。
+   字号再降半档、内边距收紧，列宽重新分配，保证 1000–1200 也不横向溢出。 */
+@media (max-width:1200px){
+  #ctx-rounds .tbl th, #ctx-rounds .tbl td{padding:6px 3px;font-size:11.5px;}
+  #ctx-rounds .tbl thead th:nth-child(1){width:7%;}
+  #ctx-rounds .tbl thead th:nth-child(2){width:6%;}
+  #ctx-rounds .tbl thead th:nth-child(3){width:12.2%;}
+  #ctx-rounds .tbl thead th:nth-child(4){width:6.4%;}
+  #ctx-rounds .tbl thead th:nth-child(5){width:8.4%;}
+  #ctx-rounds .tbl thead th:nth-child(6){width:5.5%;}
+  #ctx-rounds .tbl thead th:nth-child(7){width:6%;}
+  #ctx-rounds .tbl thead th:nth-child(8){width:6.5%;}
+  #ctx-rounds .tbl thead th:nth-child(9){width:8%;}
+  #ctx-rounds .tbl thead th:nth-child(10){width:10%;}
+  #ctx-rounds .tbl thead th:nth-child(11){width:9%;}
+  #ctx-rounds .tbl thead th:nth-child(12){width:9%;}
+  #ctx-rounds .tbl thead th:nth-child(13){width:6%;}
+}
 /* v3.60（用户 m17581 第 6 条）：选中柱的描边（2px + 外扩 1px）原来被容器的 overflow 裁掉——按满高画的柱子
    正好顶到内容区上边缘，左右第一根也贴着边，所以绿柱的框看起来缺一段。上下各留 8px、左右留 4px 给描边；
    内容高度仍是 54（64 − 8 上 − 1 下 − 1 边框），柱子比例一点没变。 */
@@ -980,6 +1106,8 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
 .trend .bar.cut,.trend .bar.cut:hover{background:#f59e0b;box-shadow:none;}
 /* v3.75（用户本轮第 5 条）：非请求触发的裁切自己也是一份快照，用青色跟「裁过」的橙区分开 */
 .trend .bar.trim,.trend .bar.trim:hover{background:#06b6d4;box-shadow:none;}
+/* 用户 m17492 图5/图6：通知回调轮（别的插件的工具完成通知）单独一支天蓝。 */
+.trend .bar.notice,.trend .bar.notice:hover{background:#0ea5e9;box-shadow:none;}
 .trend .bar.error.cut,.trend .bar.error.cut:hover{background:var(--bad);}
 /* v3.99（用户 m10577）：决策轮也是一次窗口快照，柱子单独给一个紫色，别混进「未回复」的灰。 */
 .trend .bar.dec,.trend .bar.dec:hover{background:#8b5cf6;box-shadow:none;}
@@ -998,7 +1126,7 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
 .pg button:hover:not(:disabled){border-color:var(--accent);color:var(--accent);}
 .pg button:disabled{opacity:.35;cursor:default;}
 .pg .pg-i{font-size:12px;color:var(--muted);min-width:48px;text-align:center;}
-@media (max-width:860px){
+@media (max-width:1000px){
   .wrap{padding:12px 12px 30px;}
   .cards{grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;}
   .split{grid-template-columns:1fr;}
@@ -1018,7 +1146,7 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
    桌面端（≥1024px）一个字都不动：下面每一条都只在 max-width:860px 生效，
    而且整块写在 .mask / .dlg 之后，同特异性时压得住上面的规则。
    目标宽度 320 / 360 / 390 / 414 / 430 / 768，任何宽度都不许横向溢出。 */
-@media (max-width:860px){
+@media (max-width:1000px){
   /* --- 0. 外壳 --- */
   .wrap{padding:10px 10px 26px;}
   .panel,.card,.hbar,.list{max-width:100%;}
@@ -1030,6 +1158,7 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
   header #btn-reload{min-height:40px;padding:0 12px;font-size:12.5px;}
   .sw{min-height:40px;gap:7px;font-size:12.5px;}
   .sw .tr{width:44px;height:26px;}
+  .sw.sw-fold .tr{width:62px;}
   #subtitle{min-width:0;font-size:11.5px;}
 
   /* --- 2. 健康条 --- */
@@ -1087,7 +1216,7 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
   .pg button{min-width:40px;min-height:40px;padding:0 10px;font-size:13px;}
   .pg .pg-i{min-width:44px;}
 
-  /* --- 7. 表格 → 卡片：12 列在手机上没法读，一行变一张卡，列名走 td::before --- */
+  /* --- 7. 表格 → 卡片：13 列在手机上没法读，一行变一张卡，列名走 td::before --- */
   #ctx-rounds .tbl{overflow:visible;}
   #ctx-rounds .tbl table{display:block;width:100%;border-collapse:separate;border-spacing:0;}
   #ctx-rounds .tbl thead{display:none;}
@@ -1110,6 +1239,8 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
   #ctx-rounds .tbl tr.round-row td > *{min-width:0;}
   #ctx-rounds .tbl tr.round-row td.num,
   #ctx-rounds .tbl tr.round-row td.res{white-space:normal;}
+  /* 手机上卡片化后正文该换行，别省略 */
+  #ctx-rounds .tbl tr.round-row td.rtxt .ell{max-width:none;white-space:normal;overflow:visible;text-overflow:clip;}
   #ctx-rounds .tbl tr.round-row td .sub{white-space:normal;}
   #ctx-rounds .tbl tr.round-row td.tokc{position:static;}
   #ctx-rounds .tbl tr.round-row td.tokc .tokw{position:static;left:auto;top:auto;transform:none;}
@@ -1162,7 +1293,7 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
     <div class="list" id="ctx-list"></div>
     <div>
       <div class="panel" id="ctx-window" style="margin-bottom:12px">
-        <div class="sec-hd"><span class="pane-sw"><button data-pane="window">实时窗口</button><button data-pane="rounds">回复记录</button><button data-pane="decisions">决策记录</button></span><span class="vsw"><button data-view="pretty">美化</button><button data-view="mixed">对照</button><button data-view="raw">原文</button></span><span class="grow"></span></div>
+        <div class="sec-hd"><span class="pane-sw"><button data-pane="window">实时窗口</button><button data-pane="rounds">回复记录</button><button data-pane="decisions">决策记录</button></span><span class="vsw"><button data-view="pretty">美化</button><button data-view="mixed">对照</button><button data-view="raw">原文</button></span><span class="sw sw-fold" data-trend-fold="1" title="只留裁切、快照和实时柱"><span class="tr"></span></span><span class="grow"></span></div>
         <div data-ctx-trend></div>
       </div>
       <div class="panel" id="ctx-rounds" style="display:none"></div>
@@ -1183,6 +1314,13 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
             Array.prototype.forEach.call(hd.querySelectorAll("[data-view]"), function(b){
               b.classList.toggle("on", b.getAttribute("data-view") === view);
             });
+            // 折叠柱子开关的初始态也在这里落位，别等第一次重画才亮起来。
+            var tf0 = hd.querySelector("[data-trend-fold]");
+            if(tf0){
+              var on0 = false;
+              try{ on0 = localStorage.getItem("mdp_trend_fold") === "1"; }catch(e){}
+              tf0.classList.toggle("on", on0);
+            }
           }
           var wb = document.getElementById("ctx-window"), rb = document.getElementById("ctx-rounds");
           if(wb) wb.classList.toggle("linked", pane !== "window");
@@ -1493,6 +1631,19 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
     Object.keys(foldedSids).forEach(function(k){ if(foldedSids[k]) arr.push(k); });
     saveJSON(FOLD_KEY, arr);
   }
+  // 群组折叠（用户 m02038 第 9 条）：分组标题最右侧一个按钮，收起后整组卡片换成
+  // 一排固定大小的圆头像，头像外圈用竖条那四档颜色提示运行状态。
+  var GRPFOLD_KEY = "mdp_fold_groups";
+  var foldedGroups = (function(){
+    var a = loadJSON(GRPFOLD_KEY, []), m = {};
+    (Array.isArray(a) ? a : []).forEach(function(x){ m[String(x)] = true; });
+    return m;
+  })();
+  function saveFoldedGroups(){
+    var arr = [];
+    Object.keys(foldedGroups).forEach(function(k){ if(foldedGroups[k]) arr.push(k); });
+    saveJSON(GRPFOLD_KEY, arr);
+  }
 
   // 触发口径的中文名（用户 m15045：概率模式触发曾被写成「攒够条数」，还挂上 n/阈值）。
   // count 之外的三档是概率掷骰/时段曲线/自适应阈值，它们没有「攒够几条」这回事。
@@ -1682,6 +1833,13 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
     var vline = function(a, b, c){
       return "<span class='vm'>" + seg(a) + vsep + seg(b) + vsep + seg(c) + "</span>";
     };
+    // 用户 m16262 图1：用时从主值行挪到副行，主值只剩「次数 / 命中」两段。
+    // 两段的写法单独留一个（三段那个 vline 还有别的卡在用，不动）。
+    var vline2 = function(a, b){
+      return "<span class='vm'>" + seg(a) + vsep + seg(b) + "</span>";
+    };
+    // 副行末尾追加一项：前面没有内容时不要留一个孤零零的「 · 」。
+    var subTail = function(head, tail){ return head ? (head + " · " + tail) : tail; };
     // 最近 24 小时决策（用户本轮）：决策模型跑了多少次、其中判要回的多少次。
     // 数据来自后端 /overview 的 today.decisions（decision_stats(24) 数盘上
     // decision_only 的快照）。判定不回不发请求，所以这个数跟「请求」卡不是一回事，
@@ -1705,18 +1863,21 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
       // v4.68（用户 m02472）：改名「24小时回复概览」——这格现在同时讲次数、平均用时、
       // 缓存命中，还叫「回复」会让人以为只有次数；群聊/私聊拆分挪进悬浮（一行装不下）。
       ["最近24小时回复概览",
-        vline((t.replied || 0) + "次", secTxt(kr.avg_elapsed), hitTxt(kr.cache_hit)), "",
+        vline2((t.replied || 0) + "次", hitTxt(kr.cache_hit)), "",
         "真正发出去的回复条数；平均每次 " + secTxt(kr.avg_elapsed) +
         "（回复请求本身的耗时，不含决策），命中率 " + pctTxt(kr.cache_hit) +
         " 按最近 24 小时有记录的 " + (kr.elapsed_rounds || 0) + " 轮回复算" +
         (kr.cache_hit == null
           ? "（框架回给插件的回复结果里没有缓存用量，这一路只能显示 —；决策那一路有）" : ""),
-        ksRep ? ksRep.plain : "", ksRep ? ksRep.html : ""],
+        // 用户 m16262 图1：用时挂到副行尾巴上（「群聊 19 次 · 私聊 0 次 · 104秒」），
+        // 主值行只留次数和命中率。
+        subTail(ksRep ? ksRep.plain : "", secTxt(kr.avg_elapsed)),
+        subTail(ksRep ? ksRep.html : "", seg(secTxt(kr.avg_elapsed)))],
       // 用户 m02472：决策这格跟回复一样，副行写「次数 / 平均用时 / 缓存命中」；
       // 建议回复 / 建议不回 / 决策失败改挂悬停（一行装不下四项）。
       // 建议不回不发请求，所以决策次数跟「请求」卡不是一回事。
       ["最近24小时决策概览",
-        decOk ? vline((dec.rounds || 0) + "次", secTxt(kd.avg_elapsed), hitTxt(kd.cache_hit)) : "—", "",
+        decOk ? vline2((dec.rounds || 0) + "次", hitTxt(kd.cache_hit)) : "—", "",
         decOk ? ("最近 24 小时决策模型跑了 " + dec.rounds + " 次；其中建议回复 " +
                  (Number(dec.reply) || 0) + " 次、建议不回 " + (Number(dec.silent) || 0) +
                  " 次" +
@@ -1725,8 +1886,10 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
                  "（决策请求本身的耗时），命中率 " + pctTxt(kd.cache_hit) +
                  " 按决策轮的输入算，共 " + (kd.elapsed_rounds || 0) + " 轮")
               : "还没有决策记录：决策模式开着、并且真触发过一轮才有",
-        decOk ? ("建议回复 " + (Number(dec.reply) || 0) + " · 建议不回 " +
-                 (Number(dec.silent) || 0) + (Number(dec.failed) ? " · 失败 " + dec.failed : "")) : "",
+        // 用户 m16262 图1：「建议回复 / 建议不回」压成「回复 / 不回」各两个字，
+        // 省下的位置给用时（副行四项：回复 N · 不回 N · 失败 N · X秒）。
+        decOk ? subTail("回复 " + (Number(dec.reply) || 0) + " · 不回 " + (Number(dec.silent) || 0) +
+                 (Number(dec.failed) ? " · 失败 " + dec.failed : ""), secTxt(kd.avg_elapsed)) : "",
         null],
       // 请求和回复拆成两张卡（用户 m41511），成功率只挂在请求这张上。
       // 用户 m05552 第 2 条：失败轮和重试轮以前根本没进统计（结算日志只在成功路径写），
@@ -1747,11 +1910,13 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
     // 用户 m02952：副行原来写「入 / 出」，跟价目表统一成「输入 / 输出」，不用单字缩写。
     if(tk.total){
       items.push(["最近24小时 token", tokText(tk.total), "",
-                  "输入 " + (tk.input || 0) + " · 输出 " + (tk.output || 0) +
-                  " · 命中 " + (tk.cached || 0) + " · " + (tk.rounds || 0) + " 轮有 token 记录" +
-                  "（24 小时共 " + (t.rounds || 0) + " 轮请求）",
-                  "输入 " + tokText(tk.input) + " · 输出 " + tokText(tk.output) +
-                  (tk.cache_hit == null ? "" : " · 命中 " + tk.cache_hit + "%")]);
+                  "输入 " + Math.max(0, (tk.input || 0) - (tk.cached || 0)) + " · 缓存 " + (tk.cached || 0) +
+                  " · 输出 " + (tk.output || 0) +
+                  (tk.cache_hit == null ? "" : " · 命中 " + tk.cache_hit + "%") +
+                  " · " + (tk.rounds || 0) + " 轮有 token 记录（24 小时共 " + (t.rounds || 0) + " 轮请求）",
+                  // 卡片副行只有一行宽：命中率放悬停里，副行只留「输入 / 缓存 / 输出」三段，免得被截成省略号。
+                  "输入 " + tokText(Math.max(0, (tk.input || 0) - (tk.cached || 0))) + " · 缓存 " + tokText(tk.cached) +
+                  " · 输出 " + tokText(tk.output)]);
     }
     // 最近 24 小时花费（用户 m02080 第 4 条）：紧挨着 token 卡，token × 设置页手填单价。
     // 用户 m02580：这张要做成常驻卡片并顶掉「活跃会话」那一格——所以不管有没有填价
@@ -1780,7 +1945,8 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
         if(ck.decision) sp.push("决策 " + money(p.decision_cost || 0));
         var split = sp.length ? "（" + sp.join(" / ") + "）" : "";
         return shortModel(p.model) + " " + (p.priced ? money(p.cost) : "未定价") +
-               "（输入 " + (p.input || 0) + " · 输出 " + (p.output || 0) + "）" + split;
+               "（输入 " + Math.max(0, (p.input || 0) - (p.cached || 0)) + " · 缓存 " + (p.cached || 0) +
+               " · 输出 " + (p.output || 0) + "）" + split;
       }).join(" · ") : "还没填价目") + " ｜ 单位：" + (cost.unit || "元 / 百万 token");
       var ckRep = (ck.reply && typeof ck.reply.total === "number") ? ck.reply.total : null;
       var ckDec = (ck.decision && typeof ck.decision.total === "number") ? ck.decision.total : null;
@@ -1927,6 +2093,10 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
   // v4.90（用户 m01875 第 1 条）：判定「要回」的决策轮不单独成柱（由随后的回复轮代表），
   // 但它也是盘上的一份窗口快照。标题要跟缓存表那一行对得上，就得把它数进去。
   var ctxDecFolded = 0;
+  // 用户 m00942 第 5 条：走势图折叠开关（默认关）。打开后只画「裁切（橙）」「裁切快照（青）」
+  // 和实时柱——凌晨攒到缓冲上限那几刀才是要看的，其余柱子全收起来。
+  var TREND_FOLD = false;
+  try{ TREND_FOLD = localStorage.getItem("mdp_trend_fold") === "1"; }catch(e){}
   // v4.83（用户 m08855）：刷新时走势图会分三次长出来（缓存里的请求 40 根 → 决策并入 150 根 →
   // 请求并入 227 根），标题「最近 N 次快照」跟着跳三次。现在趋势数据也进缓存（trendreq/trenddec），
   // 首屏直接用上次的完整趋势；缓存没有时先画骨架，等两路都回来再一次性画。
@@ -2204,7 +2374,7 @@ var ctxSnapRequest = 0;
     // 签名里必须带上「当前选中会话」和「别名表」：切会话、改名的时候
     // ctxSessions 一个字都没变，只比数据会直接早退，active 高亮和改后的名字
     // 永远落不到 DOM（审查 bug）
-    var listSig = JSON.stringify([ctxSid, aliases, ctxSessions, Object.keys(foldedSids).sort()]);
+    var listSig = JSON.stringify([ctxSid, aliases, ctxSessions, Object.keys(foldedSids).sort(), Object.keys(foldedGroups).sort()]);
     if(listSig === lastListSig) return;
     lastListSig = listSig;
     var listTop = box.scrollTop;
@@ -2212,7 +2382,21 @@ var ctxSnapRequest = 0;
     [["gm", "群聊"], ["dm", "私聊"]].forEach(function(g){
       var arr = groups[g[0]];
       if(!arr.length) return;
-      html += "<div class='grp'>" + g[1] + "（" + arr.length + "）</div>";
+      var gfold = !!foldedGroups[g[0]];
+      html += "<div class='grp'><span class='gt'>" + g[1] + "（" + arr.length + "）</span>" +
+              "<button class='grpb" + (gfold ? " on" : "") + "' data-grpfold='" + g[0] + "' title='" +
+              (gfold ? "展开这一组，看完整卡片" : "收起这一组，只留头像") + "' aria-label='" +
+              (gfold ? "展开这一组" : "收起这一组") + "'>" + ICON_CHEV + "</button></div>";
+      // 收起后只留头像：固定 38px 圆，排不下自动换行；外圈颜色跟左边竖条同一套判定
+      if(gfold){
+        html += "<div class='avgrid'>" + arr.map(function(s){
+          var lv = stateLvl(s);
+          return "<span class='avcell " + lv + "' data-ctx='" + esc(s.sid) + "' title='" +
+                 esc(displayName(s.sid) + " · " + stateStripeTitle(s, lv)) + "'>" +
+                 avatarHtml(s.sid) + "</span>";
+        }).join("") + "</div>";
+        return;
+      }
       arr.forEach(function(s){
         var on = !(s.eff && s.eff.session_enabled === false);
         // 每个胶囊自己带 data-cfg：原来整块 .cfg 都是可点区域，鼠标划过下面那一片
@@ -2272,6 +2456,15 @@ var ctxSnapRequest = 0;
     lastListSig = "";
     renderCtxList();
   }
+  // 群组折叠：整组收起/展开，同样只改显示
+  function toggleFoldGroup(g){
+    g = String(g || "");
+    if(!g) return;
+    if(foldedGroups[g]) delete foldedGroups[g]; else foldedGroups[g] = true;
+    saveFoldedGroups();
+    lastListSig = "";
+    renderCtxList();
+  }
 
   // 每个会话一个独立开关：关掉 = 这个群/私聊插件完全不管（不计数、不进窗口、不触发）。
   // 存的是 overrides 里的 session_enabled；开回来就把这个键删掉（跟随全局默认 true）。
@@ -2304,6 +2497,9 @@ var ctxSnapRequest = 0;
     // v3.75（用户本轮第 5 条）：这不是一次请求，而是「没人说话时顺手做的一次
     // 窗口裁切」单独落的快照。不能算成「未回复」——那样颜色和统计都说错话。
     if(outcome === "trim") return { label: "窗口裁切", cls: "trim", tag: "cut", detail: "" };
+    // 用户 m17492 图5/图6：别的插件（如 nai 出图）完成时发来的是通知事件，框架照样跑一整轮。
+    // 那一轮不是谁在说话，也不是空回复——单独一档「工具回调」。
+    if(outcome === "notice") return { label: "工具回调", cls: "notice", tag: "cut", detail: "这一轮是别的插件发来的工具完成通知（比如出图完成），不是聊天消息触发的请求，也不算空回复。" };
     // 用户 m35302：建议回复、可这一轮从头到尾没等到回复请求（没跑起来，或者跑到一半断了）。
     // 分不清是失败还是空输出，就按失败画一根，别让这一轮在图上凭空消失。
     if(outcome === "decision" && String(r.reply_state || "") === "missing"){
@@ -2425,6 +2621,8 @@ var ctxSnapRequest = 0;
     if(cls === "error") return "dcon bad";
     if(cls === "ok") return "dcon";
     if(cls === "trim") return "dcon cut";
+    // 用户 m17492 图5/图6：通知回调轮跟「窗口裁切」一样用青色，别混进灰「空回复」。
+    if(cls === "notice") return "dcon cut";
     if(cls === "pending") return "dcon wait";
     if(cls === "dec") return (result.label === "建议回复") ? "dcon" : "dcon no";
     return "dcon no";
@@ -2575,11 +2773,10 @@ var ctxSnapRequest = 0;
     // 快照无关（近期 failed 轮都没带裁切）。tip 改成「这一轮把窗口裁到 N 条」。
     var barArr = arr.map(function(r, i){
       var isTrim = String(r.outcome || "") === "trim" || r.trim_only === true;
-      // v3.99（用户 m10577）：决策轮 = 一次窗口快照，紫柱；不是请求，也不叠裁切的橙色。
-      var isDec = String(r.outcome || "") === "decision";
-      // 裁切快照自己就是那次裁切的产物，不再叠「裁过」的橙色（否则一根柱子两个身份）。
-      // v4.13（用户 m18728 第 1 条）：决策轮也叠橙色。v3.99 那条「决策轮不是请求，
-      // 不叠裁切橙色」作废——决策判完按 60 条裁的那一下必须能在这根柱子上看见。
+      // 独立裁切快照保留自己的触发来源；原决策过期也不改成普通快照。
+      var isDec = String(r.outcome || "") === "decision" ||
+                  (isTrim && String(r.trim_trigger || "") === "decision");
+      // 独立裁切不再借邻轮的橙标；决策触发的裁切在自身结果里保留来源。
       var cut = isTrim ? null : (cutAt[i] || null);
       // v4.24（用户 m22078）：这一轮触发了裁切时，柱子按「裁切前」的规模站高——
       // 决策轮自己只有 56 条 user，裁切却是 83 条（user 70），柱子和悬浮都该写 70。
@@ -2589,7 +2786,7 @@ var ctxSnapRequest = 0;
       // 用户 m35302：判定要回、却从头到尾没等到回复请求的那一轮，柱子照旧出现，但画成红的。
       // 分不清是失败还是空输出，一律当失败；空回复不是这个分支，它有自己的回复柱子。
       var _missDec = isDec && String(r.reply_state || "") === "missing";
-      var result = isDec ? {cls: (_missDec ? "error" : "dec")} : roundResult(r);
+      var result = isDec ? {cls: (_missDec ? "error" : (isTrim ? "dec cut" : "dec"))} : roundResult(r);
       var errorTip = isDec ? "" : retryTip(r);
       if(errorTip) result = {cls: "error"};
       // v3.22（用户 m42531）：柱高只数用户消息，标题里写死这句话，
@@ -2644,22 +2841,25 @@ var ctxSnapRequest = 0;
         var uaU = Number(cut.user_after) || 0;
         // v4.24（用户 m22078）：裁切段的数字与柱高统一按裁切前的规模说，
         // 也不再写「决策后」这种决策信息。
-        tip += " ｜ 触发了裁切：窗口 " + cut.before + " → " + cut.after + " 条" +
+        tip += " ｜ 裁切：窗口 " + cut.before + " → " + cut.after + " 条" +
                (ubU ? " · 用户 " + ubU + (uaU ? " → " + uaU : "") : "") +
                (pendB > 0 && totB > 0 ? " · 其中待发 " + pendB + " 条" : "") +
                (pct === null ? "" : " · 字符减 " + pct + "%");
       }
-      // v4.71（用户 m01516 第 3 条）：悬停第一段就是这份快照的编号，方便按号找。
-      if(r.snap_id) tip = r.snap_id + " · " + tip;
       var sel = (snapName && (r.name === snapName || (selectedRoot && r.event_id === selectedRoot))) ? " sel" : "";
-      return "<span class='bar " + result.cls + (cut ? " cut" : "") + sel +
-             "' style='height:" + ph + "px' title='" + esc(tip) + "'" +
-             (r.name ? " data-trend='" + esc(r.name) + "'" : "") + "></span>";
+      // 用户 m00942 第 5 条：折叠开关打开后只留「裁切（橙）」「裁切快照（青）」
+      // 和实时柱，其余柱子不画——凌晨那种攒到缓冲上限的裁切快照才是要看的。
+      var keepBar = !TREND_FOLD || !!cut || isTrim;
+      return { keep: keepBar,
+               html: "<span class='bar " + result.cls + (cut ? " cut" : "") + sel +
+                     "' style='height:" + ph + "px' title='" + esc(tip) + "'" +
+                     (r.name ? " data-trend='" + esc(r.name) + "'" : "") + "></span>" };
     });
     // 从左往右 = 新到旧（用户 m28965）：最左边是「现在」，越往右越早。
     // cut 的归属在上面 map 里已经按 arr[i+1]（时间正序）算完，这里才反转，顺序不影响裁切。
     barArr.reverse();
-    var bars = barArr.join("");
+    var shownBars = 0;
+    var bars = barArr.map(function(b){ if(b.keep) shownBars++; return b.keep ? b.html : ""; }).join("");
     // 最左补一根绿柱：此刻实时窗口的条数。点它等于「回到现在」。
     if(liveN > 0){
       var lh = Math.max(2, Math.round(liveN / max * h));
@@ -2706,26 +2906,26 @@ var ctxSnapRequest = 0;
     });
     // v4.90（用户 m01875 第 1 条）：后端带回盘上的份数就直接用它，跟缓存表那一行对得上；
     // 老后端没有 snap_total 才退回前端拼凑。
-    var _diskN = ctxSnapTotal > 0 ? ctxSnapTotal : (arr.length + _markN + ctxDecFolded);
-    var haveN = _diskN + (liveN > 0 ? 1 : 0);
-    // 上限是「窗口快照显示条数」，数出来的份数不能超过它。
-    if(_capN > 0 && haveN > _capN) haveN = _capN;
-    var earliestTs = arr.length ? (Number(arr[0].ts) || 0) : 0;
-    var trendTitle = haveN
-      ? ("最近 " + haveN + " 次快照" + (earliestTs ? " · 最早 " + fmtTime(earliestTs).slice(0, 16) : ""))
-      : "还没有快照记录";
+    // 标题与 DOM 共用同一份口径：只数当前真正画出的柱子。
+    // rows、snap_total 与裁切标记来自不同索引，不能再拿它们拼一个会
+    // 随刷新返回顺序变化的数字；shownBars 已经经过重试归并、上限截断和折叠筛选。
+    var haveN = shownBars + (liveN > 0 ? 1 : 0);
+    // 用户 m00942 第 4 条：标题后面不再跟最早那份的时间，那排文字只留份数。
+    var trendTitle = haveN ? ("最近 " + haveN + " 次") : "还没有快照记录";
     return "<div class='trend-hd'><span>" + trendTitle + "</span>" +
            (infoHtml || "") + (backHtml || "") + "<span class='grow'></span>" +
            "<span class='trend-lg'>" +
-             "<i class='tb ok'></i>回了" +
+             "<i class='tb ok'></i>回复" +
              "<i class='tb no'></i>没回" +
              "<i class='tb error'></i>出错" +
-             "<i class='tb cut'></i>裁过" +
-             "<i class='tb trim'></i>裁切快照" +
+             "<i class='tb cut'></i>裁切" +
+             "<i class='tb trim'></i>快照" +
               "<i class='tb dec'></i>决策" +
              "<i class='tb live'></i>实时" +
              (far ? "<span class='hint'>" + far + "</span>" : "") + "</span></div>" +
-           "<div class='trend'><div class='trend-in'>" + bars + "</div>" + line + "</div>";
+           "<div class='trend'><div class='trend-in'>" +
+             (bars || (TREND_FOLD ? "<span class='hint' style='padding:2px 4px'>折叠中：这段时间没有裁切或快照柱子</span>" : "")) +
+           "</div>" + line + "</div>";
   }
 
   // 估算渲染后占几行：CSS 的 clip 是 6 行，按字数估比按字符数准
@@ -3705,7 +3905,9 @@ var ctxSnapRequest = 0;
   function tidyBody2(t, hasMedia){
     var s = tidyBody(t);
     if(!hasMedia) return s;
-    var names = /\[([一-龥A-Za-z]{1,8})\]/g;
+    // 用户 m14836 图4：表情包名字里带数字（[甜花13]）时旧正则认不出来，正文里就多挂一段
+    // 「[甜花13] 6 字」。名字允许数字、下划线、连字符，长度仍限 8 字以内。
+    var names = /\[([一-龥A-Za-z0-9_\-]{1,8})\]/g;
     var prose = s.replace(names, "").replace(/\s/g, "");
     if(prose) return s;
     return s.replace(names, function(m){ return BODY_PH_RE.test(m) ? m : ""; });
@@ -4126,10 +4328,18 @@ var ctxSnapRequest = 0;
     var unassigned = d && Array.isArray(d.unassigned_media) ? d.unassigned_media : (known ? [] : legacy);
     // 已按原转发条目证明的数组表示图片槽位；不同条目可有意重复同一张图。
     var orderedSlots = known && d.source === "forward_cache_aligned" && Array.isArray(d.own_media);
+    // 用户 m00942 图1：转发卡只画「这条消息自己带的图」时，模型侧按配额只挂了前几张
+    // （默认 3 张），最后一条就只剩 🖼。后端另给一份插件缓存里的全部图，只用于渲染；
+    // 不去重（同一条转发里可能有意重复同一张），也不改 known——归属结论仍是未知。
+    var allMedia = d && Array.isArray(d.forward_media_all) ? d.forward_media_all.slice() : null;
     return { known: known, own: known ? (orderedSlots ? d.own_media.slice() : uniqueOwnerMedia(d.own_media)) : [],
       unassigned: uniqueOwnerMedia(unassigned),
+      all: allMedia,
       reply: d && d.direct_reply && d.direct_reply.id !== undefined ? { id: String(d.direct_reply.id) } : null,
       body: d && typeof d.own_body === "string" ? d.own_body : "",
+      // 每条转发条目各带几张图（后端对齐成功才有）：卡片据此把图放到真正的那一条，
+      // 正文里字面的 [图片] 不占位（用户 m16262 图2）。
+      slots: orderedSlots && Array.isArray(d.own_slots) ? d.own_slots.slice() : null,
       hasBody: !!(d && typeof d.own_body === "string") };
   }
   function displayTextOf(m){
@@ -4170,6 +4380,9 @@ var ctxSnapRequest = 0;
       unassigned_media: d.known ? [] : d.unassigned,
       direct_reply: d.reply, source: d.known ? (m.display && m.display.source === "forward_cache_aligned" ? "forward_cache_aligned" : "native_chain") : "unknown" };
     if(d.hasBody) projected.own_body = body;
+    // 用户 m00942 图1：引用里的转发卡也要画全所有图，这里必须把完整图集带过去，
+    // 否则 quoteEntryOf 重建的 projected 会把它丢掉，引用里又只剩前几张。
+    if(d.all && d.all.length) projected.forward_media_all = d.all;
     return { body: body, name: String(m.name || m.who || ""), who: String(m.who || m.name || ""),
       ts: String(m.ts || ""), media: quoteMedia, display: projected };
   }
@@ -4318,8 +4531,10 @@ var ctxSnapRequest = 0;
     }
     var when = shortTs(String((hit && hit.ts) || q.ts || (m ? m[1] : "")));
     var body = stripReplyTokens(m ? m[3] : t);
-    var qsrc = d.known ? d.own : (d.unassigned || []);
     var qIsFwd = body.trim().indexOf("[Forward") === 0;
+    // 用户 m00942 图1：转发卡要画全所有图，引用里的那份也一样——display.forward_media_all
+    // 是这条转发消息的完整图集（own_media_known 仍为 false，不影响别处判定）。
+    var qsrc = d.known ? d.own : ((qIsFwd && d.all && d.all.length) ? d.all : (d.unassigned || []));
     var qm = qIsFwd ? "" : thumbsHtml(qsrc);
     // known [] 是确定无图；图文并存时不因没有 Image 占位而清掉图或文字。
     if(qm || (d.known && !qsrc.length)) body = tidyBody(body)
@@ -4429,20 +4644,38 @@ var ctxSnapRequest = 0;
     return "<span class='fwd-sub'><span class='fwb'>" + esc(label) + "</span>" +
            (note ? "<span class='fwp'>" + esc(note) + "</span>" : "") + "</span>";
   }
-  function forwardHtml(body, media){
+  // slots（可选）：每条转发条目各带几张图，跟 entries 一一对应；长度对不上就不用，
+  // 退回按正文里的 [图片] 占位顺序认领（老行为）。
+  function forwardHtml(body, media, slots){
     var t = String(body || "").trim();
     if(t.indexOf("[Forward") !== 0) return "";
     var e = bracketEnd(t, 0);
     var inner = e > 0 ? t.slice(8, e) : t.slice(8);
     inner = inner.replace(/^[\s:：]+/, "");
     var rows = [];
-    inner.split(/\n{2,}/).forEach(function(raw){
+    var entries = inner.split(/\n{2,}/);
+    // 用户 m17492 图2：实时窗拿不到后端的槽位表（图片被归到「归属不明」那一堆），
+    // 但正文里宿主自己留的 [Image attached] 就是权威槽位——按条目数一遍，
+    // 总数正好等于这一条的图片数才敢用，多一张少一张都退回占位顺序认领。
+    if((!slots || slots.length !== entries.length) && media && media.length){
+      var hostSlots = entries.map(function(raw){
+        var hm = String(raw || "").match(/\[image(?:\s+attached)?\]/gi);
+        return hm ? hm.length : 0;
+      });
+      var hostTotal = hostSlots.reduce(function(a, b){ return a + b; }, 0);
+      if(hostTotal === media.length) slots = hostSlots;
+    }
+    var useSlots = !!(slots && slots.length === entries.length);
+    entries.forEach(function(raw, nodeIdx){
       var it = String(raw || "").trim();
       if(!it) return;
       var mm = it.match(/^\[([^\]]{4,40})\]\s*([^:：]{1,40})[:：]\s*([\s\S]*)$/);
       var when = mm ? shortTs(mm[1]) : "", who = mm ? mm[2] : "";
       if(/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(when)) when = when.replace(/^\d{4}-\d{2}-\d{2}[ T]/, "").slice(0, 5);
       var tx = (mm ? mm[3] : it).trim();
+      // 这一条真正带几张图：宿主写的是 [Image attached]，tidyBody 之后跟正文自带的
+      // [图片] 长得一样，所以张数以背端槽位表为准，-1 表示没有槽位表。
+      var slotN = useSlots ? (slots[nodeIdx] | 0) : -1;
       // 用户第 2 条：转发条目里的 [Image attached] 以前原样露英文标记，
       // 现在跟正文一样洗成 [图片]，连续多张压成「[图片] ×8」免得一行糊满
       tx = tidyBody(tx);
@@ -4463,14 +4696,16 @@ var ctxSnapRequest = 0;
         rows.push({ who: who, when: when, text: "", sub: sub, n: 1 });
         return;
       }
-      rows.push({ who: who, when: when, text: tx, sub: null, n: 1 });
+      rows.push({ who: who, when: when, text: tx, sub: null, n: 1, slotN: slotN });
     });
     if(!rows.length) return "";
     var merged = [];
     rows.forEach(function(r){
       var last = merged[merged.length - 1];
       if(last && last.who === r.who && last.text === r.text && /^\[(图片|表情|语音|视频)\]/.test(r.text)){
-        last.n++; return;
+        last.n++;
+        if(last.slotN >= 0 && r.slotN >= 0) last.slotN += r.slotN; else last.slotN = -1;
+        return;
       }
       merged.push(r);
     });
@@ -4482,7 +4717,7 @@ var ctxSnapRequest = 0;
     var cursor = 0;
     // 第一遍按 [图片] 占位顺序认领（跟 QQ 的图文顺序一致；嵌套转发小卡不占槽位）
     var claims = merged.map(function(r){
-      var got = [], want = r.sub ? 0 : fwdPicN(r.text || "") * (r.n || 1);
+      var got = [], want = r.sub ? 0 : (r.slotN >= 0 ? r.slotN : fwdPicN(r.text || "") * (r.n || 1));
       while(want > 0 && cursor < pool.length){ got.push(pool[cursor++]); want--; }
       return got;
     });
@@ -4518,21 +4753,26 @@ var ctxSnapRequest = 0;
       });
       return n;
     }
-    // 图都贴上了就不重复写「[图片]」字样；还缺图的条目留着占位，说明图被清理了
-    function stripFwdPics(t){
-      return String(t || "").replace(/\[(?:图片|表情)\](?:\s*×\s*\d+)?/g, "").replace(/[ \t]{2,}/g, " ").trim();
+    // 用户 m17145：正文里的 [表情] 不是图片槽。贴纸只有媒体池里真有图时才认领得到，
+    // 把它算进 need 会让「（已发 N）」挂在图片明明已经贴上的条目上（12:50 那条）。
+    function fwdNeed(r){
+      var t = String(r.text || ""), n = r.n || 1;
+      return { pic: r.slotN >= 0 ? (r.slotN | 0) : fwdPicN(t) * n, emo: fwdEmoN(t) * n };
+    }
+    function stripFwdKind(t, kind){
+      return String(t || "").replace(new RegExp("\\[" + kind + "\\](?:\\s*×\\s*\\d+)?", "g"), "")
+        .replace(/[ \t]{2,}/g, " ").trim();
     }
     // 2026-11-01（用户 m06138 图1）：条目已经有真图时，预览行不再把同一个 [图片]
     // 画成小方块；只有还有图没认领到（被清理/没下发）才保留占位 chip。
-    function fwdPreviewText(r, got){
-      var t = String(r.text || "");
-      var need = (fwdPicN(t) + fwdEmoN(t)) * (r.n || 1);
-      var shown = 0;
-      (got || []).forEach(function(it){
-        var o = (typeof it === "string") ? { path: it } : (it || {});
-        if(!o.missing && (o.path || o.url)) shown++;
-      });
-      return (need > 0 && shown >= need) ? stripFwdPics(t) : t;
+    // 图片先占满 [图片] 槽，多出来的才轮到 [表情]（第二遍认领），所以两种占位分开剥。
+    function fwdStrip(r, got){
+      var need = fwdNeed(r), shown = fwdShownN(got);
+      var picGot = Math.min(shown, need.pic), emoGot = Math.max(0, shown - need.pic);
+      var out = String(r.text || "");
+      if(need.pic > 0 && picGot >= need.pic) out = stripFwdKind(out, "图片");
+      if(need.emo > 0 && emoGot >= need.emo) out = stripFwdKind(out, "表情");
+      return out;
     }
     // m24522 ④⑥：占位不再当字面文字铺出来，统一换成小图标（卡片预览与弹层共用）
     function fwdPicChip(t, compact, allowChinese){
@@ -4547,10 +4787,13 @@ var ctxSnapRequest = 0;
     }
     var lis = merged.map(function(r, idx){
       var got = claims[idx] || [];
-      var pre = r.sub ? "" : fwdPreviewText(r, got);
+      var pre = r.sub ? "" : fwdStrip(r, got);
       var _shown = fwdShownN(got);
+      // 「（已发 N）」是「还有图没到手」的说明，不是张数统计：图全认领完了就不写
+      // （用户 m00942 图2：2 条转发只有 1 张图，图已经画出来了还挂一句「已发 1」）。
+      var _need = fwdNeed(r).pic;
       var body = r.sub ? fwdSubChip(r.sub) : fwdPicChip(pre, true, /^(?:\[视频\]\s*)+$/.test(String(r.text || "").trim())) + (r.n > 1 && pre ? " ×" + r.n : "") +
-        (!r.sub && _shown > 0 && pre ? "<span class='fw-sent'>（已发 " + _shown + "）</span>" : "");
+        (!r.sub && _shown > 0 && pre && _shown < _need ? "<span class='fw-sent'>（已发 " + _shown + "）</span>" : "");
       return "<div class='fwd-it'><span class='fw-w'>" + esc(r.who || "某人") + "</span>" +
              (r.when ? "<span class='fw-t'>" + esc(r.when) + "</span>" : "") +
              "<span class='fw-c'>" + body + fwdMini(got) + "</span></div>";
@@ -4560,18 +4803,18 @@ var ctxSnapRequest = 0;
       if(r.sub){
         body = "<div class='fp-tx'>" + fwdSubChip(r.sub) + "</div>";
       } else {
-        var total = (fwdPicN(r.text || "") + fwdEmoN(r.text || "")) * (r.n || 1);
-        var left = total - got.length;
+        var _needF = fwdNeed(r);
+        var _shownF = fwdShownN(got);
+        var _leftF = _needF.pic - Math.min(_shownF, _needF.pic);
         // 有剩余的图（被清理/没下发）就不再写死字面 [图片]，同样交给 chip
         // 用户 m28299 图1（转发的 emoji 没显示）：图都认领完了的那一支原来只 esc，
         // 弹层里 [Emoji 344] 就成了一行方括号。表情与正文同一套，一律过 emojiFaces。
-        var video = nativeVideoHtml(r.text || "", function(part){ return emojiFaces(esc(stripFwdPics(part))); }, false);
+        var _stripped = fwdStrip(r, got);
+        var video = nativeVideoHtml(_stripped, function(part){ return emojiFaces(esc(part)); }, false);
         if(video !== null && r.n > 1) video = video.repeat(r.n);
-        var txt = left > 0 ? (video !== null && r.n > 1 ? fwdPicChip(r.text || "", false).repeat(r.n)
-                           : fwdPicChip(r.text || "", false) + (r.n > 1 ? " ×" + r.n : ""))
-                           : (video !== null ? video : emojiFaces(esc(stripFwdPics(r.text || ""))));
-        var _shownF = fwdShownN(got);
-        body = (txt ? "<div class='fp-tx'>" + txt + (left > 0 && _shownF > 0 ? "<span class='fw-sent'>（已发 " + _shownF + "）</span>" : "") + "</div>" : "") + thumbsHtml(got);
+        var txt = video !== null ? video
+                : (fwdPicChip(_stripped, false) + (r.n > 1 && _stripped ? " ×" + r.n : ""));
+        body = (txt ? "<div class='fp-tx'>" + txt + (_leftF > 0 && _shownF > 0 ? "<span class='fw-sent'>（已发 " + _shownF + "）</span>" : "") + "</div>" : "") + thumbsHtml(got);
       }
       return "<div class='fp-it'><div class='fp-meta'><span class='fw-w'>" + esc(r.who || "某人") + "</span>" +
              (r.when ? "<span class='fw-t'>" + esc(r.when) + "</span>" : "") + "</div>" + body + "</div>";
@@ -4591,9 +4834,9 @@ var ctxSnapRequest = 0;
   // 正文本身就是一整块合并转发时走这里（引用里的那份仍由 quoteHtml 处理）。
   // 一条都解不出来说明框架只给了 {"type":"forward"} 这种空标记——如实写清楚，
   // 不能凭空造内容（用户 m42531 图1 那条 13:16 就只剩一个空竖线）。
-  function fwdHtml(s, media){
+  function fwdHtml(s, media, slots){
     if(!s) return "";
-    var h = forwardHtml(s, media);
+    var h = forwardHtml(s, media, slots);
     if(h) return h;
     return "<div class='fwd'><div class='fwd-hd'>合并转发 · 内容未获取</div>" +
            "<div class='fwd-b'><div class='fwd-note'>框架只收到了「这里有一条合并转发」这个标记，" +
@@ -5413,7 +5656,10 @@ var ctxSnapRequest = 0;
     // v4.37（用户 m20164）：后端给每条 assistant 补 who = bot 显示名（樱井桃华），注记那几条
     // 也被补上了，而 name 才是「对当前聊天消息的决策建议」。对照档补名字时走 noteNameOf，
     // 不然原文头上会多一个 [樱井桃华]，跟原文模式对不上。
-    if(mode === "mixed" && role === "assistant") raw = botRawHead(raw, noteNameOf(m) || m.who || m.name || "", ts);
+    // 工具回调的时间在 m.at 里（view_of 把 [HH:MM] 剥出去了），对照档不能拿
+    // 上一条 user 的时间顶——异步工具的结果可能晚好几分钟。
+    if(mode === "mixed" && role === "assistant") raw = botRawHead(raw, noteNameOf(m) || m.who || m.name || "",
+      (isToolNoteMsg(m) && m.at) ? String(m.at) : ts);
     // v3.63（用户 m18492 图2）：对照档只渲染正文，工具调用那一整段（[tool_calls] … JSON）根本不在原文里，
     // 「原文 ↔ 美化」就核对不了工具参数。这里按请求页的原文格式补在正文末尾。
     if(mode === "mixed" && role === "assistant"){
@@ -5511,8 +5757,12 @@ var ctxSnapRequest = 0;
         var inQuote = null;
         // 归属未确认时，单段转发也把 unassigned 交给转发卡：否则视图副本的 m.media
         // 已被换成空数组，卡内只剩 🖼 占位，图片又落回卡外（用户 m17217）。
-        var fwdMedia = fwdIn ? (ownerDisplay.known ? ownerDisplay.own : ownerDisplay.unassigned) : null;
-        var fwdCard = fwdIn ? fwdHtml(p.meta.fwd, fwdMedia) : "";
+        // 归属未确认时优先用后端给的「这条转发的全部图」：模型侧只挂了前几张，
+        // 用 unassigned 画卡会让最后几条只剩占位（用户 m00942 图1）。
+        var fwdMedia = fwdIn ? (ownerDisplay.known ? ownerDisplay.own
+          : ((ownerDisplay.all && ownerDisplay.all.length) ? ownerDisplay.all : ownerDisplay.unassigned)) : null;
+        var fwdSlots = fwdIn && ownerDisplay.known ? ownerDisplay.slots : null;
+        var fwdCard = fwdIn ? fwdHtml(p.meta.fwd, fwdMedia, fwdSlots) : "";
         // 卡已经把这些图收进去了，就不能再以「归属未确认的附件」在卡外画一遍。
         if(fwdCard && !ownerDisplay.known) neutralMedia = [];
         var partHtml = quoteHtml(p.meta.reply, null, p.raw || p.content || p.text) + fwdCard +
@@ -5650,7 +5900,11 @@ var ctxSnapRequest = 0;
       }
       // 组内：字数做成紧贴正文末尾的小气泡（用户 m31639）。工具次数不挂这里了——它数的是
       // 这一段对话用了几次工具，所以挪到组头名字后面（用户 m17212 图1）。
-      var segs = parseAssistant(body), bd = mediaHtml(m, mode);
+      // 用户 m21297 图2/图3：工具回调是「先一句提示、后面跟图」。以前媒体块先拼进 bd，
+      // 卡片就成了图在上、字在下；工具回调改成正文在前、图在后（其它 assistant 不动）。
+      var toolNote = isToolNoteMsg(m);
+      var toolMedia = toolNote ? mediaHtml(m, mode) : "";
+      var segs = parseAssistant(body), bd = toolNote ? "" : mediaHtml(m, mode);
       // v3.69（用户 m21003 第 4 条）：正文是抖音分享卡时不挂「N 字」
       var dyAsst = !!douyinCard(body) || segs.some(function(x){ return !!douyinCard(x.text); });
       var chipA = grp ? ((m.chars && !dyAsst ? "<span class='chb count'>" + m.chars + " 字</span>" : "") +
@@ -5667,12 +5921,14 @@ var ctxSnapRequest = 0;
       // v3.58（用户 m16875 图2）：这条消息的工具调用原来画在卡片里一遍、卡片外又补一遍，
       // 同一条消息出现两套「调用 search · 搜索 …」。现在只在正文末尾画一次。
       var tcl = tcOf(m);
-      if(!bd) bd = m.tools
+      if(!bd && !(toolNote && toolMedia)) bd = m.tools
         ? (tcl.length ? "" :
            "<span class='dim'>（这一步调用了 " + m.tools + " 个工具，没有文本输出）</span>")
         : bodyHtml(body, "(空)", 0, "", true);
       if(grp && !segs.length) bd = tailChip(bd, chipA);
       if(tcl.length) bd += "<div class='tcall-wrap'>" + toolCallList(tcl) + "</div>";
+      // 工具回调的图排在提示后面（用户 m21297 图2/图3：先提示、后图）
+      if(toolNote) bd += toolMedia;
       bd += unassignedMediaHtml(neutralMedia, mode);
       if(grp){
         // 组内：名字在组头，左列只放时间；时间从正文里剥出来了（ts 变量）
@@ -5768,25 +6024,26 @@ var ctxSnapRequest = 0;
     // 图挂了只显示 [表情]：带上 id 的「[表情21]」比原文的 [Emoji 21] 还难看
     var label = name ? ("表情·" + esc(name)) : "表情";
     // v3.25：原来上限写死 400，群里的新表情 id 常常过 400（实测 427），
-    // 一过界就直接退成文字「[表情]」，看着就是没渲染。qzone 的编号是 id+100，
-    // e527.gif 确实存在（只有 e427 是 404），所以放宽到 999，
-    // 真没有的图靠 onerror 两次失败后加 .miss 退回文字。
+    // 一过界就直接退成文字「[表情]」，看着就是没渲染。
     if(!isFinite(n) || n < 0 || n > 999){
       return "<span class='emoji'>[" + label + "]</span>";
     }
     // v4.41（用户 m24522 图4）：老版 qzone 小黄脸太旧，先取新版表情库
     // （gitee 上的新版 QQ 小黄脸，文件名就是表情 id：id 4 @2x.gif 就是「得意」，
     // 和 qzone 的 e104.gif 是同一张脸的新画法，实测对得上）。
-    // 新版取不到就退回老版两档（e{id+100} 才是真正的编号，e{id} 兜底），再失败才显示 [表情]。
     // v4.49（用户 m25038 第 5 项）：直连 gitee 会被防盗链挡成 403（实测），页面永远掉到
     // 老版 qzone 小黄脸。改走插件自己的 /emoji 代理：后端取一次、缓存到 media_cache/emoji/。
+    // v4.52（用户 m16262 图4）：后端现在也覆盖 288 以后的新脸（344 大怨种走 QFace），
+    // 老版 qzone 只有 0~211 这些老脸跟 QQ 编号差 100；再往上 e{id+100} 是另一套图，
+    // 344 会退回 e344「面无表情」——画错脸比不画还糟，所以只给老脸留这条退路。
     var NEW_SRC = API + "/emoji?id=" + n;
+    var oldFace = n <= 211;
+    var fb1 = oldFace ? ("https://qzonestyle.gtimg.cn/qzone/em/e" + (n + 100) + ".gif") : "";
+    var fb2 = oldFace ? ("https://qzonestyle.gtimg.cn/qzone/em/e" + n + ".gif") : "";
     return "<span class='emoji'><img class='em-img' loading='lazy' alt='" + label + "' title='QQ 表情 " + n +
            (name ? " · " + esc(name) : "") +
-           "' src='" + NEW_SRC + "' data-fb='" +
-           "https://qzonestyle.gtimg.cn/qzone/em/e" + (n + 100) + ".gif'" +
-           " data-fb2='https://qzonestyle.gtimg.cn/qzone/em/e" + n + ".gif'" +
-           " onerror=\"var f=this.dataset;if(!f.tried1){f.tried1='1';this.src=f.fb;}else if(!f.tried2){f.tried2='1';this.src=f.fb2;}else{this.parentNode.classList.add('miss');}\"" +
+           "' src='" + NEW_SRC + "' data-fb='" + fb1 + "' data-fb2='" + fb2 + "'" +
+           " onerror=\"var f=this.dataset;if(!f.tried1&&f.fb){f.tried1='1';this.src=f.fb;}else if(!f.tried2&&f.fb2){f.tried2='1';this.src=f.fb2;}else{this.parentNode.classList.add('miss');}\"" +
            " onload=\"this.parentNode.classList.remove('miss')\">" +
            "<span class='em-txt'>[" + label + "]</span></span>";
   }
@@ -6196,10 +6453,27 @@ var ctxSnapRequest = 0;
     "<button data-pane='window'>实时窗口</button><button data-pane='rounds'>回复记录</button>" +
     "<button data-pane='decisions'>决策记录</button></span>" +
     "<span class='vsw'><button data-view='pretty'>美化</button><button data-view='mixed'>对照</button>" +
-    "<button data-view='raw'>原文</button></span><span class='grow'></span></div>";
+    "<button data-view='raw'>原文</button></span>" +
+    // 用户 m00942 第 5 条：切换按钮右边加一个滑动开关，折叠掉没意义的柱子。
+    "<span class='sw sw-fold" + (TREND_FOLD ? " on" : "") + "' data-trend-fold='1' " +
+    "title='只留裁切、快照和实时柱'><span class='tr'></span></span>" +
+    "<span class='grow'></span></div>";
 
   // v3.62（用户 m18059 第 6 条）：走势图能整块横向滚动后，选中的那根（点旧柱子进来的、
   // 或从请求表点进来的）常落在可视区外，画完把它滚进视野，不然看着像没选中。
+  // 用户 m00942 第 3 条：柱子滚到旧日期后点快照会「回弹」——重画整块 innerHTML 会把
+  // .trend-in 的 scrollLeft 归零，revealTrendSel 再把选中柱推到右边缘。重画前后把横向
+  // 位置接回去，用户看到的就是原地选中。
+  function trendScrollX(root){
+    var box = root && root.querySelector ? root.querySelector(".trend-in") : null;
+    return box ? (box.scrollLeft || 0) : 0;
+  }
+  function restoreTrendScroll(root, x){
+    if(!x) return;
+    var box = root && root.querySelector ? root.querySelector(".trend-in") : null;
+    if(box) box.scrollLeft = x;
+  }
+
   function revealTrendSel(el){
     if(!el) return;
     requestAnimationFrame(function(){
@@ -6216,8 +6490,10 @@ var ctxSnapRequest = 0;
     var box = document.getElementById("ctx-window");
     if(!box) return null;
     var hd = box.querySelector(".sec-hd");
+    var keepX = trendScrollX(box);
     if(!hd){
       box.innerHTML = SECHD_HTML + (rest || "");
+      restoreTrendScroll(box, keepX);
       revealTrendSel(box.querySelector(".trend"));
       fillQuoteMiss();
       fillTweets();
@@ -6226,6 +6502,7 @@ var ctxSnapRequest = 0;
     var node = hd.nextSibling;
     while(node){ var nx = node.nextSibling; box.removeChild(node); node = nx; }
     if(rest) box.insertAdjacentHTML("beforeend", rest);
+    restoreTrendScroll(box, keepX);
     revealTrendSel(box.querySelector(".trend"));
     fillQuoteMiss();
     fillTweets();
@@ -6282,6 +6559,9 @@ var ctxSnapRequest = 0;
     // 用 ctxPane !== "window" 判断；以前只认 rounds，切到决策页时表格自己一个圆角，
     // 看着像两块分离的面板。
     if(box) box.classList.toggle("linked", ctxPane !== "window");
+    // 用户 m14026 第 4 条：窗口主体的显隐跟着页签走，放在入口处——下面几条早退（没数据 /
+    // 数据没变）都不会再把它漏掉，记录页也不会被一条「选一个会话」的占位顶下去。
+    if(box) box.classList.toggle("win-off", ctxPane !== "window");
     if(roundsBox) roundsBox.classList.toggle("linked", ctxPane !== "window");
     if(!d || !d.ok){ swapWinBody("<div class='empty'>选一个会话</div>"); lastWinSig = ""; return; }
     // bot 自己的头像要用设置里填的 QQ 号（框架不提供），请求页/窗口页共用这一个全局值
@@ -6345,8 +6625,13 @@ var ctxSnapRequest = 0;
     // 只留上面那行标题（页签 + 三档还要在这儿点）。以前只判 rounds，切到决策记录
     // 页时整块走势图 + 判定横幅 + 消息列表还铺在上面，把表格挤到了最底下。
     var atRounds = (ctxPane !== "window");
+    // 用户 m14026 第 4 条：切到记录页时不再清空窗口主体，只加一个 class 藏起来；
+    // 切回来时数据没变就直接显示，省掉整块重建（300+ 根柱子 + 几十条消息）。
+    // （入口处已经按页签切过 win-off，这里不再重复。）
     // 数据没变就别重画——每 5 秒自动刷新一次，一重画滚动位置和「展开全文」全回原点
-    var sig = JSON.stringify([ctxPane, VIEW, d.sid, d.size, d.keep, d.threshold, d.enabled,
+    // 用户 m14026 第 4 条：指纹里不再放 ctxPane——窗口主体跟当前页签无关（页签只决定显示/隐藏），
+    // 放进指纹会让每次切页都判成「数据变了」，切回窗口就得整块重画。
+    var sig = JSON.stringify([VIEW, d.sid, d.size, d.keep, d.threshold, d.enabled,
                               (ctxDecisions[0] || {}).name || "",
                               (d.last_decision || {}).ts || 0,
                               d.counted, d.user_counted, d.pending_counted, d.source, d.last_ts, d.bot_qq,
@@ -6372,6 +6657,8 @@ var ctxSnapRequest = 0;
       QUOTE_PIC_TRIED = Object.create(null);
     }
     QUOTE_SID = _newSid;
+    // 用户 m14026 第 4 条：记下这一版之前画进 DOM 的是哪一版，记录页那边据此判断要不要作废。
+    var prevWinSig = lastWinSig, prevTrendSig = lastTrendSig;
     lastWinSig = sig;
     lastTrendSig = trendSig;
     var oldScroll = box.querySelector(".scroll");
@@ -6409,23 +6696,29 @@ var ctxSnapRequest = 0;
     var sri = snapRetryInfo(ctxSnap);
     var snapRetry = sri.retry;
     var snapSent = sri.sent;
+    // 用户 m00942 第 4 条：这排文字只留「本轮快照 N 条 [用户…· bot…]」和编号，
+    // 后面那串「· 历史 68 · 本轮输入 3 · 实际回复 0 · 空回复」全删——数字对不上账时
+    // 反而更糊涂。编号点一下复制，方便贴到别处对账。
     var winInfo = atRounds ? "" : ctxSnap ?
       "<span class='hint'>本轮快照 " + histCount + " 条 " + snapTag +
-        (typeof ctxSnap.history_counted === "number" ? " · 历史 " + ctxSnap.history_counted + " · 本轮输入 " + ctxSnap.incoming_counted + (typeof snapSent === "number" ? " · 实际回复 " + snapSent : "") : " · 旧版记录") +
-        " · " + esc(ctxSnap.result ? ctxSnap.result.label : "") + snapRetry + "</span>" :
+        (ctxSnap.snap_id
+          ? " <span class='snap-id' data-snap-id='" + esc(ctxSnap.snap_id) + "' title='点击复制快照编号'>" + esc(ctxSnap.snap_id) + "</span>"
+          : "") +
+        "</span>" :
       // 口径、来源这些都写在行内了，标题不再挂 title（用户 m45753：尽量不要用悬停）
       "<span class='hint'>" +
       (d.enabled ? "" : "窗口已关闭 · ") +
       // 待发条数统一用后端 pending_counted：pend 是前端渲染的「组」，一批群消息会并成一组，
       // 拿组数当条数会和明细里的待发数对不上账（线上实测 8 组 vs 5 条）
       (echo ? ("窗口已重置" + (pendCount ? " · 待发 " + pendCount + " 条" : ""))
-            // 用户 m13250 第 3 条：这个「保留」说的是裁切后留下多少条，写成「裁切保留」才不会被
-            // 当成「保留请求数」那个设置（两者不是一个东西）。
-            : ("裁切保留 " + d.keep + " · 裁切阈值 " + d.threshold + " 条用户消息 · 当前 " + winTotal + " 条 " + cntTag)) +
+            : ("保留 " + d.keep + " · 阈值 " + d.threshold + " · 当前 " + winTotal + " 条 " + cntTag)) +
       "</span>";
     var html = "";
     if(atRounds){
-      swapWinBody(html);
+      // 主体已经由 .win-off 藏起来，这里不能再清空——清了切回来就得整块重画。
+      // 指纹只在「这版数据确实没画进 DOM」时作废——数据没变就留着，切回来只显示、不重画。
+      if(prevWinSig !== sig) lastWinSig = "";
+      if(prevTrendSig !== trendSig) lastTrendSig = "";
       box.onclick = winClick;
       restoreWinScroll(keepWinY);
       return;
@@ -6465,7 +6758,9 @@ var ctxSnapRequest = 0;
     // _decision_slots 定的位置），顶上再挂一张卡既重复又占掉半个屏。
     var trendBox = box.querySelector("[data-ctx-trend]");
     if(bodyUnchanged && trendBox){
+      var keepX = trendScrollX(trendBox);
       trendBox.innerHTML = trendHtml;
+      restoreTrendScroll(trendBox, keepX);
       revealTrendSel(trendBox.querySelector(".trend"));
       restoreWinScroll(keepWinY);
       fillQuoteMiss();
@@ -6526,7 +6821,9 @@ var ctxSnapRequest = 0;
         // v3.97（用户 m09615 图3）：决策记录跟普通 bot 消息一个长相——时间走左边那一列，
         // 名字写进名字位，正文就是判定本身。老数据里还留着「[决策记录] HH:MM」前缀，剥掉。
         if(m.decnote) body = decRawBody(m);
-        else if(m.role === "assistant") body = botRawHead(body, m.who || m.name || "", rawLastTs);
+        // v4.99（用户 m18435 第 2 条）：工具回调这类消息的时间由后端剥进 m.at，
+        // 正文里没有 [HH:MM] 前缀，这里要认它，否则会被标成上一条用户消息的时间。
+        else if(m.role === "assistant") body = botRawHead(body, m.who || m.name || "", m.at || rawLastTs);
         var tl = tcRawLine(m);
         if(tl) body = body ? (body + "\n" + tl) : tl;
         rawLine(m.role === "summary" ? "中期摘要" : m.role, body, false);
@@ -6697,6 +6994,12 @@ var ctxSnapRequest = 0;
     if(cr){ clearRecords(); return; }
     var sb = ev.target && ev.target.closest ? ev.target.closest("[data-snap-back]") : null;
     if(sb){ ctxSnapRequest++; exitSnap(); return; }
+    // 用户 m00942 第 5 条：折叠柱子开关（只改画法，不动数据）。
+    var tf = ev.target && ev.target.closest ? ev.target.closest("[data-trend-fold]") : null;
+    if(tf){ toggleTrendFold(tf); return; }
+    // 用户 m00942 第 4 条：点快照编号复制。
+    var si = ev.target && ev.target.closest ? ev.target.closest("[data-snap-id]") : null;
+    if(si){ copySnapId(si); return; }
     // 卡片右上角的「拉黑」（v3.36 用户第 13 条）
     var bk = ev.target && ev.target.closest ? ev.target.closest("[data-blk]") : null;
     if(bk){ toggleBlockPhrase(bk); return; }
@@ -6779,6 +7082,55 @@ var ctxSnapRequest = 0;
     }, wait);
   }, true);
 
+  // 剪贴板：navigator.clipboard 在 http://127.0.0.1 下可用；万一被拒（老浏览器 / 没权限）
+  // 退回 textarea + execCommand，别让「点了没反应」。
+  function copyText(text){
+    var s = String(text == null ? "" : text);
+    if(!s) return Promise.resolve(false);
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      return navigator.clipboard.writeText(s).then(function(){ return true; },
+                                                  function(){ return legacyCopy(s); });
+    }
+    return Promise.resolve(legacyCopy(s));
+  }
+  function legacyCopy(s){
+    try{
+      var ta = document.createElement("textarea");
+      ta.value = s;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return !!ok;
+    }catch(e){ return false; }
+  }
+
+  // 用户 m00942 第 4 条：点编号复制，给个「已复制」的即时反馈（1.2 秒后复原）。
+  function copySnapId(el){
+    var txt = el.getAttribute("data-snap-id") || "";
+    if(!txt) return;
+    copyText(txt).then(function(ok){
+      if(!ok){ mdAlert("复制失败，编号：" + txt); return; }
+      var old = el.textContent;
+      el.classList.add("done");
+      el.textContent = "已复制";
+      setTimeout(function(){ el.classList.remove("done"); el.textContent = old; }, 1200);
+    });
+  }
+
+  // 用户 m00942 第 5 条：折叠柱子开关。柱子还是那些柱子，只是把「回复 / 没回 / 出错 /
+  // 决策」这些日常柱子收起来，留下裁切、快照和实时——凌晨攒到缓冲上限那几刀才是要看的。
+  function toggleTrendFold(el){
+    TREND_FOLD = !TREND_FOLD;
+    try{ localStorage.setItem("mdp_trend_fold", TREND_FOLD ? "1" : "0"); }catch(e){}
+    if(el) el.classList.toggle("on", TREND_FOLD);
+    if(ctxWin) renderCtxWindow(ctxWin, true);
+  }
+
   // 点柱子打开那一轮：先切到「最近请求」，再展开对应行并滚到视野里
   // 点走势图的一根柱子：看「那一轮请求时的窗口快照」，只有窗口，不带 system/轨迹/输出。
   // 用户要的是对照「当时窗口里有什么」，不是复盘整轮请求（那在「最近请求」页里）。
@@ -6829,7 +7181,9 @@ var ctxSnapRequest = 0;
         failed: !!r.failed,
         // v3.89（用户 m05321 第 1 条）：裁切快照里有多少条是待发（标题上写出来）
         pending_n: Number(r.trim_pending_count || 0) || 0,
-        result: roundResult(r), legacy: !hasSnapshot };
+        result: roundResult(r), legacy: !hasSnapshot,
+        // 用户 m00942 第 4 条：标题上那个可点的快照编号（后端 _request_detail_head 补的）。
+        snap_id: r.snap_id || "" };
       // 记住此刻视口在面板里的相对位置：快照内容比实时窗口短，
       // 按比例换算回去，视口才不会落到不相干的地方（用户 m42220）。
       // 同时记下绝对位置，退出快照时按它原样回去。
@@ -6867,6 +7221,10 @@ var ctxSnapRequest = 0;
     });
     if(ctxPane) paneOpen[ctxPane] = leavingOpen;
     ctxPane = v;
+    // 页签选中态在这里就地刷新：renderCtxWindow 数据没变时会早返回，不再顺手刷这两个按钮。
+    Array.prototype.forEach.call(document.querySelectorAll("#ctx-window [data-pane]"), function(b){
+      b.classList.toggle("on", b.getAttribute("data-pane") === v);
+    });
     try{ localStorage.setItem("mdp_ctx_pane", v); }catch(e){}
     // v3.91（用户 m05749）：三个页签共用下面那一块，圆角拼缝得自己同步。
     var wbL = document.getElementById("ctx-window"), rbL = document.getElementById("ctx-rounds");
@@ -6883,6 +7241,19 @@ var ctxSnapRequest = 0;
     // 跟顶上选着的档位对不上。这里跟 setView 一个做法：整表重画把 detail 清掉，再按记录重新展开，
     // 展开时 toggleRequestRow 会用当前档位、拿内存里的记录同步重画（不闪，也不多打一次请求）。
     if(v === "rounds"){
+      var hydratedR = false;
+      if(!ctxRoundsFull && ctxSid){
+        // 用户 m14026 第 4 条：内存里没有全量列表时先拿上次的缓存铺上，
+        // 不再先闪一屏「正在读取回复记录…」再等接口回来。
+        var rc0 = null;
+        try{ rc0 = cacheGet("rounds"); }catch(e){}
+        if(rc0 && rc0.sid === ctxSid && rc0.items && rc0.items.length){
+          ctxRounds = rc0.items;
+          ctxRoundsFull = true;
+          if(rc0.keep) ctxKeep = Number(rc0.keep) || ctxKeep;
+          hydratedR = true;
+        }
+      }
       if(ctxRoundsFull){
         renderCtxRounds(ctxRounds);
         Array.prototype.forEach.call(document.querySelectorAll("#ctx-rounds tr.round-row"), function(tr){
@@ -6893,7 +7264,8 @@ var ctxSnapRequest = 0;
         var boxR = document.getElementById("ctx-rounds");
         if(boxR) boxR.innerHTML = "<div class='empty'>正在读取回复记录…</div>";
       }
-      if(!ctxRoundsFull && ctxSid) refreshCtxRounds(ctxSid, true);
+      // 缓存直出后仍要跟后台核对一次，数据变了再整表重画。
+      if(ctxSid && (!ctxRoundsFull || hydratedR)) refreshCtxRounds(ctxSid, true);
     }
     else if(v === "decisions"){
       renderCtxDecisions(ctxDecisions);
@@ -6904,7 +7276,8 @@ var ctxSnapRequest = 0;
       loadCtxDecisions(ctxSid);
     }
     else document.getElementById("ctx-rounds").style.display = "none";
-    if(ctxWin) renderCtxWindow(ctxWin, true);
+    // 用户 m14026 第 4 条：force 去掉——数据没变时切回来只把主体显示出来，不重画。
+    if(ctxWin) renderCtxWindow(ctxWin);
     // 用切页前的位置兜底再放一次（restoreWinScroll 内部会按新文档高度夹一次）。
     restoreWinScroll(keepY);
   }
@@ -6925,38 +7298,135 @@ var ctxSnapRequest = 0;
       label: (partial ? "≥ " : "约 ") + fmtBytes(total)};
   }
 
-  // v3.91（用户 m05749 / m05856）：「决策记录」页——每一次「要不要回」的判定都留一份。
-  // 模板跟回复记录、请求快照同一套：点一行展开的就是那份快照的详情，
-  // 只不过 ① 是决策用的提示词，② 是它当时读到的整段聊天记录。
+  // 两页共用本页统计；0 是有效值，缺失值不冒充 0，推断与实测使用同一批记录。
+  function recordPageStats(rows){
+    var a = {count: rows.length, input: null, output: null, hit: null, estimate: null, delta: null,
+      inferred: false, bytes: null, partial: false, hitCount: 0, estCount: 0, pairCount: 0};
+    var hs = 0, hw = 0, es = 0, ew = 0, ds = 0, dw = 0;
+    function number(v){
+      if(v === null || v === undefined || v === "" || typeof v === "boolean") return null;
+      var n = Number(v);
+      return isFinite(n) && n >= 0 ? n : null;
+    }
+    function pct(v){ var n = number(v); return n !== null && n <= 100 ? n : null; }
+    rows.forEach(function(r){
+      var tk = r.tokens || {}, input = number(tk.input), output = number(tk.output);
+      if(input !== null) a.input = (a.input === null ? 0 : a.input) + input;
+      if(output !== null) a.output = (a.output === null ? 0 : a.output) + output;
+      var ss = Array.isArray(r.step_stats) ? r.step_stats : [];
+      var multi = Number(r.steps) > 1 && ss.length > 1;
+      var hit = pct(tk.cache_hit), est = pct(r.hit_estimate), inferred = false;
+      // 与表格单行保持一致：多步用逐步平均，推断轮优先用 hit_est。
+      if(multi){
+        var se = pct(stepAvgPct(ss, "est"));
+        if(se !== null) est = se;
+      }
+      if(r.hit_inferred){
+        var ih = pct(multi ? stepAvgPct(ss, "hit_est") : (ss[0] && ss[0].hit_est));
+        if(ih !== null){ hit = ih; inferred = true; }
+      } else if(hit !== null && multi){
+        var sh = pct(stepAvgPct(ss, "hit"));
+        if(sh !== null) hit = sh;
+      }
+      var weight = input || 0;
+      if(inferred){
+        var full = 0;
+        (multi ? ss : ss.slice(0, 1)).forEach(function(s){
+          if(!s || pct(s.hit_est) === null) return;
+          full += number(s.full_est) || number(s.in) || 0;
+        });
+        if(full > 0) weight = full;
+      }
+      if(weight > 0){
+        if(hit !== null){ hs += hit * weight; hw += weight; a.hitCount++; if(inferred) a.inferred = true; }
+        if(est !== null){ es += est * weight; ew += weight; a.estCount++; }
+        // 偏差保留“预估减命中”，只比较同一批、同时具备两个值的记录。
+        if(hit !== null && est !== null){ ds += (est - hit) * weight; dw += weight; a.pairCount++; }
+      }
+      var p = payloadInfo(r), bytes = number(p.total);
+      var bytesKnown = number(r.total_estimated_bytes) !== null || number(r.payload_bytes) !== null;
+      if(bytesKnown && bytes !== null) a.bytes = (a.bytes === null ? 0 : a.bytes) + bytes;
+      if(!bytesKnown || !p.known || p.partial) a.partial = true;
+    });
+    if(hw) a.hit = hs / hw;
+    if(ew) a.estimate = es / ew;
+    if(dw) a.delta = ds / dw;
+    return a;
+  }
+
+  function recordPageSummary(rows){
+    if(!rows.length) return "";
+    var a = recordPageStats(rows);
+    var tip = "本页 " + a.count + " 轮；入/出为上游原始 usage 合计。命中和预估按输入 token 加权，明确的 0% 也参与；缺失值不当作 0。" +
+      "命中有值 " + a.hitCount + " 轮，预估有值 " + a.estCount + " 轮；偏差只按同时有两个值的 " + a.pairCount + " 轮计算，等于预估减命中。";
+    if(a.inferred) tip += "≈ 含推断：推断轮按可用逐步统计的完整输入估算加权，最多 8 步；因此不等于原始 cached/input。";
+    tip += "请求体为本页各记录保存的文本和图片 base64 投影估算之和，不是多步全过程的网络流量；M/K 按 1024 换算。";
+    if(a.partial) tip += "部分体积缺失或仅有旧版文本数据，显示已知下限。";
+    var hit = a.hit === null ? "—" : (a.inferred ? "≈" : "") + a.hit.toFixed(1) + "%";
+    var est = a.estimate === null ? "—" : a.estimate.toFixed(1) + "%";
+    var delta = a.delta === null ? "—" : a.delta.toFixed(1) + "pp";
+    var size = a.bytes === null ? "请求体 —" : "请求体" + (a.partial ? "≥ " : "约 ") +
+      (a.bytes === 0 ? "0 B" : fmtBytes(a.bytes).replace(/([KM])B$/, "$1"));
+    // 用户 m14026 第 3 条：顺序跟表头一致——先「命中预估」再「缓存命中」。
+    return "<span class='hint' title='" + esc(tip) + "'>本页：入 " + tokText(a.input) + " · 出 " + tokText(a.output) +
+      " · 预估 " + est + " · 命中 " + hit + " · 偏差 " + delta + " · " + size + "</span>";
+  }
+
+  // 决策记录与回复记录共用统计及分页布局。
   var ctxDecisions = [];
   var ctxDecisionsRequest = 0;
   var ctxDecisionsSid = "";
   var ctxDecisionsAt = 0;
+  var ctxDecisionsError = "";
   // v3.94（用户 m08398）：展开过的那几行留节点。决策表以前每次轮询/切档都整表重建，
   // 刚点开的 ①②③④ 立刻被折回去（用户说的「上个模式切换又把折叠回去了」）。
   var ctxDecisionDetails = Object.create(null);
   // v3.97（用户 m09615 第 7 条）：展开过的详情留在内存里（键是 sid|快照名），切档、
   // 切页签再展开直接用缓存同步重画，不会先闪一下「加载中…」。
   var roundRecCache = Object.create(null);
+  var ctxDecisionsInFlight = null;
+  var ctxDecisionsInFlightSid = "";
 
   function loadCtxDecisions(sid, force){
     if(!sid) return Promise.resolve();
-    var requestId = ++ctxDecisionsRequest;
     if(!force && sid === ctxDecisionsSid && ctxDecisionsAt && Date.now() - ctxDecisionsAt < 15000){
-      if(ctxPane === "decisions") renderCtxDecisions(ctxDecisions, true);
-      else if(ctxPane === "window" && ctxWin) renderCtxWindow(ctxWin, true);
+      // 调用方已用内存列表画好当前页；缓存命中无需再重画一次。
+      // 决策表只含显示上限内的记录，不覆盖独立的轻量趋势。
       return Promise.resolve();
     }
-    return get(API + "/decision-rounds?sid=" + encodeURIComponent(sid) + "&limit=0&_=" + Date.now()).then(function(d){
+    if(!force && ctxDecisionsInFlight && ctxDecisionsInFlightSid === sid){
+      return ctxDecisionsInFlight;
+    }
+    var requestId = ++ctxDecisionsRequest;
+    ctxDecisionsError = "";
+    if(ctxPane === "decisions" && ctxDecisionsSid !== sid) renderCtxDecisions([], true);
+    var p = get(API + "/decision-rounds?sid=" + encodeURIComponent(sid) + "&limit=0&_" + Date.now()).then(function(d){
       if(sid !== ctxSid || requestId !== ctxDecisionsRequest) return;
       ctxDecisions = (d && d.items) || [];
       ctxDecisionsSid = sid;
       ctxDecisionsAt = Date.now();
+      cachePut("decisions", {sid: sid, items: ctxDecisions});
+      ctxSnapKeep = Number(d && (d.snap_show || d.snap_keep) || 0) || ctxSnapKeep;
+      ctxSnapTotal = Number(d && d.snap_total || 0) || ctxSnapTotal;
+      // 趋势只由 refreshCtxWindow 的轻量结果更新，切页不缩短它。
       if(ctxPane === "decisions") renderCtxDecisions(ctxDecisions, true);
       // 实时窗口顶部那条「最近一次判定」也吃这份数据；拉回来之后要重画一次窗口，
       // 否则要等下一次数据变化（sig 变了）才轮到它。
       else if(ctxPane === "window" && ctxWin) renderCtxWindow(ctxWin, true);
-    }).catch(function(){});
+    }).catch(function(e){
+      if(sid !== ctxSid || requestId !== ctxDecisionsRequest) return;
+      ctxDecisionsError = "读取决策记录失败" + (e && e.message ? "：" + e.message : "") + "，请再点一次重试。";
+      // 已有列表继续保留；首次读取失败时给出重试提示，不误报没有记录。
+      if(ctxPane === "decisions" && ctxDecisionsSid !== sid) renderCtxDecisions([], true);
+    }).then(function(){
+      if(ctxDecisionsInFlight === p){
+        ctxDecisionsInFlight = null;
+        ctxDecisionsInFlightSid = "";
+      }
+    });
+    ctxDecisionsInFlight = p;
+    ctxDecisionsInFlightSid = sid;
+    return p;
   }
 
   // 2026-10-31（用户 m05138）：决策只给建议，不再用「要回／不回」下命令。
@@ -7000,6 +7470,14 @@ var ctxSnapRequest = 0;
     return "<span class='dcon no'>建议不回</span>";
   }
 
+  function decisionTrendOf(items){
+    var all = (items || []).filter(function(x){
+      return !!(x && x.name && String(x.outcome || "") === "decision");
+    });
+    // 判要回只等最终回复快照，决策记录自身不另占窗口快照柱。
+    var shown = all.filter(function(x){ return !x.decision_reply; });
+    return {items: shown, folded: Math.max(0, all.length - shown.length)};
+  }
   // v3.94（用户 m08398 图4/图5）：决策快照的 ③ 要跟回复记录同一种长相，一条条摆出来。
   // 后端存的 transcript 是一行一条（bot 自己以前说过的话前面带【名字】），这里还原成消息。
   // 2026-11-08（J）：名字从写死的【我】改成它在这个会话里的昵称，所以这里认任意【…】开头；
@@ -7058,6 +7536,11 @@ var ctxSnapRequest = 0;
     });
     if(!items || !items.length){
       ctxDecisionDetails = Object.create(null);
+      // 没读到当前会话的数据之前，不能把初始空数组当成“确认没有记录”。
+      if(!ctxDecisionsSid || ctxDecisionsSid !== ctxSid){
+        box.innerHTML = "<div class='empty'>" + esc(ctxDecisionsError || "正在读取决策记录…") + "</div>";
+        return;
+      }
       box.innerHTML = "<div class='empty'>还没有决策记录。决策模式开着、并且有一轮按设置触发了，才会留一条；" +
         "@ 你、点名、私聊这些直接回的轮次不经过决策。</div>";
       return;
@@ -7085,68 +7568,40 @@ var ctxSnapRequest = 0;
       "<button data-pg='next'" + (ctxDecisionPage >= dPages - 1 ? " disabled" : "") + ">›</button>" +
       "<button data-pg='last'" + (ctxDecisionPage >= dPages - 1 ? " disabled" : "") + ">»</button>" +
       "</span>";
-    var dAgg = {n: 0, inp: 0, out: 0, cached: 0, hitSum: 0, hitW: 0, estSum: 0, estW: 0, bytes: 0};
-    dShown.forEach(function(r){
-      var t0 = r.tokens || {};
-      // v4.41（用户 m21541）：本页合计也要把图片 base64 算进去，不然决策带图的轮次
-      // 合计比实际小一大截（13 张图 ≈ 几 MB，文字才 9 KB）。
-      dAgg.bytes += payloadInfo(r).total;
-      if(t0.cache_hit !== null && t0.cache_hit !== undefined && t0.input){
-        dAgg.hitSum += Number(t0.cache_hit) * Number(t0.input);
-        dAgg.hitW += Number(t0.input);
-      }
-      // 用户 m07562 第 3 条：合计行跟回复记录同一套写法，命中预估也按输入 token 加权。
-      if(r.hit_estimate !== null && r.hit_estimate !== undefined && t0.input){
-        dAgg.estSum += Number(r.hit_estimate) * Number(t0.input);
-        dAgg.estW += Number(t0.input);
-      }
-      if(t0.input === null || t0.input === undefined) return;
-      dAgg.n += 1;
-      dAgg.inp += Number(t0.input) || 0;
-      dAgg.out += Number(t0.output) || 0;
-      dAgg.cached += Number(t0.cached) || 0;
-    });
-    // 用户 m07777：决策记录不再写「第 1–20 条」，只留翻页控件。
-    var dTitle = "<div class='trend-hd' style='margin-bottom:8px'><span>最近 " + items.length + " 次决策</span>";
-    if(dAgg.n){
-      // 用户 m07562 第 3 条：合计行跟回复记录用同一套写法——入 / 出 / 缓存命中（复用）
-      // / 命中预估 / 预估差 / 请求体积估算，照着回复页那行念就能对上。
-      dTitle += "<span class='hint'>本页 " + dAgg.n + " 轮合计：输入 " + tokText(dAgg.inp) +
-                " · 输出 " + tokText(dAgg.out) + " · 缓存命中 " +
-                (dAgg.inp ? (dAgg.cached / dAgg.inp * 100).toFixed(1) + "%" : "—") +
-                "（复用 " + tokText(dAgg.cached) + "）" +
-                (dAgg.estW ? " · 命中预估 " + (dAgg.estSum / dAgg.estW).toFixed(1) + "%" : "") +
-                (dAgg.estW && dAgg.hitW
-                  ? " · 预估差 " + ((dAgg.estSum / dAgg.estW) - (dAgg.hitSum / dAgg.hitW)).toFixed(1) + "pp" : "") +
-                (dAgg.bytes ? " · 请求体积估算 约 " + fmtBytes(dAgg.bytes) : "") + "</span>";
-    }
+    var dTitle = "<div class='trend-hd' style='margin-bottom:8px'><span>最近 " + items.length + " 次</span>";
+    dTitle += recordPageSummary(dShown);
     // 用户 m07562 第 2 条：行尾那句「点一行看那一次读到的聊天记录」去掉。
     dTitle += "<span class='grow'></span>" + dPager + "</div>";
     var html = dTitle +
       // v4.85（用户 m10425 第 8 条）：两张记录表的列名与列序对齐——前面都是
       // 时间 / 结果 / 一格说明（决策写理由、回复写正文）/ 模型那一格。
-      "<div class='tbl'><table><thead><tr><th>时间</th><th>结果</th><th class='lft'>决策理由</th>" +
-      "<th class='lft'>决策模型</th>" + "<th class='lft' title='触发 → 真正开始这一轮之间等的那段（防抖 / 抖动），必回（@ / 叫名字）这一路不等'>防抖用时</th>" +
-      "<th class='lft'>用时</th><th class='lft'>窗口条数</th>" +
-      "<th class='lft' title='这一次决策调用的输入 / 输出 token'>token（输入 / 输出）</th>" +
-      "<th class='lft' title='决策提示词 + 聊天记录 + 本轮输入的 UTF-8 字节数；带图的轮次把图片 base64 也算进来'>体积估算</th>" +
-      "<th class='lft'>命中预估</th><th class='lft'>缓存命中</th>" +
-      "<th class='lft' title='这一轮是怎么被叫起来的：概率类写触发概率，@ 或叫昵称写来源'>触发类型</th></tr></thead><tbody>";
+      "<div class='tbl'><table><thead><tr><th>时间</th><th>结果</th><th class='lft'>决策<wbr>理由</th>" +
+      "<th class='lft'>渠道</th>" + "<th class='lft'>决策<wbr>模型</th>" +
+      "<th class='lft'>防抖<wbr>用时</th>" +
+      "<th class='lft'>用时</th><th class='lft'>窗口<wbr>条数</th>" +
+      "<th class='lft' title='这一次决策调用的输入 / 输出 token'>token（入/出）</th>" +
+      "<th class='lft'>体积<wbr>估算</th>" +
+      "<th class='lft'>命中<wbr>预估</th><th class='lft'>缓存<wbr>命中</th>" +
+      "<th class='lft' title='这一轮是怎么被叫起来的：概率类写触发概率，@ 或叫昵称写来源'>触发<wbr>类型</th></tr></thead><tbody>";
     dShown.forEach(function(r){
       var why = String(r.decision_reason || "").replace(/\s+/g, " ").trim();
       // m01209 图3：决策词不再引导角色说什么，记录页也不再把「打算说」当结论展示。
       var tip = (why || "（模型没给理由）");
       var body = (why || "—");
-      if(body.length > 46) body = body.slice(0, 46) + "…";
+      // 用户 m17519：理由列改成单行省略（跟回复正文列同一套 .ell），不再按字数硬截。
       // 后端 _requests_payload 把 provider:内部 ID 翻成了真名（model_label）；
       // 老记录没有这个字段就退回原来的键。
-      var mlab = String(r.model_label || r.decision_model || "—");
-      if(mlab.length > 26) mlab = mlab.slice(0, 26) + "…";
+      var mlabFull = String(r.model_label || r.decision_model || "—");
+      // 用户 m16262 图5：以前这里按 26 个字硬截断再折行，长名字被切成两行。
+      // 现在整格只占一行、由 CSS 省略号截尾，这里直接把全名交给 .mn（title 里也是全名）。
       // 用户 m00375 第 8 条：走第三方接口时决策模型只有模型名，渠道单独标在模型前面。
       var mch = String(r.model_channel || "").trim();
       var el = Number(r.decision_elapsed) || 0;
       // v4.39（用户 m20816）：决策也能看图了——结论旁边标一下这一轮真带了几张。
-      var icnt = Number(r.decision_image_count) || 0;
+      // 用户 m02038 第 4 条：这一格要的是「请求里实际带了几张图」——转发实际暴露的、
+      // 历史里的、待发的都算，所以优先用 payload_metrics 算出来的 image_count，
+      // 老记录没有这个字段才退回决策自己数的 decision_image_count。
+      var icnt = Number(r.image_count) || Number(r.decision_image_count) || 0;
       var ifb = !!r.decision_images_fallback;
       // 用最窄的写法：这一格本来就只有「30 条」几个字，塞个大徽标会把
       // 「结论 / 理由」两列挤窄（真机 1256 宽时会挤到「要回」竖着排）。
@@ -7157,7 +7612,7 @@ var ctxSnapRequest = 0;
       // 「看图退回」也只在决策成功时作为补充，别把两种结果混在一行。
       var itag;
       if(icnt){
-        itag = " <span class='dim' title='" + esc("这一轮决策带了 " + icnt + " 张图" +
+        itag = " <span class='dim' title='" + esc("这一轮请求里带了 " + icnt + " 张图（含转发实际暴露的、历史里的、待发的）" +
             (ifb ? "，" + fbTip : "")) + "'>· 图" + icnt + "</span>";
       }else{
         itag = (ifb && !r.failed) ? " <span class='tag warn' title='" + esc(fbTip) + "'>看图退回</span>" : "";
@@ -7167,31 +7622,26 @@ var ctxSnapRequest = 0;
       var tk = r.tokens || {};
       html += "<tr class='round-row' data-round='" + esc(r.name) + "'>";
       html += "<td class='num'>" + fmtTime(r.ts) + "</td>";
-      html += "<td>" + decisionConcl(r) + "</td>";
-      html += "<td class='lft' title='" + esc(tip) + "'>" + esc(body) + "</td>";
-      html += "<td class='lft' title='" + esc((mch ? "渠道：" + mch + "；模型：" : "") + String(r.decision_model || "")) + "'>" +
-              (mch ? "<span class='dim'>" + esc(mch) + " · </span>" : "") + esc(mlab) +
-              (r.decision_via === "fallback" ? " <span class='tag pend'>备用</span>" : "") + "</td>";
+      html += "<td class='res'>" + decisionConcl(r) + "</td>";
+      html += "<td class='lft rtxt' title='" + esc(tip) + "'><span class='ell'>" + esc(body) + "</span></td>";
+      // 用户 m15537 第 4 条：渠道单独一列（在模型列左边），模型格只留模型名。
+      html += "<td class='chc'>" + (mch ? esc(mch) : "<span class='dim'>—</span>") + "</td>";
+      html += "<td class='mdl' title='" + esc("模型：" + mlabFull) + "'>" +
+              "<span class='mn'><span class='mnt'>" + esc(mlabFull) + "</span>" +
+              (r.decision_via === "fallback" ? "<span class='tag pend'>备用</span>" : "") + "</span></td>";
       // 用户 m13212：防抖单独占一列，用时列只写判定本身，读起来就是「防抖 7s + 3s」。
-      html += "<td class='num'" + (del ? " title='" + esc("触发 → 真正开始判定之间等了 " + fmtDur(del)) + "'" : "") + ">" +
-              (del ? "<span class='dim'>防抖 </span>" + fmtDur(del) : "<span class='dim'>—</span>") + "</td>";
-      html += "<td class='num'" + (el ? " title='" + esc("判定本身用了 " + fmtDur(el)) + "'" : "") + ">" +
-              (el ? fmtDur(el) : "<span class='dim'>—</span>") + "</td>";
+      html += "<td class='num'>" + (del ? fmtDur(del) : "<span class='dim'>—</span>") + "</td>";
+      html += "<td class='num'>" + (el ? fmtDur(el) : "<span class='dim'>—</span>") + "</td>";
       // 看图张数跟着「窗口条数」走：那是这一轮喂进去多少内容，放结论格里会把
       // 「理由」列挤窄、整行被撑成好几行（真机截图见过）。
       // v4.57（用户 m29312）：这一格跟回复表、走势柱同口径——只数用户消息，并且把
       // 「待发」那批一起算上（决策读的就是窗口 + 待发）。以前写的是含 bot 的总数，
       // 同一轮柱子写 14、表格写 27，两个数对不上，看着像消息被吞了。
-      var dPend = Number(r.window_pending_user) || 0;
+      // 用户 m02038 第 4 条：这一格只写「上下文窗口里总共有多少条」+「请求里实际带了多少张图」。
+      // 待发不再单独标出来——它还没并进窗口，混进条数里会让人以为窗口有 50 多条。
       var dTot = Number(r.window_total) || 0;
       var dUser = (typeof r.window_user === "number" && r.window_user > 0) ? r.window_user : dTot;
-      var dTip = "只数用户消息（跟走势柱同口径），bot 自己的回复不计入";
-      if(dPend > 0) dTip = "这一轮决策读的是「窗口 + 待发」：窗口 " + dUser + " 条用户消息 + 待发 " +
-                            dPend + " 条 = " + (dUser + dPend) + " 条（跟走势柱同口径），bot 自己的回复不计入";
-      else if(dTot > dUser) dTip += "；窗口共 " + dTot + " 条（含 bot " + (dTot - dUser) + " 条）";
-      html += "<td class='num' title='" + esc(dTip) + "'>" + (dUser + dPend) + " 条" +
-              (dPend > 0 ? " <span class='dim' title='" + esc("其中待发 " + dPend + " 条（还没并进窗口）") + "'>· 待发" + dPend + "</span>" : "") +
-              itag + "</td>";
+      html += "<td class='num'>" + (dTot || dUser) + " 条" + itag + "</td>";
       html += "<td class='num tokc'>" + (tk.input
         ? "<span class='tokw'>" + tokText(tk.input) + " / " + tokText(tk.output) + "</span>"
         : "<span class='dim'>—</span>") + "</td>";
@@ -7209,13 +7659,12 @@ var ctxSnapRequest = 0;
       } else {
         pcellD = pb ? fmtBytes(pb) : "<span class='dim'>—</span>";
       }
-      html += "<td class='num' title='" + esc(pdec.note) + "'>" + pcellD + "</td>";
+      html += "<td class='num'>" + pcellD + "</td>";
       var est = (r.hit_estimate === null || r.hit_estimate === undefined) ? null : Number(r.hit_estimate);
       html += "<td class='num'>" + (est === null ? "<span class='dim'>—</span>"
         : "<span class='est'>" + est.toFixed(1) + "%</span>") + "</td>";
       var hit = (tk.cache_hit === null || tk.cache_hit === undefined) ? null : Number(tk.cache_hit);
-      html += "<td class='num'" + (hit === null ? "" : " title='" +
-        esc("复用 " + tokText(tk.cached || 0) + " / 输入 " + tokText(tk.input || 0)) + "'") + ">" +
+      html += "<td class='num'>" +
         (hit === null ? "<span class='dim'>—</span>" : hit.toFixed(1) + "%") + "</td>";
       // v4.01（用户 m11166 图3）：末列叫「触发类型」——概率类（概率 / 曲线 / 动态）
       // 写「触发概率 X %」；@、叫昵称这种没有概率的写来源，跟回复记录同一套叫法。
@@ -7223,7 +7672,9 @@ var ctxSnapRequest = 0;
       var dsrc = String(r.decision_source || "");
       var tcell;
       if(tp > 0){
-        tcell = "触发概率 " + (Math.round(tp * 10) / 10) + " %";
+        // 用户 m02038 第 7 条：写成「2% 概率」。窄屏下百分号会被折到下一行，
+        // 所以整段套 nowrap（以前是靠数字和 % 之间的不换行空格粘住，看着多个空格）。
+        tcell = "<span style='white-space:nowrap'>" + (Math.round(tp * 10) / 10) + "% 概率</span>";
       } else if(dsrc && dsrc !== "decision"){
         tcell = esc(REASON_LABEL[dsrc] || dsrc);
       } else {
@@ -7231,7 +7682,7 @@ var ctxSnapRequest = 0;
       }
       html += "<td class='lft'>" + tcell + "</td>";
       html += "</tr>";
-      html += "<tr class='round-detail' data-detail='" + esc(r.name) + "' data-cspan='12' style='display:none'><td colspan='12'><div class='hint'>加载中…</div></td></tr>";
+      html += "<tr class='round-detail' data-detail='" + esc(r.name) + "' data-cspan='13' style='display:none'><td colspan='13'><div class='hint'>加载中…</div></td></tr>";
     });
     html += "</tbody></table></div>";
     box.innerHTML = html;
@@ -7243,6 +7694,44 @@ var ctxSnapRequest = 0;
       row.parentNode.replaceChild(old, row);
       if(old.previousElementSibling) old.previousElementSibling.classList.toggle("open", old.style.display !== "none");
     });
+  }
+
+  // 用户 m15537 第 3 条：多步命中不再逐步铺开（一行要 300px，格子只有 130px），
+  // 折成一句「3 步 42.1%」。平均值按每步的输入 token 加权——步数多的那步权重更大，
+  // 比算术平均更接近整轮的真实占比；某步没有 in 时退回算术平均。
+  function stepAvgPct(ss, key){
+    if(!Array.isArray(ss) || !ss.length) return null;
+    var sum = 0, wsum = 0, plain = 0, n = 0;
+    for(var i = 0; i < ss.length; i++){
+      var o = ss[i] || {};
+      var v = o[key];
+      if(v === null || v === undefined || v === "" || isNaN(Number(v))) continue;
+      // v4.9x（用户 m02038 第 2 条）：反推出来的步带 full_est（这一步完整 prompt 的
+      // token 数），按它加权才是「整轮合计」的口径；没有 full_est 的老记录仍按 in 加权。
+      var w = Number(o["full_est"]) || Number(o["in"]) || 0;
+      sum += Number(v) * w;
+      wsum += w;
+      plain += Number(v);
+      n++;
+    }
+    if(!n) return null;
+    return wsum > 0 ? (sum / wsum) : (plain / n);
+  }
+
+  // 每步明细（只给 title 用）：「1步 12.3% · 2步 45.6% · …」，超过 6 步只写前 6 步。
+  function stepDetailText(ss, key, unit){
+    if(!Array.isArray(ss) || !ss.length) return "";
+    var out = [], show = Math.min(ss.length, 6);
+    for(var i = 0; i < show; i++){
+      var o = ss[i] || {};
+      var v = o[key];
+      // 用户 m15537：中转站只报未命中那截时，这一步算不出比例（后端给 null），
+      // 明细里写「—」而不是跳过，免得「5 步 29.2%」被读成五步的平均。
+      if(v === null || v === undefined || v === "" || isNaN(Number(v))){ out.push((i + 1) + "步 —"); continue; }
+      out.push((i + 1) + "步 " + Number(v).toFixed(1) + unit);
+    }
+    if(ss.length > show) out.push("+" + (ss.length - show) + "步");
+    return out.join(" · ");
   }
 
   function renderCtxRounds(items, preserveDetails){
@@ -7272,34 +7761,6 @@ var ctxSnapRequest = 0;
     if(ctxRoundPage < 0) ctxRoundPage = 0;
     var start = ctxRoundPage * CTX_PAGE_SIZE;
     var shown = items.slice(start, start + CTX_PAGE_SIZE);
-    // 表格里每行有 token，但「这一页总共花了多少、命中多少」得自己加，
-    // 用户看的是整体开销（用户 m29241）
-    var agg = {n: 0, inp: 0, out: 0, cached: 0, bytes: 0, chars: 0, prefixChars: 0, prefixTotal: 0,
-               unknownImages: 0, estSum: 0, estW: 0, // v3.22 第 5 条：顺便按输入 token 加权算本页实测命中
-               hitSum: 0, hitW: 0};
-    shown.forEach(function(r){
-      var t0 = r.tokens || {};
-      // 体积和字符数跟 token 分开累：没有 token 的老记录也要算进去
-      agg.bytes += payloadInfo(r).total;
-      agg.unknownImages += (r.image_unknown_count || 0);
-      agg.chars += (r.total_chars || 0);
-      if(r.prefix_reuse_total_chars > 0 && r.prefix_reuse_percent != null){
-        agg.prefixChars += r.prefix_reuse_chars || 0;
-        agg.prefixTotal += r.prefix_reuse_total_chars;
-      }
-      // 命中预估按输入 token 加权平均，比按行数平均更贴近实际开销
-      if(r.hit_estimate != null && r.tokens && r.tokens.input){
-        agg.estSum += r.hit_estimate * r.tokens.input;
-        agg.estW += r.tokens.input;
-      }
-      // 实测命中同样按输入 token 加权，跟预估摆在一起就能看出偏差有多大
-      if(t0.cache_hit != null && t0.input){
-        agg.hitSum += t0.cache_hit * t0.input;
-        agg.hitW += t0.input;
-      }
-      if(t0.input === null || t0.input === undefined) return;
-      agg.n += 1; agg.inp += (t0.input || 0); agg.out += (t0.output || 0); agg.cached += (t0.cached || 0);
-    });
     // 这一行跟「实时窗口」页的走势图标题行走同一套坐标（.trend-hd，左边 12px），
     // 以前是裸 .hint 贴左边缘，两页切来切去那行字会跳一下（用户 m30613）
     var pager = "<span class='pg'>" +
@@ -7309,44 +7770,25 @@ var ctxSnapRequest = 0;
       "<button data-pg='next'" + (ctxRoundPage >= pages - 1 ? " disabled" : "") + ">›</button>" +
       "<button data-pg='last'" + (ctxRoundPage >= pages - 1 ? " disabled" : "") + ">»</button>" +
       "</span>";
-    // 用户 m13708 第 1 条：标题只按「设置里的保留次数」写，不写当前实际存了几份。
-    // 以前写的是实际条数——设置 100 次、那个会话只存了 20 份，标题就显示「最近 20 次请求」，
-    // 看着像设置没生效。存不满时在括号里补一句实际已有多少，两个数同时看得见。
-    // 同一条还把「请求」改成「快照」：这里列的就是上下文快照，和设置项名对得上。
-    var keepN = ctxKeep > 0 ? ctxKeep : total;
-    // v3.98（用户 m10169 图5）：这里列的就是一轮轮真实回复，标题写「回复」；
-    // 后面那个「（已有 N 次）」用户说多余，去掉。
-    var roundTitle = "最近 " + keepN + " 次回复";
-    html += "<div class='trend-hd' style='margin-bottom:8px'><span>" + roundTitle + "</span>";
-    if(agg.n){
-      html += "<span class='hint'>本页 " + agg.n + " 轮合计：输入 " + tokText(agg.inp) +
-              " · 输出 " + tokText(agg.out) + " · 缓存命中 " +
-              (agg.inp ? (agg.cached / agg.inp * 100).toFixed(1) + "%" : "—") +
-              "（复用 " + tokText(agg.cached) + "）" +
-              (agg.estW ? " · 命中预估 " + (agg.estSum / agg.estW).toFixed(1) + "%" : "") +
-              // 用户 m07562 第 3 条：删掉「实测命中 61.1%」这一项，只留预估差；
-              // 实测值仍参与算差，只是不再单独念一遍。
-              (agg.estW && agg.hitW
-                ? " · 预估差 " + ((agg.estSum / agg.estW) - (agg.hitSum / agg.hitW)).toFixed(1) + "pp" : "") +
-              (agg.bytes ? " · 请求体积估算 " + (agg.unknownImages ? "≥ " : "约 ") + fmtBytes(agg.bytes) + (agg.unknownImages ? "（部分图片未知）" : "") : "") +
-
-              "</span>";
-    }
+    // 用户 m14026 第 2 条：标题报实际读到的条数，不再报配置里的保留上限（100）。
+    html += "<div class='trend-hd' style='margin-bottom:8px'><span>最近 " + total + " 次</span>";
+    html += recordPageSummary(shown);
     html += "<span class='grow'></span>" + pager + "</div>";
     html += "<div class='tbl'><table><thead><tr><th>时间</th><th>结果</th>" +
             // v4.85（用户 m10425 第 8 条）：跟决策表同一列位置放这一轮的说明——决策那边
-            // 是「决策理由」，回复这边是真正发出去的正文。两张表因此都是 12 列。
-            "<th class='lft' title='这一轮真正发出去的文字；多条气泡用「/」连起来，太长只显示前面一段'>回复内容</th>" +
+            // 是「决策理由」，回复这边是真正发出去的正文。两张表因此都是 13 列。
+            "<th class='lft' title='这一轮真正发出去的文字；多条气泡用「/」连起来，太长只显示前面一段'>回复<wbr>内容</th>" +
             // v4.84（用户 m09179 第 10 条）：回复快照也记下这一轮用的渠道与模型。
             // 用户 m00375 第 8 条：这里的「渠道」要的是 API 渠道（供应商实例名），
             // 不是 IM 平台；列名改成「回复模型」，机器人账号挪到 title 里。
-            "<th class='lft' title='这一轮真正发出去的模型，前面是它所属的 API 渠道（供应商实例名）'>回复模型</th>" +
-            "<th class='lft' title='触发 → 真正开始请求之间等的那段（防抖 / 抖动）；必回（@ / 叫名字）这一路不等'>防抖用时</th>" +
-            "<th class='lft' title='流水线总耗时：请求开始到请求结束，不含防抖等待与回复吐字'>用时</th><th class='lft'>窗口条数</th>" +
-            "<th class='lft' title='这一轮所有步骤的合计；多步（有工具调用）时会把上下文重复计一次'>token（输入 / 输出）</th>" +
-            "<th class='lft' title='文本JSON + 请求图片base64投影预测（图片按 base64 计入体积）；不是实际wire抓包字节'>体积估算</th>" +
-            "<th class='lft'>命中预估</th>" +
-            "<th class='lft'>缓存命中</th><th class='lft'>触发类型</th></tr></thead><tbody>";
+            "<th class='lft'>渠道</th>" +
+            "<th class='lft' title='这一轮真正发出去的模型'>回复<wbr>模型</th>" +
+            "<th class='lft'>防抖<wbr>用时</th>" +
+            "<th class='lft'>用时</th><th class='lft'>窗口<wbr>条数</th>" +
+            "<th class='lft' title='这一轮所有步骤的合计；多步（有工具调用）时会把上下文重复计一次'>token（入/出）</th>" +
+            "<th class='lft'>体积<wbr>估算</th>" +
+            "<th class='lft'>命中<wbr>预估</th>" +
+            "<th class='lft'>缓存<wbr>命中</th><th class='lft'>触发<wbr>类型</th></tr></thead><tbody>";
     shown.forEach(function(r){
       var tk = r.tokens || {};
       html += "<tr class='round-row' data-round='" + esc(r.name) + "'>";
@@ -7360,8 +7802,8 @@ var ctxSnapRequest = 0;
       if(!rtxt){
         html += "<td><span class='dim' title='这条记录里没有正文：v4.85 之前的旧快照，或者这一轮没发文字'>—</span></td>";
       }else{
-        var rbody = rtxt.length > 46 ? rtxt.slice(0, 46) + "…" : rtxt;
-        html += "<td class='lft' title='" + esc(rtxt) + "'>" + esc(rbody) + "</td>";
+        // 用户 m13442 图1：正文一长就换行，把整行撑高。改成单行省略，完整正文留在 title 里。
+        html += "<td class='lft rtxt' title='" + esc(rtxt) + "'><span class='ell'>" + esc(rtxt) + "</span></td>";
       }
       // v4.84（用户 m09179 第 10 条）：回复快照也记下这一轮用的渠道与模型。
       // v4.84 之前写的快照没有这两个键，显示「—」并在 title 里说明，别当成「没用到模型」。
@@ -7372,13 +7814,14 @@ var ctxSnapRequest = 0;
       var rpv = String(r.reply_provider || "").trim();
       var rch = String(r.reply_channel || "").trim();
       var rmd = String(r.reply_model || "").trim();
+      // 用户 m15537 第 4 条：渠道单独一列（在模型列左边），模型格只留模型名。
       if(!rpv && !rmd){
-        html += "<td><span class='dim' title='这条是旧记录，当时没存模型'>—</span></td>";
+        html += "<td class='chc'><span class='dim' title='这条是旧记录，当时没存渠道'>—</span></td>";
+        html += "<td class='mdl'><span class='dim' title='这条是旧记录，当时没存模型'>—</span></td>";
       }else{
-        var rmt = (rpv ? rpv + " · " : "") + (rmd || "—");
-        if(rmt.length > 30) rmt = rmt.slice(0, 30) + "…";
-        html += "<td title='" + esc("渠道：" + (rpv || "未记录") + "；模型：" + (rmd || "未记录") +
-                 (rch ? "；机器人账号：" + rch : "")) + "'>" + esc(rmt) + "</td>";
+        html += "<td class='chc'>" + (rpv ? esc(rpv) : "<span class='dim'>—</span>") + "</td>";
+        html += "<td class='mdl' title='" + esc("模型：" + (rmd || "未记录")) + "'>" +
+                 "<span class='mn'><span class='mnt'>" + esc(rmd || "—") + "</span></span></td>";
       }
       // 用时（用户 m10749 第 7 条）：改成「流水线总耗时」——跟 ④ 明细里那条同口径，
       // 从请求开始到请求结束（模型思考 + 工具调用都算在内），不含回复慢慢吐字那段。
@@ -7391,28 +7834,16 @@ var ctxSnapRequest = 0;
       // 的等待，已经记在决策那一行；这里再取一次算出的是 started - 触发时刻，
       // 把决策耗时也裹了进去，数是错的。回复行只留 决策 / 发送 / 流水线。
       var dbt = 0;
-      var dec = Number(r.elapsed_decision) || 0;
-      // 用户 m05691 第 4 条：回复这一段里，逐条发送的间隔单列一格，别混进「流水线」里
-      // 让人以为模型慢（三条气泡之间各隔四秒多，加起来就是十几秒）。
-      var snd = Number(r.elapsed_send) || 0;
-      if(snd > dur) snd = 0;
-      var durTip = "这条记录当时没存用时";
-      if(r.elapsed != null){
-        durTip = "流水线总耗时：请求开始到请求结束（模型思考与工具调用都算），不含回复吐字";
-        if(dec) durTip += "，中间决策判定用了 " + fmtDur(dec);
-        if(r.elapsed_llm != null) durTip += "，其中模型自己用时 " + fmtDur(r.elapsed_llm);
-        if(snd > 0.3) durTip += "；回复那一段里有 " + fmtDur(snd) + " 是把 " + (Number(r.send_count) || 0) + " 条气泡逐条发出去的间隔";
-      } else if(r.elapsed_trigger != null){
-        durTip = "老记录没有流水线总耗时，这里显示的是触发 → 请求结束（含防抖等待）";
-      }
+      // 用户 m14406 第 1、2 条：这一格不再挂悬停说明。以前 title 写「中间决策判定用了 2.3s」，
+      // 读起来像把决策也算进了这一格；它其实只是回复自己的流水线（请求开始 → 请求结束）。
       // 用户 m05124 第 8 条 / m05453：三段摆进格子里——「决策 5s + 发送 3s + 流水线 12s」。
       // 用户 m06046 图4：回复行不再算防抖（抖动发生在决策之前，算在这里会把决策耗时裹进去）。
       // 用户 m07562 图2：这一格只写「流水线总耗时」，不再拆成
       // 「决策 2.3s + 发送 3.2s + 6.4s」——三个数并排看着像三段不同的耗时，
-      // 反而看不出这一轮总共花了多久。细分留在 title 里，悬停能看。
+      // 反而看不出这一轮总共花了多久。
       var durCell;
       if(dur == null && r.elapsed_trigger == null){
-        durCell = "<span class='dim' title='这条记录当时没存用时'>—</span>";
+        durCell = "<span class='dim'>—</span>";
       } else {
         durCell = (dur != null) ? fmtDur(dur) : fmtDur(r.elapsed_trigger);
       }
@@ -7420,44 +7851,21 @@ var ctxSnapRequest = 0;
       // 用户 m06046 当年嫌算错的是「把决策耗时也算进回复行」，所以这里只取纯抖动那段：
       // 引擎量到的 debounce_fixed 优先，没有再退回 debounce - 决策耗时。
       var dbo = Number(r.elapsed_debounce) || 0;
-      html += "<td class='num'" + (dbo > 0
-        ? " title='" + esc("触发 → 真正开始请求之间等了 " + fmtDur(dbo)) + "'"
-        : " title='这一轮没有独立的防抖：要么开关关着 / 必回直接开跑，要么走的是决策模式——那几秒算在决策记录那一行'") + ">" +
-        (dbo > 0 ? "<span class='dim'>防抖 </span>" + fmtDur(dbo) : "<span class='dim'>—</span>") + "</td>";
-      html += "<td class='num' title='" + esc(durTip) + "'>" + durCell + "</td>";
-      // v3.22（用户 m42531）：这一列跟走势柱同口径，只数窗口里的用户消息——窗口里还躺着
-      // bot 的回复，混在一起会让人以为「明明才 50 多条，怎么记成 68」。含 bot 的总数放 title。
+      html += "<td class='num'>" + (dbo > 0 ? fmtDur(dbo) : "<span class='dim'>—</span>") + "</td>";
+      html += "<td class='num'>" + durCell + "</td>";
+      // 用户 m02038 第 4 条：这一格只写「上下文窗口里总共有多少条」+「请求里实际带了多少张图」。
+      // 待发不再单独标出来——它还没并进窗口，混进条数里会让人以为窗口有 50 多条。
       var wUser = (typeof r.window_user === "number") ? r.window_user : 0;
-      // v4.57（用户 m29312）：决策轮还要把待发那批算进来（决策读的就是窗口 + 待发），
-      // 否则这一格写 14、下一轮写 20，看着像中间那几条被吞了。
-      var wPend = Number(r.window_pending_user) || 0;
       var wAll = r.window_total || r.window_counted || 0;
-      var wTip = "只数窗口里的用户消息（跟走势柱同口径），bot 自己的回复不计入";
-      if(wPend > 0) wTip = "这一轮决策读的是「窗口 + 待发」：窗口 " + wUser + " 条用户消息 + 待发 " +
-                            wPend + " 条 = " + (wUser + wPend) + " 条（跟走势柱同口径），bot 自己的回复不计入";
-      // v3.87（用户 m04715 第 1 条）：裁切快照记的是裁切**之前**的窗口，不说清楚会被当成裁后的数
-      if(String(r.outcome || "") === "trim" || r.trim_only === true){
-        // v3.89（用户 m05321 第 1 条）：快照 = 裁切那一刻的完整内容（裁前窗口 + 待发），
-        // 柱子高度就是这份快照自己的条数；其中几条是待发要说清。
-        var tpN2 = Number(r.trim_pending_count) || 0;
-        wTip = "这是触发裁切那一刻的完整内容（裁前窗口 + 攒着的待发），柱子高度就是这份快照自己的条数；只数用户消息" +
-               "（裁前 " + (Number(r.trim_before) || 0) + " 条 → 裁完 " + (Number(r.trim_after) || wUser) + " 条" +
-               (tpN2 ? "；其中待发 " + tpN2 + " 条" : "") + "）";
-      }
-      if(wUser && wAll > wUser) wTip += "；窗口共 " + wAll + " 条（含 bot " + (wAll - wUser) + " 条）";
-      else if(!wUser && wAll) wTip += "；这条是 v3.21 之前的记录，只存了含 bot 的总数 " + wAll + " 条";
-      // v4.41（用户 m21541）：条数旁边标上这一轮真正发出去的图——历史里的图仍以
-      // [图片] 占位留着，只有本轮新发的图才会变成 base64 跟着请求走，所以只数这些。
+      // 图片：请求里实际带了多少张（含转发实际暴露的、历史里的、待发的），不是窗口里出现过多少张。
       var rimg = Number(r.image_count) || 0;
       var rimgB = Number(r.image_base64_estimated_bytes) || 0;
-      if(rimg) wTip += "；这一轮随请求真发出去的图 " + rimg + " 张（base64 " + fmtBytes(rimgB) + "）";
       var rimgTag = rimg
         ? " <span class='dim' title='" + esc("这一轮随请求发出 " + rimg + " 张图，base64 " + fmtBytes(rimgB) +
-            "；历史窗口里的图仍以 [图片] 占位，不重复发") + "'>· 图" + rimg + "</span>"
+            "；含转发实际暴露的、历史里的、待发的，只要是请求里真带上的都算") + "'>· 图" + rimg + "</span>"
         : "";
-      html += "<td class='num' title='" + esc(wTip) + "'>" + ((wUser || wPend) ? (wUser + wPend) + " 条"
-                                     : (wAll ? wAll + " 条" : "<span class='dim' title='这条是 v2.64 之前的记录，当时没存真实条数'>—</span>")) +
-                (wPend > 0 ? " <span class='dim' title='" + esc("其中待发 " + wPend + " 条（还没并进窗口）") + "'>· 待发" + wPend + "</span>" : "") +
+      html += "<td class='num'>" + ((wAll || wUser) ? (wAll || wUser) + " 条"
+                                     : "<span class='dim'>—</span>") +
                 rimgTag + "</td>";
       // 字符数 / 字符每 token / 文本体积各占一列：原来三条全挤在 token 单元格
       // 底下那一行小字里，右边空出一大片，也没法按列比较（用户 m33271 图1）
@@ -7486,7 +7894,7 @@ var ctxSnapRequest = 0;
                  : " · <span class='dim'>无图</span>") +
           (pi.partial && rpcnt ? "（" + (r.image_unknown_count || 0) + " 张未知）" : "")
         : (pi.total ? pi.label : "<span class='dim'>—</span>");
-      html += "<td class='num' title='" + esc(pi.note + "；不含展示反查图。") + "'>" + pcell + "</td>";
+      html += "<td class='num'>" + pcell + "</td>";
       // 命中预估（用户 m41511）：后端按「本轮公共前缀占比」算基准，只在距上一轮
       // 超过 3 小时时打五折（离线 97 轮 MAE 10.1pp）；不再写「（字符）」也不再拿上一轮实测去平均。
       var est = (r.hit_estimate === null || r.hit_estimate === undefined) ? null : r.hit_estimate;
@@ -7496,49 +7904,58 @@ var ctxSnapRequest = 0;
       // 想要原因去看右侧「缓存命中」列的实际值和对面的窗口走势。
       // v3.62（用户 m18059 第 1 条）：多步轮也要逐步写。第 1 步用后端的老口径（首步文本与上一轮同位置的
       // 公共前缀）；第 2 步起的 prompt 前缀就是上一步的整段输入，所以逐步预估 = 上一步 in ÷ 这一步 in。
+      // 用户 m15537：中转站只报「没命中那截」时这一步的 in 会比上一步还小，前缀模型不成立，
+      // 后端给 null，这里写「—」不计入平均，免得算出 845.6% 这种数。
       var ss = Array.isArray(r.step_stats) ? r.step_stats : null;
-      var estTip = stN > 1
-        ? "逐步预估：第 1 步按「这一步要发的文本与上一轮同位置的公共前缀」算，第 2 步起按「上一步的整段输入 ÷ 这一步的输入」算（每一步都接在上一步后面，前缀就是上一步的全文）"
-        : "按这一步要发的文本、与上一轮同位置的公共前缀估算：量的是跨轮复用，不含轮内自发自收";
       var estCell;
       if(stN > 1 && ss && ss.length > 1){
-        var ep = [], showE = Math.min(ss.length, 4);
-        for(var ei = 0; ei < showE; ei++){
-          var oe = ss[ei] || {};
-          var ev = (oe.est === null || oe.est === undefined) ? (ei === 0 ? est : null) : oe.est;
-          if(ev === null || ev === undefined) continue;
-          ep.push("<span class='slbl'>" + (ei + 1) + "步</span> <span class='est'>" + Number(ev).toFixed(1) + "%</span>");
+        // 用户 m15537 第 3 条：逐步铺开一行要 300px，格子只有 130px，折成三行还把整行拉高。
+        // 折成一句「3 步 42.1%」，按每步输入 token 加权平均。
+        var eAvg = stepAvgPct(ss, "est");
+        if(eAvg === null && est != null) eAvg = Number(est);
+        if(eAvg === null){
+          estCell = "<span class='dim'>—</span>";
+        }else{
+          estCell = "<span class='steps'>" + ss.length + " 步 <span class='est'>" + eAvg.toFixed(1) + "%</span></span>";
         }
-        if(ss.length > showE) ep.push("<span class='dim'>+" + (ss.length - showE) + "步</span>");
-        estCell = ep.length ? ep.join("<span class='dim'> · </span>") : "<span class='dim'>—</span>";
       } else {
         estCell = (est == null) ? "<span class='dim'>—</span>"
           : "<span class='est'>" + Number(est).toFixed(1) + "%</span>";
       }
-      html += "<td class='num' title='" + esc(estTip) + "'>" + estCell + "</td>";
+      html += "<td class='num'>" + estCell + "</td>";
       // v3.59（用户 m17212 第 1 条）：实测量的是整轮各步合计（第二步会把前面整段再发一遍，
       // 所以天然偏高）；多步轮把首步命中一起写出来，跟上面的预估才是同一个量。
       var fch = (r.first_cache_hit === null || r.first_cache_hit === undefined) ? null : Number(r.first_cache_hit);
       // v3.60（用户 m17581 第 4 条）：多步轮按步写「1步 55.2% · 2步 89.5%」——每一步都是该步 cached ÷ 该步 input，
       // 第二步把前文再发一遍天然就高，混成一个整轮数看不出口径。后端没带 step_stats 的老记录退回「整轮 X%（首步 Y%）」。
-      var cacheCell = "", cacheTip = "";
-      if(tk.cache_hit === null || tk.cache_hit === undefined){
+      var cacheCell = "";
+      if(r.hit_inferred){
+        // 中转站不回报 cached_tokens：后端按上报 token 反推，逐步用 hit_est，整轮用 tk.cache_hit。
+        var chv = (tk.cache_hit === null || tk.cache_hit === undefined) ? null : (tk.cache_hit + "%");
+        if(stN > 1 && ss && ss.length > 1){
+          var hAvg = stepAvgPct(ss, "hit_est");
+          if(hAvg === null){
+            cacheCell = (chv !== null ? chv : "<span class='dim'>—</span>");
+          }else{
+            cacheCell = "<span class='steps'>" + ss.length + " 步 ≈" + hAvg.toFixed(1) + "%</span>";
+          }
+        } else {
+          var h0 = (ss && ss.length && ss[0] && ss[0].hit_est != null) ? ss[0].hit_est : null;
+          cacheCell = (h0 !== null) ? ("≈" + h0 + "%") : (chv !== null ? chv : "<span class='dim'>—</span>");
+        }
+      } else if(tk.cache_hit === null || tk.cache_hit === undefined){
         cacheCell = "<span class='dim'>—</span>";
       } else if(stN > 1 && ss && ss.length > 1){
-        var sp = [], showN = Math.min(ss.length, 4);
-        for(var si = 0; si < showN; si++){
-          var one = ss[si] || {};
-          if(one.hit === null || one.hit === undefined) continue;
-          sp.push("<span class='slbl'>" + (si + 1) + "步</span> " + one.hit + "%");
+        var nAvg = stepAvgPct(ss, "hit");
+        if(nAvg === null){
+          cacheCell = tk.cache_hit + "%";
+        }else{
+          cacheCell = "<span class='steps'>" + ss.length + " 步 " + nAvg.toFixed(1) + "%</span>";
         }
-        cacheCell = sp.length ? sp.join("<span class='dim'> · </span>") : (tk.cache_hit + "%");
-        if(ss.length > showN) cacheCell += "<span class='dim'> · +" + (ss.length - showN) + "步</span>";
-        cacheTip = "这一轮 " + stN + " 步，按步分开写（每一步都是该步 cached ÷ 该步 input）；整轮合计 " + tk.cache_hit + "%";
       } else {
         cacheCell = tk.cache_hit + "%" + ((stN > 1 && fch !== null) ? " <span class='dim'>（首步 " + fch + "%）</span>" : "");
-        if(stN > 1 && fch !== null) cacheTip = "这一轮 " + stN + " 步，外面是各步合计；括号里只按第一步算，跟「命中预估」同口径";
       }
-      html += "<td class='num'" + (cacheTip ? " title='" + esc(cacheTip) + "'" : "") + ">" + cacheCell + "</td>";
+      html += "<td class='num'>" + cacheCell + "</td>";
       // 用户 m16808：回复记录的触发列只写大类，不再带「静默冒泡」「曲线触发 · 18% · 连 N 条」这些细项。
       // 判定顺序：重试轮 → 重试触发；决策通过/决策轮 → 决策触发；静默 → 静默触发；裁切快照保留窗口裁切。
       var rlab;
@@ -7562,8 +7979,8 @@ var ctxSnapRequest = 0;
       html += "<td>" + rlab + "</td></tr>";
       // v3.94：cspan 是详情加载器里的局部变量（renderCtxRounds 里取不到），
       // 这里直接写死并带上 data-cspan，展开时才不会被加载器按 9 列重排。
-      // v4.84 加「渠道 / 模型」、v4.85 加「回复内容」，回复表现在 12 列。
-      html += "<tr class='round-detail' data-detail='" + esc(r.name) + "' data-cspan='12' style='display:none'><td colspan='12'><div class='hint'>加载中…</div></td></tr>";
+      // v4.84 加「渠道 / 模型」、v4.85 加「回复内容」、v4.88 把渠道拆成独立列，回复表现在 13 列。
+      html += "<tr class='round-detail' data-detail='" + esc(r.name) + "' data-cspan='13' style='display:none'><td colspan='13'><div class='hint'>加载中…</div></td></tr>";
     });
     html += "</tbody></table></div>";
     box.innerHTML = html;
@@ -7583,29 +8000,26 @@ var ctxSnapRequest = 0;
   var ctxKeep = 0;
   function refreshCtxRounds(sid, full){
     if(sid !== ctxSid) return;
-    // 走势图只要最近 100 条；回复记录页才拉全量。这样 5 秒轮询的 /requests 从 172KB 降到约 86KB。
+    // 表格与趋势分别按各自的上限读取；全量列表不能覆盖更长的轻量趋势。
     var wantFull = !!full || ctxPane === "rounds";
     var key = sid + (wantFull ? ":f" : ":l");
     if(ctxRoundsLoading === key) return;
     var requestId = ++ctxRoundsRequest;
     ctxRoundsLoading = key;
-    // v4.71：轻量轮询也按「回复快照上限」要满，不再写死 100（上限调大了图表也要跟着长）。
-    // v4.90（用户 m01133 第 2 条）：走势图改按「窗口快照」上限要满——三种快照共用一条份数线，
-    // 只按回复上限（trace_keep）要，回复轮一多就把决策轮挤出去，图上永远画不满。
-    var _snapCap = ctxSnapKeep > 0 ? ctxSnapKeep : (ctxTrimKeep > 0 ? ctxTrimKeep : 0);
-    var lim = wantFull ? 0 : (_snapCap > 0 ? _snapCap : (ctxKeep > 0 ? ctxKeep : 100));
-    // v4.73（用户 m02417）：轻量那条路（走势图）带 trim=1，让裁切快照自己成柱；
-    // 全量那条（回复记录页）要不要都行——页面在下面把裁切行挑出去再上表。
-    var light = wantFull ? "&trim=1" : "&light=1&trim=1";
-    return get(API + "/requests?sid=" + encodeURIComponent(sid) + "&limit=" + lim + light + "&_=" + Date.now()).then(function(d){
+    var base = API + "/requests?sid=" + encodeURIComponent(sid) + "&limit=0&trim=1";
+    return Promise.all([
+      get(base + "&light=1&_=" + Date.now()),
+      wantFull ? get(base + "&_=" + Date.now()) : Promise.resolve(null)
+    ]).then(function(res){
       if(sid !== ctxSid || requestId !== ctxRoundsRequest) return;
+      var d = res[0] || {}, list = wantFull ? (res[1] || {}) : d;
       var items = d.items || [];
-      ctxKeep = Number(d.keep || 0) || 0;
+      ctxKeep = Number(list.keep || 0) || 0;
       ctxSnapKeep = Number(d.snap_show || d.snap_keep || 0) || 0;
       ctxSnapTotal = Number(d.snap_total || 0) || 0;
       // v4.73（用户 m02417）：裁切快照回走势图，但 v4.07 的口径不变——回复记录表里仍然
       // 只有真实请求（它们不占行、不进「本页合计」的命中率）。两路在这里就分开。
-      var _plain = items.filter(function(it){
+      var _plain = (list.items || []).filter(function(it){
         return !(String(it.outcome || "") === "trim" || it.trim_only === true);
       });
       // 走势图那一路单独判变化：只多了一份裁切快照时，回复记录表没变，
@@ -7614,14 +8028,19 @@ var ctxSnapRequest = 0;
       ctxTrendRounds = items;
       ctxTrendReq = true;
       // v4.83（用户 m08855）：趋势数据也进缓存，下次刷新首屏直接画完整走势图。
-      if(_trendChanged) cachePut("trendreq", {sid: sid, items: items});
-      var changed = JSON.stringify(_plain) !== JSON.stringify(ctxRounds);
-      ctxRounds = _plain;
-      ctxRoundsFull = wantFull;
-      // 缓存只存全量，避免下次首屏拿 100 条当完整列表。
-      if(wantFull) cachePut("rounds", {sid: sid, items: _plain, keep: ctxKeep});
-      if(!changed && !_trendChanged && document.querySelector("#ctx-rounds [data-round]")) return;
+      if(_trendChanged) cachePut("trendreq", {version: 3, sid: sid, items: items, snapKeep: ctxSnapKeep, snapTotal: ctxSnapTotal});
+      var changed = wantFull && JSON.stringify(_plain) !== JSON.stringify(ctxRounds);
+      // 轻量轮询只刷新趋势，不冲掉已加载的完整回复表和它的展开缓存。
       if(wantFull){
+        ctxRounds = _plain;
+        ctxRoundsFull = true;
+        cachePut("rounds", {sid: sid, items: _plain, keep: ctxKeep});
+      }
+      if(!changed && !_trendChanged && document.querySelector("#ctx-rounds [data-round]")){
+        if(ctxWin) renderCtxWindow(ctxWin);
+        return;
+      }
+      if(wantFull && ctxPane === "rounds"){
         var box = document.getElementById("ctx-rounds");
         var scrollX = window.scrollX, scrollY = window.scrollY;
         var table = box.querySelector(".tbl"), tableX = table ? table.scrollLeft : 0;
@@ -7634,7 +8053,6 @@ var ctxSnapRequest = 0;
       if(ctxWin) renderCtxWindow(ctxWin);
     }).catch(function(){
       // 临时失败保留旧列表与详情，下个周期重试。
-      ctxTrendReq = true;   // v4.83：失败也别让骨架一直挂着
     }).then(function(){
       if(requestId === ctxRoundsRequest) ctxRoundsLoading = "";
     });
@@ -7649,9 +8067,14 @@ var ctxSnapRequest = 0;
     ctxDecisions = [];
     ctxDecisionsSid = "";
     ctxDecisionsAt = 0;
+    ctxDecisionsError = "";
     ctxDecTrend = [];
     ctxDecFolded = 0;
     ctxTrendReq = false; ctxTrendDec = false;   // v4.83：换代后重新等两路趋势
+    ctxSnapKeep = 0;
+    ctxSnapTotal = 0;
+    ctxDecisionsInFlight = null;
+    ctxDecisionsInFlightSid = "";
     roundRecCache = Object.create(null);
     ctxRoundsLoading = "";
     ctxRoundsFull = false;
@@ -7665,43 +8088,27 @@ var ctxSnapRequest = 0;
       // v4.71（用户 m01516 第 1 条）：limit=0 = 要全部保留的窗口快照（后端按 windows_keep 给满）。
       // 以前写死 100：群聊设了 200 份，走势图也只画得出 100 根裁切柱。
       get(API + "/windows?limit=0&sid=" + encodeURIComponent(sid)).catch(function(){ return null; }),
-      // v3.99（用户 m10577）：决策记录跟着窗口一起刷，走势图上才有决策轮那几根柱子。
-      // light=1 只取走势图要的字段，不带图片与轨迹；全量列表只在「决策记录」页另拉。
-      // v4.90（用户 m01875 第 1 条）：走势图最多画「窗口快照显示条数」那么多根，决策轮只要够画就行。
-      // 以前写死 limit=0，后端按「决策记录显示条数」截断（默认 100），走势图就少了一截。
-      get(API + "/decision-rounds?sid=" + encodeURIComponent(sid) + "&limit=" + (ctxSnapKeep > 0 ? ctxSnapKeep : 200) + "&light=1&_=" + Date.now()).catch(function(){ return null; })
+      // 所有页签共用完整轻量趋势，limit=0 由后端按快照显示上限解析。
+      get(API + "/decision-rounds?sid=" + encodeURIComponent(sid) + "&limit=0&light=1&_" + Date.now()).catch(function(){ return null; })
     ]).then(function(res){
       if(sid !== ctxSid || requestId !== ctxWindowRequest) return;
-      ctxTrendDec = true;   // v4.83：决策趋势这一路回来了（失败也算，别让骨架一直挂着）
-      if(!res[0]) return;   // 临时读取失败保留上一次有效窗口
       if(res[1]){
         ctxTrims = res[1].items || [];
         ctxTrimKeep = Number(res[1].keep || 0) || 0;
+        if(!ctxSnapKeep && ctxTrimKeep) ctxSnapKeep = ctxTrimKeep;
       }
-      if(res[2]){
-        var decItems = res[2].items || [];
-        var _decAll = decItems.filter(function(x){
-          return !!(x && x.name && String(x.outcome || "") === "decision");
-        });
-        ctxDecTrend = _decAll.filter(function(x){
-        if(!(x && x.name && String(x.outcome || "") === "decision")) return false;
-        // 用户 m35221：判定「要回」的那一轮不上走势图 —— 它和随后的回复轮比只差一条 bot 回复，
-        // 真正要看的是回复结束后的那一份快照；判定不回的那一轮照旧出柱子（那是它唯一的快照）。
-        // 记录本身照常落盘，决策记录页那一行还在，只是不占柱子。
-        if(!x.decision_reply) return true;
-        // 用户 m35302：要回也可能根本没回成。后面那一轮回复真的跑了（成功 / 空回复 / 出错）时
-        // 由那根柱子说话；完全没等到回复轮才补一根，标「失败」——分不清是失败还是空输出，一律当失败。
-        // 但查不到当年那一轮回复记录的更老的决策，不能当失败，照旧出紫柱子。
-        var _rst = String(x.reply_state || "");
-        if(!_rst || _rst === "unknown") return true;
-        return _rst === "missing";
-        });
-        ctxDecFolded = Math.max(0, _decAll.length - ctxDecTrend.length);
-      }
-      ctxWin = res[0];
-      cachePut("win", {sid: sid, win: ctxWin, trims: ctxTrims, trimKeep: ctxTrimKeep});
-      // v4.83（用户 m08855）：决策趋势也进缓存，首屏走势图不用等这一路。
-      cachePut("trenddec", {sid: sid, items: ctxDecTrend, folded: ctxDecFolded});
+        if(res[2]){
+          ctxSnapKeep = Number(res[2].snap_show || res[2].snap_keep || 0) || ctxSnapKeep;
+          ctxSnapTotal = Number(res[2].snap_total || 0) || ctxSnapTotal;
+          var trend = decisionTrendOf(res[2].items || []);
+          ctxDecTrend = trend.items;
+          ctxDecFolded = trend.folded;
+          ctxTrendDec = true;
+        }
+      if(res[2]) cachePut("trenddec", {version: 3, sid: sid, items: ctxDecTrend, folded: ctxDecFolded});
+      if(res[0]) ctxWin = res[0];
+      if(!ctxWin) return;
+      cachePut("win", {sid: sid, win: ctxWin, trims: ctxTrims, trimKeep: ctxTrimKeep, snapKeep: ctxSnapKeep, snapTotal: ctxSnapTotal});
       renderCtxWindow(ctxWin);
     });
   }
@@ -7722,7 +8129,8 @@ var ctxSnapRequest = 0;
     ctxWin = null;
     ctxSnap = null;
     renderCtxList();
-    refreshCtxWindow(sid).then(function(){ if(ctxPane === "decisions") loadCtxDecisions(sid); });
+    if(ctxPane === "decisions") loadCtxDecisions(sid);
+    refreshCtxWindow(sid);
     renderCtxRounds([]);
     refreshCtxRounds(sid);
     // v3.91：决策记录既给「决策记录」页用，也给走势图用；换会话时先拉轻量趋势，
@@ -7786,7 +8194,7 @@ var ctxSnapRequest = 0;
   }
 
   // 三档共用折叠头，单步也显示真实 token 与命中统计。
-  function traceChips(tr){
+  function traceChips(tr, unreported){
     if(!tr || !(tr.steps || []).length) return "";
     var tot = tr.totals || {}, steps = tr.steps || [];
     var h = "<span class='tk'>" + steps.length + " 步</span>" +
@@ -7798,11 +8206,12 @@ var ctxSnapRequest = 0;
       h += "<span class='tk'>模型调用 " + Number(modelSeconds.toFixed(3)) + " 秒</span>";
     }
     h += "<span class='tk'>输入 " + tokText(tot.input_tokens) + " · 输出 " + tokText(tot.output_tokens) + "</span>";
-    if(tot.cache_hit !== null && tot.cache_hit !== undefined) h += "<span class='tk'>缓存命中 " + tot.cache_hit + "%</span>";
+    if(unreported) h += "<span class='tk'>缓存命中 —</span>";
+    else if(tot.cache_hit !== null && tot.cache_hit !== undefined) h += "<span class='tk'>缓存命中 " + tot.cache_hit + "%</span>";
     return h + "<span class='dim'>（思考 · 工具调用与返回 · token）</span>";
   }
 
-  function traceHtml(tr){
+  function traceHtml(tr, unreported){
     if(!tr || !(tr.steps || []).length) return "";
     var tot = tr.totals || {};
     var steps = tr.steps || [];
@@ -7810,12 +8219,15 @@ var ctxSnapRequest = 0;
     // 头行跟 ①②③ 共用 .seqh：原来自己一套 .trace-hd，字号/间距/颜色都不同，
     // 用户 m33400 说三档「说了要做一样，结果还是有区别」—— 现在四段一个模子。
     var h = "<div class='seqh'><span class='mini' data-fold='trace'>展开</span>④ agent 轨迹";
-    h += traceChips(tr) + "<span class='grow'></span></div>";
+    h += traceChips(tr, unreported) + "<span class='grow'></span></div>";
     h += "<div data-foldbody='trace' style='display:none'>";
     steps.forEach(function(s){
       h += "<div class='tstep'><div class='th'>第 " + (s.index || 0) + " 步";
       h += "<span class='tk'>入 " + tokText(s.input_tokens) + " · 出 " + tokText(s.output_tokens) + "</span>";
-      if(s.cached_tokens !== null && s.cached_tokens !== undefined){
+      var sRep = (s.cached_reported === false) || (s.cached_reported === undefined && !!unreported);
+      if(sRep){
+        h += "<span class='tk'>命中 —</span>";
+      } else if(s.cached_tokens !== null && s.cached_tokens !== undefined){
         h += "<span class='tk'>命中 " + tokText(s.cached_tokens) +
              (s.cache_hit !== null && s.cache_hit !== undefined ? "（" + s.cache_hit + "%）" : "") + "</span>";
       }
@@ -7978,6 +8390,20 @@ var ctxSnapRequest = 0;
     return hd9.indexOf("建议回复") === 0 || hd9.indexOf("建议不回") === 0
       || hd9.indexOf("判定要回") === 0 || hd9.indexOf("判定不回") === 0;
   }
+  // 用户 m20315：工具回调（nai 出图这类异步结果）是插件替 bot 写进窗口的一条
+  // assistant 消息，名字是「工具回调·<工具>」，正文前面带一句「【工具回调 x】」声明。
+  // 页面要按 assistant 画它（不是 user），声明剥掉，名字用工具名。
+  function isToolNoteMsg(m){
+    if(!m) return false;
+    if(m.toolnote === true || m.tnote === true) return true;
+    return String(m.name || "").indexOf("工具回调·") === 0;
+  }
+  function toolNoteBody(t){
+    // 快照里的工具回调正文前面还有 stamp_assistant_time 补的 [HH:MM]，
+    // 声明要连时间一起认，时间留着（卡片头部要用），只剥声明。
+    return String(t == null ? "" : t).replace(/^(\s*\[\d{1,2}:\d{2}\]\s*)?【工具回调[^】]*】\s*/,
+      function(_w, ts){ return ts || ""; });
+  }
 
   // 本地前缀只作独立对比提示，绝不决定消息所属轮次；上游 token 才是缓存实测。
   function localPrefixLen(r){
@@ -8017,7 +8443,7 @@ var ctxSnapRequest = 0;
     });
     for(var ai=upper-1;ai>=0;ai--){
       var reply=msgs[ai];
-      if(reply && reply.role==="assistant" && !isDecNoteLike(reply) && String(rawContent(reply.content) || "").trim()) return ai+1;
+      if(reply && reply.role==="assistant" && !isDecNoteLike(reply) && !isToolNoteMsg(reply) && String(rawContent(reply.content) || "").trim()) return ai+1;
     }
     return 0;
   }
@@ -8152,7 +8578,7 @@ var ctxSnapRequest = 0;
       if(rows[i].getAttribute("data-round") === name){ head = rows[i]; }
     }
     if(!target || !head) return;
-    // 决策表与回复记录现在都是 12 列（v4.84 加「渠道 / 模型」、v4.85 加「回复内容」），详情单元格的 colspan 跟着这张表走
+    // 决策表与回复记录现在都是 13 列（v4.84 加「渠道 / 模型」、v4.85 加「回复内容」、v4.88 渠道独立成列），详情单元格的 colspan 跟着这张表走
     var cspan = target.getAttribute("data-cspan") || 9;
     var open = target.style.display !== "none";
     target.style.display = open ? "none" : "";
@@ -8274,8 +8700,11 @@ var ctxSnapRequest = 0;
           var currentRaw = "";
           function appendCurrentRaw(m){
             if(!m) return;
-            var body = rawContent(m.content);
-            if(m.role === "assistant") body = botRawHead(body, noteNameOf(m), "");
+            // 用户 m20315 第 3 条：工具回调在原文里也要是 assistant——正文剥掉
+            // 「【工具回调 xxx】」声明，交给 botRawHead 补成「[HH:MM] 【工具回调·xxx】」。
+            var toolR = isToolNoteMsg(m);
+            var body = toolR ? toolNoteBody(contentText(m.content)) : rawContent(m.content);
+            if(m.role === "assistant") body = botRawHead(body, noteNameOf(m), toolR ? hhmm(m.ts) : "");
             n += 1;
             currentRaw += "[" + n + "] " + String(m.role || "user") + "\n" + body + "\n";
             if(m.tool_calls && m.tool_calls.length) currentRaw += "[tool_calls] " + JSON.stringify(m.tool_calls) + "\n";
@@ -8418,9 +8847,22 @@ var ctxSnapRequest = 0;
         partition.currentRows.forEach(function(m, idx){
           if(!m) return;
           var role3 = String(m.role || "user"), text3 = tsShortOf(contentText(m.content));
+          // 用户 m20315 第 2 条：工具回调在 ③ 里要按 assistant 画——名字用工具名，
+          // 正文剥掉「【工具回调 xxx】」声明，图跟着卡片一起出。
+          var tool3 = isToolNoteMsg(m);
+          if(tool3) text3 = toolNoteBody(text3);
           if(role3 !== "user") text3 = tidyBody(text3);
-          var mm3 = {role:role3,who:m.who || m.name || "",name:m.name || "",text:text3,
-            raw:tsShortOf(rawContent(m.content)),media:m.media || [],display:snapshotDisplay(m).display,chars:text3.length,
+          var raw3 = tool3 ? text3 : tsShortOf(rawContent(m.content));
+          // 用户 m20315 图1：工具回调带的图就是它自己的（nai 发出去的那张），
+          // 不能画成「归属未确认的附件」；正文里的 [图片] 占位由缩略图顶掉。
+          var media3 = m.media || [], disp3 = snapshotDisplay(m).display;
+          if(tool3 && media3.length){
+            text3 = stripMediaTags(text3, media3.length);
+            disp3 = {own_media_known:true, own_media:media3, unassigned_media:[],
+                     own_body:text3, direct_reply:null, source:"tool_note"};
+          }
+          var mm3 = {role:role3,who:tool3 ? String(m.name || "") : (m.who || m.name || ""),name:m.name || "",text:text3,
+            raw:raw3,media:media3,display:disp3,chars:text3.length,
             files:m.files || [],
             tools:(m.tool_calls || []).length,tool_call_id:m.tool_call_id || "",tc:tcOf(m)};
           var gk3 = groupKeyOf(mm3, "f" + idx);
@@ -8442,9 +8884,9 @@ var ctxSnapRequest = 0;
         if(VIEW === "mixed"){
           // 对照档要的是原文，④ 不能还是美化样式（用户 m51324 ⑧）
           h += rawBlock("④ agent 轨迹", "· 思考 · 工具调用 · 工具返回",
-                        traceRawText(r.trace) || "（这一轮没有 agent 轨迹）", "", traceChips(r.trace || {}));
+                        traceRawText(r.trace) || "（这一轮没有 agent 轨迹）", "", traceChips(r.trace || {}, r.cache_unreported));
         } else {
-          var th = traceHtml(r.trace);
+          var th = traceHtml(r.trace, r.cache_unreported);
           if(th){
             h += th;
           } else {
@@ -8608,6 +9050,8 @@ var ctxSnapRequest = 0;
       ctxWin = wc.win || null;
       ctxTrims = wc.trims || [];
       ctxTrimKeep = Number(wc.trimKeep || 0) || 0;
+      ctxSnapKeep = Number(wc.snapKeep || 0) || ctxSnapKeep;
+      ctxSnapTotal = Number(wc.snapTotal || 0) || ctxSnapTotal;
       lastWinSig = "";
       lastTrendSig = "";
     }
@@ -8615,12 +9059,21 @@ var ctxSnapRequest = 0;
       ctxRounds = rc.items || [];
       ctxRoundsFull = true;
     }
+    var dc = cacheGet("decisions");
+    if(dc && ctxSid && dc.sid === ctxSid && Array.isArray(dc.items) && dc.items.length){
+      ctxDecisions = dc.items;
+      ctxDecisionsSid = ctxSid;
+      // 缓存只负责首屏直出，仍要立刻向后台核对最新记录。
+      ctxDecisionsAt = 0;
+    }
     // v4.83（用户 m08855）：走势图的数据也缓存（trendreq/trenddec），首屏直接画上次的完整趋势，
     // 不再先画缓存里的 40 根、再被决策和请求两次补齐（标题会跳 40 → 150 → 220）。
     // 老缓存没有这两份时先不画，等两路都回来一次性画（renderCtxWindow 里的骨架）。
     var tr = cacheGet("trendreq"), td = cacheGet("trenddec");
-    if(tr && tr.sid === ctxSid && td && td.sid === ctxSid){
+    if(tr && tr.version === 3 && tr.sid === ctxSid && td && td.version === 3 && td.sid === ctxSid){
       ctxTrendRounds = tr.items || [];
+      ctxSnapKeep = Number(tr.snapKeep || 0) || ctxSnapKeep;
+      ctxSnapTotal = Number(tr.snapTotal || 0) || ctxSnapTotal;
       ctxDecTrend = td.items || [];
       ctxDecFolded = Number(td.folded || 0) || 0;
       ctxTrendReq = true;
@@ -8634,16 +9087,8 @@ var ctxSnapRequest = 0;
     if(cs){ try{ renderCtxList(); }catch(e){} }
     if(ctxWin){ try{ renderCtxWindow(ctxWin); }catch(e){} }
     if(ctxRounds.length){ try{ renderCtxRounds(ctxRounds); }catch(e){} }
-    // v3.97（用户 m09615 图1）：上回停在「决策记录」页，刷新后没有缓存可直出，
-    // 面板就整片空白（决策记录不进 localStorage 缓存）。先给一句占位，
-    // 等 load() 把真正的列表拉回来。
-    if(ctxPane === "decisions"){
-      var boxD = document.getElementById("ctx-rounds");
-      if(boxD && !boxD.querySelector("[data-round]")){
-        boxD.style.display = "";
-        boxD.innerHTML = "<div class='empty'>正在读取决策记录…</div>";
-      }
-    }
+    // 有同会话的旧列表就直接画；没有时由渲染函数显示加载态，等后台确认。
+    if(ctxPane === "decisions") renderCtxDecisions(ctxDecisions);
   }
 
   var overviewInFlight = null;
@@ -8664,11 +9109,14 @@ var ctxSnapRequest = 0;
       if(d.health) renderHealth(d.health);
       renderCtxList();
       if(ctxSid && ctxSessions.some(function(s){ return s.sid === ctxSid; })){
-        refreshCtxWindow(ctxSid).then(function(){
-          // v3.97（用户 m09615 图1）：停在决策记录页时，刷新后也要自己把列表拉回来
-          if(ctxPane === "decisions") loadCtxDecisions(ctxSid);
-        });
+        if(ctxPane === "decisions") loadCtxDecisions(ctxSid);
+        refreshCtxWindow(ctxSid);
         refreshCtxRounds(ctxSid);
+        // 用户 m14026 第 4 条：回复记录页要的是全量表，趁用户还停在窗口页时后台先拉一次，
+        // 等他点过去就是现成的表，不用当场等接口（refreshCtxRounds 内部已有在途去重）。
+        if(!ctxRoundsFull && ctxPane !== "rounds") setTimeout(function(){
+          if(ctxSid && !ctxRoundsFull) refreshCtxRounds(ctxSid, true);
+        }, 1200);
       }
       else if(ctxSessions.length) openCtx(ctxSessions[0].sid);
       else {
@@ -8805,6 +9253,8 @@ var ctxSnapRequest = 0;
     if(del){ e.stopPropagation(); askRemove(del.getAttribute("data-hide")); return; }
     var fld = e.target.closest ? e.target.closest("[data-foldsid]") : null;
     if(fld){ e.stopPropagation(); toggleFoldSid(fld.getAttribute("data-foldsid")); return; }
+    var gfl = e.target.closest ? e.target.closest("[data-grpfold]") : null;
+    if(gfl){ e.stopPropagation(); toggleFoldGroup(gfl.getAttribute("data-grpfold")); return; }
     var it = e.target.closest ? e.target.closest("[data-ctx]") : null;
     if(it) openCtx(it.getAttribute("data-ctx"));
   });

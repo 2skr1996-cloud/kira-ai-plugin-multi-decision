@@ -22,7 +22,8 @@ from typing import Any, Optional
 from core.logging_manager import get_logger
 
 from .prefix_projection import comparison_pair, legacy_record_estimate, valid_fingerprints
-from .tracer import usage_event
+from .tracer import (IMAGE_TOKENS, _approx_tokens, _est_from_parts, _flat_of,
+                      _prompt_tokens_est, _record_model, usage_event)
 
 try:  # 同包内的计数口径，测试桩里没有就退回「数组长度」
     from ..window.trim import count_messages as _count_messages
@@ -82,6 +83,44 @@ def _outcome_of(data: dict) -> str:
     return 'replied' if d.get('replied') else 'no_reply'
 
 
+_NOTICE_HEAD_RE = re.compile(
+    r"^\[\s*\d{1,2}:\d{2}\s*\]\s*Notice\s*\[(?:group_id|user_id):[^\]]*\]\s*\|")
+
+
+def _notice_head_only(text: str) -> bool:
+    """整段只剩一句空的 Notice 头（后面没有任何正文）才算。"""
+    s = str(text or "").lstrip()
+    head = _NOTICE_HEAD_RE.match(s)
+    if head is None:
+        return False
+    return not s[head.end():].strip()
+
+
+def notice_only_record(data: dict) -> bool:
+    """这一轮是不是「只有别的插件的通知、没有谁在说话」的回调轮（用户 m17492 图5/图6）。
+
+    别的插件（如 nai 出图）完成时会发一条 is_notice 事件，框架照样跑一整轮 LLM；
+    那一轮没说话不是「空回复」，单独算一类，不进 24 小时统计。
+    新记录直接看 notice_only / outcome="notice"；老记录没有这两个键，就看当时那份
+    user_prompt 是不是只剩一句空的 Notice 头。
+    """
+    d = data if isinstance(data, dict) else {}
+    if d.get("notice_only") is True or str(d.get("outcome") or "") == "notice":
+        return True
+    # 老记录：先看提示词分段。"message" 段全是空的 Notice 头、别的段都是插件自己塞的
+    # 完成提示（如 nai_studio_completion），这一轮就是通知回调轮；message 段里有真
+    # 内容就说明确实有人在说话，不算。
+    parts = d.get("user_prompt_parts")
+    if isinstance(parts, list) and parts:
+        heads = [p for p in parts
+                 if isinstance(p, dict) and str(p.get("name") or "") == "message"]
+        if heads:
+            return all(_notice_head_only(str(p.get("text") or "")) for p in heads)
+    # 没有分段信息就退回看 user_prompt 开头：整段只剩一句空的 Notice 头才算。
+    # 只取开头一小段，user_prompt 可能上百 KB。
+    return _notice_head_only(str(d.get("user_prompt") or "")[:512])
+
+
 def _safe_sid(sid: str) -> str:
     """sid 里带冒号（adapter:gm:1001），Windows 文件名不允许，换成下划线。
 
@@ -94,14 +133,8 @@ def _safe_sid(sid: str) -> str:
 
 #: 命中预估用的粗略 tokenizer 口径（v3.19）：CJK 一字算一个 token，其余每 4 字符算一个。
 #: 只用于给「前缀能复用多少」估个百分比，不参与任何计费或上限判断。
-_CJK_RE = re.compile(r"[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef\u3000-\u303f]")
-
-
-def _approx_tokens(text: str) -> int:
-    if not text:
-        return 0
-    cjk = len(_CJK_RE.findall(text))
-    return cjk + (len(text) - cjk + 3) // 4
+#: v4.87：实现搬到 tracer.py 了（价目页反推缓存命中也要用同一份口径），这里只做转发。
+#: 单张图片按 IMAGE_TOKENS 折算，见 tracer.py。
 
 
 # 框架 assemble_prompt 会把这几段挪到最后一条 user 消息（见 core/provider/llm_model.py）
@@ -236,7 +269,42 @@ def _to_dict(msg: Any) -> Any:
 _DEC_NOTE_HEAD = ("建议回复", "建议不回", "判定要回", "判定不回")
 
 
-def _decorate_rows(rows: Any, media_by_id: Any) -> None:
+def _prepared_refs_by_mid(rows: Any) -> dict:
+    """按 message_id 取「这次真正挂进请求」的图片（用户 m18251）。
+
+    快照行原来按 request._mdp_incoming_media 补图，那是收消息时存下的整包图；
+    转发消息按策略只挂前几张，两边对不上就会显示「已发 58」。
+    这里从已准备的发送集合里取实际挂上的引用。
+    """
+    out: dict = {}
+    if not rows:
+        return out
+    try:
+        from ..window.buffer import ids_of
+    except Exception:  # pragma: no cover
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        content = row.get("content")
+        if not isinstance(content, (list, tuple)):
+            continue
+        text = "\n".join(str(p.get("text") or "") for p in content
+                         if isinstance(p, dict) and p.get("type") == "text")
+        refs = [p for p in content
+                if isinstance(p, dict) and p.get("type") == "kira_image_ref" and p.get("path")]
+        if not text or not refs:
+            continue
+        try:
+            ids = ids_of([{"role": "user", "content": text}])
+        except Exception:
+            ids = []
+        for mid in ids:
+            out.setdefault(mid, []).extend(refs)
+    return out
+
+
+def _decorate_rows(rows: Any, media_by_id: Any, prepared: Any = None) -> None:
     """给快照里的消息行补上「判定注记」标记与图片引用（用户 m08158）。
 
     快照存的是框架 Message，只有 role/content：窗口里那些 media 与 decnote
@@ -255,7 +323,8 @@ def _decorate_rows(rows: Any, media_by_id: Any) -> None:
         if not isinstance(row, dict):
             continue
         body = row.get("content")
-        text = body if isinstance(body, str) else ""
+        text = body if isinstance(body, str) else "\n".join(
+            str(p.get("text") or "") for p in (body or []) if isinstance(p, dict))
         if str(row.get("role") or "") == "assistant" and not row.get("decnote"):
             # 老注记带「[决策记录] 12:00」前缀（v4.05 之后才去掉），两种都认。
             head = re.sub(r"^\[决策记录\]\s*(?:\d{1,2}:\d{2})?\s*", "", text.lstrip())
@@ -276,7 +345,12 @@ def _decorate_rows(rows: Any, media_by_id: Any) -> None:
             ids = []
         got: list[dict] = []
         for mid in ids:
-            for ref in (media_by_id.get(mid) or []):
+            src = media_by_id.get(mid) or []
+            # 用户 m18251：转发消息只挂策略允许的那几张，快照里的「已发 N」要跟
+            # 真正发出去的一致，不能拿收消息时存下的整包图。
+            if prepared and "[Forward" in text:
+                src = prepared.get(mid) or []
+            for ref in src:
                 if not isinstance(ref, dict) or not ref.get("path"):
                     continue
                 item = {"path": ref.get("path"), "mime": ref.get("mime") or ""}
@@ -516,6 +590,131 @@ def _unwrapped_reply(trace: Any) -> bool:
     text = text.strip()
     return bool(text) and "<msg" not in text.lower()
 
+# ---------------------------------------------------------------- 命中预估（token 份额）
+#
+# v5.x（2026-11-12 用户 m12441「每条都尽量精准」）：命中预估不再拿 JSON 字符公共
+# 前缀当命中量。字符口径有三处结构性偏差：图片是 token 但只有 0 字符；system prompt
+# 占字符大头、token 小头；一条消息只改后半段，JSON 前缀照样算命中。
+# 改成按「token 份额」算：分子是消息指纹公共前缀（cache_prefix_len）里那些消息的
+# token，分母是整轮 token，图片按张折算。311 轮 DS 决策轮实测：
+#   字符前缀口径 MAE 11.93pp ｜ 消息条数混合口径 7.44pp ｜ 本口径 4.5pp（中位 2.6pp）。
+_EST_MID_RE = re.compile(r'\[message_id:\s*(-?\d+)\]|<msg\b[^>]*\bmessage_id="?(-?\d+)"?', re.I)
+#: 图片 part 的类型名：这些不进正文 token，单独按张折算。
+_EST_IMAGE_TYPES = ("kira_image_ref", "image_url", "image", "input_image")
+#: 每条消息的角色/分隔开销（真实 wire 每条都要几个 token）。
+_EST_MSG_OVERHEAD = 4
+#: 缓存按块对齐，前缀尾部一般差几个点；311 轮拟合下来整体乘 0.97 偏差最小。
+_EST_BLOCK_ROUND = 0.97
+
+
+def _est_msg_parts(msg) -> tuple:
+    """(会进 prompt 的正文, 消息自带的图片张数)。图片 part 不算正文。"""
+    try:
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+    except Exception:
+        content = ""
+    if isinstance(content, str):
+        return content, 0
+    if not isinstance(content, list):
+        try:
+            return json.dumps(content, ensure_ascii=False), 0
+        except Exception:
+            return str(content or ""), 0
+    chunks = []
+    images = 0
+    for part in content:
+        if isinstance(part, str):
+            chunks.append(part)
+        elif isinstance(part, dict):
+            if str(part.get("type") or "") in _EST_IMAGE_TYPES:
+                images += 1
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                chunks.append(text)
+    return "".join(chunks), images
+
+
+def _est_mid_of(text: str) -> str:
+    """消息里的 message_id（引用/转发也认），用来把 decision_images 归到它那条。"""
+    match = _EST_MID_RE.search(text or "")
+    if not match:
+        return ""
+    return match.group(1) or match.group(2) or ""
+
+
+def _token_share_estimate(series: list, data: dict) -> tuple:
+    """这一轮大概能命中多少 token（百分比）；返回 (值, 依据)，算不出来时值给 None。"""
+    try:
+        pref = int(data.get("cache_prefix_len") or 0)
+    except (TypeError, ValueError):
+        pref = 0
+    if not series:
+        return None, "no_series"
+    pref = max(0, min(pref, len(series)))
+    if pref <= 0 and not str(data.get("system_prompt") or "").strip():
+        # 裁切快照这类没有真实请求体的记录：连系统提示词都没有，算出来只会是 0%。
+        return None, "no_system"
+    model = _record_model(data)
+    texts = []
+    images = []
+    for msg in series:
+        text, count = _est_msg_parts(msg)
+        texts.append(text)
+        images.append(count)
+    # 图片是 token 却不在正文里：按 mid 归到它所在的那条消息。消息自带的 image part
+    # 与 decision_images 取大者，同一张图不会算两遍。
+    mapped = [0] * len(series)
+    extra = data.get("decision_images") or []
+    if extra:
+        index = {}
+        for pos, text in enumerate(texts):
+            mid = _est_mid_of(text)
+            if mid and mid not in index:
+                index[mid] = pos
+        for item in extra:
+            if not isinstance(item, dict):
+                continue
+            pos = index.get(str(item.get("mid") or ""))
+            if pos is not None:
+                mapped[pos] += 1
+    total = _est_from_parts(_approx_tokens(str(data.get("system_prompt") or "")), 0, model)
+    head = total
+    for pos, text in enumerate(texts):
+        weight = (_est_from_parts(_approx_tokens(text), max(images[pos], mapped[pos]), model)
+                  + _EST_MSG_OVERHEAD)
+        total += weight
+        if pos < pref:
+            head += weight
+    if total <= 0:
+        return None, "no_tokens"
+    share = head * 100.0 / total * _EST_BLOCK_ROUND
+    # 没有任何可复用的历史前缀时，上游仍会把系统提示词那段缓存起来（实测这一档
+    # cached_tokens 恒等于系统提示词的 768 token），所以照旧给一个只算系统段的数，
+    # 而不是退回字符口径——字符口径在这些轮里会高报成 30~50%。
+    basis = "token_share" if pref > 0 else "system_only"
+    return round(max(0.0, min(100.0, share)), 1), basis
+
+def _cache_reported_of(data: dict):
+    """这条记录写的时候，上游到底有没有回报 cached_tokens（v5.x 用户 m12891）。
+
+    决策轮的用量记在记录顶层（decision_phase 写 cached_tokens），回复轮记在
+    trace.totals 里，两处都会带 cache_reported。老记录没有这个键，返回 None，
+    由调用方按「这个模型历史上从没报过缓存」这条稳定判据兜底——绝不在读的时候
+    按当前模型或时间窗口重新判，否则切模型会把旧记录的口径一起翻掉。
+    """
+    flag = data.get("cache_reported")
+    if isinstance(flag, bool):
+        return flag
+    trace = data.get("trace")
+    if isinstance(trace, dict):
+        totals = trace.get("totals")
+        if isinstance(totals, dict):
+            flag = totals.get("cache_reported")
+            if isinstance(flag, bool):
+                return flag
+    return None
+
 
 class RequestLog:
     """data/requests/<sid>/<毫秒时间戳>.json，每会话保留最近 N 轮。"""
@@ -526,6 +725,12 @@ class RequestLog:
                  trim_keep: int = 0, trim_keep_of=None):
         self.enabled = bool(enabled)
         self.dir = Path(data_dir) / "requests"
+        # 用户 m18435 第 1 条：在飞记录目录。stage() 把整份 record 另存一份到这里，
+        # flush() 时内存里没有就从这里捞回来。插件热重载（部署、改设置、手动重载）
+        # 会清空 _pending，没有这份兜底那一轮永远没有快照——走势图上就是一根红柱
+        # 「失败」，可实际那句回复已经发出去了。
+        # 注意别放 requests/ 下：那里每个子目录都会被当成一个会话目录枚举。
+        self.inflight_dir = Path(data_dir) / "inflight"
         try:
             self.keep = max(1, int(keep_rounds or 100))
         except (TypeError, ValueError):
@@ -559,6 +764,10 @@ class RequestLog:
                 self.dir.mkdir(parents=True, exist_ok=True)
             except Exception:
                 logger.exception("[multi-decision] 无法创建请求记录目录")
+            try:
+                self.inflight_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                logger.exception("[multi-decision] 无法创建在飞记录目录")
         self._pending: dict[tuple[str, str], dict] = {}
         # (sid, event_id) -> 落盘文件名。重试成功要把结果补写回「原错误那一轮」的
         # 记录，得先能按事件号找回那份文件；重启后索引是空的，_find_name 兜底扫盘。
@@ -1023,6 +1232,7 @@ class RequestLog:
         window_user: int | None = None,
         incoming_rows: Optional[list] = None,
         decision_passed: bool = False,
+        notice_only: bool = False,
     ) -> None:
         """ON_LLM_REQUEST 时暂存，等结算时补上 replied 再落盘。
 
@@ -1304,9 +1514,10 @@ class RequestLog:
         media_sid = str(getattr(request, "_mdp_media_raw_sid", "") or "")
         # 用户 m08158：快照里的行只有 role/content，窗口里的 media / decnote 全丢，
         # 页面就看不出这次决策注记、也画不出刚发的图。落盘前补一次。
+        prepared_refs = _prepared_refs_by_mid(assembled)
         try:
-            _decorate_rows(messages, media_by_id)
-            _decorate_rows(round_rows, media_by_id)
+            _decorate_rows(messages, media_by_id, prepared_refs)
+            _decorate_rows(round_rows, media_by_id, prepared_refs)
         except Exception:
             logger.debug("[multi-decision] 快照行补标记失败", exc_info=True)
         native_projection = []
@@ -1374,7 +1585,7 @@ class RequestLog:
         for key, pending in list(self._pending.items()):
             if now - pending.get("ts", now) > 900:
                 self._pending.pop(key, None)
-        self._pending[(sid, str(event_id or ""))] = {
+        record = {
             "ts": now,
             "sid": sid,
             "event_id": str(event_id or ""),
@@ -1382,6 +1593,8 @@ class RequestLog:
             # v4.11（用户 m17596 第 6 条）：这一轮是先过进阶决策、判定要回才发的。
             # 触发列就写「决策触发」，原来的触发原因降成副标。
             "decision_passed": bool(decision_passed),
+            # 用户 m17492 图5/图6：这一轮是别的插件的通知事件触发的，不是聊天请求。
+            "notice_only": bool(notice_only),
             "trigger_count": int(trigger_count or 0),
             "count_threshold": int(count_threshold or 0),
             # 用户 m15045：概率/曲线模式触发时，把当时掷到的那一档概率一起存，
@@ -1449,6 +1662,9 @@ class RequestLog:
             **metrics,
             "system_parts": sys_parts,
         }
+        self._pending[(sid, str(event_id or ""))] = record
+        # 用户 m18435 第 1 条：同时落一份在飞记录，热重载后 flush 能捞回来。
+        self._save_inflight(sid, event_id, record)
 
     # ------------------------------------------------------------------ 落盘
 
@@ -1471,7 +1687,19 @@ class RequestLog:
         # H03：先写成功再出队。写失败时记录留在内存里，下次还能重试，不会静默丢。
         record = self._pending.get(key)
         if record is None:
-            return None
+            # 用户 2026-10-27 的约定：带事件号的那一轮只能用它自己的号结算。
+            # 内存里还有这个会话的轮次时，无号 final 分不清是哪一轮，直接拒绝；
+            # 只有热重载把 _pending 清空后，才按「只剩一份」兜底捞回。
+            if not event_id and any(k[0] == sid for k in self._pending):
+                return None
+            # 用户 m18435 第 1 条：插件热重载会清空 _pending，但这一轮的 final
+            # 还会送到新实例。从在飞记录兜底捞回来，照样落一份完整快照。
+            record = self._load_inflight(sid, event_id)
+            if record is None:
+                return None
+            record["recovered"] = True
+            if not event_id:
+                event_id = str(record.get("event_id") or "")
         record["replied"] = bool(replied)
         record["reply_bubbles"] = int(reply_bubbles)
         record["event_id"] = event_id
@@ -1496,6 +1724,7 @@ class RequestLog:
         saved = self._save_round(sid, record, ledger=True)
         if saved:
             self._pending.pop(key, None)
+            self._drop_inflight(sid, event_id or record.get("event_id"))
         return saved
 
     def mark_delivery_failed(
@@ -1552,6 +1781,83 @@ class RequestLog:
                 return None
             return path.name
         return None
+
+    # ------------------------------------------------------- 在飞记录（热重载兜底）
+
+    def _inflight_path(self, sid: str, event_id: str) -> Path:
+        token = hashlib.sha256(f"{sid}|{event_id}".encode()).hexdigest()[:16]
+        return self.inflight_dir / f"{_safe_sid(sid)}__{token}.json"
+
+    def _save_inflight(self, sid: str, event_id: str, record: dict) -> None:
+        """把还没结算的那一轮另存一份，热重载后 flush 能捞回来。"""
+        if not self.enabled or not isinstance(record, dict):
+            return
+        try:
+            self.inflight_dir.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(
+                self._inflight_path(sid, event_id),
+                json.dumps(record, ensure_ascii=False),
+            )
+        except Exception:
+            logger.exception("[multi-decision] 写在飞记录失败（不影响本轮请求）")
+            return
+        try:
+            self._prune_inflight()
+        except Exception:
+            logger.exception("[multi-decision] 清理在飞记录失败")
+
+    def _load_inflight(self, sid: str, event_id: str) -> Optional[dict]:
+        """按事件号捞回在飞记录；没事件号时只在该会话只剩一份时兜底。"""
+        if not self.enabled:
+            return None
+        try:
+            path = self._inflight_path(sid, event_id)
+            if not path.exists():
+                if str(event_id or ""):
+                    return None
+                # 老调用方不带事件号：只有这一份才敢认，多份就分不清是哪一轮。
+                candidates = sorted(
+                    (p for p in self.inflight_dir.glob(_safe_sid(sid) + "__*.json")),
+                    key=lambda p: p.stat().st_mtime,
+                )
+                if len(candidates) != 1:
+                    return None
+                path = candidates[0]
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except Exception:
+            logger.exception("[multi-decision] 读在飞记录失败")
+            return None
+
+    def _drop_inflight(self, sid: str, event_id: str) -> None:
+        try:
+            self._inflight_path(sid, str(event_id or "")).unlink(missing_ok=True)
+        except Exception:
+            logger.exception("[multi-decision] 删在飞记录失败")
+
+    def _prune_inflight(self, max_age: float = 21600.0, keep_max: int = 100) -> None:
+        """在飞记录只在结算前有用：超过 6 小时或份数超限就清掉。"""
+        now = time.time()
+        files = []
+        for path in self.inflight_dir.glob("*.json"):
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if now - mtime > max_age:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                continue
+            files.append((mtime, path))
+        if len(files) > keep_max:
+            files.sort()
+            for _, path in files[: len(files) - keep_max]:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
 
     def _save_round(self, sid: str, record: dict, ledger: bool = True) -> Optional[str]:
         """把一份快照记录落盘。flush 与「裁切快照」（write_trim_snapshot）共用。
@@ -1824,6 +2130,10 @@ class RequestLog:
         in_tok = sum(item["input"] for item in stats_usage)
         out_tok = sum(item["output"] for item in stats_usage)
         cached = sum(item["cached"] for item in stats_usage)
+        # v5.x（用户 m12891）：这一轮上游有没有真的回报缓存命中。没回报时 cached
+        # 只能是 0，落盘时一起存下来，页面才不会把「没回报」当成「实测 0%」。
+        reported = (all(bool(item.get("cached_reported")) for item in stats_usage)
+                    if stats_usage else None)
         elapsed = float(data.get("elapsed") or 0.0)
         cache_hit = round(cached * 100.0 / in_tok, 1) if (in_tok and cached) else None
         dec_trace = {
@@ -1832,6 +2142,7 @@ class RequestLog:
                 "input_tokens": in_tok,
                 "output_tokens": out_tok,
                 "cached_tokens": (cached or None),
+                "cached_reported": reported,
                 "cache_hit": cache_hit,
                 "time_consumed": (round(elapsed, 3) if elapsed else None),
                 "reasoning": "",
@@ -1841,7 +2152,8 @@ class RequestLog:
                 "text": str(data.get("raw") or ""),
             }],
             "totals": {"input_tokens": in_tok, "output_tokens": out_tok,
-                       "cached_tokens": cached, "cache_hit": cache_hit},
+                       "cached_tokens": cached, "cache_hit": cache_hit,
+                       "cache_reported": reported},
             "tools": list(data.get("tools_used") or []),
             "elapsed": (round(elapsed, 3) if elapsed else 0),
         }
@@ -1983,6 +2295,7 @@ class RequestLog:
             "input_tokens": in_tok,
             "output_tokens": out_tok,
             "cached_tokens": cached,
+            "cache_reported": reported,
             "usage": copy.deepcopy(stats_usage),
             # ④ agent 轨迹（决策模型那一次调用）。模板跟回复记录一样，
             # 页面 traceChips / traceHtml / traceRawText 都认这套键。
@@ -2564,7 +2877,9 @@ class RequestLog:
     def _row_of(self, path, data: dict, *, pbytes: int = 0, est=None,
                 prefix_chars: int = 0, total_chars: int = 0,
                 prefix_tokens: int = 0, total_tokens: int = 0,
-                previous_name: str = "", gap_seconds=None) -> dict:
+                previous_name: str = "", gap_seconds=None,
+                prompt_tokens_est: int = 0, token_est=None,
+                token_basis: str = "") -> dict:
         """把一份快照文件投影成列表行（文件解析与行构造分开）。
 
         v4.80（2026-11-07 性能）：从 list_rounds 里拆出来，给 list_rounds_light
@@ -2580,6 +2895,8 @@ class RequestLog:
             "replied": bool(data.get("replied")),
             "failed": bool(data.get("failed")),
             "outcome": data.get("outcome") or ("failed" if data.get("failed") else "replied" if data.get("replied") else "no_reply"),
+            # 用户 m17492 图5/图6：别的插件通知事件触发的回调轮，前端单独显示「工具回调」。
+            "notice_only": notice_only_record(data),
             "error": data.get("error") or "",
             "reply_bubbles": data.get("reply_bubbles") or 0,
             # 用户 2026-11-07：回复记录表要显示这一轮实际用的模型与渠道。
@@ -2659,6 +2976,17 @@ class RequestLog:
             "prefix_reuse_total_chars": total_chars,
             "prefix_reuse_tokens": prefix_tokens,
             "prefix_reuse_total_tokens": total_tokens,
+            # v5.x（用户 m12441）：按 token 份额算的命中预估（百分比）。上面那几列字符
+            # 比例仍保留作诊断，但页面上的「预估」改用这一列，图片按张折算。
+            "token_prefix_percent": token_est,
+            "token_prefix_basis": token_basis,
+            # v5.x（用户 m11874）：消息条数口径的前缀比例。字符比例在带图轮偏高
+            # （图片是 token 但 0 字符），命中预估要拿它做第二把尺子。
+            "cache_prefix_len": int(data.get("cache_prefix_len") or 0),
+            "cache_series_len": int(data.get("cache_series_len") or 0),
+            # v4.87（用户 m13442 第 2 条）：完整 prompt 的 token 估计（文本 + 图片）。
+            # 中转不回报 cached 时，前端拿它当分母反推命中。
+            "prompt_tokens_est": prompt_tokens_est,
             # v3.52（用户 m07864 第 4 条）：本轮新消息里带了几张图。
             # 命中预估要按「这张图是不是这轮刚加的」折算成不参与缓存的 token。
             "incoming_image_count": _count_image_parts(data.get("incoming_with_native") or []),
@@ -2705,6 +3033,9 @@ class RequestLog:
             "input_tokens": int(data.get("input_tokens") or 0),
             "output_tokens": int(data.get("output_tokens") or 0),
             "cached_tokens": int(data.get("cached_tokens") or 0),
+            # v5.x（用户 m12891）：这一轮上游有没有真的回报缓存命中。None = 老记录，
+            # 页面按模型全历史兜底判（见 main.py 的 _cache_silent_models）。
+            "cache_reported": _cache_reported_of(data),
             "decision_system_names": list(data.get("decision_system_names") or []),
             "_trace": data.get("trace") if isinstance(data.get("trace"), dict) else None,
             # 用户 m02159 图6：模型写了话但没按 <msg> 包起来 → 这一轮算「未回复」。
@@ -2731,14 +3062,7 @@ class RequestLog:
 
         def _flat(rec: dict) -> str:
             """序列化记录中的消息投影；不是 provider wire，也不是 token 序列。"""
-            try:
-                return json.dumps(
-                    rec.get("assembled") or rec.get("messages") or [],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-            except Exception:
-                return ""
+            return _flat_of(rec)
 
         def _prefix(a: str, b: str) -> int:
             """公共前缀长度。二分 + 切片比较，比逐字符循环快一个量级。"""
@@ -2775,8 +3099,13 @@ class RequestLog:
             prefix_tokens = total_tokens = 0
             previous_name = ""
             gap_seconds = None
+            # v4.87（用户 m13442 第 2 条）：完整 prompt 的 token 估计，每一份都要，
+            # 不依赖有没有上一轮——最后一份记录也要能反推命中。
+            cur_flat = _flat(data)
+            prompt_tokens_est = _prompt_tokens_est(data, cur_flat)
+            # v5.x（用户 m12441）：token 份额口径的命中预估，分子是消息指纹公共前缀。
+            token_est, token_basis = _token_share_estimate(self._series_of(data), data)
             if idx + 1 < len(records):
-                cur_flat = _flat(data)
                 # v4.25（用户 m22166）：命中预估只跟**同类**的上一份比。
                 # 回复轮与决策轮的 assembled 结构完全不同（一个是 messages、
                 # 一个是 transcript），拿上一份文件不分类地比，前缀会整段断掉，
@@ -2807,7 +3136,8 @@ class RequestLog:
                 path, data, pbytes=pbytes, est=est, prefix_chars=prefix_chars,
                 total_chars=total_chars, prefix_tokens=prefix_tokens,
                 total_tokens=total_tokens, previous_name=previous_name,
-                gap_seconds=gap_seconds,
+                gap_seconds=gap_seconds, prompt_tokens_est=prompt_tokens_est,
+                token_est=token_est, token_basis=token_basis,
             ))
         return out
 
@@ -2894,7 +3224,10 @@ class RequestLog:
                     data = json.loads((folder / name).read_text(encoding="utf-8"))
                 except Exception:
                     continue
-                row = self._row_of(folder / name, data)
+                row = self._row_of(
+                    folder / name, data,
+                    prompt_tokens_est=_prompt_tokens_est(data),
+                )
                 cache[key] = row
             rows.append(dict(row))
         # 被裁掉的旧文件不再占内存（留一点余量，别每轮都重建字典）。
@@ -2982,6 +3315,8 @@ class RequestLog:
                 "replied": bool(record.get("replied") or outcome == "replied"),
                 "failed": bool(record.get("failed") or outcome in ("failed", "error")
                                or record.get("error")),
+                # 用户 m17492 图5/图6：通知回调轮不进 24 小时统计，账本里标一笔。
+                "notice": bool(record.get("notice_only") or outcome == "notice"),
             }
             self.ledger.parent.mkdir(parents=True, exist_ok=True)
             with self._ledger_lock:
@@ -3106,6 +3441,7 @@ class RequestLog:
                 "root": str(row.get("root") or ""),
                 "replied": bool(row.get("replied")),
                 "failed": bool(row.get("failed")),
+                "notice": bool(row.get("notice")),
                 "key": self._round_key(sid, event_id, ts),
             })
         self._ledger_cache = (stamp, rows)
@@ -3136,7 +3472,7 @@ class RequestLog:
             retry_set = set()
         start = time.time() - hours * 3600
 
-        def _row(sid, ts, replied, failed, event_id, root) -> dict:
+        def _row(sid, ts, replied, failed, event_id, root, notice=False) -> dict:
             eid = str(event_id or "")
             root_id = str(root or "")
             return {
@@ -3146,6 +3482,7 @@ class RequestLog:
                 "root": root_id,
                 "replied": bool(replied),
                 "failed": bool(failed),
+                "notice": bool(notice),
                 # 重试轮两条路认：retry_history 链路里的事件号，或记录自带 root_event_id
                 "retried": bool((eid and eid in retry_set)
                                 or (root_id and eid and root_id != eid)),
@@ -3158,7 +3495,7 @@ class RequestLog:
                 continue
             seen.add(row["key"])
             rows.append(_row(row["sid"], row["ts"], row["replied"], row["failed"],
-                             row["event_id"], row["root"]))
+                             row["event_id"], row["root"], row.get("notice")))
         # ② 再用请求文件补账本上线前的历史；同一轮（同一个 key）只算一次。
         try:
             folders = list(self.dir.glob("*"))
@@ -3210,7 +3547,7 @@ class RequestLog:
                 seen.add(key)
                 rows.append(_row(str(data.get("sid") or folder.name), ts,
                                  bool(data.get("replied") or outcome == "replied"),
-                                 failed, event_id, root))
+                                 failed, event_id, root, notice_only_record(data)))
         return rows
 
     def recent_round_rows(self, hours: int = 24, retry_events=None) -> list:
@@ -3218,7 +3555,8 @@ class RequestLog:
 
         v3.48（用户 2026-10-24 第 1 条）：概览卡顶上一排数字要一份 24 小时全量口径，
         消息日志的 round_end 与这里的逐轮记录按 event_id 合并。字段只留计数需要的
-        六个，别把整份 assembled 消息带出去。
+        那几个（v4.9x 加了 notice：别的插件的通知回调轮不进统计），别把整份
+        assembled 消息带出去。
         """
         return [
             {
@@ -3228,6 +3566,7 @@ class RequestLog:
                 "replied": row["replied"],
                 "failed": row["failed"],
                 "retried": row["retried"],
+                "notice": bool(row.get("notice")),
             }
             for row in self._window_rows(hours, retry_events)
         ]
@@ -3252,6 +3591,10 @@ class RequestLog:
         """
         out = {"rounds": 0, "failed": 0, "replied": 0, "retried": 0, "silent": 0}
         for row in self._window_rows(hours, retry_events):
+            # 用户 m17492 图5/图6：别的插件的工具完成通知不是一轮聊天请求，
+            # 不计进「最近 24 小时」的轮数与成功率。
+            if row.get("notice"):
+                continue
             out["rounds"] += 1
             if row["failed"]:
                 out["failed"] += 1

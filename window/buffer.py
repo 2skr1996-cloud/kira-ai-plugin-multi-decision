@@ -255,6 +255,47 @@ def clone_message(msg: Any) -> Any:
     return msg
 
 
+def drop_tool_rounds(messages):
+    """把工具调用的往返整段摘掉，返回 (留下的列表, 摘掉的条数)（v4.92，用户 m13535）。
+
+    bot 在回复里调过工具之后，框架记忆里会留下成对的「assistant 带 tool_calls」
+    和「tool 结果」。以前这两条照原样进窗口：一条工具结果动辄几万字符（一次
+    search 就是整页 JSON），下一轮决策、回复都要重新背一遍，缓存也跟着重算。
+
+    用户 m13535 要求在窗口这层收住，设置项是「工具结果不进实时窗」，默认关；
+    打开才整段摘掉，关着就按原样进窗，但发请求时 tool_calls / tool_call_id 必须
+    成对（见 state/decision_phase.py 的 chat_payload）。所以这里只做整段摘除：
+    - role=tool 的行直接丢；
+    - 只带 tool_calls、正文为空的 assistant 行一起丢（它的内容全在调用里）；
+    - 正文和 tool_calls 都有的 assistant 行，只摘 tool_calls，正文留着。
+    """
+    out = []
+    gone = 0
+    for m in messages or []:
+        role = str(_get(m, "role") or "")
+        if role == "tool":
+            gone += 1
+            continue
+        calls = _get(m, "tool_calls") if role == "assistant" else None
+        if not calls:
+            out.append(m)
+            continue
+        body = _flat_text(_get(m, "content")).strip()
+        if not body:
+            gone += 1
+            continue
+        copy = clone_message(m)
+        if isinstance(copy, dict):
+            copy.pop("tool_calls", None)
+        else:
+            try:
+                copy = copy.model_copy(update={"tool_calls": None})
+            except Exception:
+                pass
+        out.append(copy)
+    return out, gone
+
+
 @dataclass
 class WindowState:
     """一个会话的窗口状态。纯内存，插件卸载即丢。"""
@@ -476,7 +517,7 @@ def patch_forward_shells(messages) -> List[Any]:
 def merge_framework_messages(state: WindowState, framework_messages, seed_limit: int = 0,
                              anchor_msg=None, require_anchor: bool = False,
                              trusted_messages=None, mention_names=None,
-                             mention_normalizer=None) -> int:
+                             mention_normalizer=None, drop_tools: bool = False) -> int:
     """把框架这次给的历史增量并进窗口缓冲，返回新增条数。
 
     - 先拆包：框架常把一批群消息拼成一条 user，窗口里一条一条存
@@ -530,6 +571,11 @@ def merge_framework_messages(state: WindowState, framework_messages, seed_limit:
     # 进来之前先丢掉，别让它在窗口里长住。
     incoming, _gone_in = drop_empty_bot_replies(incoming)
     trusted, _gone_tr = drop_empty_bot_replies(trusted)
+    # v4.92（用户 m13535）：工具结果默认不进窗口，整段（调用行 + 结果行）一起摘，
+    # 只留正文；开关关掉时照旧并进来，发请求那边负责把配对补全。
+    if drop_tools:
+        incoming, _gone_tool_in = drop_tool_rounds(incoming)
+        trusted, _gone_tool_tr = drop_tool_rounds(trusted)
     # 打标走副本：框架给的消息对象是它自己的记忆条目，就地改会把 [@你] 写回框架那边
     if mention_names or mention_normalizer is not None:
         incoming = mark_copies(incoming, mention_names, mention_normalizer)
@@ -600,8 +646,74 @@ def merge_framework_messages(state: WindowState, framework_messages, seed_limit:
         else:
             tail = incoming[-1:]
 
+    # v4.07（用户 m14406）：工具往返排在回复之前，窗口末条却已经是那条回复，
+    # 锚点落在回复上时 tail 为空、锚点落在 user 上时整段被追加到回复后面——两种
+    # 都会让这一轮的工具行永远进不了窗口。并之前先把缺失的前缀按原位补回去。
+    # 开关打开（工具结果不进窗口）时不补，否则刚摘掉的又被插回来。
+    backfilled = 0 if drop_tools else _backfill_turn_prefix(state, incoming)
     tail = [(msg, False) for msg in tail] + [(msg, True) for msg in trusted]
-    return _merge_tail(state, tail, seen_before)
+    return _merge_tail(state, tail, seen_before) + backfilled
+
+def _present_at(state: WindowState, msg: Any, have_ids, have_fp, echo_at) -> int:
+    """msg 在窗口里的下标，没有就 -1。按编号、按指纹、按回显占位三种口径认。"""
+    ids = ids_of([msg])
+    if ids:
+        for i, m in enumerate(state.messages):
+            if ids & ids_of([m]):
+                return i
+    fp = fingerprint(msg)
+    if fp in have_fp:
+        for i in range(len(state.messages) - 1, -1, -1):
+            if fingerprint(state.messages[i]) == fp:
+                return i
+    k = echo_key(msg)
+    if k and (_get(msg, "role") or "") == "assistant":
+        return echo_at.get(k, -1)
+    return -1
+
+
+def _backfill_turn_prefix(state: WindowState, incoming: List[Any]) -> int:
+    """把最后一轮里「排在窗口已有消息之前、窗口却缺了」的消息按原位补回去（v4.07）。
+
+    用户 m14406：框架记忆里工具往返是齐的（assistant 带 tool_calls + tool 结果），
+    可窗口末条往往已经是这一轮的回复。锚点落在回复上时 tail 为空，工具行补不进来；
+    锚点落在 user 上时整轮被追加到回复之后，顺序反了（工具排到回复后面）。
+    这里只补「这一轮开头被跳过」的那段，插在窗口里第一条已存在的消息之前，
+    顺序与原样一致；整轮都还没进窗口时不动，交给原来的 tail 追加。
+    """
+    if not state.messages or not incoming:
+        return 0
+    user_at = -1
+    for i in range(len(incoming) - 1, -1, -1):
+        if (_get(incoming[i], "role") or "") == "user":
+            user_at = i
+            break
+    if user_at < 0:
+        return 0
+    block = incoming[user_at + 1:]
+    if not block:
+        return 0
+    have_ids = ids_of(state.messages)
+    have_fp = {fingerprint(m) for m in state.messages}
+    echo_at: dict = {}
+    for i, m in enumerate(state.messages):
+        k = echo_key(m)
+        if k:
+            echo_at.setdefault(k, i)
+    for j, msg in enumerate(block):
+        at = _present_at(state, msg, have_ids, have_fp, echo_at)
+        if at < 0:
+            continue
+        missing = [m for m in block[:j]
+                   if _present_at(state, m, have_ids, have_fp, echo_at) < 0]
+        if not missing:
+            return 0
+        at = max(0, min(at, len(state.messages)))
+        state.messages[at:at] = [clone_message(m) for m in missing]
+        logger.debug("[multi-decision] 窗口补回缺失前缀 %d 条", len(missing))
+        return len(missing)
+    return 0
+
 
 def _merge_tail(state: WindowState, tail, seen_before=None) -> int:
     """把一批待并消息逐条去重后并入窗口，返回新增条数。

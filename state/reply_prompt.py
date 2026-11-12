@@ -23,6 +23,47 @@ logger = get_logger("multi_decision", "orange")
 PERSONA_NAME = "persona"
 
 
+def filter_tool_set(tool_set, names):
+    """按提示词页勾的名单裁掉多余的工具（用户 m11103）。
+
+    names 是空表就一个都不留——用户要的是「勾哪个挂哪个」，全不勾就是不给工具，
+    不回退成框架全量。返回 (留下的名字, 拿掉的名字)；tool_set 上没有 remove 时不动它。
+    """
+    tools = list(getattr(tool_set, "tools", None) or [])
+    keep = {str(x).strip() for x in (names or []) if str(x).strip()}
+    dropped = [str(getattr(t, "name", "") or "") for t in tools
+               if str(getattr(t, "name", "") or "") not in keep]
+    if dropped:
+        remover = getattr(tool_set, "remove", None)
+        if callable(remover):
+            remover(*dropped)
+        else:
+            logger.warning("[multi-decision] tool_set 没有 remove，回复工具没裁成")
+            return [str(getattr(t, "name", "") or "") for t in tools], []
+    left = [str(getattr(t, "name", "") or "") for t in list(getattr(tool_set, "tools", None) or [])]
+    return left, dropped
+def apply_reply_tools(request, names):
+    """把这一轮回复请求的 tool_set 裁成提示词页勾的那份（用户 m11103）。
+
+    names 为 None＝还没在提示词页勾过，原样不动（保持框架全量）。返回
+    (留下的名字, 拿掉的名字)；没裁到东西或没得裁都返回 None。
+    """
+    tool_set = getattr(request, "tool_set", None)
+    if tool_set is None or names is None:
+        return None
+    have = [str(getattr(t, "name", "") or "") for t in list(getattr(tool_set, "tools", None) or [])]
+    if not have:
+        return None
+    kept, dropped = filter_tool_set(tool_set, names)
+    if not dropped:
+        return None
+    # assemble 阶段还会按 tool_set 重算 tools / tool_choice，这里只动 tool_set 就够；
+    # 顺手同步一次，万一别的钩子读 request.tools 也不会看到旧清单。
+    try:
+        request.tools = tool_set.to_list()
+    except Exception:
+        logger.debug("[multi-decision] 同步 request.tools 失败（assemble 会重算）", exc_info=True)
+    return kept, dropped
 class ReplyPrompt:
     """新提示词服务入口及旧配置/快照兼容；指定 sid 时绝不跨会话借用。"""
 

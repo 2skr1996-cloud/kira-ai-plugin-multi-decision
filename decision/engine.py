@@ -33,6 +33,8 @@ from ..state.session_state import SessionState
 from ..state.sids import normalize_sid
 from ..state.retry_history import RETRY_META
 from ..state.reply_media import ReplyMediaAdapter
+from ..state.reply_delivery import REPLY_ATTEMPT, ReplyDeliveryGuard
+from ..state.reply_publication import REPLY_PUBLICATION, ReplyPublicationGuard
 from ..window.buffer import ids_of
 from ..window.split import _looks_image, mark_mention, mark_messages, split_user_content
 
@@ -114,7 +116,12 @@ from ..window.manager import (
     strip_group_tags,
     stamp_assistant_time,
     is_decision_note,
+    is_tool_note,
+    tool_media_from_records,
+    _data_root,
     text_of_content,
+    is_notice_shell_text,
+    notice_shell_ts,
 )
 
 logger = get_logger("multi_decision", "orange")
@@ -1177,6 +1184,27 @@ def sender_id_of(message) -> str:
         return ""
 
 
+def _event_messages(event) -> list:
+    """这一轮事件里的消息列表（批量事件用 messages，单条事件用 message）。"""
+    msgs = list(getattr(event, "messages", None) or [])
+    if not msgs:
+        one = getattr(event, "message", None)
+        if one is not None:
+            msgs = [one]
+    return msgs
+
+
+def _event_notice_messages(event) -> list:
+    """这一轮事件里哪些消息是 is_notice 通知（别的插件回调）。
+
+    用户 m20315 第 2 条：is_notice 挂在 KiraIMMessage 上，不在事件对象上；
+    以前 getattr(event, "is_notice", False) 永远 False，通知轮被记成「未回复」。
+    """
+    return [m for m in _event_messages(event)
+            if bool(getattr(m, "is_notice", False))]
+
+
+
 class _InputFlow:
     """Runtime-only admission boundary; never put deferred input in window.pending."""
 
@@ -1200,8 +1228,15 @@ class DecisionEngine:
         # 宿主会在钩子后追加 native 图；仅在带私有标记的回复发送前统一替换。
         self._reply_failure_token = object()
         self._reply_media = ReplyMediaAdapter(
-            self.ctx, logger=logger, on_failure=self._handle_reply_preparation_failure)
+            self.ctx, logger=logger, on_failure=self._handle_reply_preparation_failure,
+            on_check=self._check_reply_round)
         self._reply_media.install()
+        self._reply_delivery = ReplyDeliveryGuard(self.ctx, logger=logger)
+        self._reply_delivery.install()
+        self._reply_publication = ReplyPublicationGuard(self.ctx, logger=logger)
+        self._reply_publication.install()
+        self._reply_attempts: dict[str, object] = {}
+        self._reply_tasks: set = set()
         self._states: dict[str, SessionState] = {}
         # 归一 sid -> 框架原始 sid。v2.42 把会话 id 的机器人名前缀去掉了，
         # 但框架自己的会话记忆（buffer、记忆库）还挂在原始 id 上，
@@ -1238,6 +1273,13 @@ class DecisionEngine:
         # 从 event.model_group / 适配器上取到就存这里，结算（含出错轮、看门狗）
         # 时按 (sid, event_id) 取回；取不到再退回 tracer 的默认模型名。
         self._round_reply_meta: dict[tuple[str, str], dict] = {}
+        # 用户 m06995 第 2 项：回复模型也有「连续失败切换 / 切回主模型等待」。
+        # 只放内存：重启后从主模型重新试，没必要写进会话状态（会改持久化 schema）。
+        self._reply_fail_streak: dict[str, int] = {}
+        self._reply_fallback_until: dict[str, float] = {}
+        # 用户 m17492 图5/图6：别的插件的通知事件（is_notice）触发的这一轮不是聊天请求。
+        # 请求侧按 (sid, event_id) 记一笔，结算时标成「工具回调」，不算空回复、不进统计。
+        self._notice_rounds: dict[tuple[str, str], float] = {}
         self._settled_rounds: dict[tuple[str, str], float] = {}
         self._retry_events: dict[str, list] = {}
         self._round_roots: dict[tuple[str, str], str] = {}
@@ -1424,6 +1466,255 @@ class DecisionEngine:
                 "[multi-decision] 窗口钩子异常（已吞掉，本轮退回框架原生记忆）"
             )
 
+    async def _tool_media_refs(self, sid: str, until: float = 0.0, skip=()) -> list:
+        """工具刚发出去的那批图（用户 m20315 第 1 条）。
+
+        走框架自己的 message_history（同一个连接池），比另开只读 sqlite 稳：
+        真机上 WAL 正被框架写着，外面再开一个只读连接会直接报
+        file is not a database。
+        """
+        svc = getattr(self.ctx, "message_history", None)
+        if svc is None:
+            return []
+        key = ""
+        try:
+            key = self.window.raw_sid(sid) if self.window is not None else ""
+        except Exception:
+            key = ""
+        if not key or key == sid:
+            try:
+                key = await self.plugin._session_key_of(sid)
+            except Exception:
+                key = key or str(sid or "")
+        if not key:
+            return []
+        try:
+            page = await svc.list_messages(key, limit=120)
+        except Exception:
+            logger.debug("[multi-decision] %s 读工具出站图失败（已忽略）", sid, exc_info=True)
+            return []
+        return tool_media_from_records(
+            getattr(page, "messages", None) or [], _data_root(), until, skip)
+
+    async def _commit_tool_notes(self, sid: str, request) -> int:
+        """把本轮的工具回调提前入窗，并从 user_prompt 里摘掉（用户 m20315）。
+
+        别的插件（nai 出图这类）异步完成时，把结果以一条
+        name="<工具>_completion" 的 Prompt 挂进下一轮请求的 user_prompt。框架
+        assemble_prompt 会把 user_prompt 里所有 Prompt 拼成**最后一条 user**，
+        于是模型和快照里都成了「user 说第 1 张画好了」，图也进不了上下文。
+
+        这里在取快照之前把它摘出来，按 assistant 记进窗口（带工具刚发的那批图），
+        本轮请求的 messages 里就有这条 assistant 了；user_prompt 里不再有它，
+        框架也就不会把它拼成 user。
+
+        同一轮里框架还会把一条空 Notice 壳（「[19:58] Notice [group_id…] | 」）
+        当普通消息塞进 user_prompt。它不是谁说的话，这里一并摘掉，时间取通知头
+        上的 [HH:MM]，和工具回调合成同一条 assistant（用户 m20315 第 2 条）。
+        """
+        if self.window is None:
+            return 0
+        parts = getattr(request, "user_prompt", None)
+        if not isinstance(parts, list) or not parts:
+            return 0
+        # 热重载时 engine 可能在 window.manager 之前被重新导入，模块级
+        # `from ..window.manager import is_notice_shell_text` 会绑到旧函数上，
+        # 旧正则只认短格式，长格式 Notice 就摘不掉。这里运行时再取一次，
+        # 保证用的是当前 window.manager 里的实现（用户 m01243 复验）。
+        from ..window.manager import is_notice_shell_text as _is_notice_shell_text
+        from ..window.manager import notice_shell_ts as _notice_shell_ts
+        keep, notes, notices = [], [], []
+        for p in parts:
+            name = str(getattr(p, "name", "") or "")
+            if name.endswith("_completion"):
+                notes.append((name[: -len("_completion")], getattr(p, "content", "")))
+                continue
+            # 用户 m20315 第 2 条：nai 完成时框架还会把一条空 Notice 壳当普通
+            # 消息塞进 user_prompt。它不是谁说的话，和工具回调合成一条 assistant，
+            # 时间用通知头上的 [HH:MM]，不能让它单独占一条 user。
+            content = getattr(p, "content", "")
+            if _is_notice_shell_text(content):
+                notices.append(content)
+                continue
+            keep.append(p)
+        if not notes and not notices:
+            return 0
+        # 用户 m01243：真机上 Notice 仍留在 user_prompt，先打一行能看出
+        # 新代码是否加载、每段正文到底是什么；确认后可以删掉。
+        logger.info("[multi-decision] %s 工具回调检查 v3：notes=%d notices=%d parts=%s",
+                    sid, len(notes), len(notices),
+                    [(str(getattr(p, "name", "") or ""), repr(str(getattr(p, "content", ""))[:160]))
+                     for p in parts])
+        if not notes:
+            # 只有 Notice 壳、没有工具回调：本轮没有可合并的工具结果
+            # （也可能是钩子顺序变了，别的插件还没把 completion 挂进来）。
+            # 这时绝不能摘壳——摘了模型就不知道被唤醒的原因，回调也会整条丢失。
+            return 0
+        request.user_prompt = keep
+        at = _notice_shell_ts(notices[0]) if notices else 0.0
+        at = at or time.time()
+        added = 0
+        skip = set()
+        for tool, body in notes:
+            refs = await self._tool_media_refs(sid, time.time(), skip)
+            added += self.window.commit_tool_note(sid, tool, body, ts=at, refs=refs)
+            for ref in refs or ():
+                if isinstance(ref, dict) and ref.get("path"):
+                    skip.add(str(ref["path"]).replace("\\", "/"))
+        if added:
+            logger.info("[multi-decision] %s 工具回调提前入窗 %d 条（已从 user_prompt 摘掉）",
+                        sid, added)
+        return added
+
+    @staticmethod
+    def _stop_reply_event(event) -> None:
+        stop = getattr(event, "stop", None)
+        if callable(stop):
+            stop()
+
+    def _bind_reply_attempt(self, sid, eid, epoch, event, request, *, claim_task=True) -> None:
+        """Freeze ownership before queueing; attach the actual workflow at its hook."""
+        owner = (self._reply_failure_token, sid, eid, epoch)
+        attempt = self._reply_attempts.get(sid)
+        if attempt is None or attempt.owner != owner:
+            st = self.state(sid)
+            if not st.busy:
+                st.busy = True
+                st.busy_since = time.time()
+            remaining = st.busy_since + self._watchdog_seconds(sid) - time.time()
+            attempt = SimpleNamespace(owner=owner, event=event, task=None, tasks=set(),
+                deadline=asyncio.get_running_loop().time() + max(0.0, remaining), expired=False)
+            self._reply_attempts[sid] = attempt
+            # Rebind the timer to this epoch without extending the original budget.
+            self._arm_watchdog(sid, st)
+        if request is not None:
+            request._mdp_reply_round = owner
+        event._mdp_reply_round = owner
+        if not claim_task:
+            return
+        task = asyncio.current_task()
+        if attempt.task is None and task is not None:
+            attempt.task = task
+        self._track_reply_task(attempt, task)
+
+        async def check():
+            await self._check_reply_round(owner)
+        self._reply_delivery.set_check(check)  # Tool children inherit the frozen owner, including reloads.
+
+    def _track_reply_task(self, attempt, task) -> None:
+        if task is None or task in attempt.tasks:
+            return
+        attempt.tasks.add(task)
+        self._reply_tasks.add(task)
+
+        def done(finished):
+            attempt.tasks.discard(finished)
+            self._reply_tasks.discard(finished)
+        task.add_done_callback(done)
+
+    async def _check_reply_round(self, owner) -> None:
+        """Fail closed before/after provider work and before any owned send."""
+        if (not isinstance(owner, tuple) or len(owner) != 4
+                or owner[0] is not self._reply_failure_token):
+            return  # A foreign/unmanaged request is outside this engine's scope.
+        _, sid, eid, epoch = owner
+        attempt = self._reply_attempts.get(sid)
+        flow = self._input_flows.get(sid)
+        st = self._states.get(sid)
+        if (self._closed or attempt is None or attempt.owner != owner or attempt.expired
+                or flow is None or flow.epoch != epoch or flow.phase != "active"
+                or flow.event_id != eid or self._active_rounds.get(sid) != eid
+                or (sid, eid) in self._settled_rounds or st is None or not st.busy):
+            raise asyncio.CancelledError("reply attempt is no longer active")
+        self._track_reply_task(attempt, asyncio.current_task())
+        if asyncio.get_running_loop().time() < attempt.deadline:
+            return
+        async with flow.lock:
+            if (self._reply_attempts.get(sid) is attempt and flow.epoch == epoch
+                    and flow.phase == "active" and self._active_rounds.get(sid) == eid
+                    and (sid, eid) not in self._settled_rounds and st.busy):
+                await self._expire_reply_locked(sid, flow, st)
+        raise asyncio.CancelledError("reply attempt exceeded its deadline")
+
+    async def guard_reply_request(self, event) -> None:
+        owner = getattr(event, "_mdp_reply_round", None)
+        if isinstance(owner, tuple) and len(owner) == 4 and owner[0] is not self._reply_failure_token:
+            self._stop_reply_event(event)
+            raise asyncio.CancelledError("reply publication belongs to an unloaded engine")
+        await self._check_reply_round(owner)
+
+    async def _accept_reply_callback(self, event) -> bool:
+        try:
+            await self._check_reply_round(getattr(event, "_mdp_reply_round", None))
+        except asyncio.CancelledError:
+            return False
+        return True
+
+    def _accepted_reply_failure(self, event) -> bool:
+        owner = getattr(event, "_mdp_reply_round", None)
+        if (not isinstance(owner, tuple) or len(owner) != 4
+                or owner[0] is not self._reply_failure_token
+                or getattr(event, "_mdp_reply_failed_round", None) != owner):
+            return False
+        _, sid, eid, epoch = owner
+        flow = self._input_flows.get(sid)
+        return bool(not self._closed and flow is not None and flow.epoch == epoch
+            and self._active_rounds.get(sid) == eid and (sid, eid) in self._settled_rounds
+            and (sid, eid) in self._round_errors)
+
+    async def guard_reply_final(self, event, result) -> None:
+        if self._accepted_reply_failure(event):
+            steps = list(getattr(result, "step_results", None) or [])
+            tail = str(getattr(steps[-1], "raw_output", "") or "").strip() if steps else ""
+            if not tail or tail.startswith("[ProviderError]"):
+                return  # Complete the already accepted error trace, never re-settle it.
+        await self._check_reply_round(getattr(event, "_mdp_reply_round", None))
+
+    async def guard_reply_response(self, event, response) -> None:
+        if getattr(response, "status", None) == "error" and self._accepted_reply_failure(event):
+            return
+        try:
+            await self._check_reply_round(getattr(event, "_mdp_reply_round", None))
+        except asyncio.CancelledError:
+            # Some host versions still inspect a stopped executor's last response.
+            response.text_response = ""
+            for name in ("tool_calls", "tool_results"):
+                items = getattr(response, name, None)
+                if isinstance(items, list):
+                    items.clear()
+            self._stop_reply_event(event)
+            raise
+
+    async def _expire_reply_locked(self, sid, flow, st, *, cancel_runner=True) -> None:
+        """One timeout settlement shared by timer, ingress and transport checks."""
+        eid = str(self._active_rounds.get(sid, "") or "")
+        if not st.busy or (eid and (sid, eid) in self._settled_rounds):
+            return
+        if eid:
+            self._settled_rounds[(sid, eid)] = time.time()
+        attempt = self._reply_attempts.get(sid)
+        current = asyncio.current_task()
+        if attempt is not None and attempt.owner[2:] == (eid, flow.epoch):
+            attempt.expired = True
+            self._stop_reply_event(attempt.event)
+            for task in tuple(attempt.tasks):
+                if task is not current and not task.done():
+                    task.cancel()
+        self.health["watchdog"] += 1
+        wd = self._watchdog_seconds(sid)
+        st.last_error = "投递后 %d 秒没有任何结算，本次请求已作废" % int(wd)
+        st.last_error_at = time.time()
+        logger.warning("[multi-decision] %s 超过 %.1fs，本次请求作废并取消，迟到结果不再接受", sid, wd)
+        self._watchdog_record_failure(sid, st)
+        self._retry_after_fail(sid, st)
+        runner = flow.runner
+        if cancel_runner and runner is not None and runner is not current and not runner.done():
+            if st.debounce_task is runner:
+                st.debounce_task = None
+                st.debounce_deadline = 0.0
+            runner.cancel()
+        await self._settle_input_locked(sid, flow, trigger="watchdog")
+
     async def _handle_llm_request(self, event, request) -> None:
         plugin = self.plugin
         if not plugin.enabled or request is None:
@@ -1440,10 +1731,19 @@ class DecisionEngine:
 
         eid = str(getattr(event, "event_id", "") or "")
         if self._closed or (sid, eid) in self._settled_rounds:
-            return
+            self._stop_reply_event(event)
+            raise asyncio.CancelledError("reply round is no longer active")
+        # A delayed hook must not rebind an expired event to a fresh epoch.
+        await self.guard_reply_request(event)
         # 用户 2026-11-07：这一轮回复用的模型/渠道先记下来。结算时 event 可能
         # 已经拿不到了（看门狗、异常钩子），那时只能靠这份缓存。
         self._note_reply_meta(sid, eid, event)
+        # 用户 m17492 图5/图6：别的插件（如 nai 出图）完成时发的是 is_notice 通知事件，
+        # 框架照样跑一整轮 LLM。这一轮不是聊天请求，标记下来，结算时记成「工具回调」。
+        _msgs = _event_messages(event)
+        notice_round = bool(_msgs) and len(_event_notice_messages(event)) == len(_msgs)
+        if notice_round:
+            self._notice_rounds[(sid, eid)] = time.time()
         if self._active_rounds.get(sid) != eid:
             self._bind_retry_round(sid, eid, event)
             st = self.state(sid)
@@ -1470,6 +1770,10 @@ class DecisionEngine:
         for key, meta in list(self._round_reply_meta.items()):
             if now - float(meta.get("ts") or 0.0) > 900:
                 self._round_reply_meta.pop(key, None)
+        # 通知轮标记同样带 TTL：没走到结算的轮不能一直占着内存
+        for key, seen_at in list(self._notice_rounds.items()):
+            if now - float(seen_at or 0.0) > 900:
+                self._notice_rounds.pop(key, None)
         # round_end 去重表同样带 TTL：失败轮的 event_id 过了 15 分钟不可能再来 final
         for key, logged_at in list(self._round_end_logged.items()):
             if now - logged_at > 900:
@@ -1482,10 +1786,9 @@ class DecisionEngine:
         if hasattr(request, "_mdp_retained_ready"):
             delattr(request, "_mdp_retained_ready")
         epoch = flow.epoch
+        self._bind_reply_attempt(sid, eid, epoch, event, request)
         media_by_id = await self._incoming_media(event, request, sid)
-        if (self._closed or flow.epoch != epoch or flow.phase != "active"
-                or self._active_rounds.get(sid) != eid or (sid, eid) in self._settled_rounds):
-            return
+        await self._check_reply_round(request._mdp_reply_round)
         framework = list(getattr(request, "messages", None) or [])
         window_owned = False
         if self._c("window_enabled", sid) and self.window is not None:
@@ -1505,6 +1808,14 @@ class DecisionEngine:
                 self.window.commit_decision(sid)
             except Exception:
                 logger.exception(f"[multi-decision] {sid} 决策消息补落失败（已吞掉）")
+            # 用户 m20315：工具回调（nai 出图这类异步结果）要作为一条真正的
+            # assistant 消息进窗口——带图、排在 Notice 之前，模型和页面看到的是
+            # 同一条。以前它留在 user_prompt 里，被框架拼成最后一条 user，快照
+            # 里就成了「user 说第 1 张画好了」，图也进不了上下文。
+            try:
+                await self._commit_tool_notes(sid, request)
+            except Exception:
+                logger.exception(f"[multi-decision] {sid} 工具回调提前入窗失败（已吞掉）")
             # 裁切挪到「本轮请求组装前」（用户 m03343 第 3 条）：这一刻窗口里已经有
             # 本轮输入、上一轮 bot 回复补回的、以及工具往返，全都算名额；裁完紧接着
             # 取快照，所以请求里带的就是保留条数（keep=30 就是 30 条），不会再出现
@@ -1580,9 +1891,16 @@ class DecisionEngine:
         if self.window is not None and self._c("window_enabled", sid):
             self.window.commit_round(sid, getattr(request, "user_prompt", None), media_by_id=media_by_id)
 
+        # 用户 m06995 第 2 项：回复看图关掉时，历史与本轮都不带原图（只留 [图片] 占位）。
+        try:
+            reply_keep = None if self._c("reply_see_images", sid) is not False else 0
+        except Exception:
+            reply_keep = None
+
         # 原始本轮先入窗；模型侧再统一投影，别把派生图与说明写回页面/存档。
         try:
-            self._prepare_reply_media(request, sid, media_by_id, event=event, window_owned=window_owned)
+            self._prepare_reply_media(request, sid, media_by_id, event=event,
+                                      window_owned=window_owned, keep=reply_keep)
         except Exception:
             logger.exception(f"[multi-decision] {sid} 本轮图片准备失败（保留原请求）")
             if getattr(request, "_mdp_retained_round", None):
@@ -1594,7 +1912,8 @@ class DecisionEngine:
                     delattr(request, "_mdp_retained_ready")
                 self._drop_incoming(request)
                 try:
-                    self._prepare_reply_media(request, sid, media_by_id, event=event, window_owned=window_owned)
+                    self._prepare_reply_media(request, sid, media_by_id, event=event,
+                                              window_owned=window_owned, keep=reply_keep)
                 except Exception:
                     self._reply_media.unstage(request)
                     logger.exception(f"[multi-decision] {sid} 本轮顺序降级准备失败（原生路径不重复正文）")
@@ -1656,9 +1975,11 @@ class DecisionEngine:
                 # v4.11（用户 m17596 第 6 条）：这一轮是不是决策判要回之后才发的。
                 # 记一次就清，重试轮沿用同一份 pending 不受影响。
                 decision_passed=decision_passed,
+                # 用户 m17492 图5/图6：这一轮是别的插件的通知事件触发的，不是聊天请求。
+                notice_only=notice_round,
             )
-        # Frozen identity for our own pre-provider preparation errors only.
-        request._mdp_reply_round = (self._reply_failure_token, sid, eid, epoch)
+        # Keep the identity captured before preparation; tool steps share its deadline.
+        await self._check_reply_round(request._mdp_reply_round)
 
     def _repair_render_failures(self, request) -> None:
         """渲染失败的 Prompt 降级成原文，别让整段 system 消失。
@@ -2205,8 +2526,12 @@ class DecisionEngine:
         counts = coverage(sid, prepared) if callable(coverage) else {}
         return all(counts.get(mid, 0) >= total for mid, total in required.items())
 
-    def _prepare_reply_media(self, request, sid: str, media_by_id=None, *, event=None, window_owned=False) -> int:
-        """模型历史/本轮共用一次限图；宿主原始 Prompt 始终保持字符串。"""
+    def _prepare_reply_media(self, request, sid: str, media_by_id=None, *, event=None, window_owned=False, keep=None) -> int:
+        """模型历史/本轮共用一次限图；宿主原始 Prompt 始终保持字符串。
+
+        用户 m06995 第 2 项：`keep=0` 就是「回复不看图」——历史与本轮的原图都
+        换成 [图片] 占位，只留文字；默认 None 仍按窗口的 history_images 配额走。
+        """
         self._reply_media.unstage(request)
         request._mdp_reply_projection = None
         if hasattr(request, "_mdp_retained_ready"):
@@ -2224,7 +2549,7 @@ class DecisionEngine:
         extra = [row for row in incoming
                  if not (ids_of([row]) and ids_of([row]) <= retained_ids)]
         rows = history + extra
-        prepared = self.window.prepare_messages(sid, rows, media_by_id=media_by_id)
+        prepared = self.window.prepare_messages(sid, rows, keep=keep, media_by_id=media_by_id)
         if len(prepared) != len(rows):
             raise ValueError("media preparation changed message count")
         ready, offset, kept_ids = [], len(history), []
@@ -2281,6 +2606,10 @@ class DecisionEngine:
             return []
         notes = []
         i = len(msgs) - 1
+        # 用户 m20315：工具回调（nai 出图这类）落在窗口最末尾，别让它挡住
+        # 「本轮 user → 决策注记」的识别；它自己按普通历史消息留在 ② 里。
+        while i >= 0 and is_tool_note(msgs[i]):
+            i -= 1
         while i >= 0 and is_decision_note(msgs[i]):
             notes.insert(0, msgs[i])
             i -= 1
@@ -3033,11 +3362,7 @@ class DecisionEngine:
 
         # 定时器按 watchdog_seconds 走，入口这条兜底必须同一口径（M01）
         if self._busy_overrun(sid, st, now):
-            st.last_error = "上一轮超过忙碌时限未结算"
-            st.last_error_at = now
-            self._watchdog_record_failure(sid, st)
-            self._retry_after_fail(sid, st)
-            await self._settle_input_locked(sid, self._input_flow(sid), trigger="watchdog")
+            await self._expire_reply_locked(sid, self._input_flow(sid), st)
 
         # 自己发的消息不回灌
         sender = sender_id_of(message)
@@ -3361,6 +3686,10 @@ class DecisionEngine:
         except Exception:
             sid = ""
         sid = normalize_sid(sid)
+        eid = str(getattr(event, "event_id", "") or "")
+        if (self._closed or (sid, eid) in self._settled_rounds
+                or (sid in self._active_rounds and self._active_rounds[sid] != eid)):
+            return
         if sid:
             # H06：先记「这一轮真发出去过东西」。同一个 message_id 只算一条，
             # 跟下面窗口去重无关——这里要的是「有没有对外发过」，不是进没进待发列表。
@@ -3520,6 +3849,8 @@ class DecisionEngine:
             key = (sid, eid)
             if (sid in self._active_rounds and self._active_rounds[sid] != eid) or key in self._settled_rounds:
                 return
+            if not await self._accept_reply_callback(event):
+                return
             if expected_epoch is not None:
                 flow = self._input_flows.get(sid)
                 if (self._closed or flow is None or flow.epoch != expected_epoch
@@ -3533,6 +3864,10 @@ class DecisionEngine:
             if key in self._round_errors:
                 return  # The exception and final hooks can report the same round repeatedly.
             self._round_errors[key] = text
+            attempt = self._reply_attempts.get(sid)
+            if attempt is not None and attempt.owner[2] == eid:
+                attempt.event._mdp_reply_failed_round = attempt.owner
+                event._mdp_reply_failed_round = attempt.owner
             self._record_retry_error(sid, eid)
             now = time.time()
             st.last_error = text
@@ -3764,7 +4099,9 @@ class DecisionEngine:
         eid = str(getattr(event, "event_id", "") or "")
         key = (sid, eid)
         tracked = sid in self._active_rounds
-        if key in self._settled_rounds:
+        if key in self._settled_rounds or (tracked and self._active_rounds[sid] != eid):
+            return
+        if not await self._accept_reply_callback(event):
             return
         error = self._round_errors.get(key, "")
         if tracked:
@@ -3783,21 +4120,25 @@ class DecisionEngine:
             error = next((str(getattr(step, "raw_output", "") or "")[:500]
                           for step in getattr(final_result, "step_results", None) or []
                           if str(getattr(step, "raw_output", "") or "").lstrip().startswith("[ProviderError]")), "请求失败")
-        outcome = "failed" if failed else "replied" if replied else "no_reply"
+        # 用户 m17492 图5/图6：通知事件触发的这一轮，模型没说话不是「空回复」，
+        # 单独记成「工具回调」（别的插件在等它出图后的那句补充，它决定不说）。
+        # 用户 m20315 第 2 条：回调轮里模型真回了话，就按正常回复记，不能因为
+        # 它是通知触发的就把回复藏掉（否则回复轮索引和页面都当它没回）。
+        notice_only = bool(self._notice_rounds.pop(key, False)) and not replied
+        outcome = ("failed" if failed else "replied" if replied
+                   else "notice" if notice_only else "no_reply")
         if self.request_log is not None:
             try:
                 self.request_log.flush(
                     sid, replied=replied, reply_bubbles=bubble_count, event_id=eid,
                     extra={"failed": failed, "outcome": outcome, "error": error,
+                           "notice_only": bool(notice_only),
                            "reply_text": self._reply_text_of(final_result),
                            **self._reply_meta_of(sid, eid, event)})
             except Exception:
                 logger.exception("[multi-decision] 落盘请求记录失败")
         if tracked:
             self._settled_rounds[key] = time.time()
-            if self._active_rounds[sid] != eid:
-                logger.warning(f"[multi-decision] {sid} 忽略过期回合结算 event_id={eid}")
-                return
         self.health["finals"] += 1
         # 这轮到底成功没有。provider 全挂时框架不抛异常，而是把
         # [ProviderError] 当成一条正常回复结算 —— 所以「走到 final 了」
@@ -3806,9 +4147,13 @@ class DecisionEngine:
             st.last_error = error or "请求失败"
             self._record_retry_error(sid, eid)
             self._retry_after_fail(sid, st)
+            # 用户 m06995 第 2 项：回复模型连续失败到阈值就切备用。
+            self._note_reply_model_result(sid, False)
             # 重试轮又失败了也要记下来，不然健康条永远停在「第一次释放在排队」
             self._note_watchdog_retry_round(sid, eid)
         else:
+            # 用户 m06995 第 2 项：这一轮模型跑通了，连续失败清零、回到主模型。
+            self._note_reply_model_result(sid, True)
             if self.retry_history is not None:
                 self.retry_history.finish(sid, eid, failed=False)
             self._retry_roots.pop(sid, None)
@@ -5040,6 +5385,122 @@ class DecisionEngine:
         except Exception:
             logger.exception("[multi-decision] 投递失败回填请求记录异常（已吞掉）")
 
+    def _reply_model_clients(self, sid: str) -> list:
+        """这一轮回复该用哪些模型（用户 m06995 第 2 项）。
+
+        跟决策链同一套语义：主模型连续失败到「连续失败切换」次就换备用，
+        用备用撑过「切回主模型等待」再试回主模型。框架的 agent_executor 本来
+        就按 model_group 顺序试、报错换下一个，所以这里只决定顺序。
+        取不到客户端就返回空，让框架按默认模型走。
+        """
+        primary = str(self._c("reply_model", sid) or "").strip()
+        fallback = str(self._c("reply_fallback_model", sid) or "").strip()
+        if not primary and not fallback:
+            return []
+        ctx = getattr(self.plugin, "ctx", None)
+        if ctx is None:
+            return []
+        now = time.time()
+        switch = max(1, int(self._c("reply_fail_switch", sid) or 2))
+        cooldown = max(30.0, float(self._c("reply_fallback_cooldown", sid) or 300.0))
+        streak = int(self._reply_fail_streak.get(sid, 0) or 0)
+        until = float(self._reply_fallback_until.get(sid, 0.0) or 0.0)
+        tripped = bool(fallback) and streak >= switch
+        cooling = tripped and until > 0 and now < until
+        if tripped and not cooling and until > 0:
+            # 冷却结束后的这一轮先试主模型；再失败就继续用备用撑一个冷却期。
+            self._reply_fallback_until[sid] = now + cooldown
+        order = []
+        if not cooling and primary:
+            order.append(primary)
+        if fallback:
+            order.append(fallback)
+        clients = []
+        for key in order:
+            try:
+                client = ctx.get_llm_client(key)
+            except Exception as exc:
+                logger.warning("[multi-decision] 取回复模型失败（%s）：%s", key, exc)
+                client = None
+            if client is not None:
+                clients.append(client)
+        return clients
+
+    def _apply_reply_models(self, sid: str, event) -> None:
+        """把这一轮回复要用的模型组挂到批次事件上（框架按顺序试，报错换下一个）。"""
+        try:
+            clients = self._reply_model_clients(sid)
+        except Exception:
+            logger.exception("[multi-decision] 回复模型选择异常（这一轮用框架默认模型）")
+            return
+        if not clients:
+            return
+        try:
+            event.model_group = clients
+        except Exception:
+            logger.exception("[multi-decision] 回复模型组写入失败（这一轮用框架默认模型）")
+
+    def _note_reply_model_result(self, sid: str, ok: bool) -> None:
+        """回复模型这一轮成没成：连续失败到阈值就切备用，成功就清零。"""
+        if ok:
+            if self._reply_fail_streak.pop(sid, None) is not None:
+                self._reply_fallback_until.pop(sid, None)
+            return
+        streak = int(self._reply_fail_streak.get(sid, 0) or 0) + 1
+        self._reply_fail_streak[sid] = streak
+        try:
+            switch = max(1, int(self._c("reply_fail_switch", sid) or 2))
+            cooldown = max(30.0, float(self._c("reply_fallback_cooldown", sid) or 300.0))
+        except Exception:
+            switch, cooldown = 2, 300.0
+        if streak >= switch:
+            self._reply_fallback_until[sid] = time.time() + cooldown
+
+    async def _with_reply_publication(self, sid, operation):
+        flow = self._input_flow(sid)
+        epoch = flow.epoch
+
+        async def claim(event):
+            # Only the real batch from our filtered flush belongs to this attempt.
+            if not isinstance(getattr(event, "messages", None), list):
+                return
+            if normalize_sid(getattr(event, "sid", "")) != sid:
+                return
+            st = self.state(sid)
+            if self._closed or flow.epoch != epoch or flow.phase != "active" or not st.busy:
+                self._stop_reply_event(event)
+                raise asyncio.CancelledError("reply publication is no longer active")
+            eid = str(getattr(event, "event_id", "") or "")
+            if not eid or (sid, eid) in self._settled_rounds:
+                self._stop_reply_event(event)
+                raise asyncio.CancelledError("reply publication has no active identity")
+            if self._active_rounds.get(sid) != eid:
+                self._bind_retry_round(sid, eid, event)
+                st.last_error = ""
+                st.last_error_at = 0.0
+                self._round_sent.pop(sid, None)
+                self._round_sent_ids.pop(sid, None)
+            self._active_rounds[sid] = eid
+            flow.event_id = eid
+            # 用户 m06995 第 2 项：回复模型 / 备用模型在这里挂上去——这是框架真正
+            # 拿去跑 agent 的那个批次事件，晚一步 request.py 就已经取过 model_group 了。
+            self._apply_reply_models(sid, event)
+            self._capture_retry_events(sid, event)
+            self._bind_reply_attempt(sid, eid, epoch, event, None, claim_task=False)
+            if asyncio.get_running_loop().time() >= self._reply_attempts[sid].deadline:
+                async with flow.lock:
+                    if flow.epoch == epoch and flow.phase == "active":
+                        # wait_for runs publication in a child of flow.runner. Let
+                        # its cancellation propagate after timeout cleanup finishes.
+                        await self._expire_reply_locked(sid, flow, st, cancel_runner=False)
+                raise asyncio.CancelledError("reply publication exceeded its deadline")
+
+        token = REPLY_PUBLICATION.set(claim)
+        try:
+            return await operation
+        finally:
+            REPLY_PUBLICATION.reset(token)
+
     async def _flush_guarded(self, raw_sid: str, filter_fn, sid: str) -> bool:
         """把「交给框架跑 agent」这一步加上上限（v4.63，用户 m36670）。
 
@@ -5050,9 +5511,9 @@ class DecisionEngine:
         """
         timeout = 30.0
         try:
-            return bool(await asyncio.wait_for(
+            return bool(await self._with_reply_publication(sid, asyncio.wait_for(
                 self.ctx.flush_session_messages(raw_sid, filter_fn=filter_fn),
-                timeout=timeout))
+                timeout=timeout)))
         except asyncio.TimeoutError:
             logger.warning(
                 "[multi-decision] %s 投递超时：%.0f 秒没回来，按失败处理", sid, timeout)
@@ -5064,7 +5525,8 @@ class DecisionEngine:
         # Older hosts exposed extra_event; inspect before calling, never replay
         # a call after TypeError since publication may already have side effects.
         if len(events) == 1 and "extra_event" in inspect.signature(flush).parameters:
-            return await flush(raw_sid, extra_event=events[0])
+            return await self._with_reply_publication(normalize_sid(raw_sid),
+                flush(raw_sid, extra_event=events[0]))
         buffer = self.ctx.get_buffer(raw_sid)
         replays = [copy.copy(event) for event in events]
         identities = {id(event) for event in replays}
@@ -5073,7 +5535,8 @@ class DecisionEngine:
             for event in replays:
                 buffer.add(event)
         try:
-            return await flush(raw_sid, filter_fn=selected)
+            return await self._with_reply_publication(normalize_sid(raw_sid),
+                flush(raw_sid, filter_fn=selected))
         finally:
             # On failed/empty publication remove only our injected events.
             # Real hosts drain these on success; concurrent new messages stay.
@@ -5162,6 +5625,9 @@ class DecisionEngine:
         eid = flow.event_id or self._active_rounds.get(sid, "")
         if eid:
             self._settled_rounds[(sid, eid)] = time.time()
+        attempt = self._reply_attempts.get(sid)
+        if attempt is not None and attempt.owner[2:] == (eid, flow.epoch):
+            self._reply_attempts.pop(sid, None)
         # Keep the boundary closed until all output is durable in the window and
         # trimming has finished. Deferred input is absent from both operations.
         if self.window is not None:
@@ -5176,7 +5642,8 @@ class DecisionEngine:
             if trim and folded:
                 _trig = "decision" if _deferred_trim else trigger
                 try:
-                    self.window.maybe_trim(sid, trigger=_trig, deferred=_deferred_trim)
+                    self.window.maybe_trim(
+                        sid, trigger=_trig, event_id=eid, deferred=_deferred_trim)
                 except Exception:
                     logger.exception("[multi-decision] 收束裁切失败（继续释放隔离）")
         if discard:
@@ -5729,56 +6196,29 @@ class DecisionEngine:
         return max(1.0, value)
 
     def _arm_watchdog(self, sid: str, st) -> None:
-        """投递成功后挂一个超时兜底。
-
-        框架一旦在 assemble/execute 阶段抛异常，事件总线会把它静默吞掉
-        （连日志都不打），插件永远等不到 _handle_final，st.busy 就永久为
-        True —— 表现为「重启就好、第一轮正常、第二轮起永远不回」。
-        v2.46 修了根因（窗口里混进 dict），这里再兜一层：到点还没结算就
-        强制解锁并裁一次窗口，免得坏轮把窗口越撑越大。
-        等多久由配置 watchdog_seconds 决定（BUSY_WATCHDOG 只是默认值）。
-        """
+        """Expire the owning round at the configured deadline, not merely unlock it."""
         started = st.busy_since
-        wd = self._watchdog_seconds(sid)
-        task = None
+        flow = self._input_flow(sid)
+        epoch = flow.epoch
+        remaining = max(0.0, started + self._watchdog_seconds(sid) - time.time())
+        previous = self._watchdogs.pop(sid, None)
+        if previous is not None and previous is not asyncio.current_task() and not previous.done():
+            previous.cancel()
 
         async def _wait():
             try:
-                await asyncio.sleep(wd)
-                if not st.busy or st.busy_since != started:
-                    return  # 已经结算，或者又开了新的一轮
-                logger.warning(
-                    f"[multi-decision] {sid} 投递后 {int(wd)}s 没有任何结算，"
-                    f"强制释放忙碌标记（框架可能在中途抛了异常并被事件总线吞掉）"
-                )
-                self.health["watchdog"] += 1
-                # 投递后等不到结算，和「请求失败」是同一件事：这一轮的东西没出来。
-                # 以前只放掉忙碌标记，于是这个群就这么静着，非得等下一条消息才恢复；
-                # 现在按失败走同一条重试路径，retry_max 次内自己补回来（用户 m51xxx 图2）。
-                st.last_error = "投递后 %d 秒没有任何结算" % int(wd)
-                st.last_error_at = time.time()
-                # 只放掉忙碌标记的话，走势图上根本没有「触发看门狗的那一轮」：
-                # 用户只看到健康条说释放过 1 次，对不上是哪根柱子（用户 m01927）。
-                self._watchdog_record_failure(sid, st)
-                self._retry_after_fail(sid, st)
-                flow = self._input_flow(sid)
-                runner = flow.runner
-                if runner is not None and not runner.done() and runner is not asyncio.current_task():
-                    if st.debounce_task is runner:
-                        st.debounce_task = None
-                        st.debounce_deadline = 0.0
-                    runner.cancel()
-                await self._settle_input(sid)
+                await asyncio.sleep(remaining)
+                async with flow.lock:
+                    if (self._closed or not st.busy or st.busy_since != started
+                            or flow.epoch != epoch):
+                        return
+                    await self._expire_reply_locked(sid, flow, st)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception(f"[multi-decision] 看门狗异常 sid={sid}")
 
-        try:
-            task = asyncio.get_running_loop().create_task(_wait())
-            self._watchdogs[sid] = task
-        except Exception:
-            logger.exception("[multi-decision] 看门狗挂载失败（已吞掉）")
+        self._watchdogs[sid] = asyncio.get_running_loop().create_task(_wait())
 
     def _watchdog_record_failure(self, sid: str, st) -> None:
         """把被看门狗强释放的这一轮按「失败」记下来（用户 m01927）。
@@ -5948,10 +6388,16 @@ class DecisionEngine:
     async def shutdown(self) -> None:
         self._closed = True
         self._reply_media.close()
+        self._reply_delivery.close(retain=True)
+        self._reply_publication.close()
+        for attempt in self._reply_attempts.values():
+            attempt.expired = True
+            self._stop_reply_event(attempt.event)
         for flow in self._input_flows.values():
             flow.epoch += 1  # invalidate suspended media/request/decision work first
         current = asyncio.current_task()
-        running = set(self._tasks) | set(self._watchdogs.values()) | set(self._retries.values()) | set(self._input_tasks)
+        running = (set(self._tasks) | set(self._watchdogs.values()) | set(self._retries.values())
+                   | set(self._input_tasks) | set(self._reply_tasks))
         running |= {flow.runner for flow in self._input_flows.values() if flow.runner is not None}
         running = {task for task in running if task is not None and task is not current and not task.done()}
         for task in running:
@@ -5976,6 +6422,8 @@ class DecisionEngine:
             flow.deferred.clear()
         self._input_flows.clear()
         self._input_tasks.clear()
+        self._reply_attempts.clear()
+        self._reply_tasks.clear()
         for sid, root in self._retry_roots.items():
             self._retry_status(sid, root, "cancelled")
         if self.store is not None:

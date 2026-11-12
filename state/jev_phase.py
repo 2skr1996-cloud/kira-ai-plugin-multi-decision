@@ -556,11 +556,12 @@ def options_from_config(get) -> JevOptions:
         # 用户 m06706：判断「要不要开口」也得知道自己在装谁，所以 JEV 自己有一份 jev_persona。
         # v4.89（用户 m14715 第 1 条）：旧 decision_persona 已删除，不再回退到它。
         persona=str(get("jev_persona", "") or "").strip(),
-        retry=_int("decision_retry", 2, 0, 5),
-        retry_delay=_num("decision_retry_delay", 3, 0, 60),
-        fail_switch=_int("decision_fail_switch", 2, 1, 10),
-        cooldown=float(_int("decision_fallback_cooldown", 300, 30, 3600)),
-        timeout=float(_int("decision_timeout", 60, 5, 300)),
+        # 用户 m07859：重试 / 重试间隔 / 单次超时不再各留一份，统一读基础设置页那三项。
+        retry=_int("retry_max", 2, 0, 10),
+        retry_delay=_num("retry_delay", 5, 0, 600),
+        fail_switch=_int("jev_fail_switch", 2, 1, 10),
+        cooldown=float(_int("jev_fallback_cooldown", 300, 30, 3600)),
+        timeout=float(_int("watchdog_seconds", 180, 30, 600)),
         fail_action=str(get("decision_fail_action", "allow") or "allow").strip().lower(),
         # 用户 m08123：接口来源与自定义接口的三个参数；密钥不从这里读，
         # 由插件在读取时补进来（它单独落盘，不进配置、不回页面）。
@@ -1632,7 +1633,11 @@ def models_of_type(kind: str) -> list:
         for mid, item in group.items():
             if not isinstance(item, dict):
                 continue
+            _mname = str(item.get("model_name") or mid)
             out.append({"value": "%s:%s" % (pid, mid),
-                        "label": "%s / %s" % (pname, str(item.get("model_name") or mid)),
+                        "label": "%s / %s" % (pname, _mname),
+                        # 用户 m15537：记录页的「渠道」列要单独的供应商名。
+                        "provider": pname,
+                        "model": _mname,
                         "kind": kind})
     return out

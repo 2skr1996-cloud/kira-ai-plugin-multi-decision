@@ -25,6 +25,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from core.logging_manager import get_logger
 
+from . import token_calib
 from .sids import normalize_sid
 
 # v3.47：账本/统计的异常一律只记日志，不影响业务
@@ -58,6 +59,177 @@ def _blank_kind() -> dict:
     """单个 kind（回复 / 决策）的同一批数字（v4.68，用户 m02472）。"""
     return {"rounds": 0, "calls": 0, "input": 0, "output": 0, "cached": 0,
             "cache_hit": None, "elapsed_sum": 0.0, "elapsed_rounds": 0, "avg_elapsed": None}
+
+
+# ---------------------------------------------------------------- prompt 估算
+
+#: 中日韩字符与全角标点：一个字符约等于一个 token（英文按 4 字符 1 token 折）。
+_CJK_RE = re.compile(r"[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef\u3000-\u303f]")
+
+#: 单张图片在 provider 侧折算的 token 数（v4.87 用户 m13442 第 2 条）。
+#: Gemini 按 768×768 切 tile、每 tile 258 token，聊天里这些图都够 4 tile，
+#: 45 轮真实记录反推出来稳定在 1,025～1,033，取 1,032。跟图片字节数无关
+#: （381KB 和 232KB 的图都是这个数），所以不用按体积估。
+IMAGE_TOKENS = int(token_calib.DEFAULT_IMAGE_TOKENS)   # v4.9x：默认值，实际按模型取
+
+#: 反推命中时，首步上报值要小于完整 prompt 的这个比例才认（否则说明 provider
+#: 报的就是完整 input，这一轮真没命中）。
+INFER_MAX_RATIO = 0.75
+
+#: 多步轮里，第 2 步的上报要小于第 1 步的这个比例，才认定 provider 报的是「增量」
+#: （用户 m02038 第 2 条）。第 1 步的 prompt 是全新的，本来就不可能命中，中转站
+#: 报的「未命中那截」就等于完整 prompt；只有第 2 步明显变小才说明它报的是增量。
+#: 反过来，每步都报完整 input 的 provider（DeepSeek 那种）第 2 步只会更大。
+INFER_DELTA_RATIO = 0.9
+
+#: 一个模型至少要有这么多轮「cached 全是 0」的记录，才认定它不回报缓存命中。
+INFER_MIN_ROUNDS = 3
+
+#: 文本 token 的实测折算系数（v4.9x 用户 m10585 第 1 条）：_approx_tokens 按
+#: 「CJK 1 字 1 token、其余 4 字 1 token」估，但 Gemini 侧实测只有它的 1/1.2。
+#: 6 条有真值的回复轮（11:51 / 12:46 / 17:43 / 17:44 / 17:51 / 19:01）按此折算后，
+#: 完整 prompt 与「上报 + 缓存读取」的误差 ≤1.1%，反推命中误差 ≤0.2pp。
+TEXT_TOKEN_SCALE = token_calib.DEFAULT_TEXT_SCALE   # v4.9x：默认值，实际按模型取
+
+
+def _approx_tokens(text: str) -> int:
+    if not text:
+        return 0
+    cjk = len(_CJK_RE.findall(text))
+    return cjk + (len(text) - cjk + 3) // 4
+
+
+def _flat_of(record: dict) -> str:
+    """序列化记录里的消息投影（命中预估与 prompt 估算共用同一份文本）。"""
+    try:
+        return json.dumps(
+            record.get("assembled") or record.get("messages") or [],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    except Exception:
+        return ""
+
+
+def _record_model(record: dict) -> str:
+    """取这条记录用的模型名：决策轮是 decision_model，回复轮是 reply_model，轨迹行是 model。"""
+    if not isinstance(record, dict):
+        return ""
+    for key in ("decision_model", "reply_model", "model"):
+        val = record.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    trace = record.get("trace")
+    if isinstance(trace, dict):
+        val = trace.get("model")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
+def infer_gate(record: dict) -> float:
+    """这条记录的反推门槛：按这个模型样本的噪声定（见 token_calib.gate）。"""
+    return token_calib.gate(_record_model(record))
+
+
+def _prompt_parts(record: dict, flat: str = "") -> tuple:
+    """(文本 token 原始估算, 图片张数)。文本按「CJK 1 字 1 token」算，还没乘系数。"""
+    text = _approx_tokens(flat or _flat_of(record))
+    text += _approx_tokens(str(record.get("system_prompt") or ""))
+    try:
+        imgs = int(record.get("image_count") or 0)
+    except (TypeError, ValueError):
+        imgs = 0
+    return text, max(0, imgs)
+
+
+def _est_from_parts(text: int, imgs: int, model: str) -> int:
+    """按这个模型学到的系数折算：文本 × 系数 + 图片张数 × 单图 token。"""
+    scale, per_img = token_calib.factors(model)
+    return int(round(text * scale)) + int(round(imgs * per_img))
+
+
+def _prompt_tokens_est(record: dict, flat: str = "") -> int:
+    """整轮 prompt 的 token 估计：文本 × 本模型系数 + 图片张数 × 本模型单图 token。
+
+    v4.9x（用户 m10781）：系数不再写死。Gemini 实测文本是 1/1.2、单图 1032，
+    但换一家模型（GPT-4o 中文约 0.6~0.7 token/字、DeepSeek 约 0.6）就不一样，
+    所以按模型名从 token_calib 取，没样本的模型退回默认值。
+    """
+    text, imgs = _prompt_parts(record, flat)
+    return _est_from_parts(text, imgs, _record_model(record))
+
+
+def infer_cached_steps(full_est: int, steps: list,
+                       gate: Optional[float] = None) -> Optional[List[dict]]:
+    """中转站不回报 cached_tokens 时，按完整 prompt 估计反推每一步的「完整输入 / 命中」。
+
+    v4.87（用户 m13442 第 2 条）：反重力 Gemini 这类中转站上报的 input 只是
+    「没命中的那一截」，cached_tokens 恒为 0，于是记录页的实测命中常年 0%、
+    价目页也按全价算钱。这里按「完整 prompt ≈ 文本 token + 图片张数 × 1032」反推：
+
+      第 1 步完整 = full_est，命中 = 完整 − 上报（上报 ≥ 完整 75% 时判为真未命中）；
+      第 k 步完整 = 上一步完整 + 本步上报（本步上报就是新增的那一截），命中 = 上一步完整。
+
+    v4.9x（用户 m02038 第 2 条）：多步轮的首步上报本来就等于完整 prompt——新 prompt
+    第一次发出去不可能命中，中转站报的「未命中那截」就是全部。以前这里一律判成
+    「provider 报的是完整 input，真没命中」直接放弃，于是 2 步以上的轮次从第 2 步起
+    命中全丢（3 步轮实测 63.8%，页面只写 43.6%）。现在多步轮改看第 2 步：它明显
+    小于第 1 步就说明报的是增量，按「第 1 步完整 = 首步上报、命中 0」往下推。
+
+    steps 是 [{"in": int, "cached": int}, ...]。返回与 steps 等长的列表，
+    每项是 {"full": int, "cached": int}，该步拿不到分母时为 None；整轮不适用
+    （没有完整估计 / 有任一步报了 cached / 首步上报 ≥ 完整 × 门槛且第 2 步没变小）时返回 None。
+
+    v4.9x（用户 m11048）：门槛不再写死 0.75，改由 token_calib 按这个模型的样本噪声
+    给（估得准就敢认 10% 这种小命中），没样本的模型仍用 0.75。
+    """
+    limit = INFER_MAX_RATIO if gate is None else float(gate)
+    if full_est <= 0 or not steps:
+        return None
+    for step in steps:
+        if not isinstance(step, dict):
+            return None
+        if _as_int(step.get("cached")) > 0:
+            return None
+    first_in = _as_int(steps[0].get("in"))
+    if first_in <= 0:
+        return None
+    if first_in >= full_est * limit:
+        # 多步轮：第 2 步明显小于第 1 步 → 报的是增量，可以反推（见 docstring）。
+        second_in = _as_int(steps[1].get("in")) if len(steps) > 1 else 0
+        if second_in <= 0 or second_in >= first_in * INFER_DELTA_RATIO:
+            return None
+        out_delta: List[Optional[dict]] = [{"full": first_in, "cached": 0}]
+        cur_delta = first_in
+        for step in steps[1:]:
+            in_tokens = _as_int(step.get("in"))
+            if in_tokens <= 0:
+                out_delta.append(None)
+                continue
+            if in_tokens >= cur_delta:
+                out_delta.append({"full": in_tokens, "cached": 0})
+                cur_delta = in_tokens
+            else:
+                out_delta.append({"full": cur_delta + in_tokens, "cached": cur_delta})
+                cur_delta += in_tokens
+        return out_delta
+    out: List[Optional[dict]] = []
+    cur = int(full_est)
+    for index, step in enumerate(steps):
+        in_tokens = _as_int(step.get("in"))
+        if in_tokens <= 0:
+            out.append(None)
+            continue
+        if index == 0:
+            out.append({"full": cur, "cached": max(0, cur - in_tokens)})
+        elif in_tokens >= cur:
+            out.append({"full": in_tokens, "cached": 0})
+            cur = in_tokens
+        else:
+            out.append({"full": cur + in_tokens, "cached": cur})
+            cur += in_tokens
+    return out
 
 
 def _finish_kinds(out: dict) -> None:
@@ -169,6 +341,25 @@ def usage_identity(obj: Any) -> dict:
             "model_id": mid, "identity_source": str(_attr(obj, "identity_source", "") or "recorded") if known else "unknown"}
 
 
+def _cached_reported(obj: Any) -> bool:
+    """这个响应到底有没有回报 cached_tokens（v5.x 用户 m12891）。
+
+    「没回报」和「回报 0」是两件事：框架的 LLMResponse 在没有缓存字段时把
+    cached_tokens 留成 None（core/provider/openai_compatible.py 里就是
+    getattr(prompt_details, "cached_tokens", None)），落盘时被 _as_int 抹成 0，
+    记录页只能把它显示成「实测 0%」。这里在归一化的同时把这条信号留下来：
+    以后判断「这一轮该显示实测还是推算」只看记录自己，不再看当前用哪个模型、
+    也不看窗口里还有谁。
+    """
+    flag = _attr(obj, "cached_reported", None)
+    if isinstance(flag, bool):
+        return flag
+    probe = _attr(obj, "cached", None)
+    if probe is None:
+        probe = _attr(obj, "cached_tokens", None)
+    return probe is not None
+
+
 def usage_event(obj: Any, ts: float = 0.0, timestamp_source: str = "legacy_round") -> dict:
     """Normalize evidence without inventing tokens or a request timestamp."""
     inp = max(0, _as_int(_attr(obj, "input", _attr(obj, "input_tokens", 0))))
@@ -176,7 +367,8 @@ def usage_event(obj: Any, ts: float = 0.0, timestamp_source: str = "legacy_round
     cached = min(inp, max(0, _as_int(_attr(obj, "cached", _attr(obj, "cached_tokens", 0)))))
     return {**usage_identity(obj), "ts": _number(_attr(obj, "ts", ts)),
             "timestamp_source": str(_attr(obj, "timestamp_source", "") or timestamp_source),
-            "input": inp, "output": outp, "cached": cached}
+            "input": inp, "output": outp, "cached": cached,
+            "cached_reported": _cached_reported(obj)}
 
 
 def _default_model_of(path: Any) -> str:
@@ -391,6 +583,8 @@ class Tracer:
         self._hints: Dict[tuple[str, str], str] = {}
         # 模型名兜底的缓存（见 default_model_name）：数据目录 + 解析到的配置路径 + mtime
         self._data_dir = Path(data_dir)
+        # v4.9x（用户 m10781）：按模型自学习的 token 折算系数，存插件数据目录。
+        token_calib.configure(self._data_dir / "token_calib.json")
         # v3.47（用户 2026-10-24 第 3/4 条）：24 小时 token/用时的账本。
         # traces 会被 _prune 按 keep 裁掉，只读 traces 最多就能看到 60 轮，
         # 「请求平均用时」和「最近24小时 token」于是都被 60 截断（不是真实值）。
@@ -541,6 +735,9 @@ class Tracer:
                 "input_tokens": token["input"],
                 "output_tokens": token["output"],
                 "cached_tokens": token["cached"],
+                # v5.x（用户 m12891）：上游这一响应有没有回报缓存命中。落盘存下来，
+                # 老记录没有这个键，读的时候按模型全历史判（见 main.py）。
+                "cached_reported": token["cached_reported"],
                 "cache_hit": round(token["cached"] / token["input"] * 100, 1) if token["input"] else None,
                 "time_consumed": _attr(llm_resp, "time_consumed", None),
                 "llm_elapsed_seconds": _attr(llm_resp, "time_consumed", None),
@@ -677,6 +874,11 @@ class Tracer:
             if totals["input_tokens"]
             else None
         )
+        # v5.x（用户 m12891）：整轮「上游有没有回报缓存」一起落盘——只要有一个付过费
+        # 的步骤没回报，这一轮的 cached 就不能当实测用。
+        _paid = [step for step in rec["steps"] if _as_int(step.get("input_tokens")) > 0]
+        totals["cache_reported"] = bool(_paid) and all(
+            bool(step.get("cached_reported")) for step in _paid)
         rec["totals"] = totals
         # 本轮模型：取步数最多的那个（正常一轮只会出现一个，重试换模型才会多）
         model_hits: Dict[str, int] = {}
@@ -810,6 +1012,43 @@ class Tracer:
             row["usage"] = [usage_event(row)]
         return row
 
+    def _snapshot_trace_row(self, rec: dict, payload: dict) -> dict:
+        """快照行 = 轨迹行 + 完整 prompt 估计（反推缓存命中要用）。
+
+        v4.87（用户 m13442 第 2 条）：中转站不回报 cached_tokens 时，只能拿
+        「完整 prompt 有多大」去反推命中。估算要 json.dumps 整段消息，几十万字符，
+        所以只在 cached 为 0（有可能要反推）时才算，其余行不付这个成本。
+
+        v4.9x（用户 m10781）：cached 为 0 且首步上报就是完整 prompt 的轮次，顺手
+        当标定点喂给 token_calib，按模型学「文本系数 / 单图 token」。
+        """
+        row = self._trace_row(rec)
+        if _as_int(row.get("cached")) <= 0:
+            text, imgs = _prompt_parts(payload)
+            est = _est_from_parts(text, imgs, _record_model(payload))
+            row["prompt_est"] = est
+            self._observe_calib(row, payload, text, imgs, est)
+        return row
+
+    def _observe_calib(self, row: dict, payload: dict, text: int, imgs: int, est: int) -> None:
+        """首步上报 ≥ 完整估算 × INFER_MAX_RATIO 时，上报值就是完整 prompt，可当标定点。
+
+        低于这个比例说明 provider 报的是「没命中那截」，拿它当完整 prompt 会把系数
+        学小，所以只收冷轮。
+        """
+        if est <= 0 or text <= 0:
+            return
+        usage = row.get("usage") or []
+        first = _as_int(usage[0].get("input")) if usage and isinstance(usage[0], dict) else 0
+        if first <= 0:
+            first = _as_int(row.get("input"))
+        if first <= 0 or first < est * INFER_MAX_RATIO:
+            return
+        sid = str(row.get("sid") or "")
+        eid = str(row.get("event_id") or row.get("started") or "")
+        token_calib.observe(_record_model(payload), text, imgs, first,
+                            f"{sid}:{eid}" if eid else "")
+
     def _snapshot_row(self, payload: dict) -> Optional[dict]:
         if not isinstance(payload, dict):
             return None
@@ -823,18 +1062,20 @@ class Tracer:
                        model=payload.get("decision_model") or "")
             rec["totals"] = {key: payload.get(key, totals.get(key, 0)) for key in
                              ("input_tokens", "output_tokens", "cached_tokens")}
+            # v5.x（用户 m12891）：决策这一轮上游有没有回报缓存，跟着 totals 一起带下去。
+            rec["totals"]["cache_reported"] = payload.get("cache_reported")
             if isinstance(payload.get("usage"), list):
                 rec["usage"] = copy.deepcopy(payload["usage"])
             if not isinstance(rec.get("usage"), list):
                 # Old decision traces have neither provider evidence nor request times.
                 rec["steps"] = []
-            return self._trace_row(rec)
+            return self._snapshot_trace_row(rec, payload)
         if not isinstance(original, dict) or not isinstance(original.get("totals"), dict):
             return None
         rec = dict(original)
         rec.setdefault("sid", payload.get("sid") or "")
         rec.setdefault("event_id", payload.get("event_id") or "")
-        return self._trace_row(rec)
+        return self._snapshot_trace_row(rec, payload)
 
     def _snapshot_rows(self, since: float = 0.0) -> Iterator[dict]:
         """遍历请求快照里的轨迹行。
@@ -1073,9 +1314,78 @@ class Tracer:
         usage = [usage_event(item, row.get("ts", 0)) for item in raw]
         return usage if self._usage_totals(usage) == self._counts(row) else None
 
-    def _add_round(self, out: dict, row: dict, memo: dict) -> None:
-        """A business round is global; model buckets count distinct participation."""
-        inp, outp, cached = self._counts(row)
+    def _silent_cache_models(self, rows: List[dict]) -> set:
+        """哪些模型从来不回报 cached_tokens（中转站只报未命中的那一截）。
+
+        v4.87（用户 m13442 第 2 条）：反重力 Gemini 这类中转站把 input 报成「没命中的
+        那截」，cached_tokens 恒为 0，价目页于是把命中部分也按全价算钱。判据是
+        「这个模型在窗口里至少跑了 INFER_MIN_ROUNDS 轮，且每一轮的 cached 都是 0」——
+        只要有一轮报了非 0，就说明上游会回报，这一批一律不反推。宁可少算，
+        也不能把「真没命中」当成「命中」去少收钱。
+        """
+        seen: Dict[str, List[int]] = {}
+        for row in rows:
+            usage = row.get("usage")
+            if not isinstance(usage, list):
+                continue
+            for item in usage:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("model") or "").strip() or MODEL_UNKNOWN
+                stat = seen.setdefault(name, [0, 0])
+                stat[0] += 1
+                if _as_int(item.get("cached")) > 0:
+                    stat[1] += 1
+        return {name for name, stat in seen.items()
+                if stat[0] >= INFER_MIN_ROUNDS and stat[1] == 0}
+
+    def _with_inferred_cache(self, row: dict, usage: list, silent: set) -> list:
+        """把「不回报缓存」的模型这一轮的每步 input 抬到完整 prompt、cached 填反推值。
+
+        只在这一轮所有步都没报 cached、且模型在 silent 里时才动；反推不出来就原样返回。
+        input 必须一起抬：pricing.summarize 里 c = min(a, cached)，只填 cached 不抬
+        input 的话 c 会被夹到 a，成本还是不对。
+        """
+        if not usage:
+            return usage
+        if any(_as_int(item.get("cached")) > 0 for item in usage):
+            return usage
+        if not any((str(item.get("model") or "").strip() or MODEL_UNKNOWN) in silent
+                   for item in usage):
+            return usage
+        full = _as_int(row.get("prompt_est"))
+        if full <= 0:
+            return usage
+        steps = [{"in": _as_int(item.get("input")), "cached": 0} for item in usage]
+        inferred = infer_cached_steps(full, steps, token_calib.gate(_record_model(row)))
+        if not inferred:
+            return usage
+        out = []
+        for item, guess in zip(usage, inferred):
+            if not guess:
+                out.append(item)
+                continue
+            fixed = dict(item)
+            fixed["input"] = int(guess["full"])
+            fixed["cached"] = int(guess["cached"])
+            fixed["cache_inferred"] = True
+            out.append(fixed)
+        return out
+
+    def _add_round(self, out: dict, row: dict, memo: dict, silent: Optional[set] = None) -> None:
+        """A business round is global; model buckets count distinct participation.
+
+        silent 是「不回报缓存命中」的模型名集合（见 _silent_cache_models）：这些模型
+        的 cached 恒为 0，命中时按完整 prompt 估计反推，价目页才不会把命中部分按全价算钱。
+        """
+        usage = self._valid_usage(row)
+        if usage is None:
+            usage = [usage_event(row)]
+        if silent:
+            usage = self._with_inferred_cache(row, usage, silent)
+        inp = sum(_as_int(item.get("input")) for item in usage)
+        outp = sum(_as_int(item.get("output")) for item in usage)
+        cached = sum(_as_int(item.get("cached")) for item in usage)
         out["input"] += inp
         out["output"] += outp
         out["cached"] += cached
@@ -1092,9 +1402,6 @@ class Tracer:
         kb["input"] += inp
         kb["output"] += outp
         kb["cached"] += cached
-        usage = self._valid_usage(row)
-        if usage is None:
-            usage = [usage_event(row)]
         participating = set()
         for item in usage:
             name = self._model_name(item.get("model"), memo)
@@ -1140,8 +1447,13 @@ class Tracer:
             row = copy.deepcopy(original)
             usage = self._valid_usage(row)
             snapshot = snapshots.get(key)
-            if usage is None and snapshot is not None and self._counts(row) == self._counts(snapshot):
-                usage = self._valid_usage(snapshot)
+            if snapshot is not None and self._counts(row) == self._counts(snapshot):
+                if usage is None:
+                    usage = self._valid_usage(snapshot)
+                # v4.87：账本行不带 prompt_est（那是读快照时才算的），反推缓存命中要用，
+                # 所以只要快照对得上就把估计值补过来。
+                if _as_int(row.get("prompt_est")) <= 0:
+                    row["prompt_est"] = _as_int(snapshot.get("prompt_est"))
             row["usage"] = usage if usage is not None else [usage_event(row)]
             yield row
         for key, row in snapshots.items():
@@ -1168,8 +1480,12 @@ class Tracer:
         try:
             # v3.47：口径跟 recent_totals 一样——账本优先、traces 补历史并去重，
             # 不再只扫 traces（轮数一多就被 keep 截断，今日数字也跟着少）。
-            for row in self._round_rows(start):
-                self._add_round(out, row, memo)
+            # v4.87：先收齐窗口内的行，才能按模型判断「谁不回报缓存命中」，
+            # 再逐轮累加（反推要改 input/cached，必须在求和之前做）。
+            rows = list(self._round_rows(start))
+            silent = self._silent_cache_models(rows)
+            for row in rows:
+                self._add_round(out, row, memo, silent)
         except Exception:
             logger.debug("[multi-decision] 统计今日 token 失败", exc_info=True)
         out["total"] = out["input"] + out["output"]
@@ -1208,8 +1524,10 @@ class Tracer:
         # 全量放进去会被 _clone_totals 拷给调用方，不该出现在返回结构里。
         memo: dict = {}
         try:
-            for row in self._round_rows(start):
-                self._add_round(out, row, memo)
+            rows = list(self._round_rows(start))
+            silent = self._silent_cache_models(rows)
+            for row in rows:
+                self._add_round(out, row, memo, silent)
         except Exception:
             logger.debug("[multi-decision] 统计最近 token 失败", exc_info=True)
         out["total"] = out["input"] + out["output"]

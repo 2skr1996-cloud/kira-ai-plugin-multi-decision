@@ -361,7 +361,30 @@ def _native_display(chain, raw_sid: str, public_media):
             elif kind == "at":
                 body.append("@" + str(part.get("nickname") or part.get("pid") or "") + " ")
             elif kind == "emoji":
-                body.append("[表情]")
+                # 用户 m16262 图3/图4：emoji 元素以前一律写成「[表情]」，emoji_id 被丢掉，
+                # 页面（web/index.html 的 emojiFaces）没有编号就取不到 QQ 小黄脸，只剩一段
+                # 灰字——344 这类新表情就是这么「显示不出来」的。有编号时照框架记忆里那种
+                # 写法拼回去（[Emoji 344] / [Emoji 汪汪 (ID: 277)]），页面走同一条出图链路；
+                # 没有编号才退回 [表情]。
+                eid = ""
+                for _k in ("emoji_id", "id", "emojiId", "face_id", "face", "code"):
+                    _v = part.get(_k)
+                    if _v is None:
+                        continue
+                    _t = str(_v).strip()
+                    if _t.isdigit():
+                        eid = _t
+                        break
+                name = ""
+                for _k in ("emoji_desc", "name", "nickname", "summary", "desc"):
+                    _v = part.get(_k)
+                    if isinstance(_v, str) and _v.strip():
+                        name = _v.strip()
+                        break
+                if eid:
+                    body.append("[Emoji %s (ID: %s)]" % (name, eid) if name else "[Emoji %s]" % eid)
+                else:
+                    body.append("[表情]")
             else:
                 # Video/file/record/JSON/notice/poke cards have richer existing text.
                 # Known zero images is not proof that their own body is empty.
@@ -413,6 +436,38 @@ def _complete_forward(body):
     return depth == 0 and body.endswith("]")
 
 
+_HOST_SLOT_RE = re.compile(r"\[image(?: attached)?\]", re.I)
+
+
+def _forward_image_slots(body):
+    """Count the image slots a rendered forward body really carries.
+
+    The host renders one [Image attached] per image element and builds the
+    content parts from those same elements, so the host spelling is the slot
+    list. A literal [图片] inside a sender's own text (a magnet link ending in
+    [图片], user m16262 图2) is text, not a slot: counting it moved the only
+    image of that forward onto the entry above. Bodies that never use the host
+    spelling come from the raw-node renderer, where [图片] is the slot marker.
+    """
+    host = len(_HOST_SLOT_RE.findall(body))
+    return host if host else body.count("[图片]")
+
+
+def _forward_node_slots(body):
+    """Per-node image counts for one rendered forward body (0 = entry has none).
+
+    Mirrors the card renderer's entry split ("\n\n" between entries) so the Web
+    view can hand each image to the entry that really carried it instead of the
+    first entry that happens to print a [图片].
+    """
+    if not isinstance(body, str) or not _complete_forward(body):
+        return None
+    nodes = re.split(r"\n{2,}", body[8:-1].lstrip(" \t:："))
+    if any(_HOST_SLOT_RE.search(node) for node in nodes):
+        return [len(_HOST_SLOT_RE.findall(node)) for node in nodes]
+    return [node.count("[图片]") for node in nodes]
+
+
 def _public_slots(refs, raw_sid, public_media):
     if not isinstance(refs, (list, tuple)) or len(refs) > _MAX_ROWS:
         return None
@@ -449,10 +504,10 @@ def _forward_cache_display(original, mid, raw_sid, chain, public_media, display_
     if refs:
         # Explicit original image parts are a separate, complete source. They may
         # not be paired with a placeholder or a truncated/Reply-containing body.
-        # Host snapshots spell the same slot as [Image attached]; the proof path
-        # already normalizes it, so this explicit-refs path must count it too.
-        normalized = body.replace("[Image attached]", "[图片]")
-        if not _complete_forward(body) or not 0 < normalized.count("[图片]") == len(refs):
+        # Host snapshots spell the same slot as [Image attached]; count those
+        # (a literal [图片] in the sender's text is not a slot, see
+        # _forward_image_slots) instead of normalizing the whole body.
+        if not _complete_forward(body) or not 0 < _forward_image_slots(body) == len(refs):
             return None
         ready = _public_slots(refs, raw_sid, public_media)
         return (body, ready) if ready is not None else None
@@ -561,8 +616,13 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
                 )
                 if aligned is not None:
                     body, refs = aligned
+                    slots = _forward_node_slots(body)
                     display.update(own_media_known=True, own_media=refs, own_body=body,
                                    unassigned_media=[], source="forward_cache_aligned")
+                    # 每条转发各带几张图：前端据此把图放到真正的那一条，正文里字面
+                    # 的 [图片] 不占位（用户 m16262 图2）。总数对不上就不给，前端退回旧逻辑。
+                    if slots and sum(slots) == len(refs):
+                        display["own_slots"] = slots
         if not display["own_media_known"]:
             # 普通消息自己带的图：没有引用、没有转发时，item.media 就是这条消息的图。
             # 先转成插件缓存副本，能全部转成功就按 own_media 收下，不再挂「归属未确认」。
@@ -591,6 +651,22 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
             if own_count and len(merged) > own_count:
                 merged = merged[:own_count]
             display["unassigned_media"] = merged
+        # 转发卡只画「这条消息自己带的图」时，模型侧按配额只挂了前几张
+        # （on_demand 模式默认 3 张），卡片最后几条就只剩 🖼 占位。这里把插件
+        # 缓存里这条转发的全部图另存一份，只给卡片渲染用；own_media_known 保持
+        # False，归属结论不变（部分 refs 不能当成完整归属）。
+        if not display["own_media_known"] and mid and callable(forward_media_for_mid):
+            try:
+                _all = forward_media_for_mid(mid) or []
+            except Exception:
+                _all = []
+            _have = len(display.get("unassigned_media") or [])
+            if isinstance(_all, list) and len(_all) > _have:
+                _ready = [_public_ref(ref, raw_sid, public_media)
+                          for ref in _all if isinstance(ref, dict)]
+                _ready = [ref for ref in _ready if ref.get("path") or ref.get("url")]
+                if len(_ready) > _have:
+                    display["forward_media_all"] = _ready
         projected = dict(item)
         projected["display"] = display
         if display.get("files"):

@@ -108,9 +108,10 @@ def _restore(obj, name, wrapper):
 
 
 class ReplyMediaAdapter:
-    def __init__(self, ctx=None, logger=None, on_failure=None):
+    def __init__(self, ctx=None, logger=None, on_failure=None, on_check=None):
         self.ctx, self.logger = ctx, logger
         self._on_failure = on_failure
+        self._on_check = on_check
         self._token = object()
         self._manager = None
         self._factory = None
@@ -176,18 +177,44 @@ class ReplyMediaAdapter:
                 return (wire, *args[1:]), kwargs
             return args, {**kwargs, "request": wire}
 
+        def checker(args, kwargs):
+            request = args[0] if args else kwargs.get("request")
+            owner = getattr(request, "_mdp_reply_round", None)
+            callback = None if self._closed else self._on_check
+
+            async def check():
+                if callback is not None:
+                    await callback(owner)
+            return check
+
         if stream:
             @wraps(previous)
             async def wrapped(*args, **kwargs):
+                check = checker(args, kwargs)
                 args, kwargs = await arguments(args, kwargs)
+                await check()
                 async with aclosing(previous(*args, **kwargs)) as chunks:
-                    async for chunk in chunks:
-                        yield chunk
+                    try:
+                        async for chunk in chunks:
+                            await check()
+                            yield chunk
+                    except BaseException:
+                        await check()
+                        raise
+                    await check()
         else:
             @wraps(previous)
             async def wrapped(*args, **kwargs):
+                check = checker(args, kwargs)
                 args, kwargs = await arguments(args, kwargs)
-                return await previous(*args, **kwargs)
+                await check()
+                try:
+                    response = await previous(*args, **kwargs)
+                except BaseException:
+                    await check()
+                    raise
+                await check()
+                return response
         return wrapped
 
     async def _notify_failure(self, request, exc):
@@ -416,6 +443,7 @@ class ReplyMediaAdapter:
             return
         self._closed = True
         self._on_failure = None
+        self._on_check = None
         if self._manager is not None and self._factory is not None:
             _restore(self._manager, "get_model_client", self._factory)
         for ref in self._clients:

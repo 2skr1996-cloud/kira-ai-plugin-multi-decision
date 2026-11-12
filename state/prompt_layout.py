@@ -72,6 +72,12 @@ DYNAMIC_TEMPLATE_DEFAULT = (
 )
 DYNAMIC_TEMPLATE_NAME = "强化格式遵守"
 
+# 用户 m13442 第 4 条：框架 output 段里把「总轮次不得超过5轮」「最多调用5个工具」烤成了
+# 字面数字（模板在 BuildRequest 阶段就渲染完了）。插件接管这两项之后，预览里也要显示
+# 插件当前的值，否则设置页看到的和模型收到的是两套数。
+_RE_LOOP_LIMIT = re.compile(r"(总轮次不得超过)\s*\d+\s*(轮)")
+_RE_CALL_LIMIT = re.compile(r"(最多调用)\s*\d+\s*(个工具)")
+
 
 def _tidy_blanks(text) -> str:
     """用户 m23323：动态段几行拼起来会出现三四连换行（空记忆 / 空时间），压成最多一个空行。"""
@@ -338,23 +344,99 @@ class PromptLayouts:
         self._tpl = new
         return True
 
+    # ---------- 提示词页工具勾选：决策链一份、回复链一份（用户 m11103） ----------
+
     def selected_tools(self):
-        """提示词页勾选的工具；没存过就是 None（跟着设置页那份走）。"""
+        """决策链勾选的工具；没存过就是 None（跟着设置页那份走）。"""
         got = (self._tools or {}).get("names")
         if not isinstance(got, list):
             return None
         return [str(x) for x in got if str(x).strip()]
 
-    def set_tools(self, names):
+    def reply_selected_tools(self):
+        """回复链勾选的工具；还没在提示词页勾过就是 None（这时回复链仍挂框架全量）。"""
+        got = (self._tools or {}).get("reply_names")
+        if not isinstance(got, list):
+            return None
+        return [str(x) for x in got if str(x).strip()]
+
+    def reply_known_tools(self):
+        """回复链见过的工具名（用户 m11533：回复链新工具自动勾上、决策链手动勾）。
+
+        记这一份是为了分清两件事：名字在 known 里却不在勾选里＝用户自己取消的，不再自动加回；
+        名字连 known 都没有＝后来新装的插件带的工具，下次出现就自动勾上。
+        """
+        got = (self._tools or {}).get("reply_known")
+        if not isinstance(got, list):
+            return None
+        return [str(x) for x in got if str(x).strip()]
+
+    @staticmethod
+    def _clean_tool_names(names, cap):
         clean = []
         for x in (names or []):
             name = str(x).strip()[:80]
             if name and name not in clean:
                 clean.append(name)
-        new = {"version": 1, "names": clean[:50]}
+        return clean[:cap]
+
+    def _save_tools(self, names, reply_names, reply_known=None):
+        """v3 起一个文件装三份：names 管决策链，reply_names 管回复链，reply_known 记回复链见过的工具。"""
+        new = {"version": 3, "names": names}
+        if reply_names is not None:
+            new["reply_names"] = reply_names
+            known = reply_known
+            if known is None:
+                known = self.reply_known_tools()
+            if known is not None:
+                new["reply_known"] = known
         self._write(self.tools_path, new)
         self._tools = new
+
+    def set_tools(self, names):
+        clean = self._clean_tool_names(names, 50)
+        self._save_tools(clean, self.reply_selected_tools())
         return clean
+
+    def set_reply_tools(self, names):
+        clean = self._clean_tool_names(names, 80)
+        # known 要把「以前勾过的」也算进去：v2 老文件没有 known，用户取消一个工具时
+        # 若只记当前勾着的，那个被取消的下一轮就会被当成新工具自动加回来。
+        known = self._clean_tool_names(
+            list(self.reply_known_tools() or []) + list(self.reply_selected_tools() or []) + clean, 80)
+        self._save_tools(list(self.selected_tools() or []), clean, known)
+        return clean
+
+    def reply_tools_for(self, available=None):
+        """回复链真正要挂的工具名；None＝还没初始化（保持框架全量，不过滤）。
+
+        用户 m11533 定的口径：回复链新工具自动勾上，决策链要手动勾。
+        - 从没初始化过：把当时框架里的全部工具名写进去（默认全选，升级后行为不变）。
+        - 已经勾过：框架里新冒出来的名字（不在 reply_known 里）自动补进勾选；
+          用户自己取消过的名字在 reply_known 里，不会被自动加回来。
+        """
+        got = self.reply_selected_tools()
+        avail = self._clean_tool_names(available, 80)
+        if got is None:
+            if not avail:
+                return None
+            return self.set_reply_tools(avail)
+        if not avail:
+            return got
+        known = self.reply_known_tools()
+        if not known:
+            # 没有 known（v2 老文件）或 known 是空表：当时勾着的都算见过；
+            # 空表＝用户主动全取消，也按「都见过」处理，别把刚取消的全加回来。
+            known = list(got) if got else list(avail)
+        fresh = [n for n in avail if n not in known]
+        if not fresh:
+            return got
+        merged = self._clean_tool_names(list(got) + fresh, 80)
+        known = self._clean_tool_names(list(known) + fresh, 80)
+        self._save_tools(list(self.selected_tools() or []), merged, known)
+        logger.info("[multi-decision] 回复工具清单自动补上 %d 个新工具：%s",
+                    len(fresh), ",".join(fresh))
+        return merged
 
     @staticmethod
     def _ensure_persona(kind, doc):
@@ -1252,12 +1334,19 @@ class PromptLayouts:
         tools = self._tools_text(opt) if hasattr(opt, "tools") else ""
         return {"persona": persona, "personas": personas, "tools": tools, "opt": opt}
 
-    def _tools_text(self, opt=None, sid=""):
-        """用户 m02159 图3：勾了哪个工具就写哪个，两边共用同一份勾选（prompt_tools.json）。"""
+    def _tools_text(self, opt=None, sid="", names=None, head=None, rounds=None):
+        """用户 m02159 图3：勾了哪个工具就写哪个。
+
+        用户 m11103：决策链与回复链各有一份名单——names 给了就按它写（回复链走这条），
+        没给就按 opt.tools 写（决策链走这条）。
+        用户 m13442 第 3 条：抬头与轮数由调用方给（head / rounds），回复链不再借用决策的轮数。
+        """
         dp = self.plugin.decision_phase
         try:
-            opt = opt or self.plugin.decision_options(sid)
-            picked = dp.pick_tools(opt.tools)
+            if names is None:
+                opt = opt or self.plugin.decision_options(sid)
+                names = getattr(opt, "tools", None)
+            picked = dp.pick_tools(names)
         except Exception:
             logger.exception("[multi-decision] 取工具清单失败，这一段留空")
             return ""
@@ -1266,10 +1355,36 @@ class PromptLayouts:
         try:
             text = dp.tools_help(picked)
             from .decision_phase import TOOL_HEAD
-            return (TOOL_HEAD % max(1, opt.tool_rounds)) + "\n" + text
+            if rounds is None:
+                rounds = getattr(opt, "tool_rounds", None)
+                if rounds is None:
+                    try:
+                        rounds = self.plugin.decision_options(sid).tool_rounds
+                    except Exception:
+                        rounds = 2
+            return ((head or TOOL_HEAD) % max(1, int(rounds or 2))) + "\n" + text
         except Exception:
             logger.exception("[multi-decision] 拼工具说明失败")
             return ""
+
+    def _reply_tools_text(self, sid=""):
+        """回复链只写它真正挂的那几个工具；还没勾过（None）就空着，跟以前一样。
+
+        用户 m13442 第 3 条：轮数取「回复侧最大循环轮数 − 1」——最后那一轮要留给
+        「看完工具结果再写回复」，不能把轮数全给工具。
+        """
+        names = self.reply_selected_tools()
+        if names is None:
+            return ""
+        from .decision_phase import REPLY_TOOL_HEAD
+        rounds = 5
+        try:
+            limits = self.plugin.reply_tool_limits(sid) or {}
+            rounds = int(limits.get("rounds") or 5)
+        except Exception:
+            logger.exception("[multi-decision] 读回复工具参数失败，工具说明按框架默认 5 轮写")
+        return self._tools_text(sid=sid, names=names, head=REPLY_TOOL_HEAD,
+                                rounds=max(1, rounds - 1))
 
     def _sysseg_part(self, kind, m, source_rows, seg_name, typ):
         """系统段里按记忆 / 时间分开的一格；正文、注入、framed 的算法与旧合并段一致。"""
@@ -1412,6 +1527,9 @@ class PromptLayouts:
             elif typ == "framework":
                 # 用户 m23323：本地默认副本里有就用它，装配不再被「这一刻框架给没给」牵着走。
                 text = self._defaults_text(key) or by_name.get(key, {}).get("text", "")
+                if kind == "reply" and key == "output":
+                    # 用户 m13442 第 4 条：预览里也显示插件接管后的轮数 / 单轮工具数。
+                    text = self._rewrite_agent_limits(text, sid)
                 if by_name.get(key, {}).get("location") == "dynamic":
                     warnings.append(m["label"] + "保持在动态尾段，不进入固定 system")
                     continue
@@ -1459,6 +1577,49 @@ class PromptLayouts:
                 "inactive": inactive,
                 "source": self._source_label(sid, sample)}
 
+    def _rewrite_agent_limits(self, text, sid=""):
+        """把框架 output 段里烤死的「N 轮」「N 个工具」换成插件接管后的值。
+
+        用户 m13442 第 4 条：这两项以前只能在框架「代理设置」里改，现在归插件管，
+        预览必须跟着变，否则设置页看到的和模型收到的是两套数。
+        """
+        body = str(text or "")
+        if not body:
+            return body
+        try:
+            limits = self.plugin.reply_tool_limits(sid) or {}
+        except Exception:
+            logger.exception("[multi-decision] 读回复工具参数失败，框架原文照旧")
+            return body
+        loop = int(limits.get("rounds") or 5)
+        calls = int(limits.get("calls_per_turn") or 5)
+        body = _RE_LOOP_LIMIT.sub(lambda m: "%s%d%s" % (m.group(1), loop, m.group(2)), body)
+        body = _RE_CALL_LIMIT.sub(lambda m: "%s%d%s" % (m.group(1), calls, m.group(2)), body)
+        return body
+
+    def _patch_agent_limits(self, prompts, sid=""):
+        """把框架 output 段 Prompt 的轮数 kwargs 换成插件接管后的值。
+
+        用户 m13442 第 4 条：框架这一段是 render_template=True 的 Prompt，轮数在
+        BuildRequest 阶段就烤进 kwargs 了；这里改 kwargs，框架在 assemble 阶段渲染时
+        用的就是插件的值——不用重造 Prompt，也不会丢掉它自己的 end / persist。
+        """
+        try:
+            limits = self.plugin.reply_tool_limits(sid) or {}
+        except Exception:
+            logger.exception("[multi-decision] 读回复工具参数失败，框架原文照旧")
+            return
+        loop = int(limits.get("rounds") or 5)
+        calls = int(limits.get("calls_per_turn") or 5)
+        for p in prompts or []:
+            kw = getattr(p, "kwargs", None)
+            if not isinstance(kw, dict):
+                continue
+            if "max_tool_loop" in kw:
+                kw["max_tool_loop"] = loop
+            if "max_tool_calls_per_turn" in kw:
+                kw["max_tool_calls_per_turn"] = calls
+
     def _source_label(self, sid, sample=False):
         live = self._live.get(normalize_sid(sid))
         if live and live.get("rows"):
@@ -1480,7 +1641,7 @@ class PromptLayouts:
 
     def preview_reply(self, sid="", layout=None):
         doc = self.layout("reply", sid)[0] if layout is None else layout
-        return dict(self._render("reply", sid, doc, {"tools": self._tools_text(None, sid)}, sample=True), sid=sid)
+        return dict(self._render("reply", sid, doc, {"tools": self._reply_tools_text(sid)}, sample=True), sid=sid)
 
     async def prefetch_personas(self, sid="", layout=None):
         """用户 m23323 图2：真实回复这一路是同步装配，人格正文没预热就整段丢弃。
@@ -1538,7 +1699,7 @@ class PromptLayouts:
                 if not personas[pname]:
                     # 用户 m23323 图2：真实请求里人设整段丢了，得能在日志里一眼看见是哪一段。
                     logger.warning("[multi-decision] 回复提示词：人格「%s」正文读不到，这一段没有注入", pname)
-        tools_text = self._tools_text(None, sid)
+        tools_text = self._reply_tools_text(sid)
         rendered, output = self._render("reply", sid, doc, {"personas": personas, "tools": tools_text},
                                         rows=self._rows(request)), []
         for _w in rendered.get("warnings") or []:
@@ -1564,7 +1725,11 @@ class PromptLayouts:
                 output.append(Prompt(_pad_seg(p["text"]), name="accounts", source="system", persist=False,
                                      render_template=False, end=""))
             elif m.get("type") in ("framework", "persona", "tools"):
-                output.extend(original.get(key, []))  # kwargs/render/end/persist 原样保留。
+                kept = original.get(key, [])
+                if m.get("type") == "framework" and key == "output":
+                    # 用户 m13442 第 4 条：轮数 / 单轮工具数改由插件接管。
+                    self._patch_agent_limits(kept, sid)
+                output.extend(kept)  # kwargs/render/end/persist 原样保留。
             else:
                 output.append(Prompt(_pad_seg(p["text"]), name=p["name"], source="system", persist=False, render_template=False, end=""))
         selected = {p["name"] for p in rendered["parts"]}
@@ -1673,7 +1838,19 @@ class PromptLayouts:
                     jev_persona = await self.plugin.decision_phase.persona_text(jev_opt.persona) or ""
                 except Exception:
                     logger.exception("[multi-decision] 取 JEV 人设失败，预览不加人设")
+        # 用户 m11103：回复链第一次打开这一页就把框架现有的工具全勾上（默认全选）。
+        # 用户 m11533：之后新装的插件带的工具也自动勾上，所以每次打开都补一遍（决策链不补）。
+        # 必须赶在 _context 拼工具说明之前——否则第一次打开看到的是空清单，勾选框却全勾着。
+        if kind == "reply":
+            try:
+                self.reply_tools_for([c.get("name") for c in self.plugin.decision_phase.tool_catalog()])
+            except Exception:
+                logger.exception("[multi-decision] 初始化回复工具清单失败（保持框架全量）")
         context = await self._context(context_sid, jev_opt, doc, persona=(jev_persona or None))
+        if kind == "reply":
+            # 用户 m11103：回复页「工具说明」这一段显示的必须是回复链真正要挂的那几个工具，
+            # 以前这里拿到的是决策链那份（默认空），页面上就只剩框架那行标题。
+            context["tools"] = self._reply_tools_text(context_sid)
         preview = self._render(kind, context_sid, doc, context, sample=True)
         reply_rows = {}
         for row in self._base_rows(context_sid, sample=True):
@@ -1776,10 +1953,13 @@ class PromptLayouts:
                         "available": True, "group": "default", "tag": "动态段", "suffix": "动态段"})
         choices, picked = [], []
         try:
-            # 用户 m02159 图3：工具是全局一份（prompt_tools.json），决策和回复两边都勾同一份，
-            # 所以两个页面都要给勾选框，不能只有决策页能勾。
+            # 用户 m11103：决策链与回复链各勾各的（prompt_tools.json 的 names / reply_names）。
+            # 回复链第一次打开这一页时，把框架现有的工具全勾上——默认全选，升级后行为不变。
             choices = dp.tool_catalog()
-            picked = list(getattr(context["opt"], "tools", None) or [])
+            if kind == "reply":
+                picked = self.reply_tools_for([c.get("name") for c in choices]) or []
+            else:
+                picked = list(getattr(context["opt"], "tools", None) or [])
         except Exception:
             logger.exception("[multi-decision] 列工具失败")
         return {"ok": True, "kind": kind, "sid": sid, "context_sid": context_sid, "layout": doc,

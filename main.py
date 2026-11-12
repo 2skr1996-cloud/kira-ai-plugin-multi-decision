@@ -12,6 +12,8 @@ WebUI 页面挂在左侧边栏「多样决策」：群聊 / 私聊 / 上下文�
 from __future__ import annotations
 
 import asyncio
+import inspect
+import contextvars
 import copy
 import ctypes
 import os
@@ -87,7 +89,7 @@ from .state.display_projection import (
 from .state.hidden import Hidden
 from .state.overrides import Overrides
 from .state.pricing import PRICE_UNIT, Pricing
-from .state.reply_prompt import PERSONA_NAME, ReplyPrompt
+from .state.reply_prompt import PERSONA_NAME, ReplyPrompt, apply_reply_tools
 from .state.prompt_layout import PromptLayouts
 from .state.request_log import RequestLog, payload_metrics
 from .state.retry_history import RetryHistory
@@ -96,7 +98,7 @@ from .state.session_registry import SessionRegistry
 from .state.sids import normalize_sid
 from .state.state_store import StateStore
 from .state.summaries import Summaries
-from .state.tracer import Tracer
+from .state.tracer import Tracer, infer_cached_steps, infer_gate
 from .window.manager import (
     WindowManager,
     view_of,
@@ -441,17 +443,37 @@ PER_SESSION_KEYS = (
     "decision_tools",
     "decision_model",
     "decision_fallback_model",
-    "decision_retry",
-    "decision_retry_delay",
+    # 用户 m08678：决策页保留自己的一套次数 / 时间设置，默认值与回复一致，可各自调整。
     "decision_fail_switch",
     "decision_fallback_cooldown",
-    "decision_timeout",
+    "decision_tool_loop",
+    "decision_tool_calls_per_turn",
+    "decision_tool_timeout",
+    "decision_tool_output_tokens",
     "decision_fail_action",
-    "decision_tool_rounds",
+    # 回复链的次数 / 时间设置。
+    "reply_tool_rounds",
+    "reply_tool_calls_per_turn",
+    "reply_tool_timeout",
+    "reply_tool_output_tokens",
+    # 用户 m06995 第 2 项：回复那条链也有一套模型与看图开关，跟决策卡一一对应
+    # （少「决策失败时」——回复没有「跳过决策」这回事）。
+    "reply_model",
+    "reply_fallback_model",
+    "reply_fail_switch",
+    "reply_fallback_cooldown",
+    "reply_see_images",
+    # 用户 m07859：重试 / 重试间隔 / 单次超时只留基础设置那一份，决策链和回复链都读它；
+    # 放进白名单后也按群走。
+    "retry_max",
+    "retry_delay",
+    "watchdog_seconds",
     # 用户 m06706：JEV 决策跟普通决策一样按群一套——哪个群用专用模型、区间多宽都可以不同。
     "jev_enabled",
     "jev_model",
     "jev_fallback_model",
+    "jev_fail_switch",
+    "jev_fallback_cooldown",
     "jev_lower",
     "jev_upper",
     "jev_action",
@@ -532,6 +554,8 @@ PER_SESSION_KEYS = (
     "history_gif_first",
     "window_trim_threshold",
     "protect_tool_groups",
+    # v4.92（用户 m13535）：工具往返默认不进实时窗，窗口那边照这个开关整段摘。
+    "window_drop_tools",
     "summary_enabled",
     "summary_max_chars",
     "summary_line_chars",
@@ -582,19 +606,26 @@ _BOUNDS = {
     "adaptive_step": (1, None),
     "adaptive_tune_minutes": (1, 120),
     "adaptive_rhythm_sigma": (0, 120),
-    # v3.91（用户 m05749）：决策的重试 / 切换 / 超时也要守住范围，
-    # 别让人填出 0.001 秒这种把主模型必定判死的值。
-    "decision_retry": (0, 5),
-    "decision_retry_delay": (0, 60),
+    # 用户 m08678：决策页保留自己的一套次数 / 时间设置，范围跟回复那边一致。
+    "decision_tool_loop": (1, 10),
+    "decision_tool_calls_per_turn": (1, 20),
+    "decision_tool_timeout": (0, 600),
+    "decision_tool_output_tokens": (0, 200000),
     "decision_fail_switch": (1, 10),
-    # Q02（用户 m04478「以设置页显示为准」）：冷却 / 超时跟决策层同一个范围，
-    # 界面允许的值不能在运行时再被悄悄改小（state/decision_phase.py 同数）。
     "decision_fallback_cooldown": (30, 3600),
-    "decision_timeout": (5, 300),
-    "decision_tool_rounds": (0, 5),
+    # 回复链的次数 / 时间设置。
+    "reply_tool_rounds": (1, 10),
+    "reply_tool_calls_per_turn": (1, 20),
+    "reply_tool_timeout": (0, 600),
+    "reply_tool_output_tokens": (0, 200000),
+    # 用户 m06995 第 2 项：回复模型的切换阈值与冷却，范围跟决策那边一致。
+    "reply_fail_switch": (1, 10),
+    "reply_fallback_cooldown": (30, 3600),
     # 用户 m06706：JEV 的不确定区间按「百分比」存（40 / 60），运行时再归一到 0~1。
     "jev_lower": (0, 100),
     "jev_upper": (0, 100),
+    "jev_fail_switch": (1, 10),
+    "jev_fallback_cooldown": (30, 3600),
     "jitter_seconds": (0, None),
     "jitter_max_rounds": (1, 20),
     "burst_merge_seconds": (0, None),
@@ -1049,6 +1080,51 @@ def _as_list(value) -> list:
     return []
 
 
+# 用户 m13442 第 4 条：框架「代理设置」里的四项（最大代理循环次数 / 单轮工具调用次数上限 /
+# 工具调用超时时间 / 工具输出上限）改由插件接管。框架在三个地方现读这四项：
+#   execute.py:31（ExecuteAgentStage 开头）、func_tool_manager.py:65/71/80（工具循环里）、
+#   prompt_manager.py:84-93（BuildRequest 阶段烤进 Prompt kwargs）。
+# 前两处都在 on.llm_request 之后、同一个任务里，所以只要在 on.llm_request 里把值塞进
+# contextvar、收尾时清掉，框架读到的就是插件的值；第三处（kwargs）由 prompt_layout 的
+# _patch_agent_limits 单独改。
+_REPLY_LIMITS = contextvars.ContextVar("kira_md_reply_limits", default=None)
+_AGENT_LIMIT_KEYS = {
+    "bot_config.agent.max_tool_loop": "rounds",
+    "bot_config.agent.max_tool_calls_per_turn": "calls_per_turn",
+    "bot_config.agent.tool_call_timeout": "timeout",
+    "bot_config.agent.max_tool_output_tokens": "output_tokens",
+}
+
+
+def _install_agent_limit_patch() -> bool:
+    """给框架的 KiraConfig.get_config 打一次类方法补丁（幂等）。
+
+    只在 contextvar 有值（也就是这一轮是插件的回复请求）时才改返回值，其余请求原样透传。
+    """
+    try:
+        from core.config.config_loader import KiraConfig
+    except Exception:
+        logger.exception("[multi-decision] 找不到框架配置类，代理设置接管失效")
+        return False
+    if getattr(KiraConfig, "_kira_md_limits_patched", False):
+        return True
+    original = KiraConfig.get_config
+
+    def get_config(self, key, default=None, splitter="."):
+        value = original(self, key, default, splitter)
+        limits = _REPLY_LIMITS.get()
+        if limits:
+            field = _AGENT_LIMIT_KEYS.get(key)
+            if field is not None and field in limits:
+                return limits[field]
+        return value
+
+    KiraConfig.get_config = get_config
+    KiraConfig._kira_md_limits_patched = True
+    logger.info("[multi-decision] 已接管框架代理设置四项（回复侧）")
+    return True
+
+
 class MultiDecisionPlugin(BasePlugin):
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
@@ -1174,6 +1250,13 @@ class MultiDecisionPlugin(BasePlugin):
         # 只剩「[图片]」四个字，模型看不到。开关默认开。v4.40（用户 m21305）：张数
         # 不再单独设，跟回复同一个口径吃 history_images（默认 128）。
         self.decision_see_images = _as_bool(cfg.get("decision_see_images"), True)
+        # 用户 m06995 第 2 项：回复那条链也有一套模型与看图开关（跟决策卡一一对应，
+        # 少「决策失败时」）。模型留空 = 跟随框架默认；看图默认开。
+        self.reply_model = str(cfg.get("reply_model") or "")
+        self.reply_fallback_model = str(cfg.get("reply_fallback_model") or "")
+        self.reply_fail_switch = max(1, _as_int(cfg.get("reply_fail_switch"), 2))
+        self.reply_fallback_cooldown = max(30, _as_int(cfg.get("reply_fallback_cooldown"), 300))
+        self.reply_see_images = _as_bool(cfg.get("reply_see_images"), True)
         # v4.85（用户 m10425 第 6 条）：JEV 那条链自己收不了图——decision 类模型只有
         # choice()，没有图片入参；这个开关管的是「不确定 → 交给决策模型」那一次转交，
         # 打开后转交的普通决策会带上这一轮的图。
@@ -1272,13 +1355,13 @@ class MultiDecisionPlugin(BasePlugin):
         # 群组数量」）。所以这个值不是整个缓存目录的天花板，实际总配额 = 本值 × 群组数，
         # 由 window/manager.py 的 _prune_media_cache 按群组桶分别裁。
         # 用户 m06046 图2：600 张（那时是全目录共享一份）两天就攒满，每次收新图都会顺手
-        # 删掉一张旧的，记录里刚出现过的图跟着没。默认放到 2000，配合 2 小时的保护期。
-        self.media_cache_limit = max(1, _as_int(cfg.get("media_cache_limit"), 2000))
+        # 删掉一张旧的，记录里刚出现过的图跟着没。默认放到 1500，配合 2 小时的保护期。
+        self.media_cache_limit = max(1, _as_int(cfg.get("media_cache_limit"), 1500))
         # 用户 m24364：其他图片（推文卡片图 tw_）也按每个群 / 私聊各自的上限留，
         # 默认 40 张；0 = 不限。tw_ 的归属写在 media_owners.json 里。
         self.media_other_limit = max(0, _as_int(cfg.get("media_other_limit"), 40))
         # 用户 m11091 第 11 条：图片缓存只留最近 N 天 / 最多 N MB，0 = 不限
-        self.media_cache_keep_days = max(0, _as_int(cfg.get("media_cache_keep_days"), 56))
+        self.media_cache_keep_days = max(0, _as_int(cfg.get("media_cache_keep_days"), 30))
         # 用户 m24990：其他图片也补保留天数，默认 30 天；0 = 不限。
         self.media_other_keep_days = max(0, _as_int(cfg.get("media_other_keep_days"), 30))
         # v3.66（用户 m19536 第 5 条）：「缓存容量上限」这个总上限撤掉了——群聊默认 +
@@ -1311,6 +1394,9 @@ class MultiDecisionPlugin(BasePlugin):
         # 热重载由寄存处接回、私聊另有 window_dm.json 存档，都不需要从框架记忆里回填。
         # 冷启动一律不灌历史，见 window/manager.py 的 collect()。
         self.protect_tool_groups = _as_bool(cfg.get("protect_tool_groups"), True)
+        # v4.92（用户 m13535、m13870）：工具结果默认照旧进实时窗——现在还不能一刀切，
+        # 有些工具结果对后续判断有用。开关打开才整段摘掉，请求那边补全配对。
+        self.window_drop_tools = _as_bool(cfg.get("window_drop_tools"), False)
         self.trim_strategy = str(cfg.get("trim_strategy") or "mechanical")
         self.summary_enabled = _as_bool(cfg.get("summary_enabled"), False)
         self.summary_max_chars = max(60, _as_int(cfg.get("summary_max_chars"), 300))
@@ -1406,8 +1492,9 @@ class MultiDecisionPlugin(BasePlugin):
         # 「0 = 不限」（消息日志/窗口快照按天文件，至少要留 1 天）。默认值和以前
         # 的实际行为对齐，升级后不会突然删数据。
         # v3.66（用户 m19536 第 1 条）：保留天数默认统一 56 天（0 仍可手动填 = 不限）
+        # 2026-11-12（用户 m09879）：窗口快照的保留天数默认改成 30 天。
         self.requests_keep_days = _bounded_int(
-            "requests_keep_days", cfg.get("requests_keep_days"), 56
+            "requests_keep_days", cfg.get("requests_keep_days"), 30
         )
         # v3.64（用户 m18870）：轨迹并进请求快照，保留天数只剩 requests_keep_days 一条线
         # v3.66（用户 m19536 第 1/3 条）：所有保留天数默认统一 56 天；消息日志是自适应的
@@ -1900,8 +1987,23 @@ class MultiDecisionPlugin(BasePlugin):
     async def _on_im_message(self, event):
         await self.engine.handle_message(event)
 
-    @on.llm_request(priority=Priority.MEDIUM)
+    # 用户 m00536：必须排在别的插件的 MEDIUM 钩子之后。nai 这类工具插件是在
+    # llm_request 里把 "<工具>_completion" 挂进 user_prompt 的，同优先级时顺序
+    # 取决于插件加载顺序——进程重启后 multi-decision 可能先加载，就看不到
+    # completion，Notice 被摘掉而工具回调整条丢失。
+    # 框架里 priority 越大越先跑（handlers.py 用 sort(reverse=True)），所以这里
+    # 用 LOW：排在所有 MEDIUM 之后；LOW 档其余钩子（nai.ensure_tools、
+    # agent.filter_tools、session_tools）只动 tool_set / system_prompt，
+    # 不会往 user_prompt 里加东西，所以排在它们前面也不会漏内容。
+    @on.llm_request(priority=Priority.LOW)
     async def _on_llm_request(self, event, request, tag_set):
+        await self.engine.guard_reply_request(event)
+        # 用户 m13442 第 4 条：这一轮回复的代理参数由插件接管——框架在 ExecuteAgentStage
+        # 与工具循环里现读这四项，都在本钩子之后、同一个任务里，所以在这里塞进 contextvar。
+        try:
+            self._apply_agent_limits(self._sid_of(event))
+        except Exception:
+            logger.exception("[multi-decision] 接管代理设置失败（沿用框架值）")
         # 仅抄原模板，不渲染尚未绑定的 format；素材严格按当前 sid 隔离。
         layouts = getattr(self, "prompt_layouts", None)
         if layouts is not None:
@@ -1923,16 +2025,56 @@ class MultiDecisionPlugin(BasePlugin):
                 self.reply_prompt.apply(request, self._sid_of(event))
         except Exception:
             logger.debug("[multi-decision] 注入聊天规则失败（已吞掉）", exc_info=True)
+        # 用户 m11103：回复链挂哪些工具也由提示词页的勾选决定——以前这里是框架全量，
+        # 勾选只改了「工具说明」那段文字，勾掉工具照样能调。
+        try:
+            self._apply_reply_tools(request, self._sid_of(event))
+        except Exception:
+            logger.exception("[multi-decision] 回复工具按勾选注入失败（保留框架全量）")
         await self._trace_begin(event, request)
 
-    @on.llm_response(priority=Priority.MEDIUM)
+    def _apply_reply_tools(self, request, sid: str = "") -> None:
+        """把这一轮回复请求的 tool_set 裁成提示词页勾的那份。
+
+        还没在提示词页勾过（None）就原样不动：保持框架全量，等用户第一次打开那一页
+        时把当时的全部工具勾上（默认全选），之后才真正按名单来。
+        全不勾＝一个都不给（用户 m11103 定的口径，不回退全量）。
+        用户 m11533：框架里新冒出来的工具（新装的插件带的）自动勾上，不用手动点。
+        """
+        layouts = getattr(self, "prompt_layouts", None)
+        if layouts is None:
+            return
+        # 这一轮框架本来要挂的工具名——新出现的会被 reply_tools_for 自动补进勾选。
+        avail = []
+        for tool in (getattr(getattr(request, "tool_set", None), "tools", None) or []):
+            name = str(getattr(tool, "name", "") or "").strip()
+            if name:
+                avail.append(name)
+        try:
+            names = layouts.reply_tools_for(avail)
+        except Exception:
+            logger.exception("[multi-decision] 回复工具清单自动补勾失败（按已存的来）")
+            names = layouts.reply_selected_tools()
+        # 裁剪逻辑放在 reply_prompt.apply_reply_tools，离线用例能直接验（用户 m11103）。
+        got = apply_reply_tools(request, names)
+        if not got:
+            return
+        kept, dropped = got
+        logger.info("[multi-decision] %s 回复工具按勾选注入：挂 %d 个（%s），拿掉 %d 个（%s）",
+                    sid or "?", len(kept), ",".join(kept) or "-",
+                    len(dropped), ",".join(dropped) or "-")
+
+    @on.llm_response(priority=Priority.SYS_HIGH)
     async def _on_llm_response(self, event, llm_resp):
+        await self.engine.guard_reply_response(event, llm_resp)
         # 先记轨迹：轨迹里留模型的原样输出，收口之后也能看出是它自己写了两遍。
         if self.tracer is not None:
             try:
                 self.tracer.step(event, llm_resp)
             except Exception:
                 logger.exception("[multi-decision] 轨迹记录（响应）异常（已吞掉）")
+        if getattr(llm_resp, "status", None) == "error":
+            return
         # v3.54（用户 m14082「早上的几条消息 bot 会重复发送」）：模型偶尔把同一条
         # 回复写成两版发两遍——一版 <emoji>128</emoji>，一版正文里内联
         # [Emoji 128]。框架在这个钩子全跑完之后才读 llm_resp.text_response 去
@@ -1976,6 +2118,7 @@ class MultiDecisionPlugin(BasePlugin):
 
     @on.tool_result(priority=Priority.LOW)
     async def _on_tool_result(self, event, tool_result):
+        await self.engine._check_reply_round(getattr(event, "_mdp_reply_round", None))
         if self.tracer is None:
             return
         try:
@@ -1985,6 +2128,7 @@ class MultiDecisionPlugin(BasePlugin):
 
     @on.message_sent(priority=Priority.LOW)
     async def _on_message_sent(self, event, action, result):
+        await self.engine._check_reply_round(getattr(event, "_mdp_reply_round", None))
         # 实时窗底部的「我刚说了什么」：bot 的回复要等下一轮采集才进历史，
         # 在那之前先挂进待发列表，带名字和时间戳，跟 user 卡片长得一样（v2.26）
         try:
@@ -2005,6 +2149,13 @@ class MultiDecisionPlugin(BasePlugin):
 
     @on.final_result(priority=Priority.MEDIUM)
     async def _on_final_result(self, event, final_result):
+        await self.engine.guard_reply_final(event, final_result)
+        # 用户 m13442 第 4 条：这一轮结束，把接管的代理参数清掉，别漏给同一任务里后面的请求。
+        try:
+            _REPLY_LIMITS.set(None)
+        except Exception:
+            pass
+        self.engine._reply_delivery.set_check(None)
         await self.engine.handle_final(event, final_result)
         if self.tracer is None:
             return
@@ -2016,8 +2167,7 @@ class MultiDecisionPlugin(BasePlugin):
     @register.tool(
         "view_forward",
         "查看一条合并转发的全部图片。消息里出现「[Forward …]」或「[合并转发]」时，"
-        "如果只看到前几张图、需要看完整内容就调用它，把这条转发的图都取回来。"
-        "动图会拼成一张九宫格，具体说明写在返回文字里。",
+        "如果只看到前几张图、需要看完整内容就调用它，把这条转发的图都取回来。",
         {
             "type": "object",
             "properties": {
@@ -2967,6 +3117,33 @@ class MultiDecisionPlugin(BasePlugin):
             logger.exception("[multi-decision] 读提示词页工具勾选失败，沿用设置页那份")
         return opt
 
+    def reply_tool_limits(self, sid: str = "") -> dict:
+        """回复链的四项代理参数（用户 m13442 第 4 条）。
+
+        以前这四项只能在框架「代理设置」里改，全局一套；现在归插件管，回复提示词
+        左栏下面有自己的设置卡，跟决策那张各存各的、互不影响。
+
+        用户 m07137：设置里写几轮就是几轮工具。框架的 max_tool_loop 数的是「总循环
+        次数」（含最后写回复那一轮），所以这里 +1 再交给框架。
+        """
+        def _read(key, default):
+            try:
+                return _bounded_int(key, self._decision_get(key, default, sid), default)
+            except Exception:
+                return default
+        return {
+            "rounds": _read("reply_tool_rounds", 5) + 1,
+            "calls_per_turn": _read("reply_tool_calls_per_turn", 5),
+            "timeout": _read("reply_tool_timeout", 180),
+            "output_tokens": _read("reply_tool_output_tokens", 10000),
+        }
+
+    def _apply_agent_limits(self, sid: str = "") -> None:
+        """把回复侧的四项代理参数塞进 contextvar，框架读配置时就会拿到插件的值。"""
+        if not getattr(self, "_limits_patched", False):
+            self._limits_patched = _install_agent_limit_patch()
+        _REPLY_LIMITS.set(self.reply_tool_limits(sid))
+
     def _decision_models(self) -> list:
         """框架里配好的模型清单。
 
@@ -3003,9 +3180,14 @@ class MultiDecisionPlugin(BasePlugin):
                 for mid, item in group.items():
                     if not isinstance(item, dict):
                         continue
+                    _mname = str(item.get("model_name") or mid)
                     out.append({
                         "value": "%s:%s" % (pid, mid),
-                        "label": "%s / %s" % (pname, str(item.get("model_name") or mid)),
+                        "label": "%s / %s" % (pname, _mname),
+                        # 用户 m15537：记录页把「渠道」拆成独立一列，这里把供应商名和
+                        # 模型名分开给，前端不用再从 label 里切。
+                        "provider": pname,
+                        "model": _mname,
                         "kind": kind,
                     })
         defaults = data.get("models") if isinstance(data.get("models"), dict) else {}
@@ -3285,10 +3467,19 @@ class MultiDecisionPlugin(BasePlugin):
 
     @_api("POST", "/prompt-tools")
     async def api_prompt_tools(self, body: dict):
-        """提示词页「工具说明」段里的勾选（用户 m02159 图3）：勾了才注入、才允许模型调用。"""
+        """提示词页「工具说明」段里的勾选（用户 m02159 图3）：勾了才注入、才允许模型调用。
+
+        用户 m11103：kind=decision 写决策链那份，kind=reply 写回复链那份；
+        不带 kind 按决策链处理（老页面发的就是这个）。
+        """
+        kind = str(body.get("kind") or "decision").strip().lower()
         try:
-            names = self.prompt_layouts.set_tools(body.get("names") or [])
-            return {"ok": True, "names": names, "layout_revision": self.prompt_layouts.revision()}
+            if kind == "reply":
+                names = self.prompt_layouts.set_reply_tools(body.get("names") or [])
+            else:
+                names = self.prompt_layouts.set_tools(body.get("names") or [])
+            return {"ok": True, "kind": kind, "names": names,
+                    "layout_revision": self.prompt_layouts.revision()}
         except (ValueError, TypeError) as exc:
             return {"ok": False, "code": "INVALID_TOOLS", "error": str(exc)}
         except OSError as exc:
@@ -3623,7 +3814,9 @@ class MultiDecisionPlugin(BasePlugin):
     async def api_decision_rounds(self, sid: str, limit: int = 20, light: int = 0):
         """决策记录：跟回复记录同一套模板，只是 ① 换成决策用的提示词。"""
 
-        return await asyncio.to_thread(self._requests_payload, sid, limit, "decision", bool(light))
+        evidence = await self._reply_evidence(sid)
+        return await asyncio.to_thread(self._requests_payload, sid, limit, "decision", bool(light),
+                                       False, evidence)
 
     @_api("GET", "/band-stats")
     async def api_band_stats(self, sid: str = "", week: str = ""):
@@ -4147,6 +4340,8 @@ class MultiDecisionPlugin(BasePlugin):
         projected = project_items(
             [{"message_id": mid} for mid in want], raw_sid, native_rows,
             public_media=quote_public_media, text_of_content=content_text,
+            # 用户 m00942 图1：引用里的转发卡也要画全所有图，和主卡同一个口径。
+            forward_media_for_mid=forward_media_for_mid,
         )
         native_display = {mid: item["display"] for mid, item in zip(want, projected)}
 
@@ -5983,10 +6178,95 @@ class MultiDecisionPlugin(BasePlugin):
         # 现在两件事：① 整表计算丢进线程，不占事件循环；② 摘要行走 list_rounds_cached，
         # 目录指纹（文件数 + 最新修改时间）没变就直接复用，只有新落一轮才重算。
 
+        evidence = await self._reply_evidence(sid)
         return await asyncio.to_thread(self._requests_payload, sid, limit, "request",
-                                       bool(light), bool(trim))
+                                       bool(light), bool(trim), evidence)
 
-    def _mark_reply_state(self, sid: str, rows: list) -> None:
+    async def _session_key_of(self, sid: str) -> str:
+        """插件里的 sid（gm:1145141974）→ 框架记忆用的 session_key（人格:gm:1145141974）。"""
+        cache = getattr(self, "_sid_key_cache", None)
+        if cache is None:
+            cache = self._sid_key_cache = {}
+        if sid in cache:
+            return cache[sid]
+        key = ""
+        # 一、记忆服务自己列会话（部署版上下文里没有 session_manager，只有 session_mgr）
+        mh = getattr(self.ctx, "message_history", None)
+        if mh is not None:
+            try:
+                got = mh.list_sessions()
+                if inspect.isawaitable(got):
+                    got = await got
+                for item in got or []:
+                    cand = str(getattr(item, "session_id", "") or "")
+                    if cand == sid or cand.endswith(":" + sid):
+                        key = cand
+                        break
+            except Exception:
+                key = ""
+        # 二、会话管理器（不同版本名字不一样）
+        if not key:
+            sm = (getattr(self.ctx, "session_mgr", None)
+                  or getattr(self.ctx, "session_manager", None))
+            if sm is not None:
+                try:
+                    got = sm.get_sessions(include_content=False)
+                    if inspect.isawaitable(got):
+                        got = await got
+                    for item in got or []:
+                        if (str(getattr(item, "session_type", "")) + ":"
+                                + str(getattr(item, "session_id", ""))) == sid:
+                            key = str(getattr(item, "sid", "") or "")
+                            break
+                except Exception:
+                    key = ""
+        # 三、最后兜底：人格名 + sid（框架的会话键就是 适配器名:类型:id）
+        if not key and ":" in sid:
+            try:
+                name = self._bot_name(sid)
+            except Exception:
+                name = ""
+            if name:
+                key = str(name) + ":" + sid
+        if key:
+            cache[sid] = key
+        return key
+
+    async def _reply_evidence(self, sid: str) -> list:
+        """框架记忆里这个会话最近发出去的 bot 消息时间（秒），给走势图兜底用。
+
+        只读，30 秒缓存。框架没提供 message_history、或者查询出错，都返回空列表，
+        调用方就退回原来的「查不到记录 = missing」。
+        """
+        now = time.time()
+        cache = getattr(self, "_evidence_cache", None)
+        if cache is None:
+            cache = self._evidence_cache = {}
+        hit = cache.get(sid)
+        if hit is not None and now - hit[0] < 30.0:
+            return hit[1]
+        out = []
+        try:
+            svc = getattr(self.ctx, "message_history", None)
+            key = await self._session_key_of(sid)
+            if svc is not None and key:
+                page = await svc.list_messages(key, limit=200)
+                for rec in getattr(page, "messages", None) or []:
+                    if str(getattr(rec, "direction", "") or "") != "outgoing":
+                        continue
+                    try:
+                        ts = float(getattr(rec, "timestamp", 0) or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if ts:
+                        out.append(ts)
+        except Exception:
+            logger.debug("[multi-decision] 读框架消息历史失败（走势图兜底跳过）", exc_info=True)
+            out = []
+        cache[sid] = (now, out)
+        return out
+
+    def _mark_reply_state(self, sid: str, rows: list, evidence=None) -> None:
         """给判定「要回」的决策轮标一句：之后那一轮回复到底怎么了。
 
         用户 m35302：判定要回不等于真的回了——可能模型跑出空输出，也可能那一轮压根
@@ -5996,21 +6276,45 @@ class MultiDecisionPlugin(BasePlugin):
           failed  → 跑出错
           missing → 过了宽限也没有对应的回复请求，分不清失败还是空输出，按失败算
           pending → 刚判完、回复还在路上，先别急着画成失败
+
+        evidence 是框架记忆里这个会话最近发出的 bot 消息时间（秒）。用户 m18435
+        第 1 条：插件热重载会把在飞的那一轮冲掉，那一轮永远没有请求记录，可回复
+        明明发出去了——页面上却盖一根红柱子说失败。记录找不到时拿它兜底。
         """
         if not rows or self.request_log is None:
             return
+        if not any(bool(it.get("decision_reply")) for it in rows):
+            return
         try:
-            all_rows = self.request_log.list_rounds_cached(sid, 200)
+            # 回复表份数与快照保留份数独立；查归属必须覆盖仍在展示的历史。
+            # 只读轻量摘要，避免为了判柱子颜色重算整批请求的 trace/前缀。
+            depth = max(200, self._snap_keep_of(sid), self._snap_show_of(sid),
+                        self._snap_total_of(sid))
+            all_rows = self._cached_rows(sid, depth, light=True)
         except Exception:
             logger.debug("[multi-decision] 回复轮索引失败", exc_info=True)
             return
         cand = []
+        scanned_ts = []
+        decisions = set()
         for it in all_rows or []:
             if not isinstance(it, dict):
                 continue
+            try:
+                at = float(it.get("ts") or 0)
+            except (TypeError, ValueError):
+                continue
+            if at > 0:
+                scanned_ts.append(at)
+                if bool(it.get("decision_only")):
+                    decisions.add(at)
             if bool(it.get("decision_only")) or bool(it.get("trim_only")):
                 continue
             if str(it.get("outcome") or "") == "trim":
+                continue
+            # 用户 m17492 图5/图6：通知回调轮不是「对上一轮决策的回复」，
+            # 除非它自己真的回了话，否则不能拿来当命中。
+            if bool(it.get("notice_only")) and not bool(it.get("replied")):
                 continue
             if not bool(it.get("decision_passed")):
                 continue
@@ -6019,9 +6323,10 @@ class MultiDecisionPlugin(BasePlugin):
             except (TypeError, ValueError):
                 continue
         cand.sort(key=lambda x: x[0])
-        # 比还留着的最老一轮复复记录还早的决策，后面那轮回复早就被清掉了。
-        # 查不到不等于失败，这种一律算「不知道」，别给老记录盖一根红柱子。
-        oldest = cand[0][0] if cand else 0.0
+        # 只有找不到后续回复和框架发言证据时，才用保留边界判断是否未知。
+        # 决策往往比对应的首条回复早几秒，不能在匹配之前就把它排除。
+        oldest = min(scanned_ts) if scanned_ts else 0.0
+        decisions = sorted(decisions)
         now = time.time()
         for it in rows:
             if not bool(it.get("decision_reply")):
@@ -6030,16 +6335,24 @@ class MultiDecisionPlugin(BasePlugin):
                 t0 = float(it.get("ts") or 0)
             except (TypeError, ValueError):
                 continue
-            if not oldest or t0 < oldest:
+            # 下一次判定之后的请求归下一轮，不能让两次决策认领同一回复。
+            next_at = next((at for at in decisions if at > t0), 0.0)
+            hits = [r1 for t1, r1 in cand
+                    if t0 < t1 <= t0 + 300 and (not next_at or t1 < next_at)]
+            if len(hits) > 1:
                 it["reply_state"] = "unknown"
                 continue
-            hit = None
-            for t1, r1 in cand:
-                if t0 < t1 <= t0 + 300:
-                    hit = r1
-                    break
+            hit = hits[0] if hits else None
             if hit is None:
-                it["reply_state"] = "pending" if (now - t0) < 90 else "missing"
+                # 框架发言兜底也遵守相邻决策边界；明确发出了就不必等宽限期。
+                if any(t0 < t1 <= t0 + 300 and (not next_at or t1 < next_at)
+                       for t1 in (evidence or ())):
+                    it["reply_state"] = "replied"
+                    continue
+                if (now - t0) < 90:
+                    it["reply_state"] = "pending"
+                    continue
+                it["reply_state"] = "unknown" if not oldest or t0 < oldest else "missing"
                 continue
             out = str(hit.get("outcome") or "")
             if bool(hit.get("replied")) or out == "replied":
@@ -6102,7 +6415,8 @@ class MultiDecisionPlugin(BasePlugin):
             return 0
 
     def _requests_payload(self, sid: str, limit: int = 20, kind: str = "request",
-                          light: bool = False, with_trims: bool = False) -> dict:
+                          light: bool = False, with_trims: bool = False,
+                          evidence=None) -> dict:
         """api_requests 的计算体。只读盘与内存，放线程里跑是安全的。"""
         # 用户 m13250 第 2 条：请求页标题要跟着「保留请求数」走，所以 limit<=0 就按保留数给满，
         # 顺便把 keep 一起回给前端（标题写「最近 N 次请求（上限 M 次）」用）。
@@ -6116,7 +6430,12 @@ class MultiDecisionPlugin(BasePlugin):
         # 回复上限（100）顶掉，决策分支里就再也看不到「要满」了。
         _wants_all = limit is None or limit <= 0
         if _wants_all:
-            limit = keep
+            # 轻量趋势按窗口快照显示上限取满，冷启动不依赖前端先取得 cap。
+            # 回复/决策表的非轻量列表仍遵守各自的记录显示上限。
+            if light and (with_trims or str(kind or "request") == "decision"):
+                limit = self._snap_show_of(sid) or self._snap_keep_of(sid) or keep
+            else:
+                limit = keep
         # v3.91（用户 m05749）：决策记录与回复记录同一个目录、靠 decision_only 分账，
         # 所以多取几倍再筛，否则筛完只剩几条。决策项不走请求那一套（没有轨迹 / 重试链）。
         if str(kind or "request") == "decision":
@@ -6128,19 +6447,24 @@ class MultiDecisionPlugin(BasePlugin):
                 _dec_keep = 0
             if _dec_keep > 0:
                 keep = _dec_keep
-                if _wants_all:
+                if _wants_all and not light:
                     limit = keep
             take = max(int(limit) * 4, 120)
             rows = self._cached_rows(sid, take, light=bool(light))
             # v3.94（用户 m08398 图7/图8）：决策行照回复记录的列给数据——
             # 真实模型名（配置键换成「供应商 / 模型名」）、token（入/出）、缓存命中。
             labels = {}
+            # 用户 m15537：渠道拆成独立一列，模型列只留模型名，这里分开存三份。
+            channels = {}
+            models_only = {}
             fast_label = ""
             try:
                 for m in self._decision_models():
                     val = str(m.get("value") or "")
                     if val:
                         labels[val] = str(m.get("label") or "")
+                        channels[val] = str(m.get("provider") or "")
+                        models_only[val] = str(m.get("model") or "")
                         if m.get("fast"):
                             fast_label = val
                 # 用户 m06706：JEV 用的是 decision 类模型，不在上面那份 llm/vlm 清单里，
@@ -6150,6 +6474,8 @@ class MultiDecisionPlugin(BasePlugin):
                         val = str(m.get("value") or "")
                         if val and val not in labels:
                             labels[val] = str(m.get("label") or "")
+                            channels[val] = str(m.get("provider") or "")
+                            models_only[val] = str(m.get("model") or "")
                 except Exception:
                     logger.debug("[multi-decision] JEV 模型名映射失败", exc_info=True)
             except Exception:
@@ -6171,12 +6497,17 @@ class MultiDecisionPlugin(BasePlugin):
                 # 用户 m06706：JEV 转交时 decision_model 是「JEV 模型 → 普通决策模型」，
                 # 两段分别换成真名，别让页面显示两串 provider:model。
                 _parts = [p.strip() for p in key.split("→")] if key else []
-                it["model_label"] = (" → ".join(labels.get(p) or (p or "跟随默认") for p in _parts)
+                # 用户 m15537：模型列只留模型名（以前是「供应商 / 模型名」拼在一起）。
+                it["model_label"] = (" → ".join(models_only.get(p) or labels.get(p) or (p or "跟随默认")
+                                               for p in _parts)
                                      if _parts else "跟随默认")
                 # 用户 m00375 第 8 条：走第三方接口时决策模型只有模型名，渠道没标。
-                # 这里单独给一格渠道名，前端在模型前面加「自定义接口 · 」。
-                it["model_channel"] = ("自定义接口"
-                                       if str(it.get("decision_backend") or "") == "custom" else "")
+                # 用户 m15537：渠道列独立后这里给供应商实例名；查不到才退回「自定义接口」。
+                _chans = [channels.get(p) or "" for p in _parts] if _parts else []
+                _chan = " → ".join([c for c in _chans if c])
+                if not _chan and str(it.get("decision_backend") or "") == "custom":
+                    _chan = "自定义接口"
+                it["model_channel"] = _chan
                 in_tok = int(it.get("input_tokens") or 0)
                 cac = int(it.get("cached_tokens") or 0)
                 it["tokens"] = {
@@ -6193,10 +6524,13 @@ class MultiDecisionPlugin(BasePlugin):
                 except Exception:
                     logger.debug("[multi-decision] 决策命中预估失败", exc_info=True)
                     it["hit_estimate"] = None
+                # v5.x（用户 m12891）：这家模型从来没回报过缓存，实测那格就别写 0%。
+                if self._mark_cache_reported(it) is False:
+                    it["tokens"]["cache_hit"] = None
                 out.append(it)
             # 用户 m35302：判定要回的那一轮，先看清后面那一轮回复到底有没有发生，
             # 走势图据此决定画不画这根柱子。
-            self._mark_reply_state(sid, out)
+            self._mark_reply_state(sid, out, evidence)
             # v4.13（用户 m18728 第 1 条）：决策分支以前直接 return，没走 _attach_round_trims，
             # trims_after 这个字段压根不存在——走势图上决策柱永远拿不到裁切标记，
             # 判要回/判不回之后真正发生的裁切都没法标在决策柱上。这里补上同一套绑定。
@@ -6222,6 +6556,12 @@ class MultiDecisionPlugin(BasePlugin):
                     for key in list(it.keys()):
                         if key not in keep_keys:
                             it.pop(key, None)
+            # v4.9x（用户 m02038 第 3 条）：列表页不画决策图片、也不画轨迹，这两项占了
+            # 整包一半的体积（100 行 660KB → 约 330KB，点开决策记录要等的那一下主要
+            # 花在传它和解析它上）。详情走 /request 单独读盘，不受影响。
+            for it in picked:
+                it.pop("decision_images", None)
+                it.pop("_trace", None)
             return {"items": picked, "keep": keep, "kind": "decision",
                     "snap_keep": self._snap_keep_of(sid),
                     "snap_show": self._snap_show_of(sid),
@@ -6229,7 +6569,11 @@ class MultiDecisionPlugin(BasePlugin):
         # v3.91：决策快照跟请求快照同一个目录，回复记录里不该冒出「进阶决策」那些行，
         # 所以多取一些、把 decision_only 滤掉再截断。
         _with_trims = bool(with_trims)
-        _take = max(int(limit) * 2, 200)
+        # v4.9x（用户 m11086）：决策快照与回复快照同目录，决策轮比回复轮多好几倍。
+        # 以前固定按 limit*2 取文件，筛掉决策行后常常只剩三分之一——页头写「最近 100 次」，
+        # 表里只有 33 行，往前的回复记录看着像「没了」。起始深度按 4 倍给，还不够就翻倍再取，
+        # 直到凑够 _bar_cap 行或把目录读空（list_rounds 自己封顶 1000 份）。
+        _take = max(int(limit) * 4, 400)
         # v4.80（用户 2026-11-07 第 3 条）：走势图要的是「盘上还留着的每一次回复/裁切快照」，
         # 回复记录页那套 100 行截断不能套到它身上——盘上还有的快照画不出柱子，两次裁切
         # 中间就像是断了一大片。这里按「回复上限 + 裁切上限（= 窗口快照上限）」给满。
@@ -6241,17 +6585,28 @@ class MultiDecisionPlugin(BasePlugin):
                 _trim_cap = 0
             _bar_cap = max(int(limit), 1) + max(_trim_cap, 0)
             _take = max(_take, _bar_cap * 3, 1000)
-        items = self._cached_rows(sid, _take, light=bool(light))
-        # v4.07（用户 m13302）：窗口裁切快照不是一次真实请求——裁切发生在请求组装之前、
-        # 没有模型调用，混在回复记录里既占行也把「本页合计」的命中率带偏。
-        # v4.73（用户 m02417）：可这一刀也把裁切快照从走势图上抹掉了——走势图的柱子只认
-        # 这份列表，空闲巡检裁的那一次没有对应轮次，橙色只能贴回上一轮，看着像「没生成快照」。
-        # 现在走势图那条路带 trim=1 单独要它们（各自成一根青柱，点开是裁前那一份完整 ②），
-        # 回复记录列表仍按上面的口径不给。
-        items = [it for it in items
-                 if not bool(it.get("decision_only"))
-                 and (_with_trims or (not bool(it.get("trim_only"))
-                                      and str(it.get("outcome") or "") != "trim"))][:_bar_cap]
+        while True:
+            _rows = self._cached_rows(sid, _take, light=bool(light))
+            # v4.07（用户 m13302）：窗口裁切快照不是一次真实请求——裁切发生在请求组装之前、
+            # 没有模型调用，混在回复记录里既占行也把「本页合计」的命中率带偏。
+            # v4.73（用户 m02417）：可这一刀也把裁切快照从走势图上抹掉了——走势图的柱子只认
+            # 这份列表，空闲巡检裁的那一次没有对应轮次，橙色只能贴回上一轮，看着像「没生成快照」。
+            # 现在走势图那条路带 trim=1 单独要它们（各自成一根青柱，点开是裁前那一份完整 ②），
+            # 回复记录列表仍按上面的口径不给。
+            items = [it for it in _rows
+                     if not bool(it.get("decision_only"))
+                     and (_with_trims or (not bool(it.get("trim_only"))
+                                          and str(it.get("outcome") or "") != "trim"))]
+            # v4.9x（用户 m11086）：带 trim 时裁切行也占名额，可它们稍后会被「已经画成
+            # 柱子」那一刀剔掉——先按「上限 + 裁切行数」截，剔完才够 limit 行回复。
+            if _with_trims:
+                _n_trim = sum(1 for it in items if self._is_trim_row(it))
+                items = items[: _bar_cap + _n_trim]
+            else:
+                items = items[:_bar_cap]
+            if len(items) >= _bar_cap or len(_rows) < _take:
+                break
+            _take *= 2
         # 列表里就把 token、用时与命中带上，不用点开每一轮才知道花了多少
         for it in items:
             # v4.79（2026-11-07 性能）：裁切快照不是一次请求，没有轨迹、没有重试、也没有
@@ -6397,6 +6752,27 @@ class MultiDecisionPlugin(BasePlugin):
                     "hit": round(_c3 * 100.0 / _in3, 1) if _in3 > 0 else None,
                 })
             it["step_stats"] = step_stats
+            # v4.87（用户 m13442 第 2 条）：中转站（反重力 Gemini）不回报 cached_tokens，
+            # 上报的 input 只是「没命中的那一截」，所以实测命中列常年 0%，看着像一次都没命中。
+            # 这里按「完整 prompt ≈ 文本 token + 图片张数 × 1032」反推：
+            #   第 1 步完整 = prompt_tokens_est，命中 = 1 − 上报 ÷ 完整；
+            #   第 k 步完整 = 上一步完整 + 本步上报（本步上报就是新增的那一截）。
+            # 只在「整轮 cached 全是 0」且「上报明显小于完整（< 75%）」时才认，否则说明
+            # 这一轮真没命中、或者 provider 报的就是完整 input（DeepSeek 那种），照旧写 0。
+            # 反推值单独放 hit_est，不动实测的 hit。
+            _full = int(it.get("prompt_tokens_est") or 0)
+            if _full > 0 and step_stats:
+                # 反推口径统一在 state/tracer.py（价目页算钱用的是同一份），这里只把结果
+                # 摊到每一步：hit_est 是反推命中率，full_est 是这一步的完整 prompt。
+                _guess = infer_cached_steps(_full, step_stats, infer_gate(it))
+                if _guess:
+                    for _sp, _g in zip(step_stats, _guess):
+                        if not isinstance(_sp, dict) or not _g:
+                            continue
+                        _sp["full_est"] = int(_g["full"])
+                        _sp["hit_est"] = round(
+                            _g["cached"] * 100.0 / _g["full"], 1) if _g["full"] > 0 else 0.0
+                    it["hit_inferred"] = True
         # 原错误那一轮补一句「后来重试了几次、成没成、回复落在哪一轮」（用户 2026-10-24 图5）。
         # 只读拼接：请求记录文件一个字节都不改，靠 retry_history.json 里持久化的链。
         for it in items:
@@ -6417,6 +6793,8 @@ class MultiDecisionPlugin(BasePlugin):
                 prev = ((prev_it.get("tokens") or {}).get("cache_hit"))
             it["prev_cache_hit"] = prev
             it["hit_estimate"] = self._hit_estimate(it)
+            # v5.x（用户 m12891）：这一轮算实测还是算推算，按记录自己冻结。
+            self._mark_cache_reported(it)
             # v3.60（用户 m18059 第 6 条）：逐步命中预估。
             # 第 1 步的前缀就是整轮的公共前缀，直接沿用整轮的 hit_estimate（含间隔/图片校准）；
             # 第 k 步（k>0）的前缀恰好是上一步的整段输入，所以 上一步 in ÷ 本步 in 就是这一步
@@ -6433,13 +6811,55 @@ class MultiDecisionPlugin(BasePlugin):
                         _this_in = int(_sp.get("in") or 0)
                     except (TypeError, ValueError):
                         _this_in = 0
-                    if _k == 0:
+                    _est = _sp.get("hit_est")
+                    if _est is not None:
+                        # v4.87：反推出来的命中率比「上一步 in ÷ 本步 in」准——中转站只报
+                        # 未命中那截时，后者会算出 845% 这种数。
+                        _sp["est"] = _est
+                    elif _k == 0:
                         _sp["est"] = it.get("hit_estimate")
-                    elif _this_in > 0 and _prev_in > 0:
+                    elif _this_in > _prev_in > 0:
+                        # 用户 m15537：中转站只报「未命中那截」时，这一步的 in 会比上一步还小，
+                        # 「上一步整段输入就是这一步的前缀」这个前提不成立，比例算出来是假的
+                        # （以前会算出 845.6%）。这种步留空，前端按有值的步加权平均。
                         _sp["est"] = round(_prev_in * 100.0 / _this_in, 1)
                     else:
                         _sp["est"] = None
                     _prev_in = _this_in
+                # v4.9x（用户 m02038 第 2 条）：多步轮的整轮命中预估要按各步加权。
+                # 单步轮 hit_estimate 就是前缀复用比例；2 步以上时第 2 步起几乎整段命中，
+                # 只写第 1 步的比例会系统性低估（3 步轮实测 63.8%，页面写 43.6%）。
+                # 权重用 full_est（这一步完整 prompt 的 token 数），没有就退回 in。
+                if len(_stats) > 1:
+                    _wsum = 0.0
+                    _vsum = 0.0
+                    for _sp in _stats:
+                        if not isinstance(_sp, dict):
+                            continue
+                        _v = _sp.get("est")
+                        if _v is None:
+                            continue
+                        try:
+                            _w = float(_sp.get("full_est") or _sp.get("in") or 0)
+                        except (TypeError, ValueError):
+                            _w = 0.0
+                        if _w <= 0:
+                            continue
+                        _wsum += _w
+                        _vsum += float(_v) * _w
+                    if _wsum > 0:
+                        it["hit_estimate_single"] = it.get("hit_estimate")
+                        it["hit_estimate"] = round(_vsum / _wsum, 1)
+            # 上游没回报缓存时，实测那一格没有意义（写 0% 会被当成一次都没命中）。
+            # 反推得出来的（hit_est）照旧显示 ≈，反推不出来的留空，前端画「—」。
+            if it.get("cache_reported") is False:
+                it["hit_inferred"] = True
+                _tk = it.get("tokens")
+                if isinstance(_tk, dict):
+                    _tk = dict(_tk)
+                    _tk["cache_hit"] = None
+                    it["tokens"] = _tk
+                it["first_cache_hit"] = None
             # v3.22 第 5 条：公式不动，但把「这一轮为什么低/高」算成一句话给悬停用
             it["hit_note"] = self._hit_note(it, prev_it)
         self._attach_round_trims(sid, items)
@@ -6518,6 +6938,90 @@ class MultiDecisionPlugin(BasePlugin):
                 "snap_show": self._snap_show_of(sid),
                 "snap_total": self._snap_total_of(sid)}
 
+    def _cache_silent_models(self) -> set:
+        """整本账里从来没回报过缓存的模型（v5.x 用户 m12891）。
+
+        「这家不回报 cached_tokens」以前是按「今日 / 最近 24 小时」的窗口现算的
+        （state/tracer.py 的 _silent_cache_models：窗口里连 3 轮 cached 全是 0 就算），
+        切模型之后旧模型掉出窗口，同一批老记录就会从「推算」翻成「实测 0%」。
+        现在改读整本用量账：一个模型要么报过、要么从没报过，跟当前用哪家、
+        窗口里还剩谁都没关系。新记录自己带 cache_reported，根本不查这里。
+        """
+        now = time.time()
+        cached = getattr(self, "_silent_cache_cache", None)
+        if cached and (now - cached[0]) < 60.0:
+            return cached[1]
+        out = set()
+        path = None
+        tracer = getattr(self, "tracer", None)
+        if tracer is not None:
+            path = getattr(tracer, "ledger", None)
+        if path is None:
+            path = Path(self.store.dir).parent / "stats" / "tokens.jsonl"
+        try:
+            seen = {}
+            with Path(path).open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    model = str(row.get("model") or "")
+                    if not model:
+                        continue
+                    try:
+                        _in = int(row.get("input") or 0)
+                        _c = int(row.get("cached") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if _in <= 0:
+                        continue
+                    total, hit = seen.get(model, (0, 0))
+                    seen[model] = (total + 1, hit + (1 if _c > 0 else 0))
+            for model, (total, hit) in seen.items():
+                if total >= 3 and hit == 0:
+                    out.add(model)
+        except Exception:
+            logger.debug("[multi-decision] 读 tokens.jsonl 判不回报缓存的模型失败", exc_info=True)
+        self._silent_cache_cache = (now, out)
+        return out
+
+    @staticmethod
+    def _row_model_of(item: dict) -> str:
+        """这一行是哪家模型跑的：回复轮看 reply_model，决策轮看 decision_model。"""
+        for key in ("reply_model", "decision_model", "model"):
+            val = item.get(key)
+            if val:
+                return str(val)
+        return ""
+
+    def _mark_cache_reported(self, it: dict):
+        """这一轮按实测还是按推算，钉在记录上（v5.x 用户 m12891）。
+
+        新记录落盘时就带了 cache_reported（上游到底给没给 cached_tokens）；
+        老记录没这个字段，退回「整本账里这家模型有没有报过」——不再看时间窗口，
+        所以切换模型之后，老记录原来怎么算还怎么算，新记录按新模型走。
+
+        返回 True / False；没真正发出请求（裁切快照、失败轮）返回 None——那种行
+        谈不上「上游回报没回报」，命中列本来就该是「—」。
+        """
+        _tk = it.get("tokens")
+        if not isinstance(_tk, dict) or not _tk.get("input"):
+            it["cache_reported"] = None
+            return None
+        rep = it.get("cache_reported")
+        if rep is None:
+            rep = self._row_model_of(it) not in self._cache_silent_models()
+        it["cache_reported"] = bool(rep)
+        if not rep:
+            it["cache_unreported"] = True
+        return bool(rep)
+
     @staticmethod
     def _hit_estimate_with_images(item: dict, base=None):
         """含图轮的命中预估：文字按字符前缀比例，图片按「见过几张」折算（v3.53 用户 m08226 第 3 条）。
@@ -6553,7 +7057,7 @@ class MultiDecisionPlugin(BasePlugin):
 
     @staticmethod
     def _hit_estimate(item: dict):
-        """命中预估（v3.19 用户 m41511 第 8 条）。
+        """命中预估（v3.19 用户 m41511 第 8 条；v5.x 用户 m11874 重做）。
 
         离线拿盘上 97 轮实测比过几套公式（MAE，pp）：
           纯前缀字符比例 11.3 ｜ 0.5 前缀 + 0.5 上一轮实测 15.2 ｜
@@ -6563,18 +7067,62 @@ class MultiDecisionPlugin(BasePlugin):
           工具定义，和分子不是一个尺度，会把预估系统性压低（线上 57.1% 估成 14.6%）；
         · 和上一轮实测各半平均更糟：上一轮 0% 往往意味着刚把这段写进缓存，本轮恰恰
           会命中，各半平均等于直接砍半。
-        唯一有效的修正是间隔：provider 的 KV 缓存会过期，距上一轮超过 3 小时打五折
-        （3h 阈值在 97 轮样本上 MAE 10.1pp、误差超 20pp 的只占 12.4%，比 1h/6h/12h 都好）。
+
+        v5.x（2026-11-12 用户 m11874「预估的确实不准」）：字符比例在带图轮系统性偏高
+        ——图片是 token 但只有 0 字符，system prompt 又占字符大头、token 小头。改用
+        「消息条数前缀比例」cache_prefix_len / cache_series_len 做第二把尺子，两者按
+        0.3 / 0.7 混合，但条数那一份先和字符比例取 min（条数比例虚高时以字符比例为准）。
+        311 轮 DS 决策轮实测：MAE 11.93→7.40、偏差 +5.82→+0.31，中位误差 5.4pp；
+        条数比例 ≥ 字符比例的 107 轮用纯字符比例（MAE 6.48、偏差 −0.43），
+        低于的 204 轮用 0.3/0.7 混合（MAE 7.88、偏差 +0.70），前后半段各自 7.27 / 7.80。
+        同时去掉两处旧校准：
+        · 全局 −2pp：混合后偏差只剩 +1.35，再减就过头；
+        · 间隔 >3h 打五折：用户 m11874 指出各家缓存已能维持很久，308 轮里 >3h 的样本
+          极少，去掉后 MAE 几乎不变。
 
         含图轮拆成「文字 + 图片」两份（v3.53 用户 m08226 第 3 条）：``assembled`` 的 content
         是纯字符串，图片只活在 native 投影里，字符前缀比例把整张图当 0 字符，于是这轮新加
         一张图时预估会高得离谱（线上 93.9%，实测 65.2%）。现在只把「图片占 input 的那一份」
         单独按「见过几张」折算（公式见 ``_hit_estimate_with_images``），文字那份继续用字符
-        比例，所以纯文本轮的预估一个数都不变。
+        比例，所以纯文本轮的预估一个数都不变。含图路径的 −2pp 校准沿用 v3.53 的拟合结果。
 
-        再叠一个全局校准 −2pp（v3.53）：114 轮真实记录里字符口径整体偏高 5.0pp，
-        减 2pp 后偏差 2.8pp、MAE 9.36→8.76（带新图 31 轮 9.70→7.71，多图多新图 14 轮 7.59）。
+        v5.x 三版（2026-11-12 用户 m12441「每条都尽量精准」）：上面两版都还站在字符
+        前缀上，而字符前缀本身就是错的尺子（图片 0 字符、system prompt 字符多 token 少、
+        一条消息只改后半段也算命中）。现在改由 request_log 按「token 份额」算好——
+        分子是消息指纹公共前缀里那些消息的 token，分母是整轮 token，图片按张折算——
+        行里带 token_prefix_percent，这里直接用；拿不到才退回下面的字符口径。
+        311 轮 DS 决策轮实测：字符口径 11.93pp → 混合口径 7.44pp → 本口径 4.5pp，
+        中位误差 2.6pp，残差只剩上游真失效的那两轮。
         """
+        # 没有真实请求的轮次（裁切快照、上游失败）没有实测可比，预估写出来只会误导。
+        _inp = 0
+        _srcs = [item.get("input_tokens")]
+        _tok = item.get("tokens")
+        if isinstance(_tok, dict):
+            _srcs.append(_tok.get("input"))
+        _st = item.get("step_stats")
+        if isinstance(_st, list):
+            _step_sum = 0
+            for _sp in _st:
+                if isinstance(_sp, dict):
+                    try:
+                        _step_sum += int(_sp.get("in") or 0)
+                    except (TypeError, ValueError):
+                        pass
+            _srcs.append(_step_sum)
+        for _v in _srcs:
+            try:
+                _inp = max(_inp, int(_v or 0))
+            except (TypeError, ValueError):
+                pass
+        if _inp <= 0:
+            return None
+        token_est = item.get("token_prefix_percent")
+        if token_est is not None:
+            try:
+                return round(max(0.0, min(100.0, float(token_est))), 1)
+            except (TypeError, ValueError):
+                pass
         base = item.get("prefix_reuse_percent")
         if base is None:
             return None
@@ -6584,11 +7132,21 @@ class MultiDecisionPlugin(BasePlugin):
             return None
         mix = MultiDecisionPlugin._hit_estimate_with_images(item, base)
         if mix is not None:
-            base = mix
-        base -= 2.0  # 全局校准：114 轮实测字符口径整体偏高 5pp，减 2pp 后 MAE 最优
-        gap = item.get("gap_from_previous")
-        if isinstance(gap, (int, float)) and gap > 3 * 3600:
-            base *= 0.5
+            base = mix - 2.0  # 含图路径沿用 v3.53 的 −2pp 校准（114 轮拟合时含这一项）
+        else:
+            # v5.x：消息条数前缀比例做第二把尺子，和字符比例 0.3/0.7 混合。
+            try:
+                _ser = float(item.get("cache_series_len") or 0)
+                _pre = float(item.get("cache_prefix_len") or 0)
+            except (TypeError, ValueError):
+                _ser = _pre = 0.0
+            if _ser > 0:
+                _msg = max(0.0, min(100.0, _pre * 100.0 / _ser))
+                # v5.x 二版（2026-11-12 用户 m11874）：条数比例高于字符比例时，字符比例
+                # 本身更准（107 轮 MAE 6.48、偏差 −0.43）；低于时 0.3/0.7 混合更准
+                # （204 轮 MAE 7.88、偏差 +0.70）。取 min 正好是这两簇的分段最优：
+                # 311 轮 MAE 7.51→7.40、偏差 +1.33→+0.31，中位误差 5.4pp。
+                base = base * 0.3 + min(base, _msg) * 0.7
         return round(max(0.0, min(100.0, base)), 1)
 
     @staticmethod
@@ -6603,8 +7161,20 @@ class MultiDecisionPlugin(BasePlugin):
         """
         est = item.get("hit_estimate")
         if est is None:
+            # v5.x：裁切快照与失败轮根本没发请求，说成「第一轮」会让人以为能估。
+            _out = str(item.get("outcome") or "")
+            _tin = 0
+            try:
+                _tin = int((item.get("tokens") or {}).get("input") or 0)
+            except (TypeError, ValueError):
+                _tin = 0
+            if _out in ("trim", "error", "failed") or _tin <= 0:
+                return "这一轮没有成功发出请求（裁切或失败），没有实测命中可比"
             return "第一轮：没有上一轮可比，无法估算"
         parts = []
+        if item.get("token_prefix_basis") == "system_only":
+            # v5.x：这一轮没有和上一轮共享的历史消息，能复用的只有系统提示词那一段。
+            parts.append("没有可复用的历史前缀，只按系统提示词那段算")
         cur_w = item.get("window_size")
         prev_w = (prev_item or {}).get("window_size")
         if isinstance(cur_w, int) and isinstance(prev_w, int) and prev_w > 0:
@@ -6620,13 +7190,21 @@ class MultiDecisionPlugin(BasePlugin):
                 parts.append("窗口 %d 条，与上一轮相同" % cur_w)
         gap = item.get("gap_from_previous")
         if isinstance(gap, (int, float)) and gap > 3 * 3600:
-            parts.append("距上一轮 %.1f 小时，超过 3 小时按缓存过期打五折" % (gap / 3600.0))
+            # v5.x（用户 m11874）：各家缓存已能维持很久，不再按间隔打折，这里只说明事实。
+            parts.append("距上一轮 %.1f 小时，缓存一般仍有效，未按时间打折" % (gap / 3600.0))
         imgs = int(item.get("image_count") or 0)
         new_imgs = int(item.get("incoming_image_count") or 0)
         if imgs > 0 and new_imgs > 0:
             parts.append("本轮新加 %d 张图（共 %d 张），新图那部分 token 不进缓存，"
                          "已按图片占比从预估里扣掉" % (new_imgs, imgs))
         act = (item.get("tokens") or {}).get("cache_hit")
+        if item.get("cache_unreported"):
+            # v5.x（用户 m12891）：上游没回报 cached_tokens 时不能拿 0% 当实测去比，
+            # 反推得出来的标「≈」，反推不出来的直说无法反推。
+            _inf = any(isinstance(_sp, dict) and _sp.get("hit_est") is not None
+                       for _sp in (item.get("step_stats") or []))
+            parts.append("上游没回报 cached_tokens，这一轮命中%s"
+                         % ("按上报 token 反推（≈）" if _inf else "无法反推"))
         if isinstance(act, (int, float)):
             if abs(est - act) >= 1.0:
                 parts.append("本轮实测 %s%%，预估%s %.1f 个百分点"
@@ -6791,6 +7369,12 @@ class MultiDecisionPlugin(BasePlugin):
         # 变成灰色「未回复」、请求记录里也多出一条像失败的记录。原样透传。
         if not failed and str(record.get("outcome") or "") == "trim":
             return {"outcome": "trim", "failed": False, "error": "", "replied": False}
+        # 用户 m17492 图5/图6：别的插件（如 nai 出图）完成通知触发的这一轮不是聊天请求，
+        # 原样透传成「工具回调」——别算成空回复，也别让它顶替上一轮的回复状态。
+        if not failed and (record.get("notice_only") is True
+                           or str(record.get("outcome") or "") == "notice"):
+            return {"outcome": "notice", "failed": False, "error": "",
+                    "replied": False, "notice_only": True}
         outcome = "error" if failed else ("replied" if record.get("replied") else "no_reply")
         if record.get("outcome") in ("pending", "running") and not failed:
             outcome = "pending"
@@ -7001,6 +7585,8 @@ class MultiDecisionPlugin(BasePlugin):
             )
         })
         rec.update(payload_metrics(data))
+        # 用户 m00942 第 4 条：快照标题后面要能点一下复制编号，编号跟柱子 tip 用同一套。
+        rec["snap_id"] = _snapshot_id(rec.get("ts"))
         # v4.86（用户 m10425 第 4 条）：轨迹本来就写在这份快照里（列表那条路也是这么取的），
         # 直接取比按 event_id 把整个目录扫一遍快得多——裁切快照一份轨迹都没有，以前
         # 每点一次都要白扫最多 300 份 JSON（实测多花 160ms 上下）。
@@ -7148,6 +7734,7 @@ class MultiDecisionPlugin(BasePlugin):
         def project_request_view(items, proof):
             return project_items(items, raw_sid, owner_rows, public_media=public_media,
                                  text_of_content=content_text, forward_proof_items=proof,
+                                 forward_media_for_mid=forward_media_for_mid,
                                  forward_display_proof_for_mid=forward_display_proof_for_mid)
 
         for field, proof in owner_proofs.items():
@@ -7591,12 +8178,97 @@ class MultiDecisionPlugin(BasePlugin):
     # v4.49（用户 m25038 第 5 项）：新版 QQ 表情库（gitee 那套）在浏览器里直连会被
     # 防盗链挡成 403，页面上永远退回老版 qzone 小黄脸——用户嫌「这个老的难看」。
     # 只能由插件后端去取一份再吐给页面；取到的图缓存在 media_cache/emoji/ 下，只下过一次。
+    #
+    # v4.52（用户 m16262 图3/图4）：gitee 那套只到 332，344「大怨种」这类 2023 年以后
+    # 的新表情取不到，页面只能退回老版 qzone——而 qzone 的 e{id+100} 只在 0~211 这些老脸
+    # 上跟 QQ 编号差 100，再往上就是另一套图（344 → e444 是 404、e344 是「面无表情」），
+    # 画出来是张完全不相干的脸。改成按编号依次试三档，都取不到才 404 让页面退回文字：
+    #   ① gitee 新版库：0~287 是「编号@2x.gif」，288~332 是「编号.哈希.png」（要查表）
+    #   ② koishijs/QFace：编号 0~507 全覆盖，每个编号一个目录，apng 动图 / png 静态图
     _EMOJI_BASE = "https://gitee.com/yxkfw/emoji-emotions/raw/master/QQ/gif/"
+    _EMOJI_HASH = {
+        "277": "277.164cfcbd3a9ed49e213c.png", "288": "288.b9c3521b5a275ec1f99b.png", "289": "289.fea51cee3cee3f64e22b.png",
+        "293": "293.dd95c4897fb462da9bf9.png", "294": "294.f7da3a3e27e120f5a554.png", "295": "295.4c0882fcf9326dd3b886.png",
+        "296": "296.147ec1f57412a25b686b.png", "297": "297.f6389ef2a0e40c258b4a.png", "298": "298.53b6380a3fd0d1f33f0f.png",
+        "299": "299.f88131c1a25c32c74a42.png", "300": "300.a01a1fa3f0888a542f36.png", "301": "301.f03fb11b30a1134a44f7.png",
+        "303": "303.7b59cd0db92c1dab250f.png", "304": "304.78267a6de9c4286adc50.png", "305": "305.5f4fb2c80e5e8c2d0879.png",
+        "311": "311.25aec566822eb85e5466.png", "312": "312.8a3bb90b393b6a6c08d9.png", "313": "313.6978dfe67d54c4f473bc.png",
+        "314": "314.854272f991ebf01ea4ad.png", "315": "315.afcfbd9c97efa723356a.png", "316": "316.0472d78bd4ef2fb58e85.png",
+        "317": "317.bde106ab796218d610c6.png", "318": "318.573b9dfceaed34db3ecc.png", "319": "319.626ae5579cd5bb58ed2a.png",
+        "320": "320.b42fcc8f8b133798e0e3.png", "321": "321.15379466db718b3cb1d5.png", "322": "322.a1b2dd1f0423a4c78383.png",
+        "323": "323.7b71b1a44244d62294d5.png", "324": "324.bc33e8fc449f270277ba.png", "325": "325.aa5af7e2d0ae8cc4dfff.png",
+        "326": "326.f5d0e503a33d09c881cf.png", "327": "327.3a61e9f0dfca7ce3f34d.png", "328": "328.cc59a3ccd4dd6bd03808.png",
+        "329": "329.c8b9312b18fb30755dd5.png", "330": "330.1b8ef33119f538852eae.png", "331": "331.701c7029724f91184a92.png",
+        "332": "332.7777dfcc2dbf80a2024c.png",
+    }
+    _EMOJI_QFACE = ("https://cdn.jsdelivr.net/gh/koishijs/QFace@master/"
+                    "public/assets/qq_emoji/%d/%s/%d.png")
+    _EMOJI_QFACE_RAW = ("https://raw.githubusercontent.com/koishijs/QFace/master/"
+                        "public/assets/qq_emoji/%d/%s/%d.png")
     _EMOJI_MAX = 2 * 1024 * 1024
+
+    @staticmethod
+    def _emoji_mime(data):
+        """看文件头认图，别拿 .gif 的名字当准（新版库里 288 以后全是 png）。"""
+        if not data:
+            return ""
+        if data.startswith(b"GIF8"):
+            return "image/gif"
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if data.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return "image/webp"
+        return ""
+
+    @classmethod
+    def _emoji_urls(cls, n):
+        """按优先级列出这个编号可能的表情图地址（前面取不到才试后面的）。"""
+        out = [cls._EMOJI_BASE + "%d@2x.gif" % n]
+        hashed = cls._EMOJI_HASH.get(str(n))
+        if hashed:
+            out.append(cls._EMOJI_BASE + hashed)
+        for tmpl in (cls._EMOJI_QFACE, cls._EMOJI_QFACE_RAW):
+            out.append(tmpl % (n, "apng", n))
+            out.append(tmpl % (n, "png", n))
+        return out
+
+    async def _emoji_fetch(self, n):
+        """依次试各图源，返回 (字节, mime)；全都不行返回 (b"", "")。"""
+        cap = self._EMOJI_MAX
+
+        def _grab(url):
+            import urllib.request
+
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"),
+                    "Referer": "https://gitee.com/",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = resp.read(cap + 1)
+            if not data or len(data) > cap:
+                return b""
+            return data
+
+        for url in self._emoji_urls(n):
+            try:
+                data = await asyncio.to_thread(_grab, url)
+            except Exception as exc:
+                logger.debug(f"[multi-decision] 取表情 {n} 失败（{url}）：{type(exc).__name__}: {exc}")
+                continue
+            mime = self._emoji_mime(data)
+            if data and mime:
+                return data, mime
+        return b"", ""
 
     @_api("GET", "/emoji")
     async def api_emoji(self, id: str = ""):
-        """按表情编号取新版表情图；取不到返回 404，页面自己退回老版。"""
+        """按表情编号取表情图；取不到返回 404，页面自己退回文字。"""
         try:
             n = int(str(id or "").strip())
         except Exception:
@@ -7611,56 +8283,28 @@ class MultiDecisionPlugin(BasePlugin):
         except Exception:
             return {"ok": False, "detail": "框架没有提供路径工具"}
         target = Path(get_data_path()) / "plugin_data" / PLUGIN_ID / "media_cache" / "emoji" / ("e%d.gif" % n)
-        blob = None
+        blob = b""
         try:
             if target.is_file() and target.stat().st_size > 0:
-
                 blob = await asyncio.to_thread(target.read_bytes)
         except Exception:
-            blob = None
-        if not blob:
-            url = self._EMOJI_BASE + "%d@2x.gif" % n
-            cap = self._EMOJI_MAX
-
-            def _grab():
-                import urllib.request
-
-                req = urllib.request.Request(
-                    url,
-                    headers={
-                        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"),
-                        "Referer": "https://gitee.com/",
-                    },
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = resp.read(cap + 1)
-                    kind = str(resp.headers.get("Content-Type") or "")
-                if len(data) > cap or not data.startswith(b"GIF8"):
-                    return b""
-                if "gif" not in kind:
-                    return b""
-                return data
-
-            try:
-
-                blob = await asyncio.to_thread(_grab)
-            except Exception as exc:
-                logger.debug(f"[multi-decision] 取表情 {n} 失败：{type(exc).__name__}: {exc}")
-                blob = b""
+            blob = b""
+        mime = self._emoji_mime(blob)
+        if not mime:
+            blob, mime = await self._emoji_fetch(n)
             if blob:
                 try:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(blob)
                 except Exception:
                     pass
-        if not blob:
+        if not blob or not mime:
             try:
-                return Response(status_code=404, content=b"")
+                return Response(status_code=404, content=b"", headers={"Cache-Control": "no-store"})
             except Exception:
                 return {"ok": False, "detail": "没有这个表情"}
         return Response(
             content=blob,
-            media_type="image/gif",
+            media_type=mime,
             headers={"Cache-Control": "private, max-age=604800"},
         )

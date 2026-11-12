@@ -59,7 +59,12 @@ def _seg_text(seg) -> str:
         return str(data.get("text") or "")
     if kind == "image":
         return "[图片]"
-    if kind in ("face", "mface", "marketface"):
+    if kind == "face":
+        # 用户 m17145：小黄脸只有 id、没有图，写成框架自己的 [Emoji N]，
+        # 页面就能按 id 取到真图（动图），不再只画一个 🙂 占位。
+        fid = str(data.get("id") or data.get("face_id") or "").strip()
+        return "[Emoji %s]" % fid if fid.isdigit() else "[表情]"
+    if kind in ("mface", "marketface"):
         return "[表情]"
     if kind == "at":
         nm = str(data.get("name") or data.get("qq") or "").strip()

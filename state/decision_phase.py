@@ -238,7 +238,13 @@ DEFAULT_CHAT_RULES = """【说话语气】口语、短句，像群里一个正�
 
 
 TOOL_HEAD = """需要外部信息（查资料、算数、看时间之类）时可以调工具，最多 %d 轮。
-工具结果会贴回给你，看到结果后再给最终判断。"""
+工具结果会贴回给你，看到结果后再给最终判断。如果调用轮数到上限仍没有合适的结果，就直接回复告知。"""
+
+
+# 回复链的工具说明（用户 m13442 第 3 条）：回复这一轮最后一定要开口，所以轮数要留一轮
+# 给「看完工具结果再写回复」——%d 传的是「回复侧最大循环轮数 − 1」，不是决策那边的数。
+REPLY_TOOL_HEAD = """下面是你可以使用的工具，最多调用 %d 轮。
+工具结果会贴回给你，看到结果后再给最终判断，然后进行回复。如果调用轮数到上限仍没有合适的结果，就直接回复告知。"""
 
 
 # 模型回「回」的各种写法。判断句只认这些，其余一律当「不回」——宁可漏，不要硬回。
@@ -386,6 +392,31 @@ def _text_of(value) -> str:
     return str(value)
 
 
+def _tool_calls_of(msg) -> list:
+    """把一条消息上的 tool_calls 规整成能直接发给上游的纯 dict 列表（v4.92，用户 m13535）。
+
+    框架记忆里是对象、测试里是 dict，字段还可能只给了一半；上游只认
+    {"id", "type": "function", "function": {"name", "arguments"}}，这里补齐，
+    取不到 id 或函数名的调用直接跳过（发出去只会让整轮 422）。
+    """
+    out = []
+    for c in (_field(msg, "tool_calls") or []):
+        cid = str(_field(c, "id") or "").strip()
+        fn = _field(c, "function") or {}
+        name = str(_field(fn, "name") or "").strip()
+        args = _field(fn, "arguments")
+        if not cid or not name:
+            continue
+        if not isinstance(args, str):
+            try:
+                args = json.dumps(args if args is not None else {}, ensure_ascii=False)
+            except Exception:
+                args = "{}"
+        out.append({"id": cid, "type": "function",
+                    "function": {"name": name, "arguments": args or "{}"}})
+    return out
+
+
 def _strip_fence(text: str) -> str:
     """去掉 markdown 代码围栏与前后废话，只留下 JSON 那一坨。"""
     s = str(text or "").strip()
@@ -526,6 +557,11 @@ class DecisionOptions:
     timeout: float = 60.0
     fail_action: str = "allow"
     tool_rounds: int = 2
+    # 用户 m13442 第 4 条：框架「代理设置」那四项改由插件接管，决策链与回复链各一套。
+    # 决策链这三个只作用于插件自己的 _tool_loop（框架那套 agent 不跑决策）。
+    tool_calls_per_turn: int = 5
+    tool_timeout: float = 180.0
+    tool_output_tokens: int = 10000
 
 
 def options_from_config(get) -> DecisionOptions:
@@ -542,7 +578,7 @@ def options_from_config(get) -> DecisionOptions:
             v = min(hi, v)
         return v
 
-    # v4.90（发版前审计）：schema 里 decision_retry_delay 是 float、设置页也是
+    # v4.90（发版前审计）：schema 里 retry_delay 是 float、设置页也是
     # step='any'，但一直走 _int 被截成整数（填 3.5 存进去变 3）。小数项单独走这个。
     def _num(key, default, lo=0, hi=None):
         try:
@@ -574,14 +610,53 @@ def options_from_config(get) -> DecisionOptions:
         tools=[str(x).strip() for x in tools if str(x).strip()],
         model=str(get("decision_model", "") or "").strip(),
         fallback=str(get("decision_fallback_model", "") or "").strip(),
-        retry=_int("decision_retry", 2, 0, 5),
-        retry_delay=_num("decision_retry_delay", 3, 0, 60),
+        # 用户 m07859：重试 / 重试间隔 / 单次超时不再各留一份，统一读基础设置页那三项。
+        retry=_int("retry_max", 2, 0, 10),
+        retry_delay=_num("retry_delay", 5, 0, 600),
         fail_switch=_int("decision_fail_switch", 2, 1, 10),
         cooldown=float(_int("decision_fallback_cooldown", 300, 30, 3600)),
-        timeout=float(_int("decision_timeout", 60, 5, 300)),
+        timeout=float(_int("watchdog_seconds", 180, 30, 600)),
         fail_action=str(get("decision_fail_action", "allow") or "allow").strip().lower(),
-        tool_rounds=_int("decision_tool_rounds", 2, 0, 5),
+        # 用户 m08678：决策页保留自己的一套次数 / 时间设置，默认值与回复一致。
+        tool_rounds=_int("decision_tool_loop", 5, 1, 10),
+        tool_calls_per_turn=_int("decision_tool_calls_per_turn", 5, 1, 20),
+        # 0 = 不限制，跟框架「工具调用超时时间」同一口径。
+        tool_timeout=_num("decision_tool_timeout", 180, 0, 600),
+        # 0 = 不限制，跟框架「工具输出上限」同一口径（估算 token，4 字节 ≈ 1 token）。
+        tool_output_tokens=_int("decision_tool_output_tokens", 10000, 0, 200000),
     )
+
+
+def _clip_tool_text(text, max_tokens: int) -> str:
+    """按「估算 token」截工具输出，口径与框架 core.agent.tool.truncate_tool_output 一致。
+
+    用户 m13442 第 4 条：框架「工具输出上限」改由插件接管，决策链的工具结果也照这个
+    口径截——0 表示不限制；超限保留首尾各一半，中间插一行说明（跟框架同一句英文，
+    模型两边看到的是同一种标记）。
+    """
+    body = str(text or "")
+    try:
+        budget = int(max_tokens)
+    except (TypeError, ValueError):
+        budget = 10000
+    if budget <= 0:
+        return body
+    max_bytes = budget * 4
+    if len(body) <= budget:
+        return body
+    encoded = body.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return body
+    marker = ("\n[Tool output truncated; original size: %d UTF-8 bytes. "
+              "Narrow the query or request a smaller range.]\n" % len(encoded))
+    if len(marker.encode("utf-8")) > max_bytes:
+        marker = "[truncated]" if max_bytes >= 11 else "[..]"
+    remaining = max_bytes - len(marker.encode("utf-8"))
+    head_bytes = (remaining + 1) // 2
+    tail_bytes = remaining // 2
+    head = encoded[:head_bytes].decode("utf-8", errors="ignore")
+    tail = encoded[-tail_bytes:].decode("utf-8", errors="ignore") if tail_bytes else ""
+    return head + marker + tail
 
 
 class DecisionPhase:
@@ -986,7 +1061,11 @@ class DecisionPhase:
                         for key in ("input_tokens", "output_tokens", "cached_tokens"))
         usage = [{"ts": request_started, "timestamp_source": "request_start",
                   "model": model_ref, **identity,
-                  "input": token_in, "output": token_out, "cached": token_cached}] if evidenced else []
+                  "input": token_in, "output": token_out, "cached": token_cached,
+                  # v5.x（用户 m12891）：上游这一响应有没有真的回报缓存命中。
+                  # 没回报时 cached 只能是 0，不能当成「实测 0%」拿去跟预估比。
+                  "cached_reported": getattr(resp, "cached_tokens", None) is not None,
+                  }] if evidenced else []
         return {
             "ok": True,
             "text": text,
@@ -995,20 +1074,26 @@ class DecisionPhase:
             "in": token_in,
             "out": token_out,
             "cached": token_cached,
+            "cache_reported": getattr(resp, "cached_tokens", None) is not None,
             "usage": usage,
         }
 
-    async def _run_tool(self, tool, args: dict):
+    async def _run_tool(self, tool, args: dict, timeout: float = 0):
         """跑一个工具，返回 (正文, 附件 refs)。
 
         v4.69（用户 m00969）：工具可以返回 ToolResult。以前一律 str(got)，带图的
         工具结果会变成一段 repr 文字——模型既看不到图，正文也读不懂。现在正文从
         assemble_result() 取，media_refs 交给 _tool_loop 拼成一条 user 消息。
+
+        用户 m13442 第 4 条：timeout > 0 时按「工具调用超时时间」掐断，超时算一次
+        失败（跟框架 execute_tool 一样回一条 error 正文，不抛出去）。
         """
         try:
             got = tool.execute(**args)
             if asyncio.iscoroutine(got):
-                got = await got
+                got = await (asyncio.wait_for(got, timeout) if timeout else got)
+        except asyncio.TimeoutError:
+            return "工具执行超时（%d 秒）：%s" % (int(timeout), getattr(tool, "name", "")), []
         except Exception as exc:
             return "工具执行失败：%s: %s" % (type(exc).__name__, exc), []
         if ToolResult is not None and isinstance(got, ToolResult):
@@ -1034,6 +1119,10 @@ class DecisionPhase:
         直接吃上一次的成功结果，不再执行——副作用工具不该因为重试被跑第二遍。
         """
         names = {str(getattr(t, "name", "") or ""): t for t in tools}
+        # 用户 m13442 第 4 条：单轮次数上限 / 超时 / 输出上限都从配置现读，改完立即生效。
+        cap = max(1, int(getattr(opt, "tool_calls_per_turn", 5) or 5))
+        timeout = float(getattr(opt, "tool_timeout", 60) or 0)
+        out_tokens = int(getattr(opt, "tool_output_tokens", 10000) or 0)
         last = await self._one_call(client, messages, tools, opt.timeout)
         budget.setdefault("usage", []).extend(last.get("usage") or [])
         rounds = 0
@@ -1042,7 +1131,7 @@ class DecisionPhase:
             calls = []
             media_all = []
             media_names = []
-            for raw in last["tool_calls"]:
+            for idx, raw in enumerate(last["tool_calls"]):
                 if isinstance(raw, dict):
                     fn = raw.get("function") if isinstance(raw.get("function"), dict) else {}
                     name = str(raw.get("name") or fn.get("name") or "").strip()
@@ -1059,6 +1148,14 @@ class DecisionPhase:
                     args = {}
                 calls.append({"id": cid, "type": "function",
                               "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}})
+                if idx >= cap:
+                    # 超出的照框架的做法回一条说明：assistant 的 tool_calls 与 tool 回执
+                    # 必须一一对上，直接丢掉会让下一轮请求被 provider 判成残缺。
+                    messages.append({"role": "tool", "tool_call_id": cid,
+                                     "content": _clip_tool_text(
+                                         "本轮工具调用次数已达上限（%d 个），这个工具没有执行。" % cap,
+                                         out_tokens)})
+                    continue
                 tool = names.get(name)
                 key = (name, json.dumps(args, ensure_ascii=False, sort_keys=True))
                 result = None
@@ -1071,7 +1168,7 @@ class DecisionPhase:
                         result = cached
                 if result is None:
                     if tool:
-                        result, media = await self._run_tool(tool, args)
+                        result, media = await self._run_tool(tool, args, timeout)
                     else:
                         result, media = "没有这个工具：" + name, []
                     # 只复用「真跑成功了」的；工具报错允许重试时再试一次。
@@ -1082,7 +1179,8 @@ class DecisionPhase:
                     media_all.extend(media)
                     if name not in media_names:
                         media_names.append(name)
-                messages.append({"role": "tool", "tool_call_id": cid, "content": result[:4000]})
+                messages.append({"role": "tool", "tool_call_id": cid,
+                                 "content": _clip_tool_text(result, out_tokens)})
             messages.insert(len(messages) - len(calls),
                             {"role": "assistant", "content": last.get("text") or "",
                              "tool_calls": calls})
@@ -1176,7 +1274,7 @@ class DecisionPhase:
                 else:
                     note = ""
                     # v4.67（用户 m02347）：上游 5xx / 429 / 超时跟这一轮带没带图无关，照样
-                    # 按同一套重试参数（decision_retry / decision_retry_delay）再试，只是日志
+                    # 按同一套重试参数（retry_max / retry_delay）再试，只是日志
                     # 里单独标一句，事后能跟「没按 JSON 回」区分开。
                     if t < tries - 1 and _is_transient_error(last.get("error")):
                         logger.warning("[multi-decision] 决策请求上游临时故障（%s），第 %d/%d 次失败，"
@@ -1377,13 +1475,49 @@ class DecisionPhase:
         msgs = []
         used = []
         image_types = ("kira_image_ref", "image_url", "image", "input_image")
+        # v4.92（用户 m13535）：窗口里留着工具往返时，调用和结果必须成对发出去，
+        # 少一边上游就 422 整轮作废（2026-11-12 早上 22 轮）。先把两边都齐的调用
+        # 挑出来，孤立的调用、孤立的结果都不发。
+        calls_all = {}
+        for _m in messages or []:
+            for _c in _tool_calls_of(_m):
+                calls_all[_c["id"]] = _c
+        has_result = set()
+        for _m in messages or []:
+            if str(_field(_m, "role") or "").strip().lower() != "tool":
+                continue
+            _cid = str(_field(_m, "tool_call_id") or "").strip()
+            if _cid:
+                has_result.add(_cid)
+        paired = set(calls_all) & has_result
+
+        def _push(_role, _content, _calls=None):
+            row = {"role": _role or "user", "content": _content}
+            if _calls:
+                row["tool_calls"] = _calls
+            msgs.append(row)
+
         for m in messages or []:
             role = str(_field(m, "role") or "").strip().lower()
             if role == "system":
                 continue
+            if role == "tool":
+                # v4.92（用户 m13535）：工具结果不再一律丢——窗口里有成对的调用时
+                # 原样带上，决策也看得到 bot 上一轮查到了什么；孤立的结果（对应的
+                # 调用已被裁掉）上游判非法（422 missing field tool_call_id），不发。
+                cid = str(_field(m, "tool_call_id") or "").strip()
+                if not cid or cid not in paired:
+                    continue
+                msgs.append({"role": "tool", "tool_call_id": cid,
+                             "content": _text_of(_field(m, "content"))})
+                continue
             content = _field(m, "content")
             raw = _text_of(content).strip()
             body = "\n".join(_clean_bot(raw)) if role == "assistant" else _clean_user(raw)
+            # 只发配对齐全的调用：有调用没结果的，上游同样会拒（tool_calls 后面
+            # 必须跟 tool 消息）。
+            mine_calls = ([c for c in _tool_calls_of(m) if c["id"] in paired]
+                          if role == "assistant" else [])
             got = by_mid.pop(_mid_of_text(raw), []) if rows else []
             inline = isinstance(content, (list, tuple)) and any(
                 isinstance(p, dict) and p.get("type") in image_types for p in content)
@@ -1420,19 +1554,23 @@ class DecisionPhase:
                             selected.append(id(row))
                             used.append(row)
                 if selected:
-                    msgs.append({"role": role or "user", "content": parts})
+                    _push(role, parts, mine_calls)
                 elif body:
-                    msgs.append({"role": role or "user", "content": body})
+                    _push(role, body, mine_calls)
             elif got and not inline:
                 # 旧记录只有正文时仍按编号兜底；有 prepared refs 的消息不得补回旧图。
                 parts = [{"type": "text", "text": body or "[图片]"}]
                 for r in got:
                     parts.append({"type": "image_url", "image_url": {"url": r["url"]}})
                     used.append(r)
-                msgs.append({"role": role or "user", "content": parts})
+                _push(role, parts, mine_calls)
             elif body:
                 # images=None/[]（包括视觉失败后的纯文字降级）不发送 content 内图片。
-                msgs.append({"role": role or "user", "content": body})
+                _push(role, body, mine_calls)
+            elif mine_calls:
+                # 正文空、纯调工具的 assistant 行：配对齐全时也要发，否则下一轮
+                # 的 tool 结果没有归属（上游只认紧跟着的那条 assistant）。
+                _push(role, "", mine_calls)
         # 对不上号的图（老记录里没带 message_id）不丢：单独一条 user 摆在最后。
         if by_mid:
             _seen = set()
