@@ -695,7 +695,12 @@ def _save_image(url: str) -> dict:
             logger.info("[multi-decision] 转发配图不是图片（按文件头判断）%s", u[:80])
             return {}
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / (key + ext)).write_bytes(blob)
+        # D12（2026-11-13 交接文档）：直接写目标文件，进程中断会留下截断图，下次
+        # is_file() 命中就当有效图复用。跟 _save_local_image 一样先写 tmp 再原子替换。
+        target = folder / (key + ext)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_bytes(blob)
+        os.replace(tmp, target)
         return {"path": "plugin_data/%s/media_cache/%s%s" % (_PLUGIN_ID, key, ext),
                 "mime": _mime_of(ext)}
     except Exception as exc:

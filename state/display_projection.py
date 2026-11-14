@@ -549,7 +549,8 @@ def _forward_cache_display(original, mid, raw_sid, chain, public_media, display_
 
 
 def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_of_content=None,
-                  forward_media_for_mid=None, forward_proof_items=None, forward_display_proof_for_mid=None) -> list:
+                  forward_media_for_mid=None, forward_proof_items=None, forward_display_proof_for_mid=None,
+                  original_media_for_mid=None) -> list:
     """Copy API items and add display only; aggregate media/raw/text stay untouched.
 
     public_media is the injected (path, mime, raw_sid) callback. Unknown aggregate
@@ -667,6 +668,43 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
                 _ready = [ref for ref in _ready if ref.get("path") or ref.get("url")]
                 if len(_ready) > _have:
                     display["forward_media_all"] = _ready
+        # 用户 m21787 图3/图4：记录里的 media 是发给模型的那一份——动图被拼成九宫格、
+        # 大图被压成静态，美化档要显示聊天里原本那张。按 message_id 回插件索引取原图，
+        # 另存 orig_media，前端只在美化档用它；对照 / 原文档仍看模型侧，两边不互相覆盖。
+        if mid and callable(original_media_for_mid):
+            try:
+                _orig = original_media_for_mid(mid) or []
+            except Exception:
+                _orig = []
+            _ready_orig = [_public_ref(ref, raw_sid, public_media)
+                           for ref in _orig if isinstance(ref, dict)]
+            _ready_orig = [ref for ref in _ready_orig
+                           if (ref.get("path") or ref.get("url")) and not ref.get("missing")]
+            _now = [str((ref or {}).get("path") or "") for ref in item.get("media") or []
+                    if isinstance(ref, dict)]
+            if _ready_orig and [str(ref.get("path") or "") for ref in _ready_orig] != _now:
+                display["orig_media"] = _ready_orig
+        # 用户 m21787 图1/图2：框架把被引用那条消息的图也挂到引用它的消息上，页面分不清
+        # 归属——引用块只剩「图片」占位，外层多出一排「归属未确认的附件」。按被引用消息的
+        # message_id 回索引取它自己的图，挂到 direct_reply.media 上，并从外层未确认里剔掉。
+        _quote = display.get("direct_reply")
+        if isinstance(_quote, dict) and callable(original_media_for_mid):
+            _qid = str(_quote.get("id") or "")
+            if _qid:
+                try:
+                    _qraw = original_media_for_mid(_qid) or []
+                except Exception:
+                    _qraw = []
+                _qmedia = [_public_ref(ref, raw_sid, public_media)
+                           for ref in _qraw if isinstance(ref, dict)]
+                _qmedia = [ref for ref in _qmedia
+                           if (ref.get("path") or ref.get("url")) and not ref.get("missing")]
+                if _qmedia:
+                    display["direct_reply"] = dict(_quote, media=_qmedia)
+                    _qpaths = {str(ref.get("path") or "") for ref in _qmedia}
+                    display["unassigned_media"] = [
+                        ref for ref in display.get("unassigned_media") or []
+                        if str((ref or {}).get("path") or "") not in _qpaths]
         projected = dict(item)
         projected["display"] = display
         if display.get("files"):

@@ -34,7 +34,7 @@ from .buffer import (WindowState, clone_message, drop_tool_rounds, ids_of,
                      split_emoji_marks)
 from .split import (expand_packed_messages, regroup_images, with_owned_images,
                     mention_results, normalize_mention_content)
-from .summary import body_of, build_lines, drop_overlap, merge_summary
+from .summary import HEADER, body_of, build_lines, drop_overlap, merge_summary
 from .trim import (
     count_messages,
     count_user_messages,
@@ -723,6 +723,23 @@ def _media_by_mid_index(mid: str) -> list:
         # 命中的副本刚被页面用到，把写入时间推一下，别让裁剪把它当最老的删掉。
         for item in out:
             _touch_cache_file(cache / Path(item["path"]).name)
+    return out
+
+
+def original_media_for_mid(mid: str) -> list:
+    """按 message_id 反查这条消息在聊天里**原本**的图（剔掉模型侧派生图）。
+
+    用户 m21787 图3/图4：请求记录里存的是发给模型的那一份——动图被拼成九宫格、
+    大图被压成静态，文件名是 session_media/derived/mdp_<digest>_<tag>.jpg。美化档
+    要显示聊天里原本那张，可记录里只有派生图。派生图复制进消息目录后文件名仍以
+    mdp_ 开头，按前缀剔掉就能把原图认回来；索引里没有原图时返回空，调用方保持原样。
+    """
+    out = []
+    for ref in _media_by_mid_index(mid) or []:
+        name = str((ref or {}).get("path") or "").rsplit("/", 1)[-1]
+        if not name or name.startswith("mdp_"):
+            continue
+        out.append(ref)
     return out
 
 
@@ -3890,6 +3907,28 @@ def strip_old_images(messages, keep: int = 128) -> List[Any]:
     return out
 
 
+def strip_assistant_images(messages) -> List[Any]:
+    """assistant 消息里的图一律换成「[图片]」（用户 m20823）。
+
+    上游明确拒收 assistant 里的图：DeepSeek 直接回
+    BadRequestError: 400 - Image in assistant message is not supported，
+    整轮回复就这么挂了。插件把异步工具（nai 出图）的回调并成一条 assistant
+    入窗（用户 m20315），图也跟着进去了，下一轮请求就带着它发出去。
+
+    模型自己画过什么它知道，正文里也有「第 1 张画好了」；这里只改发出去的那
+    一份，窗口本体不动，实时窗 / 上下文页照样看得到原图。
+    """
+    out = list(messages or [])
+    for i, msg in enumerate(out):
+        if str(_get(msg, "role") or "").strip().lower() != "assistant":
+            continue
+        content = _get(msg, "content")
+        if not _has_image(content):
+            continue
+        out[i] = _replace_images(msg)
+    return out
+
+
 #: 历史行里能看出「这儿有图」的占位（框架与插件两套写法都认）
 _PIC_TEXT_RE = re.compile(r"\[(?:图片|表情|Image attached|image|Image)\]", re.I)
 
@@ -4601,6 +4640,9 @@ def attach_window_images(messages, raw_sid: str, keep: int = 128,
             emit(ref)
         out[i] = _with_content(msg, prepared)
     # 先全部准备、再从后往前按张裁；不把每条内部的多图反序。
+    # assistant 里的图上游不收（400 Image in assistant message is not supported），
+    # 先换成占位再限图，别让它们占掉 keep 的额度（用户 m20823）。
+    out = strip_assistant_images(out)
     limited = strip_old_images(out, keep)
     for i, (before, after) in enumerate(zip(out, limited)):
         original = _get(before, "content")
@@ -5396,7 +5438,136 @@ class WindowManager:
         st = self._states.get(sid)
         return list(st.pending) if st else []
 
-    def _pending_messages(self, st, exclude_ids=None) -> list:
+    def take_pending(self, sid: str) -> list:
+        """把待发整批摘下（重试不带待发时暂存，结算后原样放回）。
+
+        用户 m05550：请求组装时 collect() 一定会把待发并进上下文，所以「重试不带待发」
+        只能在请求之前先把它们从队列里摘下来，等这一轮结算再按原顺序放回。
+        """
+        st = self._states.get(sid)
+        if st is None or not st.pending:
+            return []
+        items = list(st.pending)
+        st.pending.clear()
+        return items
+
+    def restore_pending(self, sid: str, items) -> int:
+        """把 take_pending 摘下的待发按原顺序放回队首。"""
+        back = [it for it in (items or []) if isinstance(it, dict)]
+        if not back:
+            return 0
+        st = self.state(sid)
+        st.pending[:0] = back
+        if len(st.pending) > 200:
+            del st.pending[:len(st.pending) - 200]
+        return len(back)
+
+    # ------------------------------------------------------------ 用户黑名单（用户 m06193）
+    # 按发言人（QQ 号）拦，命中的消息不进请求上下文；窗口本体不动，页面照常显示。
+    # 真实格式是「[user_nickname: 某, user_id: 123]」——user_id 跟昵称在同一个方括号里，
+    # 前面没有独立的「[」，所以这里不能带开头的 \[（2026-11-14 实测踩过）。
+    _BL_UID_RE = re.compile(r"user_id:\s*([^,\]\n]+)")
+    _BL_MID_RE = re.compile(r"\[message_id:\s*([^\]\n]+)")
+
+    def _blacklist_map(self, sid: str = "") -> dict:
+        """uid -> 放行的 message_id 集合（拉黑那一刻已经在窗口里的历史）。
+
+        用户 m07715：单群 / 私聊可以把全局拉黑的人对本会话解除，这里按 sid
+        把解除名单里的 uid 跳过——全局名单一个字不动，只影响这个会话。
+        """
+        # 用户 m07157：总开关关掉时整块失效——名单还在，但一条都不剔。
+        # 用户 m08153：总开关按会话取，单群 / 私聊可以自己关掉，全局名单不动。
+        try:
+            on = bool(self.plugin.eff("user_blacklist_enabled", sid))
+        except Exception:
+            on = bool(getattr(self.plugin, "user_blacklist_enabled", True))
+        if not on:
+            return {}
+        try:
+            store = getattr(self.plugin, "user_blacklist", None)
+            if store is None:
+                return {}
+            drop = set()
+            if sid:
+                fn = getattr(self.plugin, "_user_unblock_items", None)
+                if callable(fn):
+                    try:
+                        drop = set(str(x) for x in (fn(sid) or []))
+                    except Exception:
+                        drop = set()
+            out = {}
+            for it in store.items():
+                uid = str(it.get("uid") or "").strip()
+                if uid and uid not in drop:
+                    out[uid] = set(str(x) for x in (it.get("keep") or []))
+            return out
+        except Exception:
+            logger.exception("[multi-decision] 读用户黑名单失败（这一轮不过滤）")
+            return {}
+
+    @classmethod
+    def _bl_uid_of(cls, content) -> str:
+        m = cls._BL_UID_RE.search(str(content or ""))
+        return m.group(1).strip() if m else ""
+
+    @classmethod
+    def _bl_mid_of(cls, content) -> str:
+        m = cls._BL_MID_RE.search(str(content or ""))
+        return m.group(1).strip() if m else ""
+
+    def _blacklist_drop(self, msgs, sid: str = "") -> list:
+        """把黑名单用户「拉黑之后」的消息从请求上下文里剔掉。
+
+        用户 m06193 的口径：拉黑前已经在窗口里的历史照留，只剔之后的新消息。
+        没有 message_id 的消息一律放行——宁可多留一条，也别把历史整段删掉。
+        用户 m07715：带 sid 时按本会话的解除名单过滤（单群解除了就不剔）。
+        """
+        bl = self._blacklist_map(sid)
+        if not bl:
+            return list(msgs or [])
+        out = []
+        for m in msgs or []:
+            if not isinstance(m, dict) or str(m.get("role") or "") != "user":
+                out.append(m)
+                continue
+            content = m.get("content")
+            uid = self._bl_uid_of(content)
+            if not uid or uid not in bl:
+                out.append(m)
+                continue
+            mid = self._bl_mid_of(content)
+            if not mid or mid in bl[uid]:
+                out.append(m)
+        return out
+
+    def blacklist_keep_ids(self, uid: str) -> list:
+        """拉黑那一刻该用户已经在窗口/待发里的 message_id，记下来当放行名单。"""
+        uid = str(uid or "").strip()
+        if not uid:
+            return []
+        keep = []
+        seen = set()
+        for st in list(self._states.values()):
+            for m in list(getattr(st, "messages", []) or []):
+                content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+                if self._bl_uid_of(content) != uid:
+                    continue
+                mid = self._bl_mid_of(content)
+                if mid and mid not in seen:
+                    seen.add(mid)
+                    keep.append(mid)
+            for it in list(getattr(st, "pending", []) or []):
+                if not isinstance(it, dict):
+                    continue
+                if str(it.get("sender") or "").strip() != uid:
+                    continue
+                mid = str(it.get("message_id") or "").strip()
+                if mid and mid not in seen:
+                    seen.add(mid)
+                    keep.append(mid)
+        return keep
+
+    def _pending_messages(self, st, exclude_ids=None, blacklist: bool = True) -> list:
         """把待发列表转成能进窗口的消息。
 
         框架的记忆只在「一轮 agent 跑完」时更新，所以没触发的那批群消息
@@ -5405,10 +5576,18 @@ class WindowManager:
         内容与框架记忆一致，下一轮真进记忆时按 message_id 也对得上、不会重复。
         """
         skip = set(exclude_ids or ())
+        bl = self._blacklist_map(str(getattr(st, "sid", "") or "")) if blacklist else {}
         out = []
         for it in list(getattr(st, "pending", []) or []):
             if not isinstance(it, dict):
                 continue
+            # 用户 m06193：拉黑的人，待发也不进请求（页面照常显示，走 pending_of）
+            if bl and str(it.get("mark") or "") != "bot":
+                sender = str(it.get("sender") or "").strip()
+                if sender and sender in bl:
+                    mid = str(it.get("message_id") or "").strip()
+                    if not mid or mid in bl[sender]:
+                        continue
             # 用户 m11091 第 5 条：bot 在「失败 / 卡住」的那一轮发出去的话，框架
             # 记忆里根本没有（它只在结算成功时才写记忆），重试轮的快照就漏了这一条。
             # 这里按 assistant 补进窗口，格式跟框架记忆里的 assistant 一样，只是还
@@ -5532,7 +5711,7 @@ class WindowManager:
         # 待发里攒着的群消息框架记忆里没有（没触发 agent 就不写记忆），
         # 必须在清空之前自己并进窗口，否则它们会凭空消失（v2.28）
         st.skipped_incoming = 0
-        extra = self._pending_messages(st, incoming_ids)
+        extra = self._pending_messages(st, incoming_ids, blacklist=False)
         # 本地接收的待发是可信增量；框架历史则必须先证明与当前窗口衔接。
         # 不把两种来源提前拼起来，否则失锚时会错误复活框架里已裁走的旧回复。
         # v4.03（用户 m11947）：窗口末条很可能就是决策注记，而框架历史里没有它，
@@ -5584,7 +5763,7 @@ class WindowManager:
         if st is None:
             return 0
         try:
-            extra = self._pending_messages(st)
+            extra = self._pending_messages(st, blacklist=False)
         except Exception:
             logger.exception("[multi-decision] %s 取待发失败（保留待发，停止本次折叠）", sid)
             raise
@@ -5859,7 +6038,7 @@ class WindowManager:
         msgs = stamp_assistant_time(msgs)
         return msgs
 
-    def snapshot(self, sid: str, *, prepare: bool = True) -> List[Any]:
+    def snapshot(self, sid: str, *, prepare: bool = True, blacklist: bool = True) -> List[Any]:
         """给 agent 看的窗口快照：当前全部内容，只读不裁。
 
         中期摘要（如果启用且有内容）作为最前面的一条 user 消息插进去，
@@ -5880,6 +6059,9 @@ class WindowManager:
         msgs = expand_packed_messages(msgs)
         # 拆包会把整包图片都挂到最后一条，按 message_id 哈希挪回原主（v2.54）
         msgs = regroup_images(msgs)
+        # 用户 m06193：黑名单用户拉黑之后的消息不进请求（窗口本体不动，页面照常显示）
+        if blacklist:
+            msgs = self._blacklist_drop(msgs, sid)
         msgs = shrink_timestamps(msgs)
         if prepare:
             msgs = self.prepare_messages(sid, msgs)
@@ -6372,6 +6554,11 @@ class WindowManager:
             return None
         text = merge_summary(old, fresh, max(60, max_chars))
         if not text:
+            # D01（2026-11-13 交接文档）：有东西可写却生成不出摘要，说明上限设得太
+            # 小。以前这里静默返回 None，被裁掉的消息就这么丢了，谁也不知道。
+            logger.warning(
+                "[multi-decision] %s 中期摘要没生成：上限 %s 字装不下一行（摘要头 %d 字），"
+                "这次被裁掉的 %d 条消息没进摘要", sid, max_chars, len(HEADER), len(fresh))
             return None
         prev = self.summaries.get(sid)
         item = self.summaries.set(
@@ -6761,7 +6948,7 @@ class WindowManager:
         # v4.52（用户 m28586 第 6 项）：待发与「历史留几条」都在这里算好，一路带进
         # plan —— 裁切现在要「先落快照、再动刀」，快照里也得有这份待发。
         try:
-            pend_msgs = self._pending_messages(st)
+            pend_msgs = self._pending_messages(st, blacklist=False)
         except Exception:  # pragma: no cover - 待发坏了也不能挡住裁切
             logger.exception("[multi-decision] 生成待发消息失败，保留条数退回原口径")
             pend_msgs = []
@@ -6819,7 +7006,7 @@ class WindowManager:
         pend_msgs = plan.get("pend_msgs")
         if pend_msgs is None:
             try:
-                pend_msgs = self._pending_messages(st)
+                pend_msgs = self._pending_messages(st, blacklist=False)
             except Exception:  # pragma: no cover - 待发坏了也不能挡住裁切
                 logger.exception("[multi-decision] 生成待发消息失败，保留条数退回原口径")
                 pend_msgs = []

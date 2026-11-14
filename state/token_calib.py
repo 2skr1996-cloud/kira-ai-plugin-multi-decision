@@ -160,6 +160,9 @@ class TokenCalib:
         return f, g
 
     def samples(self, model: str) -> int:
+        # D07（2026-11-13 交接文档）：factors/gate 都先 _load()，只有这里没读盘，
+        # 别的进程改了 token_calib.json 之后样本数会是旧的。
+        self._load()
         entry = self._models.get(_norm(model))
         return int(entry.get("n") or 0) if isinstance(entry, dict) else 0
     def gate(self, model: str) -> float:

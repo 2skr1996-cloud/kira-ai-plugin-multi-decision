@@ -210,6 +210,11 @@ class BandTuner:
                 wd_use = None
         key = self._key(start, end, wd_use)
         old_rec = bucket.get(key) or {}
+        # D06（2026-11-13 交接文档）：刚开星期数据、这一周还没有自己的记录时，key 是
+        # 「段@周几」，真正生效的是 _rec() 回落到的那条全周记录；冷却要按实际命中的
+        # 那条算，否则同一天会连调两格。
+        if not old_rec and wd_use is not None:
+            old_rec = bucket.get(self._key(start, end)) or {}
         # v3.84（用户 m04084 第 2 条）：这一段被用户手动接管了就不再自动调；
         # 目标（次数/天、概率/条）一改就当作「重新授权自动调整」，下面照常走。
         try:

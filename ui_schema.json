@@ -6,10 +6,10 @@
     "hint": "总开关。关闭后插件完全静默。"
   },
   "decision_enabled": {
-    "name": "接管群聊触发判定",
+    "name": "接管默认聊天",
     "type": "switch",
     "default": true,
-    "hint": "决定消息要不要回，并停用内置 default-chat。"
+    "hint": "接管并停用内置 default-chat。"
   },
   "trigger_mode": {
     "name": "触发模式",
@@ -96,9 +96,9 @@
   },
   "reply_fail_switch": {
     "name": "连续失败切换",
-    "type": "integer",
-    "default": 2,
-    "hint": "主模型连续失败几次才切备用模型。"
+    "type": "switch",
+    "default": true,
+    "hint": "开＝主模型连错 2 次就切备用；关＝一直用主模型。"
   },
   "reply_fallback_cooldown": {
     "name": "切回主模型等待",
@@ -126,9 +126,9 @@
   },
   "decision_fail_switch": {
     "name": "连续失败切换",
-    "type": "integer",
-    "default": 2,
-    "hint": "主模型连续失败几次才切备用模型。"
+    "type": "switch",
+    "default": true,
+    "hint": "开＝主模型连错 2 次就切备用；关＝一直用主模型。"
   },
   "decision_fallback_cooldown": {
     "name": "切回主模型等待",
@@ -192,9 +192,9 @@
   },
   "jev_fail_switch": {
     "name": "连续失败切换",
-    "type": "integer",
-    "default": 2,
-    "hint": "JEV 主模型连续失败几次才切备用模型。"
+    "type": "switch",
+    "default": true,
+    "hint": "开＝主模型连错 2 次就切备用；关＝一直用主模型。"
   },
   "jev_fallback_cooldown": {
     "name": "切回主模型等待",
@@ -351,7 +351,7 @@
   "rest_wake_trigger": {
     "name": "休息时段·触发",
     "type": "switch",
-    "default": true,
+    "default": false,
     "hint": "休息时段里被艾特 / 喊外号 / 喊名字，还算一次触发。关掉＝睡觉时被叫也不理。"
   },
   "rest_wake_always": {
@@ -400,7 +400,13 @@
     "name": "短语黑名单",
     "type": "switch",
     "default": true,
-    "hint": "在清单中的短语不会触发判定。"
+    "hint": "命中的纯文字不参与触发判定，消息本身仍留在上下文里。"
+  },
+  "user_blacklist_enabled": {
+    "name": "启用拉黑",
+    "type": "switch",
+    "default": true,
+    "hint": ""
   },
   "phrase_filter_list": {
     "name": "短语黑名单清单",
@@ -649,13 +655,13 @@
     "name": "机器人昵称",
     "type": "string",
     "default": "",
-    "hint": "bot 在历史里的显示名，留空取适配器昵称。"
+    "hint": "bot 的名字，留空取适配器昵称。"
   },
   "admin_name": {
     "name": "管理员名字",
     "type": "string",
     "default": "",
-    "hint": "QQ 里的真实名字，不是群昵称。"
+    "hint": "QQ 的昵称，不是群昵称。"
   },
   "admin_id": {
     "name": "管理员 QQ 号",
@@ -817,19 +823,31 @@
     "name": "自动重试次数",
     "type": "integer",
     "default": 2,
-    "hint": "出错后自动重试，0 = 不重试。决策和 JEV 判断也用它。"
+    "hint": "出错后自动重试，0 = 不重试。"
   },
   "retry_delay": {
     "name": "重试间隔秒数",
     "type": "integer",
     "default": 5,
-    "hint": "每次重试前等几秒。决策和 JEV 判断也用它。"
+    "hint": "每次重试前等待几秒。"
   },
   "watchdog_seconds": {
     "name": "请求超时重试",
     "type": "integer",
     "default": 180,
-    "hint": "请求多少秒后还没等到回复，就强制走重试流程。可设 30-600 秒。决策和 JEV 判断也用它。"
+    "hint": "发起请求后没等到回复，就强制走重试流程。"
+  },
+  "retry_take_pending": {
+    "name": "处理排队消息",
+    "type": "switch",
+    "default": false,
+    "hint": "开＝回复期间积攒的消息一起重试，可能会跑题"
+  },
+  "timeout_no_retry": {
+    "name": "超时不重试",
+    "type": "switch",
+    "default": false,
+    "hint": "开＝超时直接放弃，但可能会漏掉有价值的回复"
   },
   "band_rest_probability": {
     "name": "休息回复概率",

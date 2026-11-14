@@ -159,8 +159,15 @@ def merge_summary(old_text: str, new_lines, max_chars: int = 300) -> str:
     fresh = [str(x) for x in (new_lines or []) if str(x).strip()]
     fresh = drop_overlap(old_lines, fresh)
     lines = old_lines + fresh
-    while lines and _size(lines) > limit:
+    # D01（2026-11-13 交接文档）：以前上限小于「HEADER + 一行」时，这个 while 会把
+    # 唯一一行也弹掉，merge_summary 返回空串、调用方当成「没生成」，被裁掉的消息
+    # 就永久丢了，日志里也没有任何记录。现在至少留一行：只剩一行还超上限就把它
+    # 截到放得下，宁可摘要短一点，也不能让它变成空串。
+    while len(lines) > 1 and _size(lines) > limit:
         lines.pop(0)
+    if lines and _size(lines) > limit:
+        room = max(8, limit - len(HEADER) - 3)
+        lines = [lines[-1][:room].rstrip() + "…"]
     if not lines:
         return ""
     return HEADER + "\n" + "\n".join(lines)

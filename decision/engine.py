@@ -1219,6 +1219,9 @@ class _InputFlow:
         self.runner = None
         self.sent_ids = set()
         self.admitting = None  # accepted event suspended in media admission
+        # 用户 m05550：「重试是否处理待发」关掉时，重试轮临时摘下的待发消息。
+        # 这一轮结算（或插件关停）时按原顺序放回 window.pending。
+        self.held_pending = []
 
 
 class DecisionEngine:
@@ -1277,6 +1280,8 @@ class DecisionEngine:
         # 只放内存：重启后从主模型重新试，没必要写进会话状态（会改持久化 schema）。
         self._reply_fail_streak: dict[str, int] = {}
         self._reply_fallback_until: dict[str, float] = {}
+        # 用户 m08153：0 次重试时强制补的那一次直接走备用模型，用这个标记带过去。
+        self._reply_force_fallback: dict[str, bool] = {}
         # 用户 m17492 图5/图6：别的插件的通知事件（is_notice）触发的这一轮不是聊天请求。
         # 请求侧按 (sid, event_id) 记一笔，结算时标成「工具回调」，不算空回复、不进统计。
         self._notice_rounds: dict[tuple[str, str], float] = {}
@@ -1706,7 +1711,21 @@ class DecisionEngine:
         st.last_error_at = time.time()
         logger.warning("[multi-decision] %s 超过 %.1fs，本次请求作废并取消，迟到结果不再接受", sid, wd)
         self._watchdog_record_failure(sid, st)
-        self._retry_after_fail(sid, st)
+        # 用户 m08153：看门狗超时也算一次失败——以前这里不记账，超时轮永远
+        # 攒不到「连续失败切换」的阈值，重试完就结束了，一次备用模型都没用上。
+        self._note_reply_model_result(sid, False)
+        if bool(self._c("timeout_no_retry", sid)):
+            # 用户 m05550：都等了 3 分钟，再回也可能失真——开了这个开关就只掐断、不重试。
+            st.retry_at = 0.0
+            st.retry_count = 0
+            self._retry_status(sid, self._retry_roots.pop(sid, ""), "not_retried")
+            self._retry_events.pop(sid, None)
+            self._note_fail(sid, st)
+            logger.warning(
+                "[multi-decision] %s 看门狗超时后不重试（timeout_no_retry=开），这一轮直接放弃",
+                sid)
+        else:
+            self._retry_after_fail(sid, st)
         runner = flow.runner
         if cancel_runner and runner is not None and runner is not current and not runner.done():
             if st.debounce_task is runner:
@@ -3579,18 +3598,20 @@ class DecisionEngine:
                 f"[multi-decision] {sid} 积压 {st.counter} 条，达到绕过阈值，忽略退避"
             )
 
+        # 配额：本小时说得够多了就先忍住。计数不清零，配额一恢复立刻触发。
+        # D13（2026-11-13 交接文档）：配额只看已经回了多少条，跟这次判定无关；放在
+        # 判定前面，免得被配额拦下的那条也白白消耗一次节奏/概率命中。
+        if self._quota_blocked(st, now):
+            self._mark(sid, pend, "quota")
+            _log_msg("quota_skip")
+            return
+
         # 判定：口径（计数/概率/曲线/自适应）跟概率一起带回来，别在触发时另行编一个
         # 「count」（用户 m15045：概率模式的触发在请求页全被写成「攒够条数」）。
         hit, reason, prob = self._judge(st)
         if not hit:
             self._mark(sid, pend, "counted")
             _log_msg("counting")
-            return
-
-        # 配额：本小时说得够多了就先忍住。计数不清零，配额一恢复立刻触发。
-        if self._quota_blocked(st, now):
-            self._mark(sid, pend, "quota")
-            _log_msg("quota_skip")
             return
 
         self._mark(sid, pend, "counted")
@@ -3882,6 +3903,9 @@ class DecisionEngine:
             # 只剩成功轮的结算，成功率永远是 100%（用户 2026-10-24 第 2 条）。
             self._log_failed_round(sid, eid, st, text)
             self._retry_after_fail(sid, st)
+            # 用户 m08153：异常钩子这一轮也算一次失败。以前只有 _handle_final 记失败，
+            # provider 直接抛异常（503 全挂）时 streak 永远攒不到 2，连续失败切换等于没开。
+            self._note_reply_model_result(sid, False)
             self._settled_rounds[key] = time.time()
             if expected_epoch is None:
                 await self._settle_input(sid)
@@ -3951,6 +3975,18 @@ class DecisionEngine:
             "retries": int(getattr(st, "retry_count", 0) or 0),
         }
 
+    def _reply_force_retry_ready(self, sid: str) -> bool:
+        """用户 m08153：0 次重试时要不要强制补一次备用模型。
+
+        条件跟「连续失败切换」一致：开关开着、并且真的配了备用模型。
+        """
+        try:
+            if not bool(self._c("reply_fail_switch", sid)):
+                return False
+            return bool(str(self._c("reply_fallback_model", sid) or "").strip())
+        except Exception:
+            return False
+
     def _retry_after_fail(self, sid: str, st) -> None:
         """失败轮结算后按剩余次数排重试；已经排好的不重复排。"""
         if (sid, self._active_rounds.get(sid, "")) in self._cleared_retry_rounds:
@@ -3972,6 +4008,14 @@ class DecisionEngine:
         limit = int(self._c("retry_max", sid) or 0)
         delay = float(self._c("retry_delay", sid) or 0.0)
         root = self._retry_roots.get(sid, "")
+        # 用户 m08153：连续失败切换开着、又配了备用模型时，0 次重试也要强制补一次，
+        # 这一次直接走备用模型——不然「第一次失败就切」在 0 次重试下永远轮不到。
+        forced = False
+        if limit <= 0 and self._reply_force_retry_ready(sid):
+            limit = 1
+            forced = True
+            if delay <= 0:
+                delay = 5.0
         if limit <= 0 or delay <= 0:
             st.retry_at = 0.0
             self._retry_status(sid, root, "not_retried" if st.retry_count == 0 else "failed")
@@ -3987,6 +4031,8 @@ class DecisionEngine:
             return
         st.retry_count += 1
         st.retry_at = time.time() + delay
+        if forced:
+            self._reply_force_fallback[sid] = True
         self._retry_status(sid, root, "scheduled")
         logger.warning(
             f"[multi-decision] {sid} 请求失败，{delay:.0f} 秒后重试（{st.retry_count}/{limit}）"
@@ -5401,20 +5447,27 @@ class DecisionEngine:
         if ctx is None:
             return []
         now = time.time()
-        switch = max(1, int(self._c("reply_fail_switch", sid) or 2))
+        # 用户 m08153：连续失败切换改成开关，阈值固定 2——第一次失败算 1，
+        # 重试第一次失败算 2，第二次重试（第三次尝试）就直接走备用模型。
+        switch_on = bool(self._c("reply_fail_switch", sid))
         cooldown = max(30.0, float(self._c("reply_fallback_cooldown", sid) or 300.0))
         streak = int(self._reply_fail_streak.get(sid, 0) or 0)
         until = float(self._reply_fallback_until.get(sid, 0.0) or 0.0)
-        tripped = bool(fallback) and streak >= switch
+        tripped = bool(fallback) and switch_on and streak >= 2
         cooling = tripped and until > 0 and now < until
         if tripped and not cooling and until > 0:
             # 冷却结束后的这一轮先试主模型；再失败就继续用备用撑一个冷却期。
             self._reply_fallback_until[sid] = now + cooldown
+        # 用户 m08153：0 次重试时强制补的那一次，直接走备用模型。
+        forced = bool(self._reply_force_fallback.pop(sid, False))
         order = []
-        if not cooling and primary:
-            order.append(primary)
-        if fallback:
+        if forced and fallback:
             order.append(fallback)
+        else:
+            if not cooling and primary:
+                order.append(primary)
+            if fallback:
+                order.append(fallback)
         clients = []
         for key in order:
             try:
@@ -5441,19 +5494,21 @@ class DecisionEngine:
             logger.exception("[multi-decision] 回复模型组写入失败（这一轮用框架默认模型）")
 
     def _note_reply_model_result(self, sid: str, ok: bool) -> None:
-        """回复模型这一轮成没成：连续失败到阈值就切备用，成功就清零。"""
+        """回复模型这一轮成没成：连续失败到 2 次就切备用，成功就清零。"""
         if ok:
             if self._reply_fail_streak.pop(sid, None) is not None:
                 self._reply_fallback_until.pop(sid, None)
+            self._reply_force_fallback.pop(sid, None)
             return
         streak = int(self._reply_fail_streak.get(sid, 0) or 0) + 1
         self._reply_fail_streak[sid] = streak
         try:
-            switch = max(1, int(self._c("reply_fail_switch", sid) or 2))
+            switch_on = bool(self._c("reply_fail_switch", sid))
             cooldown = max(30.0, float(self._c("reply_fallback_cooldown", sid) or 300.0))
         except Exception:
-            switch, cooldown = 2, 300.0
-        if streak >= switch:
+            switch_on, cooldown = True, 300.0
+        # 用户 m08153：阈值固定 2——第一次失败算 1，重试第一次失败算 2。
+        if switch_on and streak >= 2:
             self._reply_fallback_until[sid] = time.time() + cooldown
 
     async def _with_reply_publication(self, sid, operation):
@@ -5606,6 +5661,35 @@ class DecisionEngine:
                     if not selected(event):
                         buffer.add(event)
 
+    def _hold_pending(self, sid: str, flow) -> int:
+        """把待发整批摘到 flow.held_pending（重试不带待发时用）。
+
+        用户 m05550：请求组装时 collect() 一定会把待发并进上下文，所以「不带待发」
+        只能在请求之前先把它们从待发队列里摘下来，等这一轮结算再按原顺序放回。
+        """
+        if self.window is None:
+            return 0
+        try:
+            items = self.window.take_pending(sid)
+        except Exception:
+            logger.exception("[multi-decision] %s 摘下待发失败（这一轮仍按原上下文重试）", sid)
+            return 0
+        if items:
+            flow.held_pending.extend(items)
+        return len(items)
+
+    def _release_held_pending(self, sid: str, flow) -> int:
+        """把重试轮摘下的待发放回待发队列（结算 / 关停都走这里）。"""
+        if not flow.held_pending or self.window is None:
+            return 0
+        items, flow.held_pending = flow.held_pending, []
+        try:
+            return int(self.window.restore_pending(sid, items) or 0)
+        except Exception:
+            logger.exception("[multi-decision] %s 归还暂存待发失败", sid)
+            flow.held_pending = items + flow.held_pending
+            return 0
+
     async def _drain_input_locked(self, sid: str, flow) -> None:
         st = self._states.get(sid)
         while (st is not None and flow.deferred and not self._closed
@@ -5646,6 +5730,8 @@ class DecisionEngine:
                         sid, trigger=_trig, event_id=eid, deferred=_deferred_trim)
                 except Exception:
                     logger.exception("[multi-decision] 收束裁切失败（继续释放隔离）")
+        # 用户 m05550：重试轮摘下的待发在这里放回，顺序不丢，等它自己的轮次。
+        self._release_held_pending(sid, flow)
         if discard:
             try:
                 await self._discard_active_input(sid, flow.active)
@@ -5709,23 +5795,34 @@ class DecisionEngine:
                 # New arrivals are not counted yet, so they cannot queue a round.
                 st.queued = bool(flow.ready)
                 return
+            take_pending = False
             if retry and flow.ready:
-                # New input is already admitted/counted for its own next round.
-                # An old retry must not consume its pending or original buffer.
-                scheduled = self._retries.pop(sid, None)
-                if scheduled is not None and scheduled is not asyncio.current_task():
-                    scheduled.cancel()
-                st.retry_at = 0.0
-                self._retry_status(sid, self._retry_roots.pop(sid, ""), "cancelled")
-                self._retry_events.pop(sid, None)
-                return
+                # 用户 m05550：以前这里一声不响地把重试撤掉，指望「新消息的下一轮」接住
+                # 回复；可那批新消息只是被接纳、没掷中任何触发（11-14 11:24:52 那次 7 条
+                # 全没掷中），于是这一轮回复彻底丢了。现在重试照常跑，开关只决定带不带
+                # 这批待发：开＝一起进这次请求的上下文（不积压，但可能答跑题）；
+                # 关＝待发留在原地等它自己的轮次，这次请求只看原来的上下文。
+                take_pending = bool(self._c("retry_take_pending", sid))
+                if take_pending:
+                    logger.info(
+                        "[multi-decision] %s 重试带上 %d 条待发一起发（retry_take_pending=开）",
+                        sid, len(flow.ready))
+                else:
+                    held = self._hold_pending(sid, flow)
+                    logger.info(
+                        "[multi-decision] %s 重试不带待发：%d 条先摘下，这一轮按原上下文重试"
+                        "（retry_take_pending=关）", sid, held)
             flow.epoch += 1
             epoch = flow.epoch
             flow.phase = "active"
             flow.event_id = ""
             flow.sent_ids.clear()
             flow.runner = asyncio.current_task()
-            flow.active, flow.ready = flow.ready, []
+            if retry and flow.ready and not take_pending:
+                # 待发留给它自己的轮次：不动 flow.ready，也别让结算把它们从 buffer 里抹掉。
+                flow.active = []
+            else:
+                flow.active, flow.ready = flow.ready, []
             # Compatibility with external/default-chat entry points which have
             # no receive registration; only use an enumerable snapshot, never a
             # selector that accepts an unknown/empty batch.
@@ -6364,6 +6461,8 @@ class DecisionEngine:
         """Persist accepted but unadmitted input; never count, trigger or publish."""
         if self.window is None:
             return
+        # 用户 m05550：重试轮摘下的待发也要在关停时落回窗口，别丢。
+        self._release_held_pending(sid, flow)
         waiting = ([flow.admitting] if flow.admitting is not None else []) + list(flow.deferred)
         try:
             self.window.fold_pending(sid)

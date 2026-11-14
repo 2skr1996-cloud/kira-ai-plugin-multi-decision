@@ -22,7 +22,9 @@ KINDS = {"decision", "reply", "jev"}
 # JEV 页的判断规则跟决策页一样是「自写文本」块，正文就在布局里，不另设引用型。
 TYPES = {"text", "custom", "identity", "framework", "decision_prompt",
          "decision_format", "persona", "tools", "realtime_marker", "dynamic_marker",
-         "dynamic", "system_dynamic", "system_memory", "system_time"}
+         "dynamic", "system_dynamic", "system_memory", "system_time",
+         # 用户 m21698：默认记忆插件追加的两段也进布局，跟别的段一样能看见、能挪。
+         "plugin_memory", "plugin_memory_ctx"}
 DYNAMIC = {"sessions", "chat_env", "memory", "time"}
 #: 用户 m11025：这两段框架的环境信息在真实请求里已被 _drop_noisy_prompts 删掉
 #: （decision/engine.py 的 _NOISY_PROMPT_NAMES），系统动态段再显示出来就是
@@ -40,14 +42,18 @@ TYPE_LABELS = {"text": "自写文本", "custom": "自定义模板",
                "tools": "工具说明", "realtime_marker": "实时窗口",
                "dynamic_marker": "动态尾段", "dynamic": "动态段",
                "system_dynamic": "系统动态段", "system_memory": "记忆段",
-               "system_time": "时间段"}
+               "system_time": "时间段",
+               "plugin_memory": "记忆插件注入",
+               "plugin_memory_ctx": "记忆插件 · 本轮上下文"}
 # 身份段由框架自动填好，只让看、不让改（用户图6）。
-READONLY_TYPES = {"identity", "system_dynamic", "system_memory", "system_time"}
+READONLY_TYPES = {"identity", "system_dynamic", "system_memory", "system_time",
+                  "plugin_memory", "plugin_memory_ctx"}
 # 只有这几种存正文；其余都是「引用」，保存时不落正文，所以永远覆盖不了默认模板。
 BODY_TYPES = {"text", "custom", "realtime_marker", "dynamic"}
 # 只标位置、不进 system 的两种占位（用户 m02159 图1）：实时窗口 + 动态段。
 # dynamic_marker 留在 TYPES 里只为兼容旧文档，读到就丢掉（用户 m02993：动态段改成真模板）。
-MARKER_TYPES = {"realtime_marker", "dynamic", "system_dynamic", "system_memory", "system_time"}
+MARKER_TYPES = {"realtime_marker", "dynamic", "system_dynamic", "system_memory", "system_time",
+                "plugin_memory", "plugin_memory_ctx"}
 
 # 用户 m10789：format 模板里有 {{ message_types }} / {{ root_tags }}，真实请求要等框架在 assemble
 # 阶段把标签清单填进去才渲染得出来。预览里先填一份：能用上最近一次真实请求的值就用真的，
@@ -59,7 +65,7 @@ DYNAMIC_NOTE = ("（这一段不注入固定 system：会话信息、聊天环�
 # 用户 m02993：动态段默认就是这段「强化格式遵守」——拼在本轮聊天记录最后，紧贴模型开口的位置，
 # 专门提醒模型把回复包进 <msg>（记录里出现过只回裸文本、发不出去的情况）。
 DYNAMIC_TEMPLATE_DEFAULT = (
-    "【格式强化 · 每一条都要照做】\n"
+    "## 格式强化（Format）\n"
     "1. 你的全部输出必须包在 <msg> 里，一个气泡一个标签：\n"
     "   <msg message_id=\"\"><text>要说的话</text></msg>\n"
     "2. 标签外面多写的字发不出去——写在外面等于这一轮白说。\n"
@@ -71,6 +77,33 @@ DYNAMIC_TEMPLATE_DEFAULT = (
     "   <msg></msg>，一个字都别多写——空壳代表「这条不发」，群里不会出现任何东西。\n"
 )
 DYNAMIC_TEMPLATE_NAME = "强化格式遵守"
+
+# 用户 m23028：记忆插件那两段的正文是插件在请求时现算的（只读类型不落正文），抓不到真实文本时
+# 卡片会空成 0 字。这两份默认模板只在预览里顶位——真发请求时没有真实正文就不注入。
+PLUGIN_MEMORY_DEFAULT = (
+    "使用 memory_add 保存稳定事实（semantic）、重要经历（episodic）或明确的互动约定（procedural）。\n"
+    "保留原语言，不编造事实、经历、偏好或人格设定。owner_type 为 user、group 或 self。\n"
+    "群聊里关于某人的信息仍属于 user，群体共同信息属于 group；self 属于当前人格。\n"
+    "新记忆仅在当前会话可见。批次有多个发言者时，用户记忆必须指定 user_id，所有写入、修改和删除\n"
+    "必须指定 source_message_id。标识须从收到的消息或下方上下文复制，不能根据昵称猜测用户。\n"
+    "添加可能重复的内容前，以及需要回忆但上下文不足时，使用 memory_search。\n"
+    "使用简短的原语言关键词检索，偶尔跨语言时自行翻译关键词。空查询列出可见记忆，offset 用于分页；\n"
+    "include_inactive 可找回已完成、已取消、已被替代或已过期的记忆，memory_id 可获取单条可见记忆。\n"
+    "更新和删除使用稳定 memory_id 及查询返回的 revision；发生冲突后重新读取。\n"
+    "core=true 仅用于少量稳定且必要的信息，它是加载偏好，不是内容分类。\n"
+    "计划和临时状态可用 status 和 expires_at（Unix 秒）管理；记下计划不等于设置提醒。\n"
+    "优先更新已有事实，同时保留有意义且标明日期的经历。"
+)
+# 本轮上下文没抓到时的骨架：形状跟插件每轮追加的那份 JSON 一致。
+PLUGIN_MEMORY_CTX_DEFAULT = (
+    '{\n'
+    '  "persona_id": "default",\n'
+    '  "session_id": "group:1145141974",\n'
+    '  "sources": [\n'
+    '    {"source_message_id": "63164553", "user_id": "3212133758"}\n'
+    '  ]\n'
+    '}'
+)
 
 # 用户 m13442 第 4 条：框架 output 段里把「总轮次不得超过5轮」「最多调用5个工具」烤成了
 # 字面数字（模板在 BuildRequest 阶段就渲染完了）。插件接管这两项之后，预览里也要显示
@@ -161,6 +194,13 @@ def tail_order(modules):
             sysmem.append(m)
         elif typ == "dynamic":
             dyn.append(m)
+        elif typ == "plugin_memory":
+            # 用户 m23028：记忆插件追加的固定说明改由提示词页摆位置（默认跟在工具说明后面），
+            # 只要还在系统段里就不强行归位。
+            keep.append(m)
+        elif typ == "plugin_memory_ctx":
+            # 用户 m21698：本轮上下文是动态段，跟动态段同一组，可以互相上下挪。
+            dyn.append(m)
         else:
             keep.append(m)
     # 用户 m04343 第 3 条：动态段（强化格式遵守）排在系统段上面——它才是最贴近聊天记录的
@@ -231,7 +271,8 @@ def normalize_layout(raw, kind):
         # 界面上表现成「一打勾就被取消」。现在允许单纯打勾——没选文件时这一段是空的，
         # 等于什么都没注入（v4.89 用户 m14715 第 1 条：旧 decision_persona 已删除）。
         clean.append(module(mid, typ, label, key, body, enabled))
-    clean = tail_order(clean)
+    # 用户 m25796：保存 / 读取时不再按类型强制归位——记忆段、时间段、插件段的位置由提示词页
+    # 自己决定，一保存就复原等于白挪。默认顺序仍由 default_layout 给。
     out = {"version": 1, "mode": raw.get("mode", "modules"), "text": text, "modules": clean}
     if len(json.dumps(out, ensure_ascii=False)) > 500000:
         raise ValueError("提示词文档总长超过 50 万字符")
@@ -485,7 +526,8 @@ class PromptLayouts:
         new_mods = list(mods)
         # 用户 m16925：补出来的空人格段同样默认停用（回复页例外：空人格会回落到框架原文）。
         new_mods.insert(insert_at, module(mid, "persona", TYPE_LABELS["persona"], "", "", kind == "reply"))
-        out["modules"] = tail_order(new_mods)
+        # 用户 m25796：补人格段只插这一块，不再整份重排（重排会抹掉用户自己挪过的位置）。
+        out["modules"] = new_mods
         return out
 
     @staticmethod
@@ -510,8 +552,16 @@ class PromptLayouts:
             n += 1
         from .decision_phase import DECISION_FORMAT_HARD
         out = dict(doc)
-        out["modules"] = tail_order(list(mods) + [module(mid, "dynamic", DYNAMIC_TEMPLATE_NAME, "",
-                                                         DECISION_FORMAT_HARD)])
+        # 用户 m25796：补出来的「强化格式遵守」插在系统段（记忆 / 时间）前面，不再整份重排——
+        # 重排会把用户自己挪过的记忆段 / 时间段 / 插件段位置一起抹掉。
+        new_mods = list(mods)
+        at = len(new_mods)
+        for i, m in enumerate(new_mods):
+            if isinstance(m, dict) and str(m.get("type") or "") in ("system_memory", "system_time", "system_dynamic"):
+                at = i
+                break
+        new_mods.insert(at, module(mid, "dynamic", DYNAMIC_TEMPLATE_NAME, "", DECISION_FORMAT_HARD))
+        out["modules"] = new_mods
         return out
 
     @staticmethod
@@ -549,8 +599,72 @@ class PromptLayouts:
 
     def _prepared(self, kind, doc):
         """读布局时统一兜底：缺人格补人格、缺格式强化补格式强化、缺角色设定补角色设定。"""
-        return self._relabel(self._ensure_decision_role(
-            kind, self._ensure_decision_format(kind, self._ensure_persona(kind, doc))))
+        return self._relabel(self._ensure_plugin_segments(
+            kind, self._ensure_decision_role(
+                kind, self._ensure_decision_format(kind, self._ensure_persona(kind, doc)))))
+
+    def _ensure_plugin_segments(self, kind, doc):
+        """用户 m21698：默认记忆插件开着时，把它追加的两段并进布局。
+
+        固定说明（「使用 memory_add …」那一大段）跟在工具说明后面，只读、位置可以挪；
+        本轮上下文（每轮都变的 {"persona_id"…}）放进动态段，只读、可以上下挪。
+        插件关掉时这两段从布局里摘掉，页面上不留空卡。
+        """
+        if kind != "reply" or not isinstance(doc, dict) or doc.get("mode") != "modules":
+            return doc
+        mods = doc.get("modules")
+        if not isinstance(mods, list):
+            return doc
+        on = self._memory_plugin_on()
+        has_static = any(str(m.get("type") or "") == "plugin_memory" for m in mods if isinstance(m, dict))
+        has_ctx = any(str(m.get("type") or "") == "plugin_memory_ctx" for m in mods if isinstance(m, dict))
+        if not on:
+            if not (has_static or has_ctx):
+                return doc
+            out = dict(doc)
+            out["modules"] = [m for m in mods
+                              if str((m or {}).get("type") or "") not in ("plugin_memory", "plugin_memory_ctx")]
+            return out
+        if has_static and has_ctx:
+            return doc
+        used = {str(m.get("id") or "") for m in mods if isinstance(m, dict)}
+        new_mods = list(mods)
+        for typ, base_id, done in (("plugin_memory", "plugin-memory", has_static),
+                                   ("plugin_memory_ctx", "plugin-memory-ctx", has_ctx)):
+            if done:
+                continue
+            mid, n = base_id, 2
+            while mid in used:
+                mid = "%s-%d" % (base_id, n)
+                n += 1
+            used.add(mid)
+            new_mods.append(module(mid, typ, TYPE_LABELS[typ], "", ""))
+        # 用户 m23028：新补的这两块默认落在「工具说明」后面（固定说明）与动态段末尾（本轮上下文），
+        # 之后由提示词页自己摆。
+        if not has_static:
+            added = [m for m in new_mods if str(m.get("type") or "") == "plugin_memory"]
+            if added:
+                rest = [m for m in new_mods if str(m.get("type") or "") != "plugin_memory"]
+                at = len(rest)
+                for i, m in enumerate(rest):
+                    if str(m.get("type") or "") == "tools":
+                        at = i + 1
+                new_mods = rest[:at] + added + rest[at:]
+                new_mods = rest[:at] + added + rest[at:]
+        # 用户 m25796：本轮上下文补在动态段末尾（系统段前面），不再靠整份重排归位。
+        if not has_ctx:
+            added = [m for m in new_mods if str(m.get("type") or "") == "plugin_memory_ctx"]
+            if added:
+                rest = [m for m in new_mods if str(m.get("type") or "") != "plugin_memory_ctx"]
+                at = len(rest)
+                for i, m in enumerate(rest):
+                    if str(m.get("type") or "") in ("system_memory", "system_time", "system_dynamic"):
+                        at = i
+                        break
+                new_mods = rest[:at] + added + rest[at:]
+        # 用户 m25796：补插件段只插这两块，不再整份重排。
+        out["modules"] = new_mods
+        return out
 
     def _relabel(self, doc):
         """用户 m01209 图1：模块名一直跟着所选模板名走，不让名字和内容对不上。"""
@@ -823,16 +937,116 @@ class PromptLayouts:
         body = "".join("[%d] %s" % (i, ln) + chr(10) for i, ln in enumerate(lines))
         return body + MEMORY_RULE
 
-    def _fill_memory(self, rows):
+    def _captured_memory_text(self, sid):
+        """真实回复请求里记忆插件追加过的那段（prompt_sources.json 抄下来的）。
+
+        用户 m20353：新版记忆插件不再写 core.txt，预览 / 决策链只读 core.txt 就只剩标题。
+        这里退回上一轮真实回复请求里抄下来的记忆段（规则 + 记录），比只剩标题准。
+        """
+        src = self._sources.get(normalize_sid(sid)) or {}
+        for row in src.get("rows") or []:
+            if seg_key(row.get("name")) == "memory":
+                text = str(row.get("text") or "").strip()
+                if text and text != "## 核心记忆（Core Memory）":
+                    return text
+        return ""
+
+    def _fill_memory(self, rows, sid=""):
         """框架那份 memory 段只有标题，正文是记忆插件在请求钩子里追加的，这里补上。"""
         core = self._core_memory_text()
-        if not core:
+        captured = "" if core else self._captured_memory_text(sid)
+        if not core and not captured:
             return rows
         out = []
         for row in rows:
             if seg_key(row.get("name")) == "memory" and "### 隐私与安全约束" not in str(row.get("text") or ""):
-                row = dict(row, text=str(row.get("text") or "") + chr(10) + core)
+                if core:
+                    row = dict(row, text=str(row.get("text") or "") + chr(10) + core)
+                else:
+                    row = dict(row, text=captured)
             out.append(row)
+        return out
+
+    def _captured_tools_extra(self, sid):
+        """上一轮真实回复请求里，记忆插件追加在 tools 段末尾的那段（含每轮上下文）。"""
+        def pick(src):
+            for row in (src or {}).get("rows") or []:
+                if seg_key(row.get("name")) == "tools":
+                    got = self._tools_extra_text(row.get("text"))
+                    if got:
+                        return got
+            return ""
+        got = pick(self._sources.get(normalize_sid(sid)))
+        if got:
+            return got
+        for src in self._sources.values():
+            got = pick(src)
+            if got:
+                return got
+        return ""
+
+    def _memory_plugin_on(self):
+        """默认记忆插件（kira_plugin_simple_memory）现在开着没有。
+
+        用户 m20823 第 5 条：开着它才会往「工具说明」段追加说明，提示词页要跟着多一段。
+        读框架的插件开关文件，读不到就当没开。
+        """
+        try:
+            from core.utils.path_utils import get_config_path
+            path = Path(get_config_path()) / "plugins.json"
+            if not path.is_file():
+                return False
+            raw = json.loads(path.read_text(encoding="utf-8") or "{}")
+            return bool(raw.get("kira_plugin_simple_memory"))
+        except Exception:
+            return False
+
+    def plugin_segments(self, kind, sid=""):
+        """别的插件在请求时自己加进来的段（目前只有默认记忆），给提示词页显示用。
+
+        用户 m20823 第 5 条：开了默认记忆，提示词拼装页要能看见它加的那段，
+        不然页面上永远只有框架那几段，看不出实际发出去的 system 多了什么。
+        """
+        if kind != "reply" or not self._memory_plugin_on():
+            return []
+        static, dynamic = self._split_tools_extra(self._captured_tools_extra(sid))
+        out = []
+        if static:
+            out.append({"name": "plugin_memory", "label": "记忆插件注入", "tag": "默认段",
+                        "text": static, "chars": len(static), "dynamic": False,
+                        "source": "默认记忆插件开启时自动追加到「工具说明」段末尾（系统段）"})
+        if dynamic:
+            out.append({"name": "plugin_memory_ctx", "label": "记忆插件 · 本轮上下文", "tag": "动态段",
+                        "text": dynamic, "chars": len(dynamic), "dynamic": True,
+                        "source": "每轮都变，拼在本轮消息末尾，不进 system"})
+        return out
+
+    @staticmethod
+    def _with_plugin_parts(preview, segs):
+        """把插件注入的段并进预览：固定的接在「工具说明」后面，动态的只列不拼进 system。"""
+        parts = list(preview.get("parts") or [])
+        at = len(parts)
+        for i, p in enumerate(parts):
+            if str(p.get("type") or "") == "tools" or str(p.get("name") or "") == "tools":
+                at = i + 1
+                break
+        for s in segs:
+            part = {"id": "plugin-" + s["name"], "label": s["label"], "name": s["name"],
+                    "type": "plugin", "text": s["text"], "chars": s["chars"],
+                    "plugin": True, "tag": s.get("tag", "")}
+            if s.get("dynamic"):
+                part["dynamic"] = True
+                parts.append(part)
+            else:
+                parts.insert(at, part)
+                at += 1
+        chunks = [str(p.get("text") or "").rstrip() for p in parts
+                  if not p.get("dynamic") and str(p.get("text") or "").strip()]
+        system = "\n\n".join(chunks)
+        out = dict(preview)
+        out["parts"] = parts
+        out["system"] = system
+        out["chars"] = len(system)
         return out
 
     def _live_rows_local(self, sid):
@@ -1033,7 +1247,7 @@ class PromptLayouts:
                 rows = None
         if not rows:
             rows, source = self._live_rows_local(sid), "插件自带文案 + 实时变量"
-        rows = self._fill_memory(rows)
+        rows = self._fill_memory(rows, sid)
         # 2026-11-08（J）：页面上不再留「同步框架默认」按钮，改成这里自动对齐——
         # 框架换了默认词，第一次请求就顺手抄一份新的；取不到框架那份（走的自带文案）时不动本地副本。
         live_source = source.startswith("框架当前模板")
@@ -1163,7 +1377,9 @@ class PromptLayouts:
                               kind not in ("decision", "jev")))
         modules.append(module("systime-tail", "system_time", TYPE_LABELS["system_time"], "", "",
                               kind not in ("decision", "jev")))
-        return self._relabel({"version": 1, "mode": "modules", "text": "", "modules": modules})
+        # 用户 m25796：默认稿仍按「系统段 → 实时窗 → 动态段 → 记忆段 → 时间段」给，
+        # 但只在新建默认稿时归位；用户存过的顺序原样保留。
+        return self._relabel({"version": 1, "mode": "modules", "text": "", "modules": tail_order(modules)})
 
     def layout(self, kind, sid=""):
         if kind not in KINDS:
@@ -1455,6 +1671,35 @@ class PromptLayouts:
                 "text": text, "chars": len(text), "dynamic": True,
                 "inject": bool(m["enabled"])}
 
+    def _plugin_texts(self, sid, context=None):
+        """用户 m21698：记忆插件追加的两段正文——固定说明 + 每轮都变的上下文。
+
+        真实请求里由 apply_reply 从这一轮的 tools 段现摘传进来；预览时读上一轮抓到的素材。
+        """
+        ctx = context or {}
+        static, dynamic = ctx.get("plugin_memory"), ctx.get("plugin_memory_ctx")
+        if static is None and dynamic is None:
+            static, dynamic = self._split_tools_extra(self._captured_tools_extra(sid))
+        return str(static or ""), str(dynamic or "")
+
+    def _plugin_part(self, m, sid, context=None):
+        """记忆插件那两段的 part：固定说明进 system，本轮上下文进动态段。
+
+        用户 m23028：抓不到真实正文时用默认模板顶位，卡片不再空成 0 字；这时 part 带
+        sample_only=True，apply_reply 会跳过它，真发请求不会注入默认模板。
+        """
+        static, dynamic = self._plugin_texts(sid, context)
+        typ = str(m.get("type") or "")
+        live = dynamic if typ == "plugin_memory_ctx" else static
+        default = PLUGIN_MEMORY_CTX_DEFAULT if typ == "plugin_memory_ctx" else PLUGIN_MEMORY_DEFAULT
+        text = str(live or default)
+        part = {"id": m["id"], "label": m["label"], "name": typ, "type": typ,
+                "text": text, "chars": len(text), "sample_only": not bool(live)}
+        if typ == "plugin_memory_ctx":
+            part["dynamic"] = True
+            part["inject"] = bool(m.get("enabled", True)) and bool(live)
+            part["inject_text"] = str(live or "")
+        return part
     def _render(self, kind, sid, layout, context, rows=None, sample=False):
         layout = normalize_layout(layout, kind)
         if layout["mode"] == "text":
@@ -1482,6 +1727,8 @@ class PromptLayouts:
                     inactive.append(self._sysdyn_part(kind, m, source_rows))
                 elif m["type"] == "dynamic":
                     inactive.append(self._dynamic_part(m))
+                elif m["type"] in ("plugin_memory", "plugin_memory_ctx"):
+                    inactive.append(self._plugin_part(m, sid, context))
                 continue
             typ, key, text = m["type"], m["key"], ""
             if typ == "text":
@@ -1552,6 +1799,14 @@ class PromptLayouts:
             elif typ == "dynamic":
                 # 用户 m02993：动态段是能改的模板，正文拼在本轮 user 消息的最后，不进 system。
                 parts.append(self._dynamic_part(m))
+                continue
+            elif typ in ("plugin_memory", "plugin_memory_ctx"):
+                # 用户 m21698：记忆插件追加的两段——固定说明进 system（跟在工具说明后面），
+                # 本轮上下文是动态段（拼在本轮消息末尾）。正文都从这一轮的 tools 段现摘。
+                part = self._plugin_part(m, sid, context)
+                if not part["text"]:
+                    continue
+                parts.append(part)
                 continue
             if typ in ("text", "custom", "decision_prompt", "decision_format") and text:
                 # 用户 m23323：自写文本里可以写 {{persona}} / {{identity}} / {{tools}} /
@@ -1669,6 +1924,63 @@ class PromptLayouts:
         if len(self._personas_pre) > 64:
             self._personas_pre.pop(next(iter(self._personas_pre)))
         return got
+    @staticmethod
+    def _tools_extra_text(text):
+        """从一段 tools 正文里摘出记忆插件追加的部分（「使用 memory_add …」之后）。"""
+        body = str(text or "")
+        for marker in ("使用 memory_add", "Use memory_add"):
+            idx = body.find(marker)
+            if idx >= 0:
+                return body[idx:].strip()
+        return ""
+
+    @classmethod
+    def _tools_extra(cls, prompts):
+        """框架 tools 段里被记忆插件追加的使用说明 + sources 上下文。
+
+        用户 m20353：多决策重建 tools 段时整段替换，把记忆插件追加的说明和上下文丢了。
+        这里只摘「使用 memory_add …」之后的部分，拼回插件自己渲染的清单后面。
+        """
+        for p in prompts or []:
+            got = cls._tools_extra_text(getattr(p, "content", ""))
+            if got:
+                return got
+        return ""
+
+    @staticmethod
+    def _split_tools_extra(text):
+        """把记忆插件追加的那段拆成「固定说明」和「每轮都变的上下文」。
+
+        用户 m20823 第 6 条：说明是固定的，留在 system 的工具段里还能吃缓存；
+        后面那串 {"persona_id": …, "sources": […]} 每轮都变，留在 system 里等于每轮都掉命中，
+        所以拆出来跟动态段一起拼到本轮消息末尾。
+        """
+        body = str(text or "").strip()
+        if not body:
+            return "", ""
+        idx = body.rfind('{"persona_id"')
+        if idx < 0:
+            return body, ""
+        return body[:idx].rstrip(), body[idx:].strip()
+
+    def _tight_prompts(self, prompts):
+        """用户 m26166：框架原段的正文自带换行，Prompt.end 默认又补一个换行，
+        拼起来模块之间就多出空行。这里把每段收成「正文 + 恰好一个空行」，
+        真实请求里模块之间就只有一个空行，跟预览一致。
+
+        就地改，不复制：框架的 Prompt 是每轮现造的（get_agent_prompt），改它不影响
+        别的请求；复制会换掉对象身份，提示词页「框架原段原样保留」的契约（对象本身、
+        kwargs、render_template）就断了。归一化幂等，重试链路反复套也不会叠空行。"""
+        for p in prompts:
+            text = str(getattr(p, "content", "") or "")
+            if not text.strip():
+                continue
+            try:
+                p.content = text.rstrip() + "\n\n"
+                p.end = ""
+            except Exception:
+                continue
+        return prompts
 
     def apply_reply(self, request, sid=""):
         if not isinstance(getattr(request, "system_prompt", None), list):
@@ -1700,12 +2012,26 @@ class PromptLayouts:
                     # 用户 m23323 图2：真实请求里人设整段丢了，得能在日志里一眼看见是哪一段。
                     logger.warning("[multi-decision] 回复提示词：人格「%s」正文读不到，这一段没有注入", pname)
         tools_text = self._reply_tools_text(sid)
-        rendered, output = self._render("reply", sid, doc, {"personas": personas, "tools": tools_text},
+        # 用户 m20823 第 6 条：记忆插件追加的那段拆两半——固定说明留在 system 吃缓存，
+        # 末尾那串每轮都变的 {"persona_id"…} 跟动态段一起拼到本轮消息末尾。
+        extra_static, extra_dyn = self._split_tools_extra(self._tools_extra(original.get("tools", [])))
+        # 用户 m21698：这两半现在是布局里的两块（记忆插件注入 / 记忆插件 · 本轮上下文），
+        # 位置和启停都归提示词页管；只有布局里没有这两块（单段文本模式）时才按老办法接回去。
+        mod_types = {str(m.get("type") or "") for m in doc["modules"]}
+        owns_static = "plugin_memory" in mod_types
+        owns_dyn = "plugin_memory_ctx" in mod_types
+        rendered, output = self._render("reply", sid, doc,
+                                        {"personas": personas, "tools": tools_text,
+                                         "plugin_memory": extra_static,
+                                         "plugin_memory_ctx": extra_dyn},
                                         rows=self._rows(request)), []
         for _w in rendered.get("warnings") or []:
             logger.warning("[multi-decision] 回复提示词：%s", _w)
         mods = {m["id"]: m for m in doc["modules"]}
         for p in rendered["parts"]:
+            if p.get("sample_only"):
+                # 用户 m23028：默认模板只给预览顶位，真发请求时没有真实正文就不注入。
+                continue
             if p.get("dynamic"):
                 # 用户 m02993：动态段不进 system，下面单独拼到本轮 user 末尾。
                 continue
@@ -1713,7 +2039,12 @@ class PromptLayouts:
             key = m.get("key", "") or {"persona": "persona", "tools": "tools", "identity": "accounts"}.get(m.get("type"), "")
             if m.get("type") == "tools" and tools_text:
                 # 用户 m02159 图3：勾过工具就按勾的那份重写「工具说明」这一段。
-                output.append(Prompt(_pad_seg(p["text"]), name="tools", source="system", persist=False,
+                # 用户 m20353：框架原段里可能被记忆插件追加了使用说明和 sources 上下文，
+                # 整段替换会把它们丢掉——把追加部分接在插件清单后面。
+                text = str(p["text"] or "")
+                if extra_static and not owns_static:
+                    text = (text + "\n\n" + extra_static).strip()
+                output.append(Prompt(_pad_seg(text), name="tools", source="system", persist=False,
                                      render_template=False, end=""))
             elif m.get("type") == "persona" and m.get("key"):
                 # 用户 m02159 图3：人格段自选的文件不在框架原段里，必须按新正文重造一段 Prompt。
@@ -1729,7 +2060,7 @@ class PromptLayouts:
                 if m.get("type") == "framework" and key == "output":
                     # 用户 m13442 第 4 条：轮数 / 单轮工具数改由插件接管。
                     self._patch_agent_limits(kept, sid)
-                output.extend(kept)  # kwargs/render/end/persist 原样保留。
+                output.extend(self._tight_prompts(kept))  # 用户 m26166：模块之间只留一个空行。
             else:
                 output.append(Prompt(_pad_seg(p["text"]), name=p["name"], source="system", persist=False, render_template=False, end=""))
         selected = {p["name"] for p in rendered["parts"]}
@@ -1747,6 +2078,10 @@ class PromptLayouts:
         # 只能是插件该拼的那部分，所以这里读 inject_text，没有才退回 text。
         dyn_text = "\n\n".join(p.get("inject_text", p["text"]) for p in rendered["parts"]
                                 if p.get("inject") and (p.get("inject_text") or p.get("text")))
+        if extra_dyn and not owns_dyn:
+            # 用户 m20823 第 6 条：记忆插件那串每轮都变的上下文别留在 system 里，
+            # 跟动态段一起拼到本轮消息末尾，system 才能整段吃缓存。
+            dyn_text = (dyn_text + "\n\n" + extra_dyn).strip()
         try:
             self._inject_user_dynamic(request, dyn_text)
         except Exception:
@@ -1911,8 +2246,7 @@ class PromptLayouts:
                 tail.append({"type": "framework", "key": key, "label": type_label("framework", key),
                              "text": row["text"], "template": native.get(key, {}).get("template", ""),
                              "source": src.get("source", ""), "available": True, "group": "default",
-                             "tag": "框架原段", "suffix": "原段",
-                             "note": "原段引用，真实请求取本轮原文"})
+                             "tag": "框架原段", "suffix": "原段"})
         # 用户 m02159 图3：人格段的下拉不是「选模板」而是「选人格」——两边都只列人格文件。
         try:
             for item in await dp.persona_options():
@@ -1962,6 +2296,9 @@ class PromptLayouts:
                 picked = list(getattr(context["opt"], "tools", None) or [])
         except Exception:
             logger.exception("[multi-decision] 列工具失败")
+        # 用户 m21698：记忆插件那两段现在是布局里的真模块（plugin_memory / plugin_memory_ctx），
+        # 由 _ensure_plugin_segments 补进 doc、由 _render 直接出 part，不再单独回一份 plugin_segments。
+        # （旧的两张静态卡 ppPluginSegHtml 已删，避免同一段在页面上出现两次。）
         return {"ok": True, "kind": kind, "sid": sid, "context_sid": context_sid, "layout": doc,
                 "default_layout": self.default_layout(kind, context_sid, migrate=False), "catalog": catalog,
                 "revision": self.revision(), "inherited": inherited, "preview": preview,

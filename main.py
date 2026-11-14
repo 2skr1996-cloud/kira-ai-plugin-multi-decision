@@ -30,6 +30,7 @@ from .decision.engine import DecisionEngine, _norm_phrase
 from .decision.output_guard import dedupe_reply, wrap_plain_reply
 from .state.adaptive import AdaptiveStats
 from .state.aliases import Aliases
+from .state.user_blacklist import UserBlacklist
 from .state.band_stats import BandStats
 from .state.band_rhythm import BandRhythm
 from .state.band_tune import BandTuner
@@ -108,6 +109,7 @@ from .window.manager import (
     media_render_state,
     public_media,
     _media_by_ids,
+    original_media_for_mid,
     _assistant_prefix,
     _sniff_image_mime,
     _media_cache_root,
@@ -192,6 +194,67 @@ def _sid_ok(sid: str) -> bool:
     if "/" in s or "\\" in s or ".." in s:
         return False
     return True
+
+
+#: 测试窗只喂最近这么多条（用户 m01977）。
+TEST_WINDOW_LIMIT = 10
+
+
+def _test_window_messages(messages, limit: int = TEST_WINDOW_LIMIT) -> list:
+    """测试窗只留「用户发的纯文字」，其余全过滤掉（用户 m01977）。
+
+    测试按钮只是看看模型怎么判，喂整份窗口（bot 自己的话、工具往返、图片、
+    表情、转发卡片）反而看不清是哪句话影响了判断。所以这里只认 role=user
+    且正文是纯文字的消息，再取最近 limit 条。
+
+    注意：真实决策链不走这里（decision/engine.py 自己取窗口），只影响
+    「实时窗」显示与三个测试按钮。
+    """
+    out = []
+    for m in messages or []:
+        try:
+            if isinstance(m, dict):
+                role = str(m.get("role") or "").strip().lower()
+                content = m.get("content")
+                calls = m.get("tool_calls")
+                media = m.get("media") or m.get("images")
+            else:
+                role = str(getattr(m, "role", "") or "").strip().lower()
+                content = getattr(m, "content", None)
+                calls = getattr(m, "tool_calls", None)
+                media = getattr(m, "media", None) or getattr(m, "images", None)
+        except Exception:
+            continue
+        if role != "user" or calls or media:
+            continue
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, (list, tuple)):
+            # 多段内容里只要有一段不是文字（图 / 附件），整条跳过。
+            parts = []
+            pure = True
+            for part in content:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict) and str(part.get("type") or "text") == "text":
+                    parts.append(str(part.get("text") or ""))
+                else:
+                    pure = False
+                    break
+            if not pure:
+                continue
+            text = "\n".join(x for x in parts if x)
+        else:
+            continue
+        text = text.strip()
+        if not text:
+            continue
+        # 重新拼成纯文字消息：窗口里那份可能还挂着图 / 附件，不能原样带下去。
+        out.append({"role": "user", "content": text})
+    if limit and limit > 0 and len(out) > limit:
+        out = out[-limit:]
+    return out
+
 
 #: 左栏竖杠判「卡住」的秒数上限。看门狗（schema 的 watchdog_seconds，默认 180 秒）要等满
 #: 才强制释放，但用户 m04917 第 2 条要求「出错时立刻变色」——一轮投递后几十秒没动静就已经不正常，
@@ -468,6 +531,9 @@ PER_SESSION_KEYS = (
     "retry_max",
     "retry_delay",
     "watchdog_seconds",
+    # 用户 m05550：重试的两个取舍开关（默认都关），跟重试参数一样按群走。
+    "retry_take_pending",
+    "timeout_no_retry",
     # 用户 m06706：JEV 决策跟普通决策一样按群一套——哪个群用专用模型、区间多宽都可以不同。
     "jev_enabled",
     "jev_model",
@@ -518,6 +584,9 @@ PER_SESSION_KEYS = (
     "short_msg_chars",
     "phrase_filter_enabled",
     "phrase_filter_list",
+    # 用户 m08153：用户黑名单总开关也按会话走——单群 / 私聊可以自己关掉，
+    # 全局名单一个字不动，只影响这个会话剔不剔。
+    "user_blacklist_enabled",
     "silent_trigger_enabled",
     "silent_trigger_minutes",
     "bands_enabled",
@@ -545,6 +614,8 @@ PER_SESSION_KEYS = (
     "retry_max",
     "retry_delay",
     "watchdog_seconds",
+    "retry_take_pending",
+    "timeout_no_retry",
     "window_enabled",
     "window_keep",
     "history_images",
@@ -611,7 +682,7 @@ _BOUNDS = {
     "decision_tool_calls_per_turn": (1, 20),
     "decision_tool_timeout": (0, 600),
     "decision_tool_output_tokens": (0, 200000),
-    "decision_fail_switch": (1, 10),
+    # 用户 m08153：三个「连续失败切换」从次数改成开关，阈值固定 2，不再有范围。
     "decision_fallback_cooldown": (30, 3600),
     # 回复链的次数 / 时间设置。
     "reply_tool_rounds": (1, 10),
@@ -619,12 +690,12 @@ _BOUNDS = {
     "reply_tool_timeout": (0, 600),
     "reply_tool_output_tokens": (0, 200000),
     # 用户 m06995 第 2 项：回复模型的切换阈值与冷却，范围跟决策那边一致。
-    "reply_fail_switch": (1, 10),
+    # 用户 m08153：reply_fail_switch 改成开关，不再走 _BOUNDS。
     "reply_fallback_cooldown": (30, 3600),
     # 用户 m06706：JEV 的不确定区间按「百分比」存（40 / 60），运行时再归一到 0~1。
     "jev_lower": (0, 100),
     "jev_upper": (0, 100),
-    "jev_fail_switch": (1, 10),
+    # 用户 m08153：jev_fail_switch 改成开关，不再走 _BOUNDS。
     "jev_fallback_cooldown": (30, 3600),
     "jitter_seconds": (0, None),
     "jitter_max_rounds": (1, 20),
@@ -1231,9 +1302,9 @@ class MultiDecisionPlugin(BasePlugin):
         self.name_wake_always_reply = _as_bool(cfg.get("name_wake_always_reply"), False)
         # 用户 m00363：休息时段里被叫到还要不要理，也分触发 / 必回两路各一个开关
         # （基础设置右下角，跟唤醒那三行排在一起）。
-        # 用户 m09403：必回默认关——睡觉时被叫到就走普通判定（该不该回看概率 / 模型），
-        # 不再跳过判断硬回；触发仍默认开，跟改之前一样算一次触发。
-        self.rest_wake_trigger = _as_bool(cfg.get("rest_wake_trigger"), True)
+        # 用户 m01432：休息时段默认关闭——睡觉时被叫到默认不理，想理就把触发拨过去。
+        # 必回默认关（用户 m09403）。
+        self.rest_wake_trigger = _as_bool(cfg.get("rest_wake_trigger"), False)
         self.rest_wake_always = _as_bool(cfg.get("rest_wake_always"), False)
 
         # v3.44（用户本轮第 1 条）：抖动 = 开关 + 固定秒数。开关默认关（关着就是
@@ -1254,7 +1325,8 @@ class MultiDecisionPlugin(BasePlugin):
         # 少「决策失败时」）。模型留空 = 跟随框架默认；看图默认开。
         self.reply_model = str(cfg.get("reply_model") or "")
         self.reply_fallback_model = str(cfg.get("reply_fallback_model") or "")
-        self.reply_fail_switch = max(1, _as_int(cfg.get("reply_fail_switch"), 2))
+        # 用户 m08153：连续失败切换改成开关（阈值固定 2），默认开。
+        self.reply_fail_switch = _as_bool(cfg.get("reply_fail_switch"), True)
         self.reply_fallback_cooldown = max(30, _as_int(cfg.get("reply_fallback_cooldown"), 300))
         self.reply_see_images = _as_bool(cfg.get("reply_see_images"), True)
         # v4.85（用户 m10425 第 6 条）：JEV 那条链自己收不了图——decision 类模型只有
@@ -1294,6 +1366,10 @@ class MultiDecisionPlugin(BasePlugin):
         # v3.52（用户 m08226 第 6 条）：进阶模式先只当「退避的前置开关」，
         # 模型 + 决策词那部分还在做（ui_schema.json 里的 default 也是 false）。
         self.advanced_enabled = _as_bool(cfg.get("advanced_enabled"), False)
+        # 用户 m20823 第 2 条：私聊单独一套「决策模式」默认值。私聊不走决策——它
+        # 就在跟一个人说话，判「要不要开口」纯属多花一次调用；这里默认 false，
+        # 想让某个私聊单独开，在设置页选中那个会话把开关拨开即可（写的是覆盖）。
+        self.advanced_enabled_dm = _as_bool(cfg.get("advanced_enabled_dm"), False)
 
         # 用户 m06706：JEV 决策（接入的专用 decision 类模型，如 Jev）自己一整套配置。
         # 跟 advanced_enabled 互斥，但两套配置各存各的——切换开关不清空对方的值，
@@ -1345,6 +1421,14 @@ class MultiDecisionPlugin(BasePlugin):
         # 30-600 秒，ui_schema.json 里的 default 必须与这里的兜底值一致（都是 180），
         # 否则前端显示的默认值和实际生效的值会对不上。
         self.watchdog_seconds = max(30, min(600, _as_int(cfg.get("watchdog_seconds"), 180)))
+        # 用户 m05550：重试的两个取舍开关，默认都关（＝保持原来的行为）。
+        #  retry_take_pending：重试时把攒下的待发一起带进上下文（不积压，但可能跑题）。
+        #  timeout_no_retry：看门狗超时后直接放弃、不再重试（3 分钟后再回也失真）。
+        self.retry_take_pending = _as_bool(cfg.get("retry_take_pending"), False)
+        self.timeout_no_retry = _as_bool(cfg.get("timeout_no_retry"), False)
+        # 用户 m07157：用户黑名单总开关，默认开。关掉后名单还在，但不再剔除消息，
+        # 窗口页也不显示「拉黑」按钮（前端读 /user-blacklist 返回的 enabled）。
+        self.user_blacklist_enabled = _as_bool(cfg.get("user_blacklist_enabled"), True)
 
         self.window_keep = max(1, _as_int(cfg.get("window_keep"), 30))
         # v3.52（用户 m08226 第 7 条）：一直没触发请求时，窗口攒到「保留 + 缓冲」
@@ -1629,6 +1713,10 @@ class MultiDecisionPlugin(BasePlugin):
             self.bot_names = dict(saved_names)
             logger.info(f"[multi-decision] 已恢复 {len(saved_names)} 个会话的机器人昵称")
         self.overrides = Overrides(data_dir)
+        # 用户 m06193：用户黑名单（按 QQ 号拦，命中的新消息不进请求上下文）。
+        # 存插件自己的数据目录，不写框架配置——设置页保存会覆盖框架内存里没有的键。
+        self.user_blacklist = UserBlacklist(data_dir)
+        # 用户 m07157：用户黑名单总开关（self.user_blacklist_enabled，在 __init__ 里读配置）。
         # 用户 m13708 第 4/5 条：摘要也按「会话数上限 + 保留天数」剪
         self.summaries = Summaries(
             data_dir,
@@ -2390,6 +2478,9 @@ class MultiDecisionPlugin(BasePlugin):
             "forward_proof_keep",
             "retry_keep",
             "trigger_probability",
+            # 用户 m20823 第 2 条：私聊的「决策模式」不跟全局走，默认关——私聊本来就
+            # 该直接回，被决策接管等于每轮多一次调用还常常判成不回。群聊仍看全局。
+            "advanced_enabled",
         }
     )
 
@@ -3270,12 +3361,21 @@ class MultiDecisionPlugin(BasePlugin):
         return "off"
 
     def _decision_messages(self, sid: str) -> list:
-        """决策要读的那份聊天记录（窗口快照）。取不到就当空。"""
+        """测试窗要读的那份聊天记录（窗口快照）。取不到就当空。
+
+        用户 m01977：测试窗只留「用户发的纯文字」，bot 自己的话、工具往返、
+        图片、表情、转发卡片全过滤掉，再取最近 10 条。测试只是看看模型怎么判，
+        喂整份窗口反而看不清是哪句话影响了判断。
+
+        真实决策链不走这里（decision/engine.py 自己取窗口），所以只影响
+        「实时窗」显示与三个测试按钮。
+        """
         try:
-            return self.window.snapshot(sid) or []
+            raw = self.window.snapshot(sid) or []
         except Exception:
             logger.exception("[multi-decision] 取窗口快照失败（决策按空记录处理）")
             return []
+        return _test_window_messages(raw)
 
     def _decision_identity(self) -> str:
         """决策提示词最后那段「身份与环境」。
@@ -3580,6 +3680,8 @@ class MultiDecisionPlugin(BasePlugin):
             "apis": [
                 {
                     "id": str(one.get("id") or "1"),
+                    # 用户 m01978 第 3 条：自定义接口页可以自己起名，页面标签与模型下拉都用它。
+                    "name": str(one.get("name") or ""),
                     "protocol": normalize_jev_protocol(one.get("protocol")),
                     "base": str(one.get("base") or ""),
                     "model": str(one.get("model") or ""),
@@ -3794,18 +3896,76 @@ class MultiDecisionPlugin(BasePlugin):
         sid = str(sid or "").strip()
         # 测试按钮不该把异常甩成 500（页面只会显示 Internal Server Error，看不出是哪一步挂的）。
         try:
-            _imgs = []
-            try:
-                if getattr(self, "decision_see_images", True) is not False:
-                    _imgs = self.window.decision_images(sid)
-            except Exception:
-                _imgs = []
+            # 用户 m01977：测试窗只喂纯文字，图也一并去掉——窗口里已经没有图了，
+            # 再单独挂一份只会跟页面上显示的内容对不上。
             got = await self.decision_phase.decide(
-                sid, self._decision_messages(sid), self.decision_options(sid), images=_imgs)
+                sid, self._decision_messages(sid), self.decision_options(sid), images=[])
         except Exception as exc:
             logger.exception("[multi-decision] 决策测试失败")
             return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc), "result": {}}
         return {"ok": True, "result": got}
+
+    @_api("POST", "/reply-test")
+    async def api_reply_test(self, sid: str = ""):
+        """立刻跑一次真回复（真调回复模型）。结果只回给页面，不写窗口、不发言。
+
+        用户 m01977：回复页也要一个测试窗，跟决策 / JEV 一样只喂「实时窗」那份
+        纯文字记录，顺便把模型的思考过程带回来。
+        """
+        sid = str(sid or "").strip()
+        if not sid:
+            try:
+                sid = self._decision_pick_sid()
+            except Exception:
+                sid = ""
+        try:
+            prev = self.reply_prompt.preview(sid) or {}
+        except Exception as exc:
+            logger.exception("[multi-decision] 回复测试取提示词失败")
+            return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc), "result": {}}
+        system_text = str(prev.get("system") or "")
+        if not system_text.strip():
+            return {"ok": False, "error": "回复提示词是空的（先去提示词页把模块填上）", "result": {}}
+        msgs = self._decision_messages(sid)
+        payload = [{"role": "system", "content": system_text}] + list(msgs)
+        clients = []
+        try:
+            clients = self.engine._reply_model_clients(sid) or []
+        except Exception:
+            logger.exception("[multi-decision] 回复测试取回复模型失败（改用框架默认模型）")
+            clients = []
+        if not clients:
+            try:
+                client = self.ctx.get_default_llm_client()
+            except Exception:
+                client = None
+            if client is not None:
+                clients = [client]
+        if not clients:
+            return {"ok": False, "error": "取不到回复模型客户端", "result": {}}
+        started = time.time()
+        got = {}
+        last_err = ""
+        for client in clients:
+            got = await self.decision_phase.one_shot(payload, client=client)
+            if got.get("ok"):
+                break
+            last_err = str(got.get("error") or "")
+        result = {
+            "ok": bool(got.get("ok")),
+            "error": "" if got.get("ok") else (last_err or "回复模型没有返回"),
+            "text": str(got.get("text") or ""),
+            "reasoning": str(got.get("reasoning") or ""),
+            "model": str(got.get("model") or ""),
+            "elapsed": round(time.time() - started, 3),
+            "input_tokens": int(got.get("in") or 0),
+            "output_tokens": int(got.get("out") or 0),
+            "cached_tokens": int(got.get("cached") or 0),
+            "messages": len(msgs),
+            "system_chars": len(system_text),
+            "sid": sid,
+        }
+        return {"ok": True, "result": result}
 
     # 注意：/decisions 这个路由老早被「消息日志」占了（下面那个 api_decisions），
     # 同名再挂一个只会被后注册的盖掉——日志里能看到 /decisions 注册了两遍。
@@ -4342,6 +4502,7 @@ class MultiDecisionPlugin(BasePlugin):
             public_media=quote_public_media, text_of_content=content_text,
             # 用户 m00942 图1：引用里的转发卡也要画全所有图，和主卡同一个口径。
             forward_media_for_mid=forward_media_for_mid,
+            original_media_for_mid=original_media_for_mid,
         )
         native_display = {mid: item["display"] for mid, item in zip(want, projected)}
 
@@ -4449,6 +4610,30 @@ class MultiDecisionPlugin(BasePlugin):
                 out[mid] = {"who": who, "ts": ts, "body": display.get("own_body", ""),
                             "media": display["own_media"] if display["own_media_known"] else [],
                             "display": display}
+        # 用户 m21787 图1：引用的是很早的一条消息时，原生消息库和最近 80 轮快照里都
+        # 找不到它，引用块就只剩一个「图片」灰块。插件自己的媒体索引按 message_id 记着
+        # 当年收消息时留的副本，这里兜底认回来——只给图，正文/昵称仍用引用里那行原文。
+        for mid in list(left):
+            try:
+                _raw = original_media_for_mid(mid) or []
+            except Exception:
+                _raw = []
+            _ready = []
+            for ref in _raw:
+                if not isinstance(ref, dict):
+                    continue
+                try:
+                    got = quote_public_media(str(ref.get("path") or ""), str(ref.get("mime") or ""), raw_sid)
+                except Exception:
+                    got = {}
+                if isinstance(got, dict) and (got.get("path") or got.get("url")) and not got.get("missing"):
+                    _ready.append(got)
+            if not _ready:
+                continue
+            out[mid] = {"who": "", "ts": "", "body": "", "media": _ready,
+                        "display": {"own_media_known": True, "own_media": _ready,
+                                    "unassigned_media": [], "direct_reply": None,
+                                    "source": "media_index"}}
         return {"ok": True, "items": out}
 
 
@@ -4458,7 +4643,8 @@ class MultiDecisionPlugin(BasePlugin):
         if not sid or self.window is None:
             return {"ok": False, "detail": "没有这个会话的窗口"}
         # Cache-filled compatibility attachments must never corroborate themselves.
-        original_messages = raw_forward_proof_items(self.window.snapshot(sid, prepare=False))
+        # 用户 m06193：转发展示凭证要按窗口原样取，黑名单过滤只作用于请求上下文
+        original_messages = raw_forward_proof_items(self.window.snapshot(sid, prepare=False, blacklist=False))
         messages = _forward_media_attach(self.window.messages_of(sid), self.window.raw_sid(sid))
         source = "live"
         last_ts = 0.0
@@ -6004,18 +6190,67 @@ class MultiDecisionPlugin(BasePlugin):
                 out.append(word)
         return out
 
+    def _phrase_unblock_items(self, sid: str) -> list:
+        """本会话「已解除」的全局短语（用户 m07715）。
+
+        单群 / 私聊可以把全局拉黑的条目对本会话解除，写进 overrides 的
+        phrase_filter_unblock，全局池一个字不动；切回全局视图照样能看到它。
+        """
+        if not sid or self.overrides is None:
+            return []
+        try:
+            raw = self.overrides.value(sid, "phrase_filter_unblock", None)
+        except Exception:
+            return []
+        if raw is None:
+            return []
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            data = []
+        out = []
+        for it in data or []:
+            word = str(it).strip()
+            if word and word not in out:
+                out.append(word)
+        return out
+
+    def _phrase_unblock_write(self, sid: str, items: list) -> None:
+        """把本会话的解除名单写回单群覆盖；空了就把这个键删掉。"""
+        if not sid or self.overrides is None:
+            return
+        try:
+            cleaned = []
+            for it in items or []:
+                word = str(it).strip()
+                if word and word not in cleaned:
+                    cleaned.append(word)
+            patch = self.overrides.get(sid)
+            if cleaned:
+                patch["phrase_filter_unblock"] = json.dumps(cleaned, ensure_ascii=False)
+            else:
+                patch.pop("phrase_filter_unblock", None)
+            self.overrides.set(sid, patch)
+        except Exception:
+            logger.exception("[multi-decision] 保存本会话解除名单失败")
+
     def _phrase_effective_items(self, sid: str = "") -> list:
-        """生效清单 = 全局池 + 本群独立池。
+        """生效清单 = 全局池 + 本群独立池 − 本会话解除的。
 
         老行为是「单群覆盖整份替换全局」：在窗口里拉黑一条只影响这个群，
         设置页的全局清单里也看不见（用户 m02693 第 4 条）。现在反过来——
         窗口拉黑默认写进全局池（所有群一起生效），独立池只当追加项，
         默认就是全局那份；某个群想多拦几句再往自己的池子里加。
+        用户 m07715：单群 / 私聊还能把全局的条目「对本会话解除」，
+        那份解除名单只减不增，全局池不动。
         """
         out = list(self._phrase_global_items())
         for word in self._phrase_own_items(sid):
             if word not in out:
                 out.append(word)
+        drop = set(_norm_phrase(w) for w in self._phrase_unblock_items(sid))
+        if drop:
+            out = [w for w in out if _norm_phrase(w) not in drop]
         return out
 
     def _global_config_path(self):
@@ -6086,7 +6321,11 @@ class MultiDecisionPlugin(BasePlugin):
             logger.exception("[multi-decision] 保存本群短语池失败")
 
     def _phrase_block_payload(self, sid: str = "") -> dict:
-        """当前生效的「不触发短语」清单，窗口里的拉黑按钮据此判断是否已拉黑。"""
+        """当前生效的「不触发短语」清单，窗口里的拉黑按钮据此判断是否已拉黑。
+
+        用户 m07715：带上 unblock_items（本会话解除掉的全局词），设置页据此把
+        那几枚胶囊画成「已解除」；global_items / own_items 用来区分来源。
+        """
         items = self._phrase_effective_items(sid)
         return {
             "enabled": bool(self.eff("phrase_filter_enabled", sid)),
@@ -6094,6 +6333,9 @@ class MultiDecisionPlugin(BasePlugin):
             "count": len(items),
             "global_count": len(self._phrase_global_items()),
             "own_count": len(self._phrase_own_items(sid)),
+            "global_items": self._phrase_global_items(),
+            "own_items": self._phrase_own_items(sid),
+            "unblock_items": self._phrase_unblock_items(sid),
         }
 
     @_api("GET", "/phrase-block")
@@ -6110,27 +6352,56 @@ class MultiDecisionPlugin(BasePlugin):
         全局配置写不动（文件不存在/权限不够）时退回老做法：只写本群独立池，
         至少当场生效，返回体里会用 scope 说明这次落在哪儿。
         比对口径和 engine._phrase_hit 一致：整条消息归一化后等于清单里的词。
+
+        用户 m07715 第 4 条：单群 / 私聊能把全局条目「对本会话解除」——
+        remove 在带 sid 且词在全局池里时只写解除名单（phrase_filter_unblock），
+        全局池一个字不动；restore 把词从解除名单里拿掉（本会话恢复生效）；
+        add 永远写全局，若这个词本来被本会话解除过，add 只做本会话恢复。
+        sid 为空＝全局视图：直接改全局池，没有解除名单这回事。
         """
-        if not sid:
-            return {"ok": False, "detail": "缺少 sid"}
-        if self.overrides is None:
+        if sid and self.overrides is None:
             return {"ok": False, "detail": "插件还没初始化完"}
         act = str(action or "add").strip().lower()
-        if act not in ("add", "remove"):
-            return {"ok": False, "detail": "action 只能是 add 或 remove"}
+        if act not in ("add", "remove", "restore"):
+            return {"ok": False, "detail": "action 只能是 add / remove / restore"}
         word = _norm_phrase(text)
         # 图片等占位不是文字；只拦添加，历史垃圾项仍须允许解除。
         text_only = re.sub(r"\[(?:图片|表情|语音|视频|文件|image(?:\s+attached)?|sticker(?:\s+attached)?|kira_image_ref|input_image)\]", "", str(text or ""), flags=re.I)
         if not word or (act == "add" and not _norm_phrase(text_only)):
             return {"ok": False, "detail": "这条消息没有可拉黑的文字"}
         items = list(self._phrase_block_payload(sid)["items"])
+        unblock = self._phrase_unblock_items(sid)
+        unblock_norm = [_norm_phrase(w) for w in unblock]
+        if act == "restore":
+            if word not in unblock_norm:
+                return {"ok": True, "changed": False, "word": word, "scope": "session",
+                        **self._phrase_block_payload(sid)}
+            self._phrase_unblock_write(sid, [w for w in unblock if _norm_phrase(w) != word])
+            logger.info(f"[multi-decision] {sid} 恢复本会话解除的短语：{word}")
+            return {"ok": True, "changed": True, "word": word, "scope": "session",
+                    **self._phrase_block_payload(sid)}
         if act == "add":
+            if word in unblock_norm:
+                # 全局池本来就有它，只是本会话解除过：再拉黑一次＝本会话恢复
+                self._phrase_unblock_write(sid, [w for w in unblock if _norm_phrase(w) != word])
+                logger.info(f"[multi-decision] {sid} 重新拉黑短语（本会话恢复）：{word}")
+                return {"ok": True, "changed": True, "word": word, "scope": "session",
+                        **self._phrase_block_payload(sid)}
             if word in [_norm_phrase(w) for w in items]:
                 return {"ok": True, "changed": False, "word": word, "scope": "global",
                         **self._phrase_block_payload(sid)}
             new_global = self._phrase_global_items() + [word]
             new_own = self._phrase_own_items(sid)
         else:
+            if word in unblock_norm:
+                return {"ok": True, "changed": False, "word": word, "scope": "session",
+                        **self._phrase_block_payload(sid)}
+            if sid and word in [_norm_phrase(w) for w in self._phrase_global_items()]:
+                # 单群 / 私聊解除全局条目：只记进本会话的解除名单，全局池不动
+                self._phrase_unblock_write(sid, unblock + [word])
+                logger.info(f"[multi-decision] {sid} 解除全局短语（只对本会话）：{word}")
+                return {"ok": True, "changed": True, "word": word, "scope": "session",
+                        **self._phrase_block_payload(sid)}
             keep = [w for w in items if _norm_phrase(w) != word]
             if len(keep) == len(items):
                 return {"ok": True, "changed": False, "word": word, "scope": "global",
@@ -6144,6 +6415,8 @@ class MultiDecisionPlugin(BasePlugin):
             return {"ok": True, "changed": True, "word": word, "scope": "global",
                     **self._phrase_block_payload(sid)}
         # ---- 退路：全局配置写不动，就只改这个群的独立池（老行为）
+        if not sid:
+            return {"ok": False, "detail": "全局配置写不动，详情看日志"}
         try:
             patch = self.overrides.get(sid)
             # 独立池 = 原有的额外词 +（add 时）这次要拉黑的词。new_own 只装「全局之外」
@@ -6162,6 +6435,139 @@ class MultiDecisionPlugin(BasePlugin):
         return {"ok": True, "changed": True, "word": word, "scope": "session",
                 "detail": "没能写进全局配置，只对这个群生效",
                 **self._phrase_block_payload(sid)}
+
+    # ------------------------------------------------------------ 用户黑名单（用户 m06193）
+    # 和上面「短语黑名单」不是一回事：短语按整条消息的文字比对，只影响触发判定；
+    # 这里按发言人（QQ 号）拦，命中的消息根本不进请求——决策上下文、回复上下文、
+    # 待发都剔掉，但窗口页照常显示（默认折叠，点开还能看）。
+    def _user_unblock_items(self, sid: str) -> list:
+        """本会话「已解除」的全局拉黑 uid（用户 m07715 第 4 条）。
+
+        单群 / 私聊可以把全局拉黑的人对本会话解除，写进 overrides 的
+        user_blacklist_unblock，全局名单一个字不动；切回全局视图照样能看到他。
+        """
+        if not sid or self.overrides is None:
+            return []
+        try:
+            raw = self.overrides.value(sid, "user_blacklist_unblock", None)
+        except Exception:
+            return []
+        if raw is None:
+            return []
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            data = []
+        out = []
+        for it in data or []:
+            uid = str(it).strip()
+            if uid and uid not in out:
+                out.append(uid)
+        return out
+
+    def _user_unblock_write(self, sid: str, uids: list) -> None:
+        """把本会话的解除名单写回单群覆盖；空了就把这个键删掉。"""
+        if not sid or self.overrides is None:
+            return
+        try:
+            cleaned = []
+            for it in uids or []:
+                uid = str(it).strip()
+                if uid and uid not in cleaned:
+                    cleaned.append(uid)
+            patch = self.overrides.get(sid)
+            if cleaned:
+                patch["user_blacklist_unblock"] = json.dumps(cleaned, ensure_ascii=False)
+            else:
+                patch.pop("user_blacklist_unblock", None)
+            self.overrides.set(sid, patch)
+        except Exception:
+            logger.exception("[multi-decision] 保存本会话解除名单失败")
+
+    def _blacklist_payload(self, sid: str = "") -> dict:
+        """当前生效的用户黑名单。
+
+        用户 m07715：带上 unblock_items（本会话解除掉的全局条目），设置页据此
+        把那几枚胶囊画成「已解除」；global_count 是全局名单原样条数。
+        """
+        all_items = self.user_blacklist.items() if self.user_blacklist else []
+        drop = set(self._user_unblock_items(sid))
+        items = [it for it in all_items if str(it.get("uid") or "") not in drop]
+        unblock_items = [it for it in all_items if str(it.get("uid") or "") in drop]
+        return {
+            "ok": True,
+            # 用户 m08153：总开关按会话取——单群 / 私聊可以自己关掉。
+            "enabled": bool(self.eff("user_blacklist_enabled", sid)),
+            "items": items,
+            "count": len(items),
+            "uids": [str(it.get("uid") or "") for it in items if it.get("uid")],
+            "unblock_items": unblock_items,
+            "unblock_count": len(unblock_items),
+            "global_count": len(all_items),
+        }
+
+    def _blacklist_keep_ids(self, uid: str) -> list:
+        """拉黑那一刻已经在窗口里的消息 id：这些历史照留，只剔之后的新消息。"""
+        try:
+            if self.window is not None:
+                return self.window.blacklist_keep_ids(uid)
+        except Exception:
+            logger.exception("[multi-decision] 收集拉黑保留消息失败（按空处理）")
+        return []
+
+    @_api("GET", "/user-blacklist")
+    async def api_user_blacklist(self, sid: str = ""):
+        """窗口页与设置页共用：当前用户黑名单（带 sid 时按本会话解除过滤）。"""
+        return self._blacklist_payload(sid)
+
+    @_api("POST", "/user-blacklist")
+    async def api_user_blacklist_set(self, uid: str = "", name: str = "", action: str = "add",
+                                     sid: str = ""):
+        """拉黑 / 解黑一个用户。
+
+        add 时把「此刻已经在窗口里的消息 id」记进 keep：用户 m06193 的口径是
+        只剔除拉黑之后的新消息，历史照留。remove 直接整条删掉，历史本来就没动过。
+
+        用户 m07715 第 4 条：单群 / 私聊 remove 一条全局拉黑时只写本会话的解除
+        名单（user_blacklist_unblock），全局名单不动；restore 把 uid 从解除名单
+        里拿掉（本会话恢复生效）；add 永远写全局，若这个人本来被本会话解除过，
+        add 只做本会话恢复。sid 为空＝全局视图。
+        """
+        uid = str(uid or "").strip()
+        if not uid:
+            return {"ok": False, "detail": "缺少 uid"}
+        if self.user_blacklist is None:
+            return {"ok": False, "detail": "插件还没初始化完"}
+        if sid and self.overrides is None:
+            return {"ok": False, "detail": "插件还没初始化完"}
+        act = str(action or "add").strip().lower()
+        if act not in ("add", "remove", "restore"):
+            return {"ok": False, "detail": "action 只能是 add / remove / restore"}
+        unblock = self._user_unblock_items(sid)
+        if act == "restore":
+            if uid not in unblock:
+                return {**self._blacklist_payload(sid), "changed": False, "uid": uid}
+            self._user_unblock_write(sid, [u for u in unblock if u != uid])
+            logger.info(f"[multi-decision] {sid} 恢复本会话解除的拉黑：{uid}")
+            return {**self._blacklist_payload(sid), "changed": True, "uid": uid}
+        if act == "add":
+            if uid in unblock:
+                # 全局名单本来就有他，只是本会话解除过：再拉黑一次＝本会话恢复
+                self._user_unblock_write(sid, [u for u in unblock if u != uid])
+                logger.info(f"[multi-decision] {sid} 重新拉黑用户（本会话恢复）：{uid}")
+                return {**self._blacklist_payload(sid), "changed": True, "uid": uid}
+            keep = self._blacklist_keep_ids(uid)
+            self.user_blacklist.add(uid, name, keep)
+            logger.info(f"[multi-decision] 拉黑用户 {uid}（{name or '未知名'}），保留历史 {len(keep)} 条")
+        else:
+            if sid and self.user_blacklist.get(uid) is not None:
+                # 单群 / 私聊解除全局拉黑：只记进本会话的解除名单，全局名单不动
+                self._user_unblock_write(sid, unblock + [uid])
+                logger.info(f"[multi-decision] {sid} 解除全局拉黑（只对本会话）：{uid}")
+                return {**self._blacklist_payload(sid), "changed": True, "uid": uid}
+            changed = self.user_blacklist.remove(uid)
+            logger.info(f"[multi-decision] 解黑用户 {uid}（{'已移除' if changed else '本来就不在表里'}）")
+        return {**self._blacklist_payload(sid), "changed": True, "uid": uid}
 
     @_api("GET", "/request-sessions")
     async def api_request_sessions(self):
@@ -7735,6 +8141,7 @@ class MultiDecisionPlugin(BasePlugin):
             return project_items(items, raw_sid, owner_rows, public_media=public_media,
                                  text_of_content=content_text, forward_proof_items=proof,
                                  forward_media_for_mid=forward_media_for_mid,
+                                 original_media_for_mid=original_media_for_mid,
                                  forward_display_proof_for_mid=forward_display_proof_for_mid)
 
         for field, proof in owner_proofs.items():
@@ -7871,10 +8278,13 @@ class MultiDecisionPlugin(BasePlugin):
         eid = str(data.get("event_id") or "")
         if eid:
             # 已有稳定身份时绝不能借邻轮轨迹；没有就是缺失，不是未回复。
-            trace = self.tracer.read_by_event(sid, eid)
-            if (trace and str(trace.get("event_id") or "") == eid
-                    and normalize_sid(str(trace.get("sid") or "")) == normalize_sid(sid)):
-                return trace
+            #
+            # v5.x（用户 m26664 性能）：轨迹就写在这份请求快照自己身上（tracer 的
+            # _rounds_folder 就是 requests/<sid>，read_by_event 也是在这批文件里找
+            # event_id），而 event_id 在目录里唯一——所以「这份文件里没有 trace」
+            # 时，按 event_id 把整个目录重扫一遍必然还是找不到。以前每遇到一轮
+            # 失败记录（没有轨迹）就白扫最多 300 份 JSON，实测 0.7~1.3 秒；列表里
+            # 五轮失败就是十秒，页面就「点开要加载好一会」。
             return None
         try:
             ts = float(data.get("ts") or 0)

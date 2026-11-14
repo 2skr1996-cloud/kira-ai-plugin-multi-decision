@@ -329,7 +329,7 @@ def normalize_api_id(raw, default: str = "1") -> str:
     return text[:8] if text else default
 
 
-def make_api(eid="1", protocol=DEFAULT_PROTOCOL, base="", model="") -> dict:
+def make_api(eid="1", protocol=DEFAULT_PROTOCOL, base="", model="", name="") -> dict:
     """一条自定义接口的归一形状。
 
     地址只去空白、不在这里洗成空串：用户把 http:// 或内网地址存进来时，
@@ -339,6 +339,7 @@ def make_api(eid="1", protocol=DEFAULT_PROTOCOL, base="", model="") -> dict:
     """
     return {
         "id": normalize_api_id(eid),
+        "name": str(name or "").strip()[:24],
         "protocol": normalize_protocol(protocol),
         "base": str(base or "").strip()[:400],
         "model": str(model or "").strip()[:120],
@@ -368,7 +369,7 @@ def parse_apis(raw) -> list:
         if eid in seen:
             continue
         seen.add(eid)
-        out.append(make_api(eid, item.get("protocol"), item.get("base"), item.get("model")))
+        out.append(make_api(eid, item.get("protocol"), item.get("base"), item.get("model"), item.get("name")))
         if len(out) >= MAX_APIS:
             break
     return out
@@ -392,7 +393,9 @@ def clamp_unit(raw, default: float) -> float:
         return float(default)
     if not math.isfinite(val):
         return float(default)
-    if 1.0 < val <= 100.0:  # 允许页面里按百分比存（20 而不是 0.2）
+    # D09（2026-11-13 交接文档）：页面按百分比存（20 表示 20%），手改配置填 1 想
+    # 表达的也是 1%，不是 100%。所以 1~100 一律按百分比归一，只有小于 1 的才是小数。
+    if 1.0 <= val <= 100.0:
         val = val / 100.0
     return min(1.0, max(0.0, val))
 
@@ -465,7 +468,8 @@ class JevOptions:
     persona: str = ""
     retry: int = 2
     retry_delay: float = 3.0
-    fail_switch: int = 2
+    # 用户 m08153：连续失败切换从「几次」改成开关，阈值固定 2。
+    fail_switch: bool = True
     cooldown: float = 300.0
     timeout: float = 60.0
     fail_action: str = "allow"
@@ -526,6 +530,18 @@ def options_from_config(get) -> JevOptions:
             val = min(hi, val)
         return val
 
+    # 用户 m08153：连续失败切换改成开关，读配置时按布尔解析（老配置里的 2 也算开）。
+    def _bool(key, default):
+        try:
+            raw = get(key, default)
+        except Exception:
+            return bool(default)
+        if raw is None or raw == "":
+            return bool(default)
+        if isinstance(raw, str):
+            return raw.strip().lower() not in ("0", "false", "off", "no", "")
+        return bool(raw)
+
     try:
         enabled = bool(get("jev_enabled", False))
     except Exception:
@@ -559,7 +575,7 @@ def options_from_config(get) -> JevOptions:
         # 用户 m07859：重试 / 重试间隔 / 单次超时不再各留一份，统一读基础设置页那三项。
         retry=_int("retry_max", 2, 0, 10),
         retry_delay=_num("retry_delay", 5, 0, 600),
-        fail_switch=_int("jev_fail_switch", 2, 1, 10),
+        fail_switch=_bool("jev_fail_switch", True),
         cooldown=float(_int("jev_fallback_cooldown", 300, 30, 3600)),
         timeout=float(_int("watchdog_seconds", 180, 30, 600)),
         fail_action=str(get("decision_fail_action", "allow") or "allow").strip().lower(),
@@ -1109,7 +1125,7 @@ class JevPhase:
         if not base_ok:
             return _fail("自定义接口地址不合法：%s" % (base_why or "还没填地址"), fatal=True)
         if not api_key.strip():
-            return _fail("自定义接口还没填密钥")
+            return _fail("自定义接口还没填密钥", fatal=True)
         rules = str(opt.prompt or DEFAULT_JEV_PROMPT)[:4000]
         if is_openai:
             # 用户 m08755：阿里这类网关只有 OpenAI 兼容，没有 SystemOne——
@@ -1296,7 +1312,11 @@ class JevPhase:
                 last = dict(last, error=why, key=str(key or ""))
                 self._last_error = str(why)[:300]
                 continue
+            # 用户 m08153：开关打开时主模型最多试 2 次（第一次 + 重试一次），
+            # 第三次尝试直接交给备用模型；0 次重试时就是「主模型 1 次 + 备用 1 次」。
             tries = (max(0, int(opt.retry)) + 1) if kind == "main" else 1
+            if kind == "main" and bool(opt.fail_switch) and fb_key:
+                tries = min(tries, 2)
             for t in range(tries):
                 attempts += 1
                 if target.get("kind") == "custom":
@@ -1322,7 +1342,7 @@ class JevPhase:
                     await asyncio.sleep(opt.retry_delay)
             if kind == "main":
                 self._fail_streak += 1
-                if self._fail_streak >= max(1, int(opt.fail_switch)):
+                if bool(opt.fail_switch) and self._fail_streak >= 2:
                     self._fallback_until = time.time() + float(opt.cooldown)
         last["attempts"] = attempts
         return last

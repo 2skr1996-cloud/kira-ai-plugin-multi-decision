@@ -48,13 +48,15 @@
 })();
 </script>
 <style>
-:root{--bg:#f6f8fc;--card:#fff;--line:#e3e9f3;--text:#1f2937;--muted:#6b7280;--accent:#3b82f6;--ok:#10b981;--warn:#f59e0b;--bad:#ef4444;--soft:rgba(127,127,127,.08);}
-html[data-theme="dark"]{--bg:#0f172a;--card:#16213a;--line:#26344f;--text:#e5edff;--muted:#93a4c4;--accent:#60a5fa;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--soft:rgba(255,255,255,.06);}
+:root{--bg:#f6f8fc;--card:#fff;--line:#e3e9f3;--text:#1f2937;--muted:#6b7280;--accent:#3b82f6;--reload:#7c3aed;--reload-soft:rgba(124,58,237,.10);--ok:#10b981;--warn:#f59e0b;--bad:#ef4444;--soft:rgba(127,127,127,.08);}
+html[data-theme="dark"]{--bg:#0f172a;--card:#16213a;--line:#26344f;--text:#e5edff;--muted:#93a4c4;--accent:#60a5fa;--reload:#a78bfa;--reload-soft:rgba(167,139,250,.16);--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--soft:rgba(255,255,255,.06);}
 *{box-sizing:border-box;}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;}
 /* v3.67（用户 m20117 第 6 条）：整页收一点边距，一屏能多看两行。 */
-.wrap{padding:14px 20px 32px;max-width:none;margin:0;}
-header{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;}
+/* 用户 m19542 第 3 条：跟首页对齐——首页 .wrap 是 18px 22px 40px，
+   原来这里 14/20 会让「首页 / 设置」两个胶囊切换时左移 2px、上移 4px。 */
+.wrap{padding:18px 22px 40px;max-width:none;margin:0;}
+header{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;}
 /* header 里的控件统一 26px 高，整条 header 正好 32px —— 和首页一样高，切页不跳（用户 m33994 图5） */
 header > button,header > select{height:26px;padding:0 12px;line-height:1;border-radius:8px;font-size:13px;}
 header > select{padding:0 6px;}
@@ -63,8 +65,15 @@ h1{font-size:20px;margin:0;font-weight:600;}
 .navseg{display:inline-flex;align-items:center;gap:2px;padding:2px;border-radius:11px;background:var(--soft);border:1px solid var(--line);height:32px;}
 .navbtn{height:26px;padding:0 15px;border-radius:9px;border:0;background:transparent;color:var(--muted);font-size:13px;font-weight:500;cursor:pointer;line-height:1;transition:background .15s,color .15s;}
 .navbtn:hover{border:0;color:var(--text);}
-.navbtn.on{background:var(--card);color:var(--accent);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.10);}
-html[data-theme="dark"] .navbtn.on{background:rgba(255,255,255,.10);}
+/* 用户 m19542 第 4 条：选中的按钮统一换成实心蓝底白字，跟首页「美化 / 对照 / 原文」一致 */
+.navbtn.on{background:var(--accent);color:#fff;font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.10);}
+/* 用户 m19731：设置页也能直接重载——「重载」并进导航胶囊当第三段，紫色 + 刷新图标，
+   中间一条竖线说明它是动作不是页面。 */
+.navseg .navsep{width:1px;height:16px;background:var(--line);margin:0 3px;flex:none;}
+.navbtn.nav-reload{display:inline-flex;align-items:center;gap:5px;padding:0 12px;color:var(--reload);background:var(--reload-soft);font-weight:600;}
+.navbtn.nav-reload svg{width:13px;height:13px;display:block;flex:none;}
+.navbtn.nav-reload:hover{color:#fff;background:var(--reload);}
+.navbtn.nav-reload:disabled{opacity:.55;cursor:default;color:var(--reload);background:var(--reload-soft);}
 .grow{flex:1;}
 button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--card);color:var(--text);padding:6px 12px;border-radius:8px;}
 button:hover{border-color:var(--accent);color:var(--accent);}
@@ -129,6 +138,9 @@ html.booting .setgrp.pgin{animation:none;}
 .dlg{width:min(420px,92vw);background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px 16px;box-shadow:0 18px 50px rgba(0,0,0,.32);}
 .dlg h3{margin:0 0 8px;font-size:14px;}
 .dlg p{margin:0;font-size:13px;line-height:1.8;color:var(--text);}
+.dlg .dlg-input{width:100%;box-sizing:border-box;height:34px;margin-top:10px;padding:0 10px;border-radius:9px;
+  border:1px solid var(--line);background:var(--soft);color:var(--text);font-size:13px;outline:none;}
+.dlg .dlg-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.16);}
 .dlg-btns{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;}
 .dlg-btns button{padding:6px 16px;border-radius:8px;border:1px solid var(--line);background:var(--soft);color:var(--text);font-size:13px;}
 .dlg-btns button.pri,.dlg-btns button:hover{border-color:var(--accent);color:var(--accent);}
@@ -157,6 +169,10 @@ html.booting .setgrp.pgin{animation:none;}
 .setrow{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:16px;align-items:center;padding:11px 14px;border-bottom:1px solid var(--line);}
 .setrow.wide{grid-template-columns:1fr;row-gap:7px;grid-column:1/-1;}
 .setrow:last-child{border-bottom:none;}
+/* v3.92（用户 m00697 第 20 条）：所有页面的设置行鼠标移上去都浮一层浅底——
+   原来只有基础设置页有这条，别的页移上去毫无反馈，看不出鼠标停在哪一行。 */
+.setrow:hover{background:var(--soft);}
+html[data-theme="dark"] .setrow:hover{background:rgba(255,255,255,.055);}
 /* 用户 m02105：分区最后一行也画着一条灰线，紧挨着下面那个分区标题，看着像多出一道分割。
    .rows 末尾有时还挂着隐藏 input，:last-child 抓不到，所以再按 .setrow 自己补一条。 */
 .setgrp .sub .rows > .setrow:last-of-type,
@@ -193,29 +209,38 @@ html.booting .setgrp.pgin{animation:none;}
 
 /* v3.10：滑动开关。原来用原生 checkbox + 「开/关」文字，和首页的大开关风格不一致。
    这里保留真实 input 供 collectSettings 读取，视觉换成轨道+圆点，勾选态交给 :checked。 */
-.sw2{position:relative;display:inline-flex;align-items:center;gap:9px;cursor:pointer;user-select:none;
-  /* v3.12：状态文字挪到轨道左边（用户 m39759 ③）。原来「开」字在轨道右侧，
-     把开关往左顶了 38px，跟同一列的输入框右边缘对不齐。 */
-  flex-direction:row-reverse;}
-.sw2 input{position:absolute;opacity:0;width:0;height:0;pointer-events:none;}
-/* v3.42（用户 m03616 第 3 条）：全站只有一种尺寸的开关——轨道 38×22、圆点 16。
-   以前「模式开关」单独缩成 36×21，同一屏里两种大小的胶囊并排，看着不齐。 */
-.sw2 .tr{width:38px;height:22px;border-radius:999px;background:var(--line);position:relative;transition:.18s;flex:none;}
-.sw2 .tr:after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:.18s;}
+/* v3.92（用户 m00697 第 10 条）：开关改成首页那种「字写在轨道里」的胶囊——
+   轨道里直接写状态（开启 / 关闭、接管 / 关闭），白色滑块滑到对应一侧。
+   真实 input 仍留在标签里（透明铺满整块），collectSettings 照旧读 checked。 */
+.sw2{position:relative;display:inline-flex;align-items:center;flex:none;cursor:pointer;user-select:none;}
+.sw2 input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer;}
+.sw2 .tr{position:relative;display:block;width:58px;height:24px;border-radius:999px;background:var(--line);transition:background .18s;flex:none;}
+.sw2 .tr:after{content:attr(data-off);position:absolute;top:2px;left:2px;width:34px;height:20px;border-radius:999px;
+  background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.22);display:flex;align-items:center;justify-content:center;
+  font-size:10.5px;font-weight:600;color:#1f2937;letter-spacing:.02em;transition:transform .18s;}
 .sw2 input:checked ~ .tr{background:var(--accent);}
-.sw2 input:checked ~ .tr:after{transform:translateX(16px);}
-.sw2 .st{font-size:12.5px;color:var(--muted);min-width:2em;white-space:nowrap;}
-.sw2 input:checked ~ .st{color:var(--text);font-weight:600;}
-/* v3.50（用户 m06761 第 4 条）：开关小字跟着状态走——开着显「开」、关着显「关」。
-   两个字都写在标签里（<i class='on'>开</i><i class='off'>关</i>），露哪个由 :checked 决定：
-   纯 CSS、不重渲染，切开关不会掉字，也不需要 JS 去改 textContent。 */
-.sw2 .st i{font-style:normal;}
-.sw2 .st .on{display:none;}
-.sw2 .st .off{display:inline;}
-.sw2 input:checked ~ .st .on{display:inline;}
-.sw2 input:checked ~ .st .off{display:none;}
+.sw2 input:checked ~ .tr:after{content:attr(data-on);transform:translateX(20px);}
 .sw2 input:focus-visible ~ .tr{outline:2px solid var(--accent);outline-offset:2px;}
 html.booting .sw2 .tr,html.booting .sw2 .tr:after{transition:none;}
+/* v3.92（用户 m00697 第 15 条）：唤醒那几行是「关闭 / 触发 / 必回」三档，
+   做成一条轨道里三段、白色滑块跟着走的分段开关（跟首页折叠 / 展开同一套语言）。 */
+.sw3{position:relative;display:inline-flex;align-items:center;flex:none;cursor:pointer;user-select:none;
+  height:24px;padding:2px;border-radius:999px;background:var(--line);}
+.sw3 input{position:absolute;opacity:0;width:0;height:0;pointer-events:none;}
+.sw3 .thumb{position:absolute;top:2px;left:2px;width:34px;height:20px;border-radius:999px;background:#fff;
+  box-shadow:0 1px 3px rgba(0,0,0,.22);transition:transform .18s;}
+.sw3 b{position:relative;z-index:1;width:34px;height:20px;display:flex;align-items:center;justify-content:center;
+  font-size:10.5px;font-weight:600;color:var(--muted);letter-spacing:.02em;transition:color .18s;}
+.sw3[data-v="trigger"] .thumb{transform:translateX(34px);}
+.sw3[data-v="always"] .thumb{transform:translateX(68px);}
+.sw3[data-v="off"] b[data-v="off"]{color:#1f2937;}
+/* 用户 m01445：触发 / 必回 选中时用蓝底白字（跟「接管」胶囊同一套），关闭仍是白底深字。 */
+.sw3[data-v="trigger"] .thumb,.sw3[data-v="always"] .thumb{background:var(--accent);}
+.sw3[data-v="trigger"] b[data-v="trigger"],.sw3[data-v="always"] b[data-v="always"]{color:#fff;}
+/* 用户 m01445：没开决策模式（advanced_enabled）时「必回」不生效——灰掉且点不动。 */
+.sw3.no-must b[data-v="always"]{color:var(--muted);opacity:.45;}
+.sw3.no-must[data-v="always"] .thumb{background:#c7ccd4;}
+.sw3.no-must[data-v="always"] b[data-v="always"]{color:#fff;opacity:.85;}
 html.booting *,html.booting *::before,html.booting *::after{transition:none!important;}
 .chips{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
 /* 列表类设置（外号/唤醒词）撑满整行，否则输入框缩在左边、右边一大片空 */
@@ -559,6 +584,9 @@ html[data-theme="dark"] .h3use.todo{background:rgba(251,191,36,.15);color:#fbbf2
   .dlb{flex:0 0 132px;font-size:13px;color:var(--text);font-weight:600;display:flex;align-items:center;gap:8px;}
   .dipt{height:30px;border:1px solid var(--line);border-radius:7px;background:var(--bg,#fff);color:var(--text);padding:0 8px;font-size:13px;min-width:180px;}
   .dipt.wide{min-width:300px;max-width:440px;}
+  /* 用户 m02992：数字框以前被全局 input[type=number] 的 background:var(--card) 抢走，
+     跟旁边的下拉（var(--bg)）不是一个色，深色主题下看着发白；这里补回来。 */
+  input.dipt{background:var(--bg);}
   .dipt.num{width:88px;min-width:0;text-align:right;}
   .darea{width:100%;margin-top:7px;border:1px solid var(--line);border-radius:8px;background:var(--bg,#fff);color:var(--text);padding:8px 10px;font-size:13px;line-height:1.65;font-family:inherit;resize:vertical;box-sizing:border-box;}
   .dtip{font-size:11.5px;color:var(--muted);line-height:1.55;}
@@ -580,13 +608,42 @@ html[data-theme="dark"] .h3use.todo{background:rgba(251,191,36,.15);color:#fbbf2
   .jev-datarow{display:flex;gap:6px;align-items:center;min-width:0;}
   .jev-datarow .dipt{flex:1 1 auto;min-width:0;}
   .jev-col .drow{padding:4px 0;gap:6px;}
+  /* 用户 m02469：标签列收窄，输入框整体往左靠、右边自适应拉长。
+     用户 m02950：再收到 56px，控件起点落在标签文字刚结束的位置（红竖线处）。 */
+  .jev-col .drow > .dlb{flex:0 0 56px;}
+  /* 用户 m01978 第 1/2 条：两项并一行——每格「短标签 + 控件」，控件自己撑开。 */
+  .jev-col .drow.pair2{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:center;}
+  .jev-col .drow.pair2 > .p2{display:flex;align-items:center;gap:6px;min-width:0;}
+  .jev-col .drow.pair2 .dlb{flex:0 0 56px;gap:4px;white-space:nowrap;}
+  .jev-col .drow.pair2 .dipt{min-width:0;flex:1 1 auto;width:auto;}
+  .jev-col .drow.pair2 .sw2{flex:0 0 auto;}
+  /* 用户 m02469：这两个数字框以前撑满整格，太长；现在跟标签列对齐、单位还留在框里。 */
+  .jev-col .drow.pair2 .ipt.has-unit{flex:1 1 auto;min-width:0;}
+  /* 用户 m02691：上面几行的下拉以前是内容宽度（237），右边留一截空白；现在撑满整列，
+     这样「300 秒」那个框的右边缘正好和「未选择模型」下拉的右边缘对齐。 */
+  .jev-col .drow > .dipt{flex:1 1 auto;min-width:0;}
+  /* 用户 m01978 第 1 条：单位（次 / 秒）搬进框里，跟基础设置页 .ipt.has-unit 一套做法。 */
+  .jev-col .ipt.has-unit{position:relative;display:inline-flex;align-items:center;flex:1 1 auto;min-width:0;}
+  .jev-col .ipt.has-unit > input{width:100%;min-width:0;padding-right:24px;}
+  .jev-col .ipt.has-unit.uw2 > input{padding-right:36px;}
+  .jev-col .ipt.has-unit > .unit{position:absolute;right:8px;top:50%;transform:translateY(-50%);
+    pointer-events:none;color:var(--muted);font-size:12px;font-weight:600;line-height:1;}
+  .jev-col .ipt.has-unit > input::-webkit-inner-spin-button,
+  .jev-col .ipt.has-unit > input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
+  /* 用户 m01978 第 3 条：这一行的标签就是接口页的名字，点一下改名。 */
+  .jev-pgname{display:inline-flex;align-items:center;gap:3px;cursor:pointer;border-bottom:1px dashed var(--line);}
+  .jev-pgname svg{width:9px;height:9px;flex:0 0 auto;opacity:.55;}
+  .jev-pgname:hover{color:var(--accent);border-bottom-color:var(--accent);}
+  .jev-pgname:hover svg{opacity:1;}
+  .jev-api-body .dlb .jev-pgname{max-width:100%;gap:2px;}
+  .jev-pgnm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
   .jev-col .drow.stack{display:block;}
   .jev-col .drow.stack > .dlb{display:block;margin:0 0 2px;}
   .jev-col .drow.stack .dipt{width:100%;box-sizing:border-box;}
   .jev-col .drow.stack .jev-datarow .dipt{width:auto;flex:1 1 auto;}
   /* 2026-11-08（用户本轮图3）：两个下拉 + 中间的「~」加起来，宽度跟同一列里普通 .dipt 选框一样
      （.dipt 的 min-width 是 180px）：180 - 两个 6px 间距 - 「~」约 7px = 161，两个框各约 80px。 */
-  .jev-range{display:flex;align-items:center;gap:6px;width:180px;box-sizing:border-box;}
+  .jev-range{display:flex;align-items:center;gap:6px;width:auto;flex:1 1 auto;box-sizing:border-box;}
   .jev-range .dipt{width:auto;min-width:0;}
   .jev-range-sep{color:var(--muted);font-size:12px;flex:0 0 auto;}
   /* 2026-11-08：不确定区间的 % 放进框里（原来在框外单独一个 %）。 */
@@ -610,30 +667,40 @@ html[data-theme="dark"] .h3use.todo{background:rgba(251,191,36,.15);color:#fbbf2
   .jev-keyline #jev-key-note:empty{display:none;}
   .jev-col input[type=password]{font:inherit;height:30px;padding:0 8px;border-radius:7px;border:1px solid var(--line);background:var(--bg,#fff);color:var(--text);width:100%;box-sizing:border-box;font-size:13px;}
   .jev-col .drow.stack .jev-keyline input[type=password]{width:auto;}
-  .jev-api{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px;align-items:start;}
-  .jev-api-tabs .jev-tabs{display:flex;flex-direction:column;gap:3px;margin:0;}
+  /* 用户 m02691：页签从左边竖条搬走，右卡的表单就能和左卡一样贴着卡片左边。
+     用户 m02835：页签再挪到右卡左下角，和右下角的「已保存」同一行。 */
+  .jev-api{display:block;}
+  .jev-api-tabs{display:flex;justify-content:flex-start;padding:0;}
+  .jev-api-tabs .jev-tabs{display:flex;flex-direction:row;gap:4px;margin:0;}
   .jev-api-tabs .jev-tab{width:26px;min-width:26px;height:24px;padding:0;}
   .jev-api-body .drow{gap:6px;align-items:center;}
-  .jev-api-body .dlb{flex:0 0 108px;font-size:11.5px;gap:4px;white-space:nowrap;}
+  .jev-col .jev-api-body .drow > .dlb{flex:0 0 66px;min-width:0;gap:4px;white-space:nowrap;}
   .jev-api-body .dipt{min-width:0;flex:1 1 auto;width:auto;}
   .jev-api-body .jev-keyline{flex:1 1 auto;min-width:0;}
   .jev-api-body .jev-keyline input[type=password]{flex:1 1 50px;min-width:0;}
   .jev-api-body .jev-keyline .dbtn{padding:0 8px;font-size:12px;}
   .jev-api-body .jev-keyline .jev-keystate{font-size:11px;}
   .jev-api-body .jev-datarow{flex:1 1 auto;min-width:0;}
-  .jev-api-body .jev-datarow .dbtn{padding:0 8px;font-size:12px;}
-  .jev-api-body{padding-bottom:16px;}
-  .jev-foot{position:absolute;right:8px;bottom:4px;font-size:11px;color:var(--muted);line-height:1.2;white-space:nowrap;pointer-events:none;}
+  .jev-api-body .jev-datarow .dbtn{padding:0 8px;font-size:12px;flex:0 0 auto;white-space:nowrap;}
+  .jev-api-body{padding-bottom:0;}
+  .jev-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0 0;font-size:11px;color:var(--muted);line-height:1.2;white-space:nowrap;}
+  .jev-foot-end{display:flex;align-items:center;gap:8px;flex:0 0 auto;}
   .jev-tabs{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 6px;}
   .jev-tab{min-width:26px;height:24px;padding:0 7px;font-size:12px;border-radius:6px;border:1px solid var(--line);
     background:transparent;color:var(--muted);cursor:pointer;}
   .jev-tab:hover{border-color:var(--accent);color:var(--accent);}
-  .jev-tab.on{border-color:var(--accent);color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);font-weight:600;}
+  .jev-tab.on{border-color:var(--accent);color:#fff;background:var(--accent);font-weight:600;}
   .jev-tab-add{border-style:dashed;font-weight:600;}
   .jev-ep{font-size:11px;color:var(--muted);margin:1px 0 0;word-break:break-all;line-height:1.4;}
   .jev-combo{position:relative;}
   .jev-modellist{position:absolute;left:0;right:0;top:100%;z-index:40;max-height:220px;overflow:auto;
     background:var(--card,#fff);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 22px rgba(0,0,0,.14);margin-top:2px;}
+  /* 用户 m01978 第 6 条：模型清单的滚动条做成内侧细条，跟提示词页右栏一样。 */
+  .jev-modellist{scrollbar-width:thin;scrollbar-color:var(--line) transparent;}
+  .jev-modellist::-webkit-scrollbar{width:8px;height:8px;}
+  .jev-modellist::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px;
+    border:2px solid transparent;background-clip:padding-box;}
+  .jev-modellist::-webkit-scrollbar-track{background:transparent;}
   .jev-modellist div{padding:4px 9px;font-size:12px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .jev-modellist div:hover{background:rgba(127,127,127,.14);}
   .jev-empty{padding:6px 9px;font-size:12px;color:var(--muted);}
@@ -675,10 +742,12 @@ html[data-theme="dark"] .h3use.todo{background:rgba(251,191,36,.15);color:#fbbf2
 .setgrp[data-split] .col h3{display:flex;align-items:center;gap:8px;}
 .msw{margin-left:auto;flex:0 0 auto;display:inline-flex;align-items:center;cursor:pointer;}
 .msw input{position:absolute;opacity:0;width:0;height:0;pointer-events:none;}
-.msw .tr{width:38px;height:22px;border-radius:999px;background:var(--line);position:relative;transition:.18s;flex:none;}
-.msw .tr:after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:.18s;}
+.msw .tr{width:64px;height:24px;border-radius:999px;background:var(--line);position:relative;transition:background .18s;flex:none;}
+.msw .tr:after{content:attr(data-off);position:absolute;top:2px;left:2px;width:40px;height:20px;border-radius:999px;
+  background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.22);display:flex;align-items:center;justify-content:center;
+  font-size:10.5px;font-weight:600;color:#1f2937;letter-spacing:.02em;transition:transform .18s;}
 .msw input:checked + .tr{background:var(--accent);}
-.msw input:checked + .tr:after{transform:translateX(16px);}
+.msw input:checked + .tr:after{content:attr(data-on);transform:translateX(20px);}
 .msw input:focus-visible + .tr{outline:2px solid var(--accent);outline-offset:2px;}
 html.booting .msw .tr,html.booting .msw .tr:after{transition:none;}
 .setgrp[data-split] .col.off h3{color:var(--muted);}
@@ -714,6 +783,11 @@ html.booting .msw .tr,html.booting .msw .tr:after{transition:none;}
    末尾一个「+」点开两个输入框（名字 / QQ 号）再回车或点「添加」。
    QQ 号在胶囊里用 .aq 压成灰小字，一眼分出哪个是号、哪个是名字。 */
 .chip .aq{color:var(--muted);font-size:12px;font-style:normal;}
+/* 用户 m07715：单群 / 私聊把全局拉黑「对本会话解除」后，那一条变灰留在原地，
+   点一下就能恢复——一眼看出它是全局条目、被本群解除了，而不是凭空消失。 */
+.chip.off{opacity:.55;border-style:dashed;cursor:pointer;}
+.chip.off:hover{opacity:.85;border-color:var(--accent);}
+.chip.off .aq{color:var(--warn,var(--muted));}
 .chips .adform[hidden]{display:none;}
 .chips .adform input{width:104px;height:28px;min-width:0;padding:0 9px;border-radius:9px;
   border:1px solid var(--line);background:var(--soft);font-size:13px;}
@@ -1148,6 +1222,31 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   }
   /* v3.54（用户本轮第 4 条）：记录页的「缓存记录」——按类型一张账本表 + 合计 + 各会话小表。
      表格沿用全局 table 的观感（见上面 th,td 那段），这里只补列宽、数字右对齐、内联数字框和清空按钮。 */
+  /* 用户 m07418：黑名单页两个清单都改成页内胶囊（跟外号 / 管理员一个手感）——
+     短语黑名单不再用「编辑清单」弹窗，用户黑名单不再用四列表格，拉黑了谁直接列出来。 */
+  .ublk{padding:2px 0 2px;}
+  .blk-desc{color:var(--muted);font-size:12px;line-height:1.6;margin:0 14px 8px;}
+  .blk-list{padding:0 14px 12px;}
+  .blk-list .chips{justify-content:flex-start;gap:8px;}
+  .blk-empty{color:var(--muted);font-size:12px;line-height:1.6;}
+  .blk-in{min-width:150px;flex:0 1 auto;border:1px solid transparent;border-radius:10px;
+    background:var(--soft);padding:6px 12px;font-size:13.5px;color:var(--text);}
+  .blk-in:hover{background:var(--card);border-color:var(--line);}
+  .blk-in:focus{outline:none;background:var(--card);border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.16);}
+  .blk-in[hidden]{display:none;}
+  /* 用户黑名单的「手动拉黑」表单：点 + 后在胶囊下面铺一行，不再用绝对定位浮层 */
+  .blk-form{display:flex;align-items:center;gap:6px;padding:10px 0 0;}
+  .blk-form[hidden]{display:none;}
+  .blk-form input{height:30px;min-width:0;padding:0 10px;border-radius:9px;border:1px solid var(--line);
+    background:var(--soft);font-size:13px;color:var(--text);}
+  .blk-form input:focus{outline:none;border-color:var(--accent);background:var(--card);}
+  .blk-form .ub-name{width:150px;}
+  .blk-form .ub-qq{width:130px;}
+  .blk-form .blk-ok{height:30px;padding:0 14px;border-radius:9px;border:1px solid var(--accent);
+    background:var(--accent);color:#fff;font-size:12.5px;font-weight:600;cursor:pointer;}
+  .blk-form .blk-x{width:26px;height:26px;padding:0;border:none;border-radius:50%;background:transparent;
+    color:var(--muted);font-size:15px;line-height:1;cursor:pointer;}
+  .blk-form .blk-x:hover{background:var(--soft);color:var(--text);}
   .cachebox{padding:2px 0 2px;}
   /* v4.9x（用户本轮图1）：缓存表 + 「页面显示条数」卡片左右并排——表格 : 卡片 = 2 : 1，
      卡片宽度正好是表格的一半，整块总宽不变；卡片不再靠右挂在表格下面。
@@ -1309,20 +1408,16 @@ html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
   font-weight:600;cursor:pointer;transition:background .15s,color .15s,box-shadow .15s;}
 .pp-tab .pp-sub{font-size:11px;font-weight:400;color:inherit;opacity:.72;}
 .pp-tab:hover{color:var(--text);}
-.pp-tab.on{background:var(--card);color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.08),0 0 0 1px var(--line);}
-.pp-tab.on .pp-sub{color:var(--muted);opacity:1;}
+.pp-tab.on{background:var(--accent);color:#fff;box-shadow:0 1px 3px rgba(0,0,0,.08);}
+.pp-tab.on .pp-sub{color:inherit;opacity:.85;}
 .pp-pane{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;align-items:start;}
 .pp-pane[hidden]{display:none;}
 .pp-left,.pp-right{min-width:0;display:flex;flex-direction:column;gap:8px;}
 .pp-right{position:sticky;top:6px;}
 .pp-left>.dcard,.pp-right>.dcard{padding:10px 12px;margin:0;}
-/* 左栏参数：一行一个键值对，说明收进 i 的 title，只有悬停才出现。 */
+/* 左栏参数：一行一个键值对；用户 m08153 起不再挂「!」图标和悬浮说明。 */
 .pp-left .dhead{display:flex;align-items:center;gap:6px;margin:0 0 3px;font-size:12px;font-weight:600;color:var(--muted);}
 .pp-left .dhead-x{margin-left:auto;font-size:11px;font-weight:400;color:var(--muted);}
-.pp-left .di{flex:none;width:13px;height:13px;border-radius:50%;border:1px solid var(--line);color:var(--muted);
-  font:600 9px/1 -apple-system,"Segoe UI",sans-serif;font-style:normal;display:inline-flex;align-items:center;
-  justify-content:center;cursor:help;letter-spacing:0;}
-.pp-left .di:hover{border-color:var(--accent);color:var(--accent);}
 .pp-left .drow{padding:4px 0;gap:8px;}
 .pp-left .dlb{flex:0 0 96px;font-size:12.5px;font-weight:500;gap:5px;}
 .pp-left .dipt{height:27px;font-size:12.5px;}
@@ -1337,9 +1432,6 @@ html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
 .pp-prev-h .pp-h4s{font-size:11px;font-weight:400;color:var(--muted);}
 .pp-prev-acts{margin-left:auto;display:flex;gap:3px;}
 .pp-prev-acts .pm-ico{width:auto;min-width:0;padding:0 7px;font-size:11px;height:22px;}
-.pp-prev-bar{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin:0 -12px;padding:6px 12px;border-bottom:1px solid var(--line);}
-.pp-chip{padding:0 7px;height:19px;line-height:18px;border-radius:999px;background:var(--soft);border:1px solid var(--line);
-  font-size:10.5px;color:var(--muted);white-space:nowrap;}
 .psegbox{display:flex;flex-direction:column;gap:4px;}
 .pp-prev .psegbox{margin:0 -12px;padding:8px 12px;border-top:1px solid var(--line);max-height:34vh;overflow:auto;}
 .pseg{border:1px solid var(--line);border-radius:8px;background:rgba(127,127,127,.04);overflow:hidden;}
@@ -1357,11 +1449,35 @@ html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
 .psegf{padding:8px 10px 10px;display:flex;justify-content:flex-end;}
 .psegempty{padding:10px;color:var(--muted);font-size:12px;}
 .pp-prev .pm-note,.pp-prev .pm-warning{margin:0 -12px;padding:6px 12px;border-top:1px solid var(--line);}
+.pp-prev .pm-note:empty,.pp-prev .pm-warning:empty{display:none;}
 .pp-prev .pm-toolbar{margin:0 -12px;padding:6px 12px;border-top:1px solid var(--line);}
+/* 用户 m03408：右栏收成两段——上面是拼好的 system；下面以「实时窗口」为界，
+   把实时窗之后那几段动态内容也拼成一段正文预览。以前这里是一串折叠行，
+   把上面已经完整预览过的静态段又列了一遍。 */
+.pp-prev-div{display:flex;align-items:center;gap:8px;margin:8px 0;padding:5px 10px;border:1px solid var(--accent);
+  border-radius:8px;background:rgba(59,130,246,.10);}
+.pp-prev-divn{flex:none;font-size:11px;font-weight:600;color:var(--accent);white-space:nowrap;}
+.pp-prev-divl{flex:1 1 auto;height:1px;background:var(--accent);opacity:.45;}
+.pp-prev-divs{flex:none;font-size:10.5px;color:var(--muted);white-space:nowrap;}
+/* 用户 m03562：上下两个预览框各带一个右上角标签，底色分开——上面是 system，下面是动态注入。
+   用户 m03707：标签改成浮在右上角的胶囊，只占自己那一小块，不再是一条通栏。 */
+.pp-prev-box{position:relative;display:flex;flex-direction:column;min-height:0;margin:0 -12px;}
+.pp-prev-box.sys{flex:1 1 auto;background:rgba(127,127,127,.05);}
+.pp-prev-box.dyn{flex:0 0 auto;background:rgba(59,130,246,.07);}
+.pp-prev-cap{position:absolute;top:5px;right:8px;z-index:2;height:17px;line-height:15px;padding:0 8px;
+  border-radius:999px;border:1px solid var(--line);background:var(--card);pointer-events:none;
+  font-size:10px;font-weight:600;letter-spacing:.02em;color:var(--muted);}
+.pp-prev-box.dyn .pp-prev-cap{color:var(--accent);border-color:rgba(59,130,246,.45);}
+.pp-prev-box>.dpre{margin:0;border:0;border-radius:0;background:transparent;padding:8px 12px 10px;}
+.pp-prev .pm-dyn{margin:0;border:0;border-radius:0;padding:4px 12px 10px;background:transparent;
+  max-height:min(26vh,260px);overflow:auto;font-size:11.5px;line-height:1.7;
+  white-space:pre-wrap;overflow-wrap:anywhere;}
 .dpre.tall{max-height:min(62vh,620px);min-height:200px;margin:0 -12px;border:0;border-radius:0;padding:10px 12px;font-size:12px;line-height:1.75;}
 .pp-prev.big{position:fixed;inset:112px 12px 12px;height:auto;max-height:none;z-index:9999;margin:0;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.5);}
 .pp-prev.big .dpre.tall{max-height:none;flex:1 1 auto;min-height:0;}
+.pp-prev.big .pp-prev-box.sys{flex:1 1 auto;min-height:0;}
 .pp-prev.big .psegbox{max-height:26vh;}
+.pp-prev.big .pm-dyn{max-height:32vh;}
 @media (max-width:1180px){.pp-pane{grid-template-columns:1fr;}.pp-right{position:static;}}
 
 /* Shared prompt layout editor（v4.10 紧凑版）：一行一个模块，正文默认折叠。 */
@@ -1386,7 +1502,7 @@ html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
 .pm-label:focus{outline:none;border-color:var(--accent);background:var(--card);}
 .pm-chars{flex:none;font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums;}
 .pm-move{flex:none;width:74px;display:flex;gap:2px;margin-left:0;justify-content:flex-end;}
-.pm-ico{width:21px;height:21px;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;
+.pm-ico{flex:none;width:21px;height:21px;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;
   color:var(--muted);font-size:12px;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;}
 .pm-ico:hover{border-color:var(--line);background:var(--card);color:var(--accent);}
 .pm-ico:disabled{opacity:.3;cursor:not-allowed;}
@@ -1445,12 +1561,33 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
 .pp{display:flex;flex-direction:column;gap:8px;min-height:420px;}
 .pp-tabs{flex:none;}
 .pp-pane{flex:1 1 auto;min-height:0;overflow:hidden;}
-.pp-left,.pp-right{height:100%;min-height:0;overflow:auto;padding-right:2px;
-  scrollbar-width:thin;scrollbar-color:var(--line) transparent;}
+.pp-left,.pp-right{height:100%;min-height:0;overflow:auto;padding-right:2px;}
+/* 用户 m03104：左栏整块套一张卡片——滚动条落在卡片右内沿，跟右边预览卡完全对称。
+   两张内层卡片拍平成区块（同底色，只留一条分隔线），否则会变成卡片套卡片。 */
+.pp-left{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:0;overflow:hidden;gap:0;}
+/* 用户 m03247：工具条那排右边露着一截滚动条，切掉——工具条挪成卡头（不滚），
+   下面这块才是滚动层，杆子从卡头下面才开始。 */
+.pp-left-head{flex:none;padding:0 12px;}
+.pp-left-body{flex:1 1 auto;min-height:0;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;}
+.pp-left-body>.dcard{background:transparent;border:0;border-radius:0;padding:0;margin:0;}
+.pp-left-body>.dcard+.dcard{border-top:1px solid var(--line);margin-top:10px;padding-top:10px;}
 .pp-right{max-height:none;}
-.pp-left::-webkit-scrollbar,.pp-right::-webkit-scrollbar{width:8px;height:8px;}
-.pp-left::-webkit-scrollbar-thumb,.pp-right::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px;}
-.pp-left::-webkit-scrollbar-track,.pp-right::-webkit-scrollbar-track{background:transparent;}
+/* 用户 m02469：左栏那根上下滑动杆以前贴着栏边——而且 scrollbar-width:thin 会让 Chromium
+   忽略 ::-webkit-scrollbar，等于没做。这里去掉 scrollbar-width，改用 webkit 伪元素：
+   轨道 12px、滑块四周留 4px 透明边，看起来就缩在栏内侧，跟模型清单那根一致。 */
+.pp-left-body::-webkit-scrollbar{width:12px;height:12px;}
+.pp-left-body::-webkit-scrollbar-thumb{background:var(--line);border-radius:10px;
+  border:4px solid transparent;background-clip:padding-box;}
+.pp-left-body::-webkit-scrollbar-track{background:transparent;}
+.pp-right::-webkit-scrollbar{width:8px;height:8px;}
+.pp-right::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px;}
+.pp-right::-webkit-scrollbar-track{background:transparent;}
+/* 用户 m03082：右侧预览里真正在滚的是里面的 pre（.pp-right 自己不滚），所以上面那套伪元素
+   一直没派上用场，浏览器给的是系统白条。这里给 .dpre 补同一根细滑块，两栏的杆子才算一致。 */
+.dpre::-webkit-scrollbar{width:12px;height:12px;}
+.dpre::-webkit-scrollbar-thumb{background:var(--line);border-radius:10px;border:4px solid transparent;background-clip:padding-box;}
+.dpre::-webkit-scrollbar-track{background:transparent;}
+.dpre::-webkit-scrollbar-corner{background:transparent;}
 /* v4.10：分段列表是 flex 列，条目会被压扁成一格一格重叠，钉住它们别缩。 */
 .psegbox>.pseg{flex:0 0 auto;}
 /* v4.10：[hidden] 被 .drow{display:flex} 顶掉过，试跑结果框一进页面就露个空框，这里按隐藏处理。 */
@@ -1465,17 +1602,18 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
 .pp-prev{height:100%;}
 .pp-prev .dpre.tall{flex:1 1 auto;min-height:150px;max-height:none;}
 .pp-prev .psegbox{flex:0 0 auto;}
-/* v4.85（用户 m10425 第 2 条）：左边「编辑方式」那排改成和右边「完整系统提示词」一样的卡头——
+.pp-prev .pm-dyn{flex:0 0 auto;}
+/* v4.85（用户 m10425 第 2 条）：左边「编辑方式」那排改成和右边「提示词预览」一样的卡头——
    一样的内边距、一样的标题字号、一样的下边框，两栏不再一个像表单、一个像卡头。
    m07137：再把高度、底色、按钮样式也对齐：控件 22px、底色跟卡片一致、按钮无边框。 */
-.pp-left .pm-editor>.pm-toolbar{position:sticky;top:0;z-index:3;background:var(--bg);
-  margin:-10px -12px 0;padding:8px 12px;border-bottom:1px solid var(--line);}
-.pp-left .pm-editor>.pm-toolbar .pm-tb-h{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;
+.pp-left .pp-left-head .pm-toolbar{position:sticky;top:0;z-index:3;background:var(--bg);
+  margin:0 -12px;padding:8px 12px;border-bottom:1px solid var(--line);}
+.pp-left .pp-left-head .pm-toolbar .pm-tb-h{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;
   margin:0;display:flex;align-items:center;}
-.pp-left .pm-editor>.pm-toolbar .dipt{height:22px;font-size:11.5px;}
-.pp-left .pm-editor>.pm-toolbar .dmini{height:22px;padding:0 7px;font-size:11px;
+.pp-left .pp-left-head .pm-toolbar .dipt{height:22px;font-size:11.5px;}
+.pp-left .pp-left-head .pm-toolbar .dmini{height:22px;padding:0 7px;font-size:11px;
   border-color:transparent;background:transparent;}
-.pp-left .pm-editor>.pm-toolbar .dmini:hover{border-color:var(--line);background:var(--card);color:var(--accent);}
+.pp-left .pp-left-head .pm-toolbar .dmini:hover{border-color:var(--line);background:var(--card);color:var(--accent);}
 @media (max-width:640px){.pm-module-head{flex-wrap:wrap;}.pm-meta{padding-left:8px;}.pm-body{padding-left:8px;}}
 /* m01209：三个页签、模板卡片页、动态尾段分隔条、身份只读标记；顺手把整页再收紧一点。 */
 .pp-tab{padding:0 12px;height:30px;}
@@ -1609,9 +1747,16 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
   /* 用户 m03879：系统动态段（框架自己拼的那些动态内容）单独一个颜色。 */
   .pm-module.pm-sysdyn{box-shadow:inset 3px 0 0 #38b28c;background:linear-gradient(90deg,rgba(56,178,140,.08),rgba(56,178,140,0) 62%);}
   .pm-module.pm-sysdyn .pm-idx{font-weight:600;color:#7fd6bd;}
+  /* 用户 m23028：记忆插件注入的两段用金色标出来——它们不是框架自己的段，正文由插件现给。 */
+  .pm-module.pm-plugin{box-shadow:inset 3px 0 0 #e0a52e;background:linear-gradient(90deg,rgba(224,165,46,.10),rgba(224,165,46,0) 62%);}
+  .pm-module.pm-plugin .pm-idx{font-weight:600;color:#f2c14e;}
+  .pm-pos-plugin{color:#f2c14e;background:rgba(224,165,46,.16);border-color:rgba(224,165,46,.36);}
+  .pm-plugin .pm-meta .pm-src-note{color:#e8c07a;}
   /* 用户 m03879 图6：底部那段说明跟上面的新增下拉左对齐，颜色也不再糊在背景里。 */
   .pm-tip{font-size:11.5px;color:var(--muted);line-height:1.5;margin-top:5px;}
   .pm-foot .pm-tip{flex:1 1 100%;margin-top:4px;padding-left:0;}
+  /* 用户 m21698：记忆插件那两段现在是布局里的真模块（记忆插件注入 / 记忆插件 · 本轮上下文），
+     由模块卡自己画，旧的 .pm-plugseg 只读卡连同样式一起删掉，避免同一段出现两次。 */
   /* 用户 m04617 图4：新增模块做成一张跟上面模板卡同风格的小卡，多一个「加到哪一段」的下拉。 */
   .pm-newcard{margin-top:8px;border:1px dashed var(--line);border-radius:10px;padding:7px 8px 8px;
     background:rgba(127,127,127,.04);}
@@ -1639,7 +1784,9 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
   /* 用户 m05124 图1：模块头做成固定三列——标题区（弹性）｜来源下拉（定宽、左对齐）｜
      右侧标签列（位置标签 + N 字 + ↑↓ + 锁/✕，整列靠右对齐）。 */
   .pm-module-head{gap:6px;}
-  .pm-module-head .pm-head-main{flex:1 1 auto;min-width:96px;display:flex;align-items:center;gap:5px;overflow:hidden;}
+  /* 用户 m01878：三页模块高度要一致——标题是输入框时 24px、是只读文字时只有 20px，
+     差 1px 会让回复页整列比决策 / JEV 矮一点；这里给标题区兜个 24px 下限。 */
+  .pm-module-head .pm-head-main{flex:1 1 auto;min-width:96px;min-height:24px;display:flex;align-items:center;gap:5px;overflow:hidden;}
   .pm-module-head .pm-head-main .pm-label,
   .pm-module-head .pm-head-main .pm-title{flex:0 1 auto;min-width:0;max-width:100%;}
   .pm-module-head .pm-pick{flex:0 0 168px;width:168px;display:flex;align-items:center;min-width:0;}
@@ -1649,7 +1796,8 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
   .pm-module-head .pm-end .pm-pos{width:50px;text-align:center;padding:0;}
   .pm-module-head .pm-end .pm-pos-none{visibility:hidden;}
   .pm-module-head .pm-chars{width:46px;}
-  .pm-module-head .pm-move{width:62px;justify-content:flex-end;}
+  /* 用户 m25796：↑↓ + 锁定三个按钮要 94px，原来定宽 62px 装不下，箭头被压进「N 字」里。 */
+  .pm-module-head .pm-move{width:auto;min-width:94px;justify-content:flex-end;}
   .pm-module-head .pm-lock{width:40px;}
   .pm-module-head .pm-desc{max-width:34%;}
   @media (max-width:820px){
@@ -1733,10 +1881,13 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     .pp{height:auto!important;min-height:0!important;}
     .pp-pane{flex:none!important;min-height:0!important;overflow:visible!important;}
     .pp-left,.pp-right{height:auto!important;max-height:none!important;overflow:visible!important;}
+    .pp-left-body{overflow:visible!important;height:auto!important;flex:none!important;}
     .pp-right>.dcard{flex:none!important;overflow:visible!important;}
     .pp-prev{height:auto!important;}
+    .pp-prev-box{flex:0 0 auto!important;min-height:0!important;}
     .dpre.tall,.pp-right .dpre.tall,.pp-prev .dpre.tall{max-height:none!important;min-height:0!important;}
     .pp-prev .psegbox{max-height:none!important;}
+    .pp-prev .pm-dyn{max-height:none!important;overflow:visible;}
     /* 7) 缓存记录页：上下堆叠，表格横向滑 */
     .cachebox .cmain{flex-direction:column;align-items:stretch;gap:10px;}
     .cachebox .cmain-l,.cachebox .cmain-r{flex:1 1 auto;width:100%;}
@@ -1860,6 +2011,9 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     <span class="navseg">
       <button id="btn-home" class="navbtn" title="回到首页">首页</button>
       <button class="navbtn on" title="当前页">设置</button>
+      <!-- 用户 m19731：重载并进导航胶囊当第三段，紫色 + 刷新图标，跟页面切换区分开 -->
+      <span class="navsep"></span>
+      <button id="btn-reload" class="navbtn nav-reload" title="重载插件：改完设置或代码后不用回桌面端重启"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>重载</button>
     </span>
     <button id="btn-reset" style="display:none">恢复跟随全局</button>
     <!-- v3.93（用户 m07570 图8）：再要一个「恢复默认」——一次只重置当前这一页，
@@ -1927,14 +2081,11 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     // 没等到结算就当这轮失败」，是重试链的起点；写死 180 秒时卡一次要等到 3 分钟才重试。
     // 用户 m07859：重试 / 重试间隔 / 单次超时只留这一份，决策链和回复链都读它，
     // 提示词页那两张卡里不再各留一份。
-    { p: "basic", t: "重试", split: 2, col: "left", keys: ["watchdog_seconds", "retry_max", "retry_delay"] },
-    // 用户 m17752：缓存记录页右边那张「页面显示条数」卡片搬到这儿，跟在「重试」下面——
-    // 它管的是页面上列多少条，跟缓存占用不是一回事，摆在缓存页反而像又一条上限。
-    // 左列「身份 + 重试」本来就只占上半屏，放这儿正好把空填上。
-    { p: "basic", t: "页面显示条数", split: 2, col: "left", custom: "show",
-      note: "只影响页面上列多少条，磁盘上留多少份由「窗口快照上限」决定",
-      keys: ["trace_keep", "trace_keep_dm", "decision_keep", "decision_keep_dm",
-             "window_show", "window_show_dm"] },
+    { p: "basic", t: "API 重试", split: 2, col: "left", keys: ["watchdog_seconds", "retry_max", "retry_delay"] },
+    // 用户 m05550：重试的两个取舍开关都是双刃剑（开了可能跑题 / 开了可能漏掉一条），
+    // 单独一组、默认都关，组名右边挂警告色胶囊提醒一句。
+    { p: "basic", t: "重试取舍", split: 2, col: "left", warn: ["双刃剑", "未经充分测试"],
+      keys: ["retry_take_pending", "timeout_no_retry"] },
     // v3.30（用户 m47796 第 4 条）：@ 拆成一行两个开关——「艾特触发」可点，
     // 用户 m00347：必回三个开关正式启用（不再灰着）——触发＝叫到算一次触发，
     // 必回＝跳过模型判断直接回。
@@ -1947,13 +2098,13 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
       // 跟其它组一个样子：一行内联小字，超长省略，全文留在 title 里。
       // v3.42（用户 m03616 第 2 条）：补上「触发」是什么——原来只讲了必回，
       // 刚上手不知道左边那列管什么。
-      note: "触发＝叫到就算一次触发（开了进阶模式先交模型判）；必回＝跳过模型判断直接回" },
+      note: "触发＝激活判定；必回＝跳过判定" },
     // 用户 m10749 第 2 条：配额整组从「限额设置」页搬到基础设置右下角，紧跟「唤醒」组。
     // 两个开关开一个、另一个变灰（值保留，见 paintQuotaMutex），不再互相关掉。
     // v3.54（用户本轮第 3 条）：四行合成两行——每行「开关 + 数字框 + 一句说明」，
     // 行由 quotaRowsHtml 整块画（custom: "quota"），keys 仍写这四个键（标成已用，防被再渲染一份）。
     { p: "basic", t: "配额", split: 2, col: "right", custom: "quota",
-      note: "两个都开时以每小时为准",
+      warn: ["未经充分测试"],
       keys: ["quota_hour_enabled", "quota_max_per_hour", "quota_day_enabled", "quota_max_per_day"] },
     // v3.15（用户 m40317）：触发页按「普通 / 高级 / 进阶」三档重排成三列。
     // v3.16（用户 m40583）：不再单列一行「当前模式」下拉——三列标题右侧各一个开关，
@@ -2008,8 +2159,7 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
       // v3.71（用户第 8 条末）：伪随机三项搬回普通模式列，这一列只剩抖动与短语清单。
       // 用户 m05691 第 3 条：抖动最多叠几跳也是设置项，默认 3 次（7+7+7）。
       keys: ["jitter_enabled", "jitter_seconds", "jitter_max_rounds",
-        "jitter_skip_must_go",
-        "phrase_filter_enabled", "phrase_filter_list"] },
+        "jitter_skip_must_go"] },
     // v3.39：兜底两项合成一小节——普通静默兜底与休息时段兜底都是「安静多久补一次」，
     // 曲线开着也照用（engine.py 2024-2058：曲线只接管回复概率，不接管兜底窗口）。
     // v3.44（用户 m04471 第 5 条）：组名「安静下来时」→「闲时兜底」，说明改成一句能覆盖
@@ -2097,6 +2247,12 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     // 右列才是「历史里保留几张原图 / 保护工具调用组 / 裁切点选择方式」。
     { p: "window", t: "窗口", keys: ["window_keep", "history_images", "window_trim_threshold",
         "protect_tool_groups", "window_buffer", "window_drop_tools"] },
+    // 用户 m05550：基础设置页那组「窗口显示」挪到这一页——它管的就是窗口列多少条。
+    // 用户 m17752：它管的是页面上列多少条，跟磁盘上留多少份不是一回事，别和「窗口快照上限」混着看。
+    { p: "window", t: "窗口显示", custom: "show",
+      note: "只影响窗口显示条数，磁盘上留多少份由「窗口快照上限」决定",
+      keys: ["trace_keep", "trace_keep_dm", "decision_keep", "decision_keep_dm",
+             "window_show", "window_show_dm"] },
     // v4.45（用户 m22611）：历史里的动图怎么发给模型，三档互斥、默认九帧拼图；
     // 三个都不开＝跳过（图上不来，正文只留 [图片]）。判定在后端 _gif_mode。
     { p: "window", t: "动图设置",
@@ -2128,6 +2284,13 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
       keys: ["trace_keep", "media_cache_limit", "media_cache_keep_days",
              "summaries_keep_dm", "summaries_keep", "summaries_keep_days"],
       custom: "cache" },
+    // 用户 m06193：缓存记录与 API 价目之间加一页「黑名单」。
+    // 短语黑名单从聊天决策页的「通用设置」搬过来——它只影响触发判定，消息本身还在上下文里；
+    // 用户黑名单是新的：按 QQ 号整条剔除，连请求都不进（窗口页照常显示，默认折叠）。
+    { p: "blacklist", t: "短语黑名单", solo: 1,
+      keys: ["phrase_filter_enabled", "phrase_filter_list"] },
+    { p: "blacklist", t: "用户黑名单", custom: "ublack", solo: 1, keys: [],
+      warn: "未经充分测试" },
     // v3.37（用户 m02080 第 4 条）：API 价目。价目是按模型名动态长的表，不是固定键，
     // 所以不进 schema、不占 keys，走 custom 整块渲染（和时段曲线一样）。
     { p: "pricing", t: "模型单价", custom: "pricing", solo: 1,
@@ -2161,6 +2324,7 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     // v3.56（用户本轮第 7 条）：「缓存设置」页改名「缓存记录」（这一页现在主要是各类缓存的账本 + 上限）；
     // 「其他」页签撤掉——它只是兜 schema 里没分组的键，一直是空的。
     { id: "log",     t: "缓存记录" },
+    { id: "blacklist", t: "黑名单" },
     { id: "pricing", t: "API 价目" }
     // 用户 m08902 第 6 条：「会话管理」页其实早就不存在了——内容块随某次改动删掉，
     // 只剩这里一条定义和 hidden-panel 的显示判断。页签是按 DOM 里的块自动扫出来的，
@@ -2217,6 +2381,15 @@ var DM_SPECIAL = { trigger_probability: 1 };
       return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
     });
   }
+  // 用户 m06007：组标题右边可以挂多枚提醒胶囊（双刃剑 / 未经充分测试），
+  // 传字符串或数组都行，返回拼好的 HTML。
+  function warnPills(w){
+    if(!w) return "";
+    var arr = Object.prototype.toString.call(w) === "[object Array]" ? w : [w];
+    return arr.map(function(t){
+      return "<span class='warnpill' title='" + esc(t) + "'>" + esc(t) + "</span>";
+    }).join("");
+  }
   function get(url){ return fetch(url, {credentials:"same-origin"}).then(function(r){ if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); }); }
   function post(url){ return fetch(url, {method:"POST", credentials:"same-origin"}).then(function(r){ if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); }); }
 
@@ -2235,7 +2408,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       box.innerHTML = "<h3>" + esc(opt.title || (opt.alert ? "提示" : "确认操作")) + "</h3>" +
         "<p class='p2'>" + esc(opt.message || "").replace(/\n/g, "<br>") + "</p>" +
         "<div class='dlg-btns'>" +
-          (opt.alert ? "" : "<button data-act='cancel'>取消</button>") +
+          (opt.alert ? "" : "<button data-act='cancel'>" + esc(opt.cancel || "取消") + "</button>") +
           "<button class='" + (opt.danger ? "danger" : "") + "' data-act='ok'>" +
             esc(opt.ok || (opt.alert ? "知道了" : "确定")) + "</button>" +
         "</div>";
@@ -2274,6 +2447,46 @@ var DM_SPECIAL = { trigger_probability: 1 };
     opt.alert = true;
     opt.message = message;
     return mdDialog(opt).then(function(){});
+  }
+  // 用户 m01978 第 3 条：改名要能打字，原生 prompt 在 sandbox iframe 里同样被忽略，
+  // 这里照 mdDialog 的样子做一个带输入框的版本，返回 Promise<string|null>。
+  function mdPrompt(opt){
+    opt = opt || {};
+    return new Promise(function(resolve){
+      var mask = document.createElement("div");
+      mask.className = "mask";
+      var box = document.createElement("div");
+      box.className = "dlg";
+      box.innerHTML = "<h3>" + esc(opt.title || "改个名字") + "</h3>" +
+        (opt.message ? "<p class='p2'>" + esc(opt.message).replace(/\n/g, "<br>") + "</p>" : "") +
+        "<input class='dlg-input' type='text' maxlength='" + (opt.maxlength || 24) + "' value='" + esc(opt.value || "") +
+        "' placeholder='" + esc(opt.placeholder || "") + "'>" +
+        "<div class='dlg-btns'><button data-act='cancel'>取消</button>" +
+        "<button data-act='ok'>" + esc(opt.ok || "确定") + "</button></div>";
+      mask.appendChild(box);
+      document.body.appendChild(mask);
+      var inp = box.querySelector(".dlg-input");
+      var done = false;
+      function close(v){
+        if(done) return;
+        done = true;
+        document.removeEventListener("keydown", onkey, true);
+        if(mask.parentNode) mask.parentNode.removeChild(mask);
+        resolve(v);
+      }
+      function onkey(e){
+        if(e.key === "Escape"){ e.preventDefault(); close(null); }
+        else if(e.key === "Enter"){ e.preventDefault(); close(inp ? inp.value : ""); }
+      }
+      document.addEventListener("keydown", onkey, true);
+      mask.addEventListener("click", function(e){
+        if(e.target === mask){ close(null); return; }
+        var b = e.target.closest ? e.target.closest("[data-act]") : null;
+        if(!b) return;
+        close(b.getAttribute("data-act") === "ok" ? (inp ? inp.value : "") : null);
+      });
+      if(inp){ inp.focus(); inp.select(); }
+    });
   }
 
   // 首屏直出用的会话级缓存（v3.08）：刷新时先拿上次的 schema+配置把表单画出来，
@@ -2320,10 +2533,16 @@ var DM_SPECIAL = { trigger_probability: 1 };
                    band_rest_probability: 1,
                    // v3.81（用户 m02645 图2）：旧的「加多少概率」两项已退役，节奏松紧是无单位刻度
                     };
+  // 用户 m01432：唤醒那几行的默认值按三档的说法写——「默认 触发 / 默认 关闭」。
+  // 用户 m03761：其余开关的默认值角标也统一成「默认 开启 / 默认 关闭」，不再写「开 / 关」。
+  var WAKE_DEF_TEXT = { mention_trigger: 1, nickname_wake: 1, name_wake: 1, rest_wake_trigger: 1 };
   function defaultText(f, k){
     var d = f ? f.default : undefined;
     var t = (f && f.type) || "string";
-    if(t === "switch" || t === "boolean" || t === "bool") return d ? "开" : "关";
+    if(t === "switch" || t === "boolean" || t === "bool"){
+      var wd = WAKE_DEF_TEXT[String(k || "")];
+      return d ? (wd ? "触发" : "开启") : "关闭";
+    }
     if(d === null || d === undefined || d === "") return "无";
     if(Array.isArray(d)) return d.length ? d.join(" / ") : "无";
     var s = String(d);
@@ -2349,22 +2568,52 @@ var DM_SPECIAL = { trigger_probability: 1 };
     return "<i class='dfv' title='默认值'>默认 " + esc(t) + "</i>";
   }
   // v3.50（用户 m06761 第 4 条）：开关上的小字跟着状态显示「开 / 关」——用户原话「开的时候
-  // 显示开，关的时候显示关」。两个 <i> 一起写进标签，露哪个由 CSS 的 :checked 决定（见 .sw2 .st），
+  // 显示开启，关的时候显示关闭」。两个 <i> 一起写进标签，露哪个由 CSS 的 :checked 决定（见 .sw2 .st），
   // 不靠重渲染也不靠 JS 改字，重绘后不会掉。on/off 两个参数留给「触发」这类别的叫法。
   function stHtml(on, off){
     return "<span class='st'><i class='on'>" + esc(on) + "</i><i class='off'>" + esc(off) + "</i></span>";
   }
-  var ST_SW = stHtml("开", "关");
+  var ST_SW = stHtml("开启", "关闭");
+  // 用户 m02469：改名用首页那把铅笔（web/index.html 的 ICON_PENCIL 同款）。
+  var ICON_PENCIL = "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 20h9'/><path d='M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z'/></svg>";
+  // v3.92（用户 m00697 第 10 条）：开关统一成「字写在轨道里」的胶囊——轨道里直接写状态，
+  // 白色滑块滑到对应一侧。onTxt / offTxt 是轨道里那两个字，默认「开启 / 关闭」；
+  // 主要开关写「接管 / 关闭」，其余写「开启 / 关闭」。真实 input 仍在标签里，collectSettings 照旧读 checked。
+  function swPill(k, on, onTxt, offTxt, title, cls){
+    return "<label class='sw2" + (cls ? " " + cls : "") + "'" + (title ? " title='" + esc(title) + "'" : "") + ">" +
+      "<input type='checkbox' data-k='" + esc(k) + "'" + (on ? " checked" : "") + ">" +
+      "<span class='tr' data-on='" + esc(onTxt || "开启") + "' data-off='" + esc(offTxt || "关闭") + "'></span></label>";
+  }
+  // v3.92（用户 m00697 第 15 条）：唤醒那几行是「关闭 / 触发 / 必回」三档，一条轨道三段、滑块跟着走。
+  // 两个键（触发 / 必回）互斥，仍各留一个隐藏 input 带 data-k，提交链路不用改。
+  function sw3(k, ak, v, title){
+    var cur = (v === "always") ? "always" : (v === "trigger" ? "trigger" : "off");
+    // 用户 m01445：没开决策模式时「必回」不生效，整段灰掉、点不动。
+    var mustOk = !!(configCache && configCache["advanced_enabled"]);
+    return "<span class='sw3" + (mustOk ? "" : " no-must") + "' data-v='" + cur + "' data-3k='" + esc(k) + "' data-3a='" + esc(ak) + "'" +
+      (title ? " title='" + esc(title) + "'" : "") + ">" +
+      "<input type='checkbox' data-k='" + esc(k) + "'" + (cur === "trigger" ? " checked" : "") + ">" +
+      "<input type='checkbox' data-k='" + esc(ak) + "'" + (cur === "always" ? " checked" : "") + ">" +
+      "<i class='thumb'></i>" +
+      "<b data-v='off'>关闭</b><b data-v='trigger'>触发</b><b data-v='always'>必回</b></span>";
+  }
   // 框内单位：计数类（条数）是「次」，成对参数按数值键推（秒 / 分钟，见 pairUnitOf）。
-  var UNIT_TEXT = { trigger_threshold: "次" };
+  // v3.92（用户 m00697 第 8 / 9 条）：重试那三个框、窗口显示那三行也带单位，单位写在框里。
+  var UNIT_TEXT = { trigger_threshold: "次",
+    watchdog_seconds: "秒", retry_max: "次", retry_delay: "秒",
+    trace_keep: "条", trace_keep_dm: "条", decision_keep: "条", decision_keep_dm: "条",
+    window_show: "条", window_show_dm: "条" };
+  // v3.92（用户 m00697 第 11 条）：主要开关轨道里写「接管 / 关闭」，其余写「开启 / 关闭」。
+  var SW_TEXT = { decision_enabled: ["接管", "关闭"] };
   // v3.72（用户第 7 / 9 条）：第 5 个参数是调用方给的 [下限, 上限]，用来兜 schema 里没写
   // min/max、后端 /config 也没下发 bounds 的键（数据使用 / 回看周数）。
   function fieldControl(k, f, v, unit, minmax){
     var t = f.type || "string";
+    var swTx = SW_TEXT[k] || ["开启", "关闭"];
     if(t === "switch" || t === "boolean" || t === "bool"){
       // v3.49（用户 m06348 第 7 条）：开关上的小字先统一成「开关」；v3.50（用户 m06761 第 4 条）
       // 又改回随状态显示「开 / 关」——名字仍在左边 .nm 里，小字只报状态。
-      return "<label class='sw2'><input type='checkbox' data-k='" + esc(k) + "' " + (v ? "checked" : "") + "><span class='tr'></span>" + ST_SW + "</label>";
+      return swPill(k, v, swTx[0], swTx[1]);
     }
     // 单群模式：只显示本群写过的值，没写过就空着 + 占位提示全局值，
     // 这样「留空 = 跟随全局」在界面上看得见，不用去记白名单。
@@ -2418,6 +2667,14 @@ var DM_SPECIAL = { trigger_probability: 1 };
         arr.map(function(x){ return "<span class='chip'>" + esc(x) + "<b data-del='1'>×</b></span>"; }).join("") +
         "<button type='button' class='chip-add' data-add='1' title='添加'>+</button>" +
         "<input class='chip-in' placeholder='输入后回车添加' hidden></div>";
+    }
+    // 用户 m00697 第 1 条：机器人昵称的框跟着内容走、文字右对齐（跟左边名字一样宽）。
+    if(k === "bot_name"){
+      var bs = String(inherit ? "" : (v == null ? "" : v));
+      var bw = 0;
+      for(var bi = 0; bi < bs.length; bi++) bw += (bs.charCodeAt(bi) > 255 ? 14 : 7.6);
+      bw = Math.max(72, Math.min(200, Math.round(bw) + 26));
+      return "<input type='text' data-k='bot_name' value='" + esc(bs) + "'" + ph + " style='width:" + bw + "px;text-align:right'>";
     }
     return "<input type='text' data-k='" + esc(k) + "' value='" + esc(inherit ? "" : (v == null ? "" : v)) + "'" + ph + ">";
   }
@@ -2547,9 +2804,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
 
   function dmodelBlockHtml(){
     var act = String(dVal("decision_fail_action", "allow")) === "block" ? "block" : "allow";
+    // 用户 m08153：这一页的「!」图标和悬浮说明全删了；hint 参数留着不渲染，
+    // 免得下面十几处调用点全改一遍。
     function row(label, ctl, hint){
-      return "<div class='drow'><label class='dlb' title='" + esc(hint) + "'>" + esc(label) +
-        "<i class='di' title='" + esc(hint) + "'>i</i></label>" + ctl + "</div>";
+      return "<div class='drow'><label class='dlb'>" + esc(label) + "</label>" + ctl + "</div>";
     }
     // 用户 m02993 图7：删掉「决策模型」这条小标题；备用模型挪到决策模型右边同一行；
     // 失败时的选项说人话（跳过决策、直接回复）；下面整块「决策可用的工具」也删了
@@ -2563,10 +2821,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
           dModelOpts(String(dVal("decision_model", "")), "跟随默认模型") + "</select>",
           "它只负责看窗口判断回不回；真正的回复还是框架默认模型来写。") +
         row("备用模型", "<select class='dipt' data-k='decision_fallback_model' id='dec-fb'>" +
-          dModelOpts(String(dVal("decision_fallback_model", "")), "不设备用") + "</select>",
+          dModelOpts(String(dVal("decision_fallback_model", "")), "未选择模型") + "</select>",
           "主模型连续失败到「连续失败切换」那个次数，才切到它。") +
         // 用户 m08678：决策页保留自己的一套，默认值与回复一致，可各自调整。
-        row("连续失败切换", dnum("decision_fail_switch", "次", 2), "连着几轮失败，就把主模型换成备用。") +
+        row("连续失败切换", swPill("decision_fail_switch", dVal("decision_fail_switch", true)), "连着几轮失败，就把主模型换成备用。") +
         row("切回主模型等待", dnum("decision_fallback_cooldown", "秒", 300), "用备用模型撑过这段时间，再试回主模型。") +
         row("最大代理循环次数", dnum("decision_tool_loop", "轮", 5), "最多调用几轮工具，最后判断那一轮不算。") +
         row("单轮工具调用上限", dnum("decision_tool_calls_per_turn", "个", 5), "一轮里最多调几个工具，多出来的不执行。") +
@@ -2578,9 +2836,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
           "<option value='allow'" + (act === "allow" ? " selected" : "") + ">跳过决策调用回复</option>" +
           "<option value='block'" + (act === "block" ? " selected" : "") + ">这一轮不回</option></select>",
           "决策模型挂了的时候：跳过判断、直接交给回复模型，还是这一轮干脆不回。") +
-        row("决策看图", "<label class='sw2'><input type='checkbox' data-k='decision_see_images'" +
-          (dVal("decision_see_images", true) ? " checked" : "") +
-          "><span class='tr'></span>" + ST_SW + "</label>",
+        row("决策看图", swPill("decision_see_images", dVal("decision_see_images", true)),
           "决策模型也看一眼这一轮消息里的图。它本身得是能看图的模型；万一上游不认图，会自动退回纯文字再判一次。") +
       "</div></div>";
   }
@@ -2590,9 +2846,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // 用户 m06995 第 2 项：回复这条链也补齐模型与看图，跟决策卡一一对应，
   // 只少「决策失败时」——回复没有「跳过决策」这回事。
   function replyToolBlockHtml(){
+    // 用户 m08153：这一页的「!」图标和悬浮说明全删了；hint 参数留着不渲染。
     function row(label, ctl, hint){
-      return "<div class='drow'><label class='dlb' title='" + esc(hint) + "'>" + esc(label) +
-        "<i class='di' title='" + esc(hint) + "'>i</i></label>" + ctl + "</div>";
+      return "<div class='drow'><label class='dlb'>" + esc(label) + "</label>" + ctl + "</div>";
     }
     return "<div class='dcard'>" +
       "<div class='drows cols2'>" +
@@ -2600,19 +2856,17 @@ var DM_SPECIAL = { trigger_probability: 1 };
           dModelOpts(String(dVal("reply_model", "")), "跟随默认模型") + "</select>",
           "真正写回复的那个模型。留空 = 用框架的默认模型。") +
         row("备用模型", "<select class='dipt' data-k='reply_fallback_model' id='rep-fb'>" +
-          dModelOpts(String(dVal("reply_fallback_model", "")), "不设备用") + "</select>",
+          dModelOpts(String(dVal("reply_fallback_model", "")), "未选择模型") + "</select>",
           "主模型连续失败到「连续失败切换」那个次数，才切到它。") +
         // 用户 m07859：重试 / 重试间隔 / 单次超时统一在「基础设置 · 重试」里改，这里不再重复。
-        row("连续失败切换", dnum("reply_fail_switch", "次", 2), "连着几轮回复失败，就把主模型换成备用。") +
+        row("连续失败切换", swPill("reply_fail_switch", dVal("reply_fail_switch", true)), "连着几轮回复失败，就把主模型换成备用。") +
         row("切回主模型等待", dnum("reply_fallback_cooldown", "秒", 300), "用备用模型撑过这段时间，再试回主模型。") +
         row("最大代理循环次数", dnum("reply_tool_rounds", "轮", 5), "回复时最多调用几轮工具，最后写回复那一轮不算。") +
         row("单轮工具调用上限", dnum("reply_tool_calls_per_turn", "个", 5), "一轮里最多调几个工具，多出来的不执行。") +
         row("工具调用超时", dnum("reply_tool_timeout", "秒", 180), "单个工具最多等多久，0 = 不限制。") +
         row("工具输出上限", dnum("reply_tool_output_tokens", "token", 10000), "工具结果最多留多少，超了保留首尾，0 = 不限制。") +
       "</div><div class='drows cols2'>" +
-        row("回复看图", "<label class='sw2'><input type='checkbox' data-k='reply_see_images'" +
-          (dVal("reply_see_images", true) ? " checked" : "") +
-          "><span class='tr'></span>" + ST_SW + "</label>",
+        row("回复看图", swPill("reply_see_images", dVal("reply_see_images", true)),
           "回复模型也看一眼历史与本轮消息里的图。关掉后只发文字，图片位置留 [图片] 占位。") +
       "</div></div>";
   }
@@ -2629,11 +2883,20 @@ var DM_SPECIAL = { trigger_probability: 1 };
 
   // 用户 m09981：自定义接口可以有多页，每页一套协议 / 地址 / 模型名，密钥仍单独存。
   // 页面改的是 configCache 里的 jev_apis（JSON 字符串），后端按它拼请求。
+  // 用户 m01978 第 3 条：每个自定义接口页有自己的名字（默认「填入API」，用户 m02950 改名），
+  // 这一行的标签、模型下拉、页签悬浮都用它，不再写「接口 1」。
+  function jevPageName(pg){
+    var nm = String((pg && pg.name) || "").trim();
+    if(nm) return nm;
+    var id = String((pg && pg.id) || "1");
+    return id === "1" ? "填入API" : ("填入API " + id);
+  }
   function jevPages(){
     if(!JEV_APIS.length){
       var cfg = (JEVOPT && JEVOPT.config) || {};
       JEV_APIS = [{
         id: "1",
+        name: "",
         protocol: String(cfg.api_protocol || dVal("jev_api_protocol", "") || "systemone"),
         base: String(cfg.api_base || dVal("jev_api_base", "") || ""),
         model: String(cfg.api_model || dVal("jev_api_model", "") || ""),
@@ -2667,6 +2930,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var clean = jevPages().map(function(pg){
       return {
         id: String(pg.id || "1"),
+        name: String(pg.name || ""),
         protocol: jevPageProtocol(pg),
         base: String(pg.base || ""),
         model: String(pg.model || "")
@@ -2680,7 +2944,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var pages = jevPages();
     if(pages.length >= 12){ alert("最多 12 页。"); return; }
     var id = jevNextPageId();
-    pages.push({id: id, protocol: "systemone", base: "", model: "", api_key_set: false, api_key_masked: ""});
+    pages.push({id: id, name: "", protocol: "systemone", base: "", model: "", api_key_set: false, api_key_masked: ""});
     JEV_PAGE = id;
     JEV_MODELS = [];
     JEV_MODEL_ERR = "";
@@ -2715,6 +2979,25 @@ var DM_SPECIAL = { trigger_probability: 1 };
     jevRerenderCard();
   }
 
+  // 用户 m01978 第 3 条：点「填入API」那一行的名字改名。
+  function jevRenamePage(){
+    var pg = jevPage();
+    if(!pg) return;
+    mdPrompt({
+      title: "给这个接口改名",
+      message: "名字会显示在这一行的标签、模型下拉和页签悬浮上。",
+      value: jevPageName(pg),
+      placeholder: "填入API",
+      ok: "保存"
+    }).then(function(name){
+      if(name === null) return;
+      pg.name = String(name || "").trim().slice(0, 24);
+      jevSavePages();
+      jevRerenderCard();
+      jevRefresh();
+    });
+  }
+
   function jevModelOpts(cur, emptyText){
     var h = "<option value=''" + (cur ? "" : " selected") + ">" + esc(emptyText) + "</option>";
     var list = (JEVOPT && JEVOPT.models) || [];
@@ -2730,7 +3013,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       var v = "custom:" + String(pg.id || "1");
       if(v === cur) seen = true;
       h += "<option value='" + esc(v) + "'" + (v === cur ? " selected" : "") + ">" +
-        "自定义 " + esc(String(pg.id || "1")) + " · " + esc(String(pg.model || "").trim() || "还没填模型") + "</option>";
+        esc(jevPageName(pg)) + " · " + esc(String(pg.model || "").trim() || "还没填模型") + "</option>";
     });
     if(cur && !seen) h += "<option value='" + esc(cur) + "' selected>" + esc(cur) + "（已不在清单里）</option>";
     return h;
@@ -2773,13 +3056,35 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var pages = jevPages();
     var pg = jevPage();
     var proto = jevPageProtocol(pg);
+    // 用户 m01978 第 5 条：没写说明的行就别挂那个 i 图标，也别留空 title。
+    // 用户 m02469：这一卡里的悬浮说明全删了，i 图标也一起去掉；hint 参数留着不渲染，
+    // 免得下面十几处调用点全改一遍。
     function row(label, ctl, hint){
-      return "<div class='drow'><label class='dlb' title='" + esc(hint) + "'>" + esc(label) +
-        "<i class='di' title='" + esc(hint) + "'>i</i></label>" + ctl + "</div>";
+      return "<div class='drow'><label class='dlb'>" + esc(label) + "</label>" + ctl + "</div>";
+    }
+    // 用户 m01978 第 1/2 条：两项并一行——每格「短标签 + 控件」，控件自己撑开。
+    function pair2(l1, c1, l2, c2, h1, h2){
+      function cell(l, c){
+        return "<span class='p2'><label class='dlb'>" + esc(l) + "</label>" + c + "</span>";
+      }
+      return "<div class='drow pair2'>" + cell(l1, c1) + cell(l2, c2) + "</div>";
+    }
+    // 用户 m01978 第 1 条：单位（次 / 秒）搬进框里，跟基础设置页 .ipt.has-unit 一套做法。
+    function dnumIn(k, unit, dft){
+      var v = dVal(k, dft === undefined ? "" : dft);
+      var u = unit ? String(unit) : "";
+      return "<span class='ipt has-unit" + (u.length > 1 ? " uw2" : "") + "'><input class='dipt num' type='number' data-k='" +
+        esc(k) + "' value='" + esc(v) + "'>" + (u ? "<b class='unit'>" + esc(u) + "</b>" : "") + "</span>";
+    }
+    // 用户 m01978 第 3 条：这一行的标签就是接口页的名字，点一下能改名。
+    // 用户 m02469：名字后面挂一把铅笔（跟首页改名那个图标同款），悬浮说明去掉。
+    function rowName(ctl, hint){
+      return "<div class='drow'><label class='dlb'>" +
+        "<span class='jev-pgname' data-jev-rename='1'><span class='jev-pgnm'>" + esc(jevPageName(pg)) + "</span>" + ICON_PENCIL + "</span>" +
+        "</label>" + ctl + "</div>";
     }
     function rowS(label, ctl, hint){
-      return "<div class='drow stack'><label class='dlb' title='" + esc(hint) + "'>" + esc(label) +
-        "<i class='di' title='" + esc(hint) + "'>i</i></label>" + ctl + "</div>";
+      return "<div class='drow stack'><label class='dlb'>" + esc(label) + "</label>" + ctl + "</div>";
     }
     function col(title, body){
       return "<div class='jev-col'>" +
@@ -2789,70 +3094,68 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // ---- 左边：模型与不确定区间 ----
     var fwBody = "<div class='drows'>" +
         row("JEV 模型", "<select class='dipt' data-k='jev_model' id='jev-model'>" +
-          jevModelOpts(String(dVal("jev_model", "")), jevEmptyText()) + "</select>",
-          "KiraAI 提供商里的 decision 类模型和右边每一页自定义接口都列在这里；选哪条就走哪条。") +
+          jevModelOpts(String(dVal("jev_model", "")), jevEmptyText()) + "</select>") +
         row("备用模型", "<select class='dipt' data-k='jev_fallback_model' id='jev-fb'>" +
-          jevModelOpts(String(dVal("jev_fallback_model", "")), "不设备用") + "</select>",
-          "主模型连续失败到「连续失败切换」那个次数才切到它；它可以是另一条路的模型。") +
-        row("连续失败切换", dnum("jev_fail_switch", "次", 2), "连着几轮 JEV 判断失败，就把主模型换成备用。") +
-        row("切回主模型等待", dnum("jev_fallback_cooldown", "秒", 300), "用备用模型撑过这段时间，再试回主模型。") +
-        row("不确定区间", "<div class='jev-range'>" +
+          jevModelOpts(String(dVal("jev_fallback_model", "")), "未选择模型") + "</select>") +
+        // 用户 m01978 第 1 条：这两项并成一行，名字缩短，单位（次 / 秒）搬进框里。
+        pair2("失败切换", swPill("jev_fail_switch", dVal("jev_fail_switch", true)),
+          "切换模型", dnumIn("jev_fallback_cooldown", "秒", 300)) +
+        // 用户 m02469：名字从「不确定区间」改成「不确定段」。
+        row("不确定段", "<div class='jev-range'>" +
           "<span class='jev-unit'>" + dsel("jev_lower", 25) + "<span class='jev-pct'>%</span></span>" +
           "<span class='jev-range-sep'>~</span>" +
-          "<span class='jev-unit'>" + dsel("jev_upper", 75) + "<span class='jev-pct'>%</span></span></div>",
-          "概率低于下限 = 不回复，高于上限 = 回复；落在两者之间（含两端）算不确定，按「不确定时」处理。默认 25 ~ 75。") +
-        row("不确定时", "<select class='dipt' data-k='jev_action' id='jev-act'>" +
+          "<span class='jev-unit'>" + dsel("jev_upper", 75) + "<span class='jev-pct'>%</span></span></div>") +
+        // 用户 m01978 第 2 条：这两项也并成一行。
+        // v4.85（用户 m10425 第 6 条）：JEV 自己收不了图（decision 类模型只有 choice()），
+        // 「回退带图」管的是「不确定 → 交给决策模型」那一次转交要不要带图。
+        pair2("不确定时", "<select class='dipt' data-k='jev_action' id='jev-act'>" +
           "<option value='no_reply'" + (act === "no_reply" ? " selected" : "") + ">不回复</option>" +
           "<option value='reply'" + (act === "reply" ? " selected" : "") + ">回复</option>" +
           "<option value='decision'" + (act === "decision" ? " selected" : "") + ">交给决策模型</option></select>",
-          "只有概率落在上下限之间才用它。选「交给决策模型」会在这一轮多一次普通决策调用，用「决策提示词」那一页的配置。") +
-        // v4.85（用户 m10425 第 6 条）：JEV 自己收不了图（decision 类模型只有 choice()），
-        // 这个开关管的是「不确定 → 交给决策模型」那一次转交要不要带图。
-        row("回退时是否带图", "<label class='sw2'><input type='checkbox' data-k='jev_see_images'" +
-          (dVal("jev_see_images", true) ? " checked" : "") +
-          "><span class='tr'></span>" + ST_SW + "</label>",
-          "JEV 自己只看文字。打开这个：JEV 判成「不确定 → 交给决策模型」时，那一次回退会带上这一轮消息里的图（它得是能看图的模型，不认图会自动退回纯文字）。") +
+          "回退带图", swPill("jev_see_images", dVal("jev_see_images", true), "带图", "不带")) +
       "</div>";
     // ---- 右边：第一列是接口页签，第二列是当前页的表单 ----
+    // 用户 m01978 第 3 条：页签还是编号，悬浮能看到这一页的名字。
     var tabs = "<div class='jev-tabs'>" + pages.map(function(p){
         var on = String(p.id) === String(pg.id);
         return "<button type='button' class='jev-tab" + (on ? " on" : "") + "' data-jev-page='" +
-          esc(String(p.id)) + "'>" + esc(String(p.id)) + "</button>";
+          esc(String(p.id)) + "' title='" + esc(jevPageName(p)) + "'>" + esc(String(p.id)) + "</button>";
       }).join("") +
       "<button type='button' class='jev-tab jev-tab-add' data-jev-pageadd='1' title='再加一个第三方接口'>+</button></div>";
     var keyState = pg.api_key_set ? "已保存" : "还没保存";
     var keyTitle = pg.api_key_set ? ("已保存（" + String(pg.api_key_masked || "") + "）") : "还没保存";
     var apiBody = "<div class='jev-api'>" +
-        "<div class='jev-api-tabs'>" + tabs + "</div>" +
         "<div class='jev-api-body'><div class='drows'>" +
-          row("协议", "<select class='dipt' data-jev-pg='protocol' id='jev-proto'>" +
+          row("选择协议", "<select class='dipt' data-jev-pg='protocol' id='jev-proto'>" +
             "<option value='systemone'" + (proto === "systemone" ? " selected" : "") + ">SystemOne（Jev 那套）</option>" +
-            "<option value='openai'" + (proto === "openai" ? " selected" : "") + ">OpenAI 兼容（模型按 JSON 回概率）</option></select>",
-            "对方按哪套协议回话。官方 Jev / TypeSafe 是 SystemOne；阿里百炼、OpenRouter 这类网关只有 OpenAI 兼容。") +
-          row("自定义API地址", "<input class='dipt' data-jev-pg='base' id='jev-base' " +
+            "<option value='openai'" + (proto === "openai" ? " selected" : "") + ">OpenAI 兼容（模型按 JSON 回概率）</option></select>") +
+          rowName("<input class='dipt' data-jev-pg='base' id='jev-base' " +
             "placeholder='" + (proto === "openai" ? "https://…/compatible-mode/v1" : "https://api.typesafe.ai") + "' " +
-            "value='" + esc(String(pg.base || "")) + "'>",
-            "只填到站点的 api 前缀，插件自己补后面的路径。必须 https，不能带账号密码、查询参数，不能指向本机或内网。") +
-          row("密钥", "<span class='jev-keyline'>" +
+            "value='" + esc(String(pg.base || "")) + "'>") +
+          row("填入密钥", "<span class='jev-keyline'>" +
             "<input type='password' id='jev-key' autocomplete='off' " +
             "placeholder='" + (pg.api_key_set ? "已保存，留空则不改" : "填 API Key") + "'>" +
             "<button type='button' class='dbtn' data-jev-key='save'>保存</button>" +
             "<button type='button' class='dbtn' data-jev-key='clear'>清除</button>" +
             "<span class='jev-keystate' id='jev-key-note'></span>" +
-          "</span>",
-            "密钥单独存在插件数据目录里，不进插件配置、不会回传到这个页面；这里只显示打码后的尾巴四位。") +
+          "</span>") +
           row("模型选择",
             "<span class='jev-datarow jev-combo'><input class='dipt' data-jev-pg='model' id='jev-apimodel' autocomplete='off' readonly " +
             "placeholder='点「获取」选择模型' value='" + esc(String(pg.model || "")) + "'>" +
             "<button type='button' class='dbtn' data-jev-get='1' id='jev-get'>获取</button>" +
             // 面板必须放在 .jev-combo 里面，才按这个输入框定位；放外面会按整页定位。
-            "<div class='jev-modellist' id='jev-model-list' hidden></div></span>",
-            "点「获取」拉取这个接口能用的模型，只能从清单里选。") +
-        "</div>" + (pages.length > 1
-          ? "<div class='jev-keyrow'><button type='button' class='dbtn' data-jev-pagedel='1'>删除这一页</button></div>"
-          : "") + "</div>" +
-      "</div>" +
-      "<div class='jev-foot'><span class='jev-keystate' id='jev-key-state' title='" + esc(keyTitle) + "'>" + esc(keyState) + "</span></div>";
+            "<div class='jev-modellist' id='jev-model-list' hidden></div></span>") +
+        "</div>" + "</div>" +
+        // 用户 m02835：页签放在右卡左下角，和右下角的「已保存」同一行。
+        // 用户 m02950：「删除这一页」从表单底下挪到右卡右下，跟在保存状态左边。
+        "<div class='jev-foot'>" +
+          "<div class='jev-api-tabs'>" + tabs + "</div>" +
+          "<span class='jev-foot-end'>" +
+            (pages.length > 1 ? "<button type='button' class='dbtn' data-jev-pagedel='1'>删除这一页</button>" : "") +
+            "<span class='jev-keystate' id='jev-key-state' title='" + esc(keyTitle) + "'>" + esc(keyState) + "</span>" +
+          "</span>" +
+        "</div>" +
+      "</div>";
     return "<div class='dcard' id='jev-card'>" +
       "<div class='jev-cols'>" +
         // v4.85（用户 m10425 第 6 条）：左边这列不再挂「决策设置」标题。
@@ -2877,7 +3180,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var ms = document.getElementById("jev-model");
     if(ms) ms.innerHTML = jevModelOpts(ms.value || String(dVal("jev_model", "")), jevEmptyText());
     var fs = document.getElementById("jev-fb");
-    if(fs) fs.innerHTML = jevModelOpts(fs.value || String(dVal("jev_fallback_model", "")), "不设备用");
+    if(fs) fs.innerHTML = jevModelOpts(fs.value || String(dVal("jev_fallback_model", "")), "未选择模型");
   }
 
   // 用户 m09506：模型清单不再用 <datalist>（那边点了展不开）。改成自己画的下拉面板：
@@ -2946,6 +3249,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         JEV_APIS = (d.apis || []).map(function(pg){
           return {
             id: String(pg.id || "1"),
+            name: String(pg.name || ""),
             protocol: String(pg.protocol || "systemone"),
             base: String(pg.base || ""),
             model: String(pg.model || ""),
@@ -2962,7 +3266,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
 
   function dtoolsBlockHtml(){
     var hint = "勾选的工具作为原生工具发送，是否写入 system 由工具模块决定；模型要调就真的去调，最多连着调几轮由「回复提示词」页的「最大代理循环次数」决定。";
-    return "<div class='dcard'><div class='dhead'>决策可用的工具<i class='di' title='" + esc(hint) + "'>i</i>" +
+    return "<div class='dcard'><div class='dhead'>决策可用的工具" +
       "<span class='dhead-x'>最多 <b id='dec-rounds-hint'>5</b> 轮</span></div>" +
       "<input type='hidden' data-k='decision_tools' id='dec-tools' value='" + esc(JSON.stringify(dPickedRaw())) + "'>" +
       "<div class='dtools' id='dec-tools-box'>" + dToolsInner() + "</div></div>";
@@ -3226,16 +3530,34 @@ var DM_SPECIAL = { trigger_probability: 1 };
     return out;
   }
   // 用户 m02159 图3：工具不再占一条模板，而是勾在「工具说明」段下面，注入和可调用同源。
+  // 用户 m20823：「已选 N / M」的 N 只数当前清单里存在的；名单里残留的旧名字另外算。
+  function ppToolPicked(s){
+    var list = Array.isArray(s.toolChoices) ? s.toolChoices : [];
+    var avail = {};
+    list.forEach(function(t){ avail[String(t.name || "")] = 1; });
+    return (Array.isArray(s.toolsSelected) ? s.toolsSelected : []).map(String).filter(function(n){ return avail[n]; });
+  }
+  function ppToolStale(s){
+    var list = Array.isArray(s.toolChoices) ? s.toolChoices : [];
+    var avail = {};
+    list.forEach(function(t){ avail[String(t.name || "")] = 1; });
+    return (Array.isArray(s.toolsSelected) ? s.toolsSelected : []).map(String).filter(function(n){ return !avail[n]; });
+  }
   function ppToolBox(s, module, index){
     var list = Array.isArray(s.toolChoices) ? s.toolChoices : [];
     var picked = (Array.isArray(s.toolsSelected) ? s.toolsSelected : []).map(String);
+    // 用户 m20823：勾选名单里会留下已经不存在的工具（换插件、关插件之后），
+    // 「已选」只数这一页真能勾到的，别出现「已选 16 / 9」这种大于总数的读数。
+    var pickedOn = ppToolPicked(s), stale = ppToolStale(s);
     if(!list.length) return "<div class='pm-hint'>这个会话没有可用工具，这一段会注入空清单。</div>";
     // 用户 m02993 图2：工具清单收进一个折叠里，跟别的模板「正文」一样要点开才看。
     // 没勾任何工具时默认展开——不然会出现「已选 0 / 4」却找不到东西可勾。
     // 用户 m04343 图3：清单默认折叠，要点开才看（summary 上一直写着「已选 N / M」）。
     return "<details class='pm-tools-fold'>" +
       "<summary class='pm-sum'><span>工具清单</span>" +
-      "<span class='pm-tools-sum' id='pp-toolsum-" + s.kind + "'>已选 " + picked.length + " / " + list.length + "</span></summary>" +
+      "<span class='pm-tools-sum' id='pp-toolsum-" + s.kind + "'" +
+        (stale.length ? " title='另有 " + stale.length + " 个已勾的工具当前不可用：" + esc(stale.join("、")) + "'" : "") +
+        ">已选 " + pickedOn.length + " / " + list.length + "</span></summary>" +
       "<div class='pm-tools'><div class='pm-tools-head'>" + (s.kind === "reply"
         ? "勾哪个就把哪个写进这一段，回复链也只挂这几个工具（全不勾＝一个都不挂）。新装插件带的工具会自动勾上。"
         : "勾哪个就把哪个写进这一段，决策链也只挂这几个工具（全不勾＝一个都不挂）。新工具要自己勾。") + "</div>" +
@@ -3278,6 +3600,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
       .catch(function(err){ s.rtLoading = false; s.rtText = ""; s.rtInfo = "读不到实时窗：" + String((err && err.message) || err); });
   }
 
+  // 用户 m21698：记忆插件那两段改成布局里的真模块后，这里不再单独画只读卡（ppPluginSegHtml 已删）。
+
   function ppModuleHtml(s, module, index){
     var typ = String(module.type || "text");
     // 用户 m02993 图5：只标位置的那条「动态尾段」单行占位撤了——动态段现在是一块
@@ -3288,13 +3612,17 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var isRealtime = typ === "realtime_marker", isDynamic = typ === "dynamic";
     var isSystemMem = typ === "system_memory", isSystemTime = typ === "system_time";
     var isSystemDyn = isSystemMem || isSystemTime || typ === "system_dynamic";
+    // 用户 m23028：记忆插件注入的两段（固定说明 / 本轮上下文）现在是布局里的真模块——
+    // 正文由插件在请求时现给，卡片只显示 + 只让你挪位置；金色标出来，跟框架自己的段分开。
+    var isPluginMem = typ === "plugin_memory", isPluginCtx = typ === "plugin_memory_ctx";
+    var isPlugin = isPluginMem || isPluginCtx;
     // 用户 m02159 图3：人格段锁住不可删，但可以放空、可以挪位置；身份段与实时窗口段同理。
     // 用户 m02993 图2：工具模板也锁定（不能删），但位置可以挪。
     // 用户 m04617 图3/图8：动态段本来就是自己加的模板，要能选、能删、能挪，
     // 所以它不再算锁定段；真正锁死的只有人格 / 身份 / 工具 / 实时窗 / 系统动态段。
-    // 用户 m05124 图1：「强化格式遵守」这块是锁定的（标「锁定」，没有 ✕），
-    // 位置也钉死在实时窗口下面、系统动态段上面——位置不能挪，正文照旧能改。
-    var locked = isPersona || isIdentity || isRealtime || isTools || isSystemDyn || isDynamic;
+    // 用户 m05124 图1：「强化格式遵守」这块是锁定的（标「锁定」，没有 ✕），正文照旧能改。
+    // 用户 m26048：位置也能挪了，只是不能越过实时窗口——它注入的是聊天记录末尾。
+    var locked = isPersona || isIdentity || isRealtime || isTools || isSystemDyn || isDynamic || isPlugin;
     // 用户 m04343 第 3 条：动态段「不锁定也不固定」，只是位置被钉在实时窗口下面、
     // 系统动态段上面——所以它不留删除键，也不挂锁标，只把 ↑↓ 变灰。
     // 用户 m04617 图3：只有实时窗是「固定」（位置钉死），别的都只是「锁定」（不能随便删）。
@@ -3303,17 +3631,21 @@ var DM_SPECIAL = { trigger_probability: 1 };
       : isIdentity ? "「你的身份」由框架自动填写，只能看不能改；位置可以挪。"
       : isTools ? "工具段是固定的一段，不能删；勾选写在这一段下面，位置可以挪。"
       : isRealtime ? "实时窗口只标位置：永远排在系统模板下面、动态段上面，不能删。"
-      : isDynamic ? "动态段是固定的一块：钉在实时窗口下面、系统段上面，不能删也不能挪；正文可以改。"
-      : isSystemMem ? "记忆段是框架自己拼在 system 末尾的动态内容，只标位置，不能删。"
-      : isSystemTime ? "时间段是框架自己拼在 system 末尾的动态内容，只标位置，不能删。"
+      : isDynamic ? "动态段不能删，正文可以改；位置只能在实时窗口下面挪，不能挪到实时窗口上面。"
+      : isSystemMem ? "记忆段是框架自己拼在 system 末尾的动态内容，只标位置，不能删；位置可以挪。"
+      : isSystemTime ? "时间段是框架自己拼在 system 末尾的动态内容，只标位置，不能删；位置可以挪。"
+      : isPluginMem ? "记忆插件注入：正文由记忆插件在请求时现给，这里只决定它放在哪；不能删。"
+      : isPluginCtx ? "记忆插件 · 本轮上下文：每轮现算，这里只决定它放在哪；不能删。"
       : "系统动态段是框架自己拼在 system 末尾的那些动态内容，只标位置，不能删。";
     // 用户 m02993 图1：实时窗口与动态段标的是「位置」，位置由框架钉死（系统提示词下面、最后一段），
-    // 所以上下移一律禁用，只留启用/停用。用户 m03879：系统动态段同样是钉死的位置。
+    // 所以上下移一律禁用，只留启用/停用。用户 m25796：记忆段 / 时间段不再跟着钉死——
+    // 它们只是「锁定」（不能删、不能改），位置可以挪。
     // 用户 m04617 图8：动态段能上下挪（默认还是排在实时窗下面、系统动态段上面）。
-    var fixedPos = isRealtime || isSystemDyn || isDynamic;
+    // 用户 m26048：「强化格式遵守」也不再钉死位置，只剩实时窗口是固定的。
+    var fixedPos = isRealtime;
     // 用户 m27528 第 5 条：角色扮演（人格）这一段锁死——只能看，不能在这儿改，
     // 换人设请用右上角的下拉。以前它能改，一改就悄悄复制成一份「我的副本」。
-    var ro = isIdentity || isSystemDyn || isPersona;
+    var ro = isIdentity || isSystemDyn || isPersona || isPlugin;
     // 用户 m04617 图6：选了人格以后，卡片上的字数得跟真正注入的那一段一致，
     // 不能再显示目录里那份预览（60 字的空骨架），否则看着像「选了反而没注入」。
     // 用户 m05691：动态段默认不含正文（跟着默认模板走），字数与正文都按真正注入的那段显示。
@@ -3321,6 +3653,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       : isSystemTime ? ppRenderedPart(s, "system_time")
       : isSystemDyn ? ppRenderedPart(s, "system_dynamic")
       : isPersona ? ppRenderedPart(s, "persona")
+      : isPlugin ? ppRenderedPart(s, typ)
       : isDynamic ? ppRenderedPart(s, "dynamic") : null;
     // 用户 m14457 图1：停用的模块以前照样把整段正文铺在卡上（只是变淡），
     // 看着像「关了右边预览还留着」——那其实是左边卡片。停用就明说，不再铺全文。
@@ -3328,7 +3661,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 用户 m23323 图1：停用也照实显示正文与字数——卡片是「这一段会收到什么」的展示位，
     // 换成一串「未启用…」的说明字反而看不出内容（系统动态段就是这么被读成空白的）。
     var body = rendered ? String(rendered.text || "")
-      : ((typ === "text" || isDynamic) ? String(module.content || "") : ppReferenceText(s, module));
+      : ((typ === "text" || isDynamic || isPlugin) ? String(module.content || "") : ppReferenceText(s, module));
     // 用户 m09506：实时窗的真实内容与「读取哪个群组」不止 JEV 页要有，决策 / 回复页也一样。
     var rtLive = isRealtime;
     if(rtLive){ body = String(s.rtText || ""); }
@@ -3346,12 +3679,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
         : ((s.kind === "reply") ? "空人格 · 用框架原文" : "空人格 · 不注入"))
       : (isTools ? "勾选注入"
         : (isDynamic ? "拼在聊天记录最后"
-          : (typ === "framework" ? "原段" : (typ === "custom" ? "自定义" : ""))));
+          : (isPlugin ? (isPluginMem ? "插件现给" : "每轮现算")
+            : (typ === "framework" ? "原段" : (typ === "custom" ? "自定义" : "")))));
     // 用户 m03879 图3：位置标签只说明「注入在哪」，放到「N 字」左边。
     // 用户 m04343 第 4 条：框架原段（系统模板）也挂「系统段」标签，跟系统动态段一个样。
-    var isSysSeg = isSystemDyn || isIdentity || isTools || typ === "framework";
-    var posLabel = isRealtime ? "实时窗" : (isSysSeg ? "系统段" : (isDynamic ? "动态段" : ""));
-    var posCls = isRealtime ? "pm-pos-rt" : (isSysSeg ? "pm-pos-sys" : "pm-pos-dyn");
+    var isSysSeg = isSystemDyn || isIdentity || isTools || typ === "framework" || isPluginMem;
+    var posLabel = isRealtime ? "实时窗" : (isPlugin ? "插件段" : (isSysSeg ? "系统段" : (isDynamic ? "动态段" : "")));
+    var posCls = isRealtime ? "pm-pos-rt" : (isPlugin ? "pm-pos-plugin" : (isSysSeg ? "pm-pos-sys" : "pm-pos-dyn"));
     var source, note = ref && ref.note ? String(ref.note) : "";
     if(isPersona){
       source = module.key ? ("人格文件：" + String(module.key))
@@ -3370,6 +3704,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
       source = "位置说明：框架自己拼在 system 末尾的动态内容（时间）";
     }else if(isSystemDyn){
       source = "位置说明：框架自己拼在 system 末尾的动态内容（会话信息 / 聊天环境 / 记忆 / 时间）";
+    }else if(isPlugin){
+      source = isPluginMem ? "记忆插件注入：正文由插件在请求时现给，这里只决定它放在哪"
+        : "记忆插件 · 本轮上下文：每轮现算，这里只决定它放在哪";
     }else if(isDynamic){
       source = "动态段：拼在本轮聊天记录最后，紧贴模型开口的位置";
     }else{
@@ -3391,13 +3728,15 @@ var DM_SPECIAL = { trigger_probability: 1 };
     }
     // 来源下拉：只有还能换内容的段才给（人格 / 框架原段 / 自写）；位置段与身份段没得选。
     // 用户 m04617 图8：动态段也要有下拉——它本身就是一段模板，能换成别的写法。
-    var hasSelect = !(isIdentity || isTools || isRealtime || isSystemDyn);
+    var hasSelect = !(isIdentity || isTools || isRealtime || isSystemDyn || isPlugin);
     // 用户 m28586 第 3 条：右边那个「编辑（存成我的模板）」按钮撤掉。规则就一句话——
     // 直接在下面的正文框里改字，改完自动复制一份存进模板库（名字变成「原名·复制（自写）」），
     // 默认模板一个字都不动。这里只剩「自定义模板」那块去模板库改正文的入口。
     var convert = (typ === "custom" && module.key) ? ppButton(s,"edit_tpl","改这个模板",index,false) : "";
     var noteText = isPersona ? ""
-      : (note || ((!custom && !isTools && (!ref || ref.available === false)) ? "这个引用现在没内容，预览会给警告。" : ""));
+      : (note || (isPlugin && rendered && rendered.sample_only
+          ? "插件这轮没回传正文，下面显示的是默认模板（不会注入）。" : "")
+        || ((!custom && !isTools && !isPlugin && (!ref || ref.available === false)) ? "这个引用现在没内容，预览会给警告。" : ""));
     // 用户 m04343 第 4 条：来源下拉搬到标题右边同一行（标题照旧能改名）；下面那行只留说明和按钮。
     var picker = hasSelect
       ? "<select class='dipt pm-src' aria-label='模块来源' title='换这一段用哪个模板' data-pm-field='type'" +
@@ -3415,7 +3754,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
         (convert ? "<span class='pm-convert'>" + convert + "</span>" : "") + "</div>"
       : "";
     return "<section class='pm-module" + (locked ? " pm-locked" : "") + (isRealtime ? " pm-realtime" : "") +
-      (isDynamic ? " pm-dynamic-mod" : "") + (isSystemDyn ? " pm-sysdyn" : "") + "' data-pm-module='" + index + "'>" +
+      (isDynamic ? " pm-dynamic-mod" : "") + (isSystemDyn ? " pm-sysdyn" : "") + (isPlugin ? " pm-plugin" : "") +
+      "' data-pm-module='" + index + "'>" +
       "<div class='pm-module-head'><span class='pm-idx'>" + (index + 1) + "</span>" +
         "<label class='pm-enabled'><input type='checkbox' data-pm-field='enabled' data-pm-index='" + index + "'" +
         (module.enabled !== false ? " checked" : "") + ">启用</label>" +
@@ -3437,7 +3777,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         "<span class='pm-chars' title='正文 " + esc(chars) + " 字符'>" + esc(chars) + " 字</span>" +
         "<div class='pm-move'>" + ppIcon(s,"up","\u2191","上移",index,
           fixedPos || index === 0 ||
-          (isDynamic && index > 0 && String((s.layout.modules[index - 1] || {}).type || "") === "realtime_marker")) +
+          ((isDynamic || isPluginCtx) && index > 0 && String((s.layout.modules[index - 1] || {}).type || "") === "realtime_marker")) +
         ppIcon(s,"down","\u2193","下移",index,fixedPos || nextIsRt || index === s.layout.modules.length - 1) + (locked
           ? (lockText ? "<span class='pm-lock' title='" + esc(lockTip) + "'>" + lockText + "</span>" : "")
           : ppIcon(s,"remove","\u2715","删除",index) + ppIcon(s,"dup","\u29c9","复制一段出来",index)) + "</div></div></div>" +
@@ -3447,8 +3787,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
         "<summary class='pm-sum'>" + (isPersona ? "人格正文 " : "正文 ") + esc(chars) + " 字符" +
         (isDynamic ? "（动态段 · 可编辑，拼在聊天记录最后）"
           : (isRealtime ? "（真实实时窗 · 只读）"
-            : (custom ? "（可编辑）" : (isPersona ? "（只读 · 换人设请用右上角的下拉）"
-              : (ro ? "（框架自动填写，只能看不能改）" : "（引用原文，只读）"))))) + "</summary>" +
+            : (isPlugin ? "（插件注入 · 只读，位置可挪）"
+              : (custom ? "（可编辑）" : (isPersona ? "（只读 · 换人设请用右上角的下拉）"
+                : (ro ? "（框架自动填写，只能看不能改）" : "（引用原文，只读）")))))) + "</summary>" +
         "<div class='pm-body-row'>" +
         // 用户 m23323 图3：<textarea> 后面紧跟的第一个换行会被 HTML 解析吃掉，
         // 正文以空行开头时回填一次就少一行、越编辑越少。这里先自己补一个换行。
@@ -3459,13 +3800,16 @@ var DM_SPECIAL = { trigger_probability: 1 };
               : (isSystemMem ? "记忆段（只读）"
                 : (isSystemTime ? "时间段（只读）"
                   : (isSystemDyn ? "系统动态段（只读）"
-                    : (isRealtime ? "实时窗口说明" : "改这里会自动存成你自己的模板"))))))) +
+                    : (isRealtime ? "实时窗口说明"
+                      : (isPlugin ? (isPluginMem ? "记忆插件注入（只读）" : "记忆插件 · 本轮上下文（只读）")
+                        : "改这里会自动存成你自己的模板")))))))) +
         "' data-pm-field='content' data-pm-index='" + index + "'" +
         (rtLive ? " readonly" : (custom || isRealtime || isDynamic ? "" : (ro ? " readonly" : " data-pm-promote='1'"))) + ">\n" + esc(body) + "</textarea>" +
         // 用户 m05124 图1：这句「只标位置」挪到上面第二行（正文摘要）去了，正文行里不再重复。
         "</div>" +
         (isRealtime ? (rtLive
-          ? ("<div class='pm-hint'>这里显示的是框架里那个会话的真实窗口内容，只读：上面的「读取」可以换会话，" +
+          ? ("<div class='pm-hint'>这里显示的是框架里那个会话的真实窗口内容，只读：上面的「读取」可以换会话。" +
+            "测试窗只留「用户发的纯文字」，bot 自己的话、工具往返、图片都过滤掉了，只取最近 10 条。" +
             (s.kind === "jev" ? "点下面的「测试」就用它跑一次 JEV 判断。" : "点下面的「测试」用的也是它。") +
             "它不会写进提示词，保存的布局里也没有这段正文。</div>")
           : "<div class='pm-hint'>这段只是给模型标出「聊天记录长这样、放在这里」，不会当成指令执行；想更像真记录就往下多写两行。</div>") : "") +
@@ -3494,7 +3838,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 用户 m13212 图1：新增模块加进哪一段，用两个标签记着（重渲染后不回弹）。
     var zonePick = s.zonePick === "dynamic" ? "dynamic" : "system";
     return "<div class='pm-toolbar'>" +
-      // v4.85（用户 m10425 第 2 条）：标题按卡头写（和右边「完整系统提示词」同一个字号与字重），
+      // v4.85（用户 m10425 第 2 条）：标题按卡头写（和右边「提示词预览」同一个字号与字重），
       // 下拉紧跟在标题后面，不再用「小灰字 + 表单」那套。
       "<label class='pm-tb-h' for='pp-mode-" + s.kind + "'>编辑方式</label>" +
       "<select class='dipt' id='pp-mode-" + s.kind + "' data-pm-field='mode'>" +
@@ -3512,8 +3856,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         " data-pm-kind='" + s.kind + "' data-pm-action='notice-off'>✕</button></div>" : "") +
       (textMode ? "<label class='pm-source-label'>完整 system<textarea class='darea' rows='18' data-pm-field='text'>" + esc(layout.text) + "</textarea></label>" :
         "<div class='pm-modules'>" + (layout.modules.map(function(m,i){ return ppModuleHtml(s,m,i); }).join("") ||
-          "<div class='pm-note'>没有模块：保存后将明确使用空 system，不会自动补回默认模块。</div>") + "</div>" +
-        "") +
+          "<div class='pm-note'>没有模块：保存后将明确使用空 system，不会自动补回默认模块。</div>") + "</div>") +
       // 用户 m04617 图4：新增这块也做成一张小卡（跟上面的模板卡一个风格），
       // 后面多一个下拉：这段是加进系统段，还是加进动态段。
       "<div class='pm-newcard'>" +
@@ -3547,6 +3890,17 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var s = ppState(kind);
     return "<div class='dcard pp-compact pm-editor' id='pp-edit-" + kind + "' data-pp-editor='" + kind + "'>" + ppEditorInner(s) + "</div>";
   }
+  // 用户 m03247：工具条要当卡头用——它要是留在滚动层里，滚动条滑块就会跟它并排露在右上角。
+  // 每次重画编辑器都是一套新 DOM，所以画完把新工具条搬进卡头，卡头里旧的整块丢掉。
+  function ppHoistToolbar(s){
+    var card = document.getElementById("pp-edit-" + s.kind);
+    var head = document.getElementById("pp-head-" + s.kind);
+    if(!card || !head) return;
+    var bar = card.querySelector(".pm-toolbar");
+    if(!bar) return;
+    while(head.firstChild) head.removeChild(head.firstChild);
+    head.appendChild(bar);
+  }
   function ppRenderEditor(s){
     if(!ppCurrent(s)) return;
     var root = document.getElementById("pp-edit-" + s.kind);
@@ -3561,6 +3915,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       }
     }
     root.innerHTML = ppEditorInner(s);
+    ppHoistToolbar(s);
     // 用户 m09506：JEV 卡整块重画完要把「实际请求地址」补上，
     // 否则刚打开页面那会儿这处是空的，要等动一下输入框才出现。
     // 用户 m09981：协议按当前这一页取，不再读全局的那个旧键。
@@ -3573,6 +3928,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(focus){
       var selector = "[data-pm-field='" + focus.field + "']" + (focus.index === null ? "" : "[data-pm-index='" + focus.index + "']");
       var next = root.querySelector(selector);
+      if(!next){
+        var headEl = document.getElementById("pp-head-" + s.kind);
+        if(headEl) next = headEl.querySelector(selector);
+      }
       if(next && next.focus){
         try{ next.focus({preventScroll:true}); if(next.setSelectionRange) next.setSelectionRange(focus.start,focus.end); }catch(e){}
       }
@@ -3590,7 +3949,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(s.notice) bits.push(s.notice);
     if(node) node.textContent = bits.join(" · ");
     if(root){
-      var saves = root.querySelectorAll("[data-pm-action='save']");
+      var owner = document.getElementById("pp-head-" + s.kind) || root;
+      var saves = owner.querySelectorAll("[data-pm-action='save']");
+      if(!saves.length) saves = root.querySelectorAll("[data-pm-action='save']");
       for(var si = 0; si < saves.length; si++){
         saves[si].disabled = s.saving || !s.dirty;
         saves[si].textContent = s.saving ? "保存中…" : "保存此提示词";
@@ -3630,29 +3991,28 @@ var DM_SPECIAL = { trigger_probability: 1 };
     out.textContent = preview ? String(preview.system || "") : "";
     var status = document.getElementById(prefix + "-prev-status");
     if(status) status.textContent = s.previewError ? s.previewError : (s.previewPending ? "正在用当前草稿重新组装…" :
-      (preview ? (preview.system === "" ? "当前结果是明确空 system" : "当前草稿预览（不调模型、不发消息）") : "等待读取模板…"));
-    var tip = document.getElementById(prefix + "-prev-tip");
-    if(tip){
-      var chips = ["作用域：" + (s.sid || "全局"), "样本会话：" + (s.contextSid || "暂无")];
-      if(preview){
-        chips.push(String(preview.chars === undefined ? String(preview.system || "").length : preview.chars) + " 字符");
-        var srcTxt = String(preview.source || "服务端同源组装");
-        // 用户 m10789：预览取的是「这一刻框架里的模板」，只有现取失败、退回插件自带文案时才要提醒。
-    var srcWarn = srcTxt.indexOf("插件自带") >= 0 || srcTxt.indexOf("样例") >= 0;
-    chips.push((srcWarn ? "⚠ " : "来源：") + srcTxt);
-      }
-      tip.innerHTML = chips.map(function(c){ return "<span class='pp-chip'>" + esc(c) + "</span>"; }).join("");
-    }
-    var parts = document.getElementById(prefix + "-prev-parts");
-    if(parts) parts.innerHTML = preview ? (preview.parts || []).map(function(p){
-      var ptext = p.text || "";
+      (preview ? "" : "等待读取模板…"));
+    // 用户 m03408：不再把每段摊成一串折叠行（静态段上面已经整段预览过），改成
+    // 「实时窗口」一条分界线，界线下面把动态段也拼成一段正文，跟 system 预览一个观感。
+    var partList = preview ? (preview.parts || []) : [];
+    var dynTexts = [], rtSeen = false;
+    partList.forEach(function(p){
       var isRt = String(p.name || "") === "realtime" || String(p.type || "") === "realtime_marker";
-      if(isRt) ptext = String(s.rtText || ptext);
-      var pchars = isRt ? String(ptext.length) : String(p.chars === undefined ? String(p.text || "").length : p.chars);
-      return "<details class='pseg'><summary><span class='psn'>" + esc(p.label || p.id || p.type || "模块") + "</span>" +
-      "<span class='pss'>" + esc(pchars) + " 字符</span></summary>" +
-      "<pre class='psegpre'>" + esc(ptext) + "</pre></details>";
-    }).join("") : "";
+      if(isRt){ rtSeen = true; return; }
+      if(!p.dynamic) return;
+      var body = String(p.text || "").replace(/\s+$/, "");
+      if(body.trim()) dynTexts.push(body);
+    });
+    var dynText = dynTexts.join("\n\n");
+    var hasDyn = dynTexts.length > 0;
+    var div = document.getElementById(prefix + "-prev-div");
+    if(div) div.hidden = !preview || !rtSeen || !hasDyn;
+    var divSub = document.getElementById(prefix + "-prev-divs");
+    if(divSub) divSub.textContent = String(s.rtInfo || "");
+    var dynBox = document.getElementById(prefix + "-prev-dynbox");
+    if(dynBox) dynBox.hidden = !preview || !hasDyn;
+    var dynPre = document.getElementById(prefix + "-prev-dyn");
+    if(dynPre) dynPre.textContent = dynText;
     var warnings = document.getElementById(prefix + "-prev-warnings");
     if(warnings) warnings.textContent = preview ? (preview.warnings || []).map(function(w){ return String(w && w.message ? w.message : w); }).join("\n") : "";
     ppPaintStatus(s);
@@ -3667,6 +4027,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(!preview || typeof preview.system !== "string") throw new Error("提示词预览响应缺少完整 system");
       if(typeof d.context_sid === "string") s.contextSid = d.context_sid;
       if(Array.isArray(d.catalog)) s.catalog = d.catalog;
+      // 用户 m21698：plugin_segments 已并入 layout.modules，不再单独回传。
       // The payload wraps preview; never replace the draft/left editor with it.
       s.preview = preview; s.previewPending = false; ppPaintPreview(s); return preview;
     }).catch(function(err){
@@ -3750,6 +4111,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       s.catalog = d.catalog; s.defaultLayout = ppClone(d.default_layout); s.contextSid = String(d.context_sid || "");
       s.toolChoices = Array.isArray(d.tool_choices) ? d.tool_choices : []; s.toolsSelected = Array.isArray(d.tools_selected) ? d.tools_selected.map(String) : [];
       s.officialReference = d.official_reference || null; s.nativeTemplates = d.native_templates || null;
+      s.pluginSegs = [];
       if(replace){
         s.layout = ppClone(d.layout); s.revision = d.revision; s.inherited = !!d.inherited;
         s.defNotice = d.default_notice || null;
@@ -3765,7 +4127,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       s.loaded = true; s.loading = null; ppRenderEditor(s); ppPaintPreview(s);
       // 用户 m08755：JEV 页一打开就把真实实时窗取一次，测试才有内容可用。
       // 用户 m09506：决策 / 回复页的实时窗也要真实内容，三页都取。
-      if(!s.rtFetched){ s.rtFetched = true; ppLoadWindowText(s).then(function(){ ppRenderEditor(s); }); }
+      if(!s.rtFetched){ s.rtFetched = true; ppLoadWindowText(s).then(function(){ ppRenderEditor(s); ppPaintPreview(s); }); }
       if(s.referencesPending) return ppRefreshReferences(s);
       // 预热另一页只为填「＋ 新增」下拉，用不到预览，别为它重排一遍 system。
       if(warm) return null;
@@ -3889,7 +4251,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 两页都有工具段，id 会重名：只改当前这一页的那一份。
     var scope = document.querySelector("[data-pp-editor='" + s.kind + "']");
     var sum = scope ? scope.querySelector(".pm-tools-sum") : null;
-    if(sum) sum.textContent = "已选 " + cur.length + " / " + (s.toolChoices || []).length;
+    // 用户 m20823：这里也按「清单里存在的」数，跟 ppToolBox 的读数保持一致。
+    if(sum){
+      var on2 = ppToolPicked(s), stale2 = ppToolStale(s);
+      sum.textContent = "已选 " + on2.length + " / " + (s.toolChoices || []).length;
+      if(stale2.length) sum.setAttribute("title", "另有 " + stale2.length + " 个已勾的工具当前不可用：" + stale2.join("、"));
+      else sum.removeAttribute("title");
+    }
     var box = scope ? scope.querySelector("[data-pm-tool='" + name + "']") : null;
     if(box && box.parentNode && box.parentNode.classList) box.parentNode.classList.toggle("on", !!on);
     // 用户 m11103：决策链和回复链各存各的，存的时候要带上这是哪一页。
@@ -3978,10 +4346,18 @@ var DM_SPECIAL = { trigger_probability: 1 };
       list.splice(at, 0, module);
     }else if(action === "remove" && module){
       // 用户 m02159 图3：人格 / 身份 / 实时窗口是固定段，只能放空或换人格，不能整段删掉。
-      if(module.type === "persona" || module.type === "identity" || module.type === "realtime_marker") return;
+      if(module.type === "persona" || module.type === "identity" || module.type === "realtime_marker"
+         || module.type === "plugin_memory" || module.type === "plugin_memory_ctx") return;
       list.splice(index,1);
     }
-    else if(action === "up" && module && index > 0){ list.splice(index,1); list.splice(index-1,0,module); }
+    else if(action === "up" && module && index > 0){
+      // 用户 m26048：动态段（强化格式遵守 / 记忆插件·本轮上下文）注入的是聊天记录末尾，
+      // 不是系统提示词，所以只能在「实时窗口」下面挪，不能挪到它上面去。
+      var upType = String(module.type || "");
+      if((upType === "dynamic" || upType === "plugin_memory_ctx")
+         && String((list[index-1] || {}).type || "") === "realtime_marker") return;
+      list.splice(index,1); list.splice(index-1,0,module);
+    }
     else if(action === "down" && module && index < list.length-1){
       // 用户 m23323 图3：任何一段都不能越过「实时窗口」往下——越过就跑到聊天记录后面去了。
       if(String((list[index+1] || {}).type || "") === "realtime_marker") return;
@@ -3990,7 +4366,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
     else if(action === "dup" && module){
       // 用户 m27528 第 5 条：模块也能复制一份——副本排在原段后面，名字带「（副本）」后缀
       // （来源下拉里一眼认得出），正文照抄；动副本不碰原段。
-      if(module.type === "persona" || module.type === "identity" || module.type === "realtime_marker") return;
+      if(module.type === "persona" || module.type === "identity" || module.type === "realtime_marker"
+         || module.type === "plugin_memory" || module.type === "plugin_memory_ctx") return;
       var cp = {};
       Object.keys(module).forEach(function(k){ cp[k] = module[k]; });
       cp.id = "pm-" + Date.now().toString(36) + "-" + (++ppModuleCounter);
@@ -4045,22 +4422,31 @@ var DM_SPECIAL = { trigger_probability: 1 };
   function promptPrevBlockHtml(kind){
     var prefix = ppPrefix(kind);
     return "<div class='dcard pp-prev' data-pp-prev='" + kind + "'>" +
-      "<div class='pp-prev-h'><h4>完整系统提示词</h4><span class='pp-h4s'>当前草稿 · 自动刷新</span>" +
+      "<div class='pp-prev-h'><h4>提示词预览</h4><span class='pp-h4s'>当前草稿 · 自动刷新</span>" +
       "<span class='pp-prev-acts'>" +
         "<button class='pm-ico' id='" + prefix + "-copy' type='button' data-pp-copy='" + kind + "' title='复制这份 system'>复制</button>" +
         "<button class='pm-ico' id='" + prefix + "-expand' type='button' data-pp-expand='" + kind + "' title='放大看 / 还原'>放大</button>" +
       "</span></div>" +
-      "<div class='pp-prev-bar' id='" + prefix + "-prev-tip'></div>" +
-      "<pre class='dpre tall pm-system' id='" + prefix + "-prev-sys'></pre>" +
+      "<div class='pp-prev-box sys' id='" + prefix + "-prev-sysbox'>" +
+        "<div class='pp-prev-cap'>系统提示词</div>" +
+        "<pre class='dpre tall pm-system' id='" + prefix + "-prev-sys'></pre></div>" +
       "<div class='pm-note' id='" + prefix + "-prev-status' role='status' aria-live='polite'>等待读取模板…</div>" +
       "<div class='pm-warning' id='" + prefix + "-prev-warnings' role='status'></div>" +
-      "<div class='psegbox' id='" + prefix + "-prev-parts'></div>" +
+      "<div class='pp-prev-div' id='" + prefix + "-prev-div' hidden>" +
+        "<span class='pp-prev-divn'>实时窗口</span><span class='pp-prev-divl'></span>" +
+        "<span class='pp-prev-divs' id='" + prefix + "-prev-divs'></span></div>" +
+      "<div class='pp-prev-box dyn' id='" + prefix + "-prev-dynbox' hidden>" +
+        "<div class='pp-prev-cap'>动态注入部分</div>" +
+        "<pre class='dpre pm-dyn' id='" + prefix + "-prev-dyn'></pre></div>" +
       // 用户 m08755 第 5 条：JEV 页也要「测试」，用实时窗那份真实聊天记录试跑。
-      (kind === "decision" || kind === "jev"
+      (kind === "decision" || kind === "jev" || kind === "reply"
         ? "<div class='pm-toolbar'><button class='dbtn ghost' id='" + prefix + "-test' type='button' disabled>测试</button>" +
           "<span class='dtip' style='margin:0'>仅测已保存提示词；会真调一次" +
-          (kind === "jev" ? "JEV 判断（用下面实时窗那份聊天记录）" : "决策模型") +
-          "，结果只显示在下面。" + (kind === "jev" ? "不写记录、不发言、不转交。" : "") + "</span></div>" +
+          (kind === "jev" ? "JEV 判断（用实时窗那份聊天记录）"
+                          : (kind === "reply" ? "回复模型（用实时窗那份聊天记录）" : "决策模型")) +
+          "，结果只显示在下面。" +
+          (kind === "jev" ? "不写记录、不发言、不转交。" : (kind === "reply" ? "不写记录、不发言。" : "")) +
+          "</span></div>" +
           "<div class='drow col' id='" + prefix + "-test-box' hidden><h4>试跑结果</h4><pre class='dpre' id='" + prefix + "-test-out'></pre></div>"
         : "") + "</div>";
   }
@@ -4150,11 +4536,14 @@ var DM_SPECIAL = { trigger_probability: 1 };
       "<button type='button' class='pp-tab" + (pane === "reply" ? " on" : "") + "' data-pp='reply'>回复提示词<span class='pp-sub'>真正开口说话</span></button>" +
       "<button type='button' class='pp-tab" + (pane === "templates" ? " on" : "") + "' data-pp='templates'>自定义<span class='pp-sub'>改过的和自写的</span></button>" +
       "</div><div class='pp-pane' data-pane='decision'" + (pane === "decision" ? "" : " hidden") + "><div class='pp-left'>" +
-      promptEditorBlockHtml("decision") + dmodelBlockHtml() + "</div><div class='pp-right'>" + promptPrevBlockHtml("decision") + "</div></div>" +
+      "<div class='pp-left-head' id='pp-head-decision' data-pp-editor='decision'></div><div class='pp-left-body'>" +
+      promptEditorBlockHtml("decision") + dmodelBlockHtml() + "</div></div><div class='pp-right'>" + promptPrevBlockHtml("decision") + "</div></div>" +
       "<div class='pp-pane' data-pane='jev'" + (pane === "jev" ? "" : " hidden") + "><div class='pp-left'>" +
-      promptEditorBlockHtml("jev") + jevBlockHtml() + "</div><div class='pp-right'>" + promptPrevBlockHtml("jev") + "</div></div>" +
+      "<div class='pp-left-head' id='pp-head-jev' data-pp-editor='jev'></div><div class='pp-left-body'>" +
+      promptEditorBlockHtml("jev") + jevBlockHtml() + "</div></div><div class='pp-right'>" + promptPrevBlockHtml("jev") + "</div></div>" +
       "<div class='pp-pane' data-pane='reply'" + (pane === "reply" ? "" : " hidden") + "><div class='pp-left'>" +
-      promptEditorBlockHtml("reply") + replyToolBlockHtml() + "</div><div class='pp-right'>" + promptPrevBlockHtml("reply") + "</div></div>" +
+      "<div class='pp-left-head' id='pp-head-reply' data-pp-editor='reply'></div><div class='pp-left-body'>" +
+      promptEditorBlockHtml("reply") + replyToolBlockHtml() + "</div></div><div class='pp-right'>" + promptPrevBlockHtml("reply") + "</div></div>" +
       "<div class='pp-pane pp-pane-wide' data-pane='templates'" + (pane === "templates" ? "" : " hidden") + ">" +
       ppTplPageHtml() + "</div></div>";
   }
@@ -4220,13 +4609,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var ms = document.getElementById("dec-model");
     if(ms) ms.innerHTML = dModelOpts(ms.value || String(dVal("decision_model", "")), "跟随默认模型");
     var fs = document.getElementById("dec-fb");
-    if(fs) fs.innerHTML = dModelOpts(fs.value || String(dVal("decision_fallback_model", "")), "不设备用");
+    if(fs) fs.innerHTML = dModelOpts(fs.value || String(dVal("decision_fallback_model", "")), "未选择模型");
     // 用户 m17507：回复设置里的「回复模型 / 备用模型」以前只在页面重画时填一次，
-    // 模型清单比页面晚到就永远只剩「跟随默认模型 / 不设备用」两个空选项，选不了。
+    // 模型清单比页面晚到就永远只剩「跟随默认模型 / 未选择模型」两个空选项，选不了。
     var rm = document.getElementById("rep-model");
     if(rm) rm.innerHTML = dModelOpts(rm.value || String(dVal("reply_model", "")), "跟随默认模型");
     var rf = document.getElementById("rep-fb");
-    if(rf) rf.innerHTML = dModelOpts(rf.value || String(dVal("reply_fallback_model", "")), "不设备用");
+    if(rf) rf.innerHTML = dModelOpts(rf.value || String(dVal("reply_fallback_model", "")), "未选择模型");
     var tb = document.getElementById("dec-tools-box");
     if(tb) tb.innerHTML = dToolsInner();
     var rh = document.getElementById("dec-rounds-hint");
@@ -4277,6 +4666,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
                    " · 尝试 " + (r.attempts || 1) + " 次 · 用时 " + (r.elapsed || 0) + " 秒");
         if(r.tools_used && r.tools_used.length) lines.push("用了工具：" + r.tools_used.join("、"));
         if(r.error) lines.push("错误：" + r.error);
+        if(r.reasoning) lines.push("", "思考过程：", String(r.reasoning).slice(0, 4000));
         if(r.raw) lines.push("", "原始返回：", String(r.raw).slice(0, 1200));
         out.textContent = lines.join("\n");
       })
@@ -4316,6 +4706,37 @@ var DM_SPECIAL = { trigger_probability: 1 };
         if(j.model) lines.push("模型：" + j.model + (Number(j.attempts || 1) > 1 ? ("（第 " + j.attempts + " 次才成）") : ""));
         if(r.reason) lines.push("理由：" + String(r.reason));
         if(j.elapsed) lines.push("用时：" + j.elapsed + " 秒");
+        out.textContent = lines.join("\n");
+      })
+      .catch(function(err){ out.textContent = "试跑失败：" + (err && err.message ? err.message : err); });
+  }
+
+  // 用户 m01977：回复页也加「测试」——用实时窗那份纯文字记录真调一次回复模型，
+  // 顺便把模型的思考过程（上游给了 reasoning_content 才有）显示出来。
+  function repTest(){
+    var box = document.getElementById("rep-test-box");
+    var out = document.getElementById("rep-test-out");
+    if(!box || !out) return;
+    var s = ppState("reply");
+    var sid = ppRtSid(s);
+    box.hidden = false;
+    out.textContent = "跑一次回复…（会真调一次，超时按失败算，别关页面）";
+    post(API + "/reply-test" + (sid ? "?sid=" + encodeURIComponent(sid) : ""))
+      .then(function(d){
+        if(!d || !d.ok){ out.textContent = "试跑失败：" + ((d && d.error) || "接口没回数据"); return; }
+        var r = d.result || {};
+        var lines = [];
+        lines.push("会话：" + (sid ? sidLabel(sid) : "（没有可用会话，用了空窗口）"));
+        lines.push("喂进去：" + (r.messages || 0) + " 条纯文字消息 · 系统提示词 " + (r.system_chars || 0) + " 字");
+        if(!r.ok) lines.push("错误：" + String(r.error || "回复模型没有返回"));
+        if(r.model) lines.push("模型：" + r.model);
+        if(r.elapsed) lines.push("用时：" + r.elapsed + " 秒");
+        if(r.input_tokens || r.output_tokens){
+          lines.push("token：入 " + (r.input_tokens || 0) + " · 出 " + (r.output_tokens || 0) +
+                     (r.cached_tokens ? (" · 缓存 " + r.cached_tokens) : ""));
+        }
+        if(r.reasoning) lines.push("", "思考过程：", String(r.reasoning).slice(0, 4000));
+        if(r.text) lines.push("", "回复：", String(r.text).slice(0, 4000));
         out.textContent = lines.join("\n");
       })
       .catch(function(err){ out.textContent = "试跑失败：" + (err && err.message ? err.message : err); });
@@ -4368,7 +4789,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       var s = ppState(ed.getAttribute("data-pp-editor"));
       s.rtSid = String(t.value || ""); s.rtText = ""; s.rtInfo = "读取中…";
       ppRenderEditor(s);
-      ppLoadWindowText(s).then(function(){ ppRenderEditor(s); });
+      ppLoadWindowText(s).then(function(){ ppRenderEditor(s); ppPaintPreview(s); });
     }, true);
     box.addEventListener("click", function(e){
       var t = e.target;
@@ -4377,7 +4798,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       var ed = editorFor(t); if(!ed) return;
       var s = ppState(ed.getAttribute("data-pp-editor"));
       s.rtText = ""; s.rtInfo = "读取中…"; ppRenderEditor(s);
-      ppLoadWindowText(s).then(function(){ ppRenderEditor(s); });
+      ppLoadWindowText(s).then(function(){ ppRenderEditor(s); ppPaintPreview(s); });
       e.preventDefault();
     }, true);
     box.addEventListener("input",inputChanged);
@@ -4465,6 +4886,11 @@ var DM_SPECIAL = { trigger_probability: 1 };
         if(js2.loaded && !js2.dirty && !js2.saving) jevTest();
         e.preventDefault(); return;
       }
+      if(t.id === "rep-test"){
+        var rs2 = ppState("reply");
+        if(rs2.loaded && !rs2.dirty && !rs2.saving) repTest();
+        e.preventDefault(); return;
+      }
       // 用户 m13212 图1：「系统段 / 动态段」两个标签，点哪个就把藏着那个 select 的值换过去。
       var zoneBtn = t.closest ? t.closest("[data-pm-zone-pick]") : null;
       if(zoneBtn && !zoneBtn.disabled){
@@ -4514,7 +4940,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
   function fwdModeHtml(k, f){
     var cur = String((configCache && configCache[k]) || "on_demand");
     return "<div class='setrow inline' data-row='" + esc(k) + "'>" +
-      "<div class='nm' title='" + esc(k + (f.hint ? "：" + f.hint : "")) + "'>" +
+      "<div class='nm' title='" + esc(fwdModeDesc(cur)) + "'>" +
         esc(nameOf(k, f)) + defaultBadge(f, k) + "</div>" +
       "<div class='ds' data-fwddesc='1'>" + esc(fwdModeDesc(cur)) + "</div>" +
       "<div class='ctl'><span class='seg'>" + FWD_MODES.map(function(o){
@@ -4526,15 +4952,16 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(k === "forward_mode") return fwdModeHtml(k, f);
     var t = f.type || "string";
     var isList = (t === "multi_select" || t === "list" || t === "array");
-    var tip = k + (f.hint ? "：" + f.hint : "");
+    // 用户 m00697 第 17 / 18 条：没有显示描述的行不加悬浮描述；有的，悬浮文字与显示的一致。
+    var tip = f.hint || "";
     // v3.80（用户 m02415）：伪随机这一行是个二选一，名字要随开关变成「伪随机 / 真随机」，
     // 所以单独包一层 span（defaultBadge 的角标不要被一起改掉）。
     var nmTxt = esc(nameOf(k, f));
     if(k === "prob_pseudo") nmTxt = "<span id='pseudo-nm'>" + nmTxt + "</span>";
     return "<div class='setrow inline" + (isList ? " wide" : "") + "' data-row='" + esc(k) + "'>" +
-      "<div class='nm' title='" + esc(tip) + "'>" + nmTxt + defaultBadge(f, k) + "</div>" +
-      "<div class='ds' title='" + esc(f.hint || "") + "'>" + esc(f.hint || "") + "</div>" +
-      "<div class='ctl" + (isList ? " list" : "") + "'>" + fieldControl(k, f, configCache[k]) + "</div>" +
+      "<div class='nm'" + (tip ? " title='" + esc(tip) + "'" : "") + ">" + nmTxt + defaultBadge(f, k) + "</div>" +
+      "<div class='ds'" + (tip ? " title='" + esc(tip) + "'" : "") + ">" + esc(tip) + "</div>" +
+      "<div class='ctl" + (isList ? " list" : "") + "'>" + fieldControl(k, f, configCache[k], UNIT_TEXT[k]) + "</div>" +
       "</div>";
   }
 
@@ -4568,7 +4995,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var s1 = (schemaCache && schemaCache["rest_start"]) || {};
     var s2 = (schemaCache && schemaCache["rest_end"]) || {};
     return "<div class='setrow inline restpair' data-row='rest_mode_enabled'>" +
-      "<div class='nm' title='" + esc("rest_mode_enabled" + (hint ? "：" + hint : "")) + "'>" +
+      "<div class='nm'" + (hint ? " title='" + esc(hint) + "'" : "") + ">" +
         esc(nameOf("rest_mode_enabled", f)) + defaultBadge(f, "rest_mode_enabled") + "</div>" +
       "<div class='ds' title='" + esc(hint) + "'>" + esc(hint) + "</div>" +
       "<div class='ctl pair'><span class='tspan'>" +
@@ -4576,21 +5003,19 @@ var DM_SPECIAL = { trigger_probability: 1 };
         "<b>→</b>" +
         fieldControl("rest_end", s2, configCache && configCache["rest_end"]) +
       "</span>" +
-      "<label class='sw2' title='" + esc(hint) + "'>" +
-        "<input type='checkbox' data-k='rest_mode_enabled'" + (on ? " checked" : "") + ">" +
-        "<span class='tr'></span>" + ST_SW + "</label>" +
+      swPill("rest_mode_enabled", on, "开启", "关闭", hint) +
       "</div></div>";
   }
   function paramRowHtml(k, f, modeKey){
     var on = (trgModeValue() === modeKey);
     return "<div class='setrow inline subrow' data-row='" + esc(k) + "'>" +
-      "<div class='nm' title='" + esc(k + (f.hint ? "：" + f.hint : "")) + "'>" +
+      "<div class='nm'" + (f.hint ? " title='" + esc(f.hint) + "'" : "") + ">" +
         esc(nameOf(k, f)) + defaultBadge(f, k) + "</div>" +
       "<div class='ds' title='" + esc(f.hint || "") + "'>" + esc(f.hint || "") + "</div>" +
       "<div class='ctl'>" + fieldControl(k, f, configCache[k], UNIT_TEXT[k]) +
         "<label class='sw2 mod' title='切到" + SUBROW_FULL[modeKey] + "'>" +
           "<input type='checkbox' data-sub='" + modeKey + "'" + (on ? " checked" : "") + ">" +
-          "<span class='tr'></span>" + ST_SW + "</label>" +
+          "<span class='tr' data-on='开启' data-off='关闭'></span></label>" +
       "</div></div>";
   }
 
@@ -4635,18 +5060,16 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(numKey && nf){
       ctl += "<span class='nspan'>" + fieldControl(numKey, nf, configCache[numKey], pairUnitOf(numKey)) + "</span>";
     }
-    ctl += "<label class='sw2' title='" + esc(hint || g.t) + "'>" +
-             "<input type='checkbox' data-k='" + esc(onKey) + "'" + (on ? " checked" : "") + ">" +
-             "<span class='tr'></span>" + ST_SW + "</label>";
+    ctl += swPill(onKey, on, "开启", "关闭", hint || g.t);
     // v4.08（用户 m16927 第 3 条）：决策模式那句提醒（多一次模型调用）要像「动态调整」行尾
     // 那条琥珀胶囊一样高亮，所以说明格拆成「文字 + 胶囊」两段，文字先省略、胶囊不被裁。
     var dsHtml = g.warn
       ? ("<div class='ds dsw' title='" + esc(hint) + "'>" +
            "<span class='dtxt'>" + esc(hint) + "</span>" +
-           "<span class='warnpill' title='" + esc(g.warn) + "'>" + esc(g.warn) + "</span></div>")
+           warnPills(g.warn) + "</div>")
       : ("<div class='ds' title='" + esc(hint) + "'>" + esc(hint) + "</div>");
     return "<div class='setrow inline rowline' data-row='" + esc(onKey) + "'>" +
-      "<div class='nm' title='" + esc(onKey + (hint ? "：" + hint : "")) + "'>" +
+      "<div class='nm'" + (hint ? " title='" + esc(hint) + "'" : "") + ">" +
         esc(g.t) + badge + word + "</div>" +
       dsHtml +
       "<div class='ctl pair'>" + ctl + "</div></div>";
@@ -4673,15 +5096,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
       badge = "<i class='dfv' title='默认值'>" + esc(dTxt) + "</i>";
     }
     return "<div class='setrow inline pairrow' data-row='" + esc(onKey) + "'>" +
-      "<div class='nm' title='" + esc(onKey + (hint ? "：" + hint : "")) + "'>" +
+      "<div class='nm'" + (hint ? " title='" + esc(hint) + "'" : "") + ">" +
         nmHtml + badge + "</div>" +
       "<div class='ds' title='" + esc(hint) + "'>" + esc(hint) + "</div>" +
       "<div class='ctl pair'>" +
         // v3.50（用户 m06761 第 4 条）：单位交给 fieldControl 放进框里（has-unit），不再挂在框外
         "<span class='nspan'>" + fieldControl(numKey, nf, configCache[numKey], unit) + "</span>" +
-        "<label class='sw2' title='" + esc(hint || nm) + "'>" +
-          "<input type='checkbox' data-k='" + esc(onKey) + "'" + (on ? " checked" : "") + ">" +
-          "<span class='tr'></span>" + ST_SW + "</label>" +
+        swPill(onKey, on, "开启", "关闭", hint || nm) +
       "</div></div>";
   }
 
@@ -4700,14 +5121,12 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var on = !!(configCache && configCache[it.on]);
     var hint = f.hint || "";
     return "<div class='setrow inline quotarow' data-row='" + esc(it.on) + "'>" +
-      "<div class='nm' title='" + esc(it.on + (hint ? "：" + hint : "")) + "'>" +
-        esc(nameOf(it.on, f)) + "</div>" +
+      "<div class='nm' title='" + esc(it.desc) + "'>" +
+        esc(nameOf(it.on, f)) + defaultBadge(nf, it.num) + "</div>" +
       "<div class='ds' title='" + esc(it.desc) + "'>" + esc(it.desc) + "</div>" +
       "<div class='ctl pair'>" +
         "<span class='nspan'>" + fieldControl(it.num, nf, configCache[it.num], it.unit) + "</span>" +
-        "<label class='sw2' title='" + esc(hint || it.desc) + "'>" +
-          "<input type='checkbox' data-k='" + esc(it.on) + "'" + (on ? " checked" : "") + ">" +
-          "<span class='tr'></span>" + ST_SW + "</label>" +
+        swPill(it.on, on, "开启", "关闭", it.desc) +
       "</div></div>";
   }
   function quotaRowsHtml(){
@@ -4730,24 +5149,15 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var on = wakeShown(k, ak, !!(configCache && configCache[k]));
     var aon = !!(configCache && configCache[ak]);
     return "<div class='setrow inline wakepair' data-row='" + esc(k) + "'>" +
-      "<div class='nm' title='" + esc(k + (f.hint ? "：" + f.hint : "")) + "'>" +
+      "<div class='nm'>" +
         esc(label) + defaultBadge(f, k) + "</div>" +
       "<div class='ctl pair'>" +
-        "<label class='sw2' title='" + esc(f.hint || hintK || (label + "被叫到时直接算一次触发")) + "'>" +
-          "<input type='checkbox' data-k='" + esc(k) + "'" + (on ? " checked" : "") + ">" +
-          // v3.50（用户 m06761 第 4 条）：用户原话「这 3 个开关应该叫做触发而不是开关」——
-          // 这里是一个写死的名字「触发」，不跟着开关状态变（上面那些普通开关才显「开 / 关」）；
-          // 右边那个是「必回」，两者别混。
-          "<span class='tr'></span><span class='st'>触发</span></label>" +
-        // 用户 m00347：必回那一路正式启用——不再 disabled / 不再灰（class soon 去掉了）。
-        "<label class='sw2' title='" + esc(af.hint || hintA || (label + "叫到时跳过模型判断直接回")) + "'>" +
-          "<input type='checkbox' data-k='" + esc(ak) + "'" + (aon ? " checked" : "") + ">" +
-          "<span class='tr'></span><span class='st'>必回</span></label>" +
+        sw3(k, ak, aon ? "always" : (on ? "trigger" : "off")) +
       "</div></div>";
   }
   // 用户 m00363：「休息时段 被@ 回不回」也要能在基础设置右下角单独开关，同样分触发 / 必回。
-  // 用户 m09403：触发默认开、必回默认关——睡觉时被叫到还是算一次触发，
-  // 但不跳判定硬回；想彻底不理就把触发也关掉。
+  // 用户 m01432：休息时段默认关闭——睡觉时被叫到默认不理，想理就把触发拨过去。
+  // 必回默认关（用户 m09403）。
   function restWakeRowHtml(){
     var k = "rest_wake_trigger", ak = "rest_wake_always";
     var f = (schemaCache && schemaCache[k]) || {};
@@ -4755,15 +5165,11 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var on = wakeShown(k, ak, !!(configCache && configCache[k]));
     var aon = !!(configCache && configCache[ak]);
     return "<div class='setrow inline wakepair' data-row='" + esc(k) + "'>" +
-      "<div class='nm' title='" + esc(f.hint || "休息时段里被叫到还要不要理") + "'>" +
+      "<div class='nm' title='休息时段里被叫到要不要理。'>" +
         "休息时段" + defaultBadge(f, k) + "</div>" +
+      "<div class='ds' title='休息时段里被叫到要不要理。'>休息时段里被叫到要不要理。</div>" +
       "<div class='ctl pair'>" +
-        "<label class='sw2' title='" + esc(f.hint || "休息时段里被叫到还算一次触发") + "'>" +
-          "<input type='checkbox' data-k='" + esc(k) + "'" + (on ? " checked" : "") + ">" +
-          "<span class='tr'></span><span class='st'>触发</span></label>" +
-        "<label class='sw2' title='" + esc(af.hint || "休息时段里必回照样生效") + "'>" +
-          "<input type='checkbox' data-k='" + esc(ak) + "'" + (aon ? " checked" : "") + ">" +
-          "<span class='tr'></span><span class='st'>必回</span></label>" +
+        sw3(k, ak, aon ? "always" : (on ? "trigger" : "off")) +
       "</div></div>";
   }
   // 用户 m10297 第 2 条：「触发」和「必回」是互斥的——必回本来就是「跳过模型判断直接回」，
@@ -4869,13 +5275,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var nf = (schemaCache && schemaCache.admin_name) || {};
     var qf = (schemaCache && schemaCache.admin_id) || {};
     var hint = fl.hint || "这一行同时管管理员的名字与 QQ 号：第一行填名字，第二行填 QQ 号，可以加多位。";
-    var nhint = nf.hint || "QQ 里的真实名字，不是群昵称。";
+    var nhint = nf.hint || "QQ 的昵称，不是群昵称。";
     var qhint = qf.hint || "填 QQ 号即可。";
     var list = adminList();
     // 用户 m07085 第 1 条：两行都挂 data-row='admin_list'（单群白名单还是只认这一个键），
     // 数据也只存 admin_list 一个键——隐藏 input 挂在第一行，两行胶囊靠 adminSync 一起刷新。
     return "<div class='setrow inline wide' data-row='admin_list'>" +
-      "<div class='nm' title='admin_list：" + esc(hint) + "'>" +
+      "<div class='nm'" + (nhint ? " title='" + esc(nhint) + "'" : "") + ">" +
         esc(nameOf("admin_name", nf)) + "</div>" +
       "<div class='ds' title='" + esc(nhint) + "'>" + esc(nhint) + "</div>" +
       "<div class='ctl list'><div class='chips' data-admin='1'>" +
@@ -4884,7 +5290,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       "<input type='hidden' data-k='admin_list' value='" + esc(JSON.stringify(list)) + "'></div>" +
       "</div>" +
       "<div class='setrow inline wide' data-row='admin_list'>" +
-      "<div class='nm' title='admin_list：" + esc(hint) + "'>" +
+      "<div class='nm'" + (qhint ? " title='" + esc(qhint) + "'" : "") + ">" +
         esc(nameOf("admin_id", qf)) + "</div>" +
       "<div class='ds' title='" + esc(qhint) + "'>" + esc(qhint) + "</div>" +
       "<div class='ctl list'><div class='chips' data-admin-qq='1'>" +
@@ -4983,9 +5389,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(ne && ne.focus) ne.focus();
   }
 
-  // v3.33（用户 m51046 第 11 条）：不触发短语——一行开关 + 一个「编辑清单」按钮。
-  // 清单本体放隐藏 input（data-k=phrase_filter_list），collectSettings 照常提交；
-  // 弹窗里一行一条，存回 JSON 数组文本（后端 _normalize_phrases 再兜一次底）。
+  // v3.33（用户 m51046 第 11 条）：不触发短语——一行开关 + 一份清单。
+  // 用户 m07418：清单从「编辑清单」弹窗改成页内胶囊（跟外号 / 管理员一个手感），
+  // 每个短语一枚 chip、末尾「+」点开输入框回车即加；清单本体仍是隐藏 input
+  // （data-k=phrase_filter_list，ui_schema 里这个键的 type 是 string），collectSettings 照常提交。
   function phraseList(){
     var raw = configCache ? configCache.phrase_filter_list : "";
     try{
@@ -5002,99 +5409,82 @@ var DM_SPECIAL = { trigger_probability: 1 };
   function phraseBlockUrl(){
     return API + "/phrase-block" + (scopeSid ? "?sid=" + encodeURIComponent(scopeSid) : "");
   }
-  // 把一份清单写回隐藏 input 与「编辑清单（N 条）」按钮，不整页重绘
-  function phrasePaint(list){
-    var txt = JSON.stringify(list);
+  // 用户 m07715：清单改成接口驱动——加 / 删 / 恢复都打 /phrase-block，后端返回这一份的
+  // 最新状态（items 生效、own_items 本群独立池、unblock_items 本会话解除掉的全局条目）。
+  function phraseQs(extra){
+    return "?sid=" + encodeURIComponent(scopeSid || "") + (extra || "");
+  }
+  function phrasePost(qs){
+    return fetch(API + "/phrase-block" + qs, { method: "POST", credentials: "same-origin" })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(d && d.ok) phraseApply(d);
+        return d;
+      });
+  }
+  function phraseApply(d){
+    phraseServer = {
+      items: (d.items || []).map(function(x){ return String(x); }),
+      own_items: (d.own_items || []).map(function(x){ return String(x); }),
+      unblock_items: (d.unblock_items || []).map(function(x){ return String(x); })
+    };
+    phrasePaint(phraseServer);
+  }
+  function phraseChipsHtml(p){
+    var items = (p && p.items) || [];
+    var off = (p && p.unblock_items) || [];
+    var empty = (items.length || off.length) ? "" :
+      "<span class='blk-empty'>还没有拉黑任何短语。点右边的 + 加一条。</span>";
+    return empty + items.map(function(x){
+      return "<span class='chip'>" + esc(x) + "<b data-pdel='1'>×</b></span>";
+    }).join("") + off.map(function(x){
+      return "<span class='chip off' data-pun='1' title='全局拉黑，本会话已解除；点一下恢复'>" +
+        esc(x) + "<em class='aq'>已解除</em></span>";
+    }).join("") +
+      "<button type='button' class='chip-add' data-padd='1' title='添加短语'>+</button>" +
+      "<input class='blk-in' type='text' placeholder='输入短语后回车添加' autocomplete='off' hidden>";
+  }
+  // 把一份清单写回隐藏 input 与页内胶囊，不整页重绘。
+  // 隐藏 input 只承载「本会话独立池」：全局模式承载全局清单，单群模式承载 own_items，
+  // 免得通用保存把全局清单整份写进单群覆盖（用户 m07715）。
+  function phrasePaint(p){
+    var box = document.getElementById("ph-chips");
+    if(box) box.innerHTML = phraseChipsHtml(p);
+    var keep = scopeSid ? ((p && p.own_items) || []) : ((p && p.items) || []);
+    var txt = JSON.stringify(keep);
     if(configCache) configCache.phrase_filter_list = txt;
     var hid = document.querySelector("#settings input[type='hidden'][data-k='phrase_filter_list']");
     if(hid) hid.value = txt;
-    var btn = document.getElementById("btn-phrases");
-    if(btn) btn.textContent = "编辑清单（" + list.length + " 条）";
+  }
+  function phraseChipText(c){
+    var s = "";
+    for(var i = 0; i < c.childNodes.length; i++){
+      if(c.childNodes[i].nodeType === 3) s += c.childNodes[i].nodeValue;
+    }
+    return s.trim();
   }
   function loadPhraseBlock(){
     return get(phraseBlockUrl()).then(function(d){
       if(!d || !d.ok || !Array.isArray(d.items)) return;
-      phraseServer = d.items.map(function(x){ return String(x); });
-      if(!scopeSid) phrasePaint(phraseServer);
+      phraseApply(d);
     }).catch(function(){ /* 静默：没登录 / 接口报错都按框架那份来 */ });
   }
-  // v3.44（用户 m04471 第 5 条）：原本是两行（开关一行、清单按钮一行），
-  // 用户要求并成一行「短语黑名单」：名称 + 一行说明在左，编辑清单按钮与开关在右。
-  // 清单本体仍是隐藏 input（data-k=phrase_filter_list），collectSettings 照常提交。
+  // v3.44（用户 m04471 第 5 条）：开关与清单并成一块「短语黑名单」。
+  // 用户 m07418：清单不再藏在弹窗里，直接铺在行下面，拉黑了哪些一眼能看到。
   function phraseRowHtml(){
     var on = !!(configCache && configCache.phrase_filter_enabled);
-    var list = phraseList();
     var f = (schemaCache && schemaCache.phrase_filter_enabled) || {};
-    var hint = "在清单中的短语不会触发判定。";
+    var hint = "命中的纯文字不参与触发判定，消息本身仍留在上下文里。";
+    var p = phraseServer || { items: phraseList(), own_items: [], unblock_items: [] };
+    var keep = scopeSid ? (p.own_items || []) : (p.items || []);
     return "<div class='setrow inline' data-row='phrase_filter_enabled'>" +
-        "<div class='nm' title='phrase_filter_enabled：" + esc(hint) + "'>短语黑名单" +
+        "<div class='nm'" + (hint ? " title='" + esc(hint) + "'" : "") + ">短语黑名单" +
           defaultBadge(f, "phrase_filter_enabled") + "</div>" +
         "<div class='ds' title='" + esc(hint) + "'>" + esc(hint) + "</div>" +
-        "<div class='ctl pair'>" +
-          "<button type='button' class='phbtn' id='btn-phrases'>编辑清单（" +
-            list.length + " 条）</button>" +
-          "<label class='sw2' title='" + esc(hint) + "'>" +
-            "<input type='checkbox' data-k='phrase_filter_enabled'" +
-            (on ? " checked" : "") + "><span class='tr'></span>" + ST_SW + "</label>" +
-        "</div></div>" +
-      "<input type='hidden' data-k='phrase_filter_list' value='" + esc(JSON.stringify(list)) + "'>";
-  }
-  function bindPhraseBox(){
-    var b = document.getElementById("btn-phrases");
-    if(!b) return;
-    b.onclick = function(){ openPhraseEditor(); };
-  }
-  // 用户 m07085 第 7 条：弹窗打开时现取一次插件侧清单（窗口页刚拉黑的能立刻看到），
-  // 取不到再退回框架缓存那份，别让弹窗打不开。
-  function openPhraseEditor(){
-    get(phraseBlockUrl()).then(function(d){
-      if(!d || !d.ok || !Array.isArray(d.items)) throw new Error("no items");
-      phraseServer = d.items.map(function(x){ return String(x); });
-      return phraseServer;
-    }).catch(function(){ return phraseList(); }).then(function(list){
-      showPhraseEditor(list);
-    });
-  }
-  function showPhraseEditor(list){
-    var mask = document.createElement("div");
-    mask.className = "mask";
-    var box = document.createElement("div");
-    box.className = "dlg";
-    // v3.44（用户 m04471 第 5 条）：跟着行名改成「短语黑名单」，说明压成一行。
-    box.innerHTML = "<h3>短语黑名单</h3>" +
-      "<p>在清单中的短语不会触发判定；一行一条，前后标点和空格会被忽略。</p>" +
-      "<textarea id='ph-ta' spellcheck='false' placeholder='哈哈&#10;草'></textarea>" +
-      "<div class='dlg-btns'><button type='button' data-act='cancel'>取消</button>" +
-      "<button type='button' class='pri' data-act='ok'>保存</button></div>";
-    mask.appendChild(box);
-    document.body.appendChild(mask);
-    var ta = box.querySelector("#ph-ta");
-    ta.value = list.join("\n");
-    try{ ta.focus(); }catch(e){}
-    function close(){ if(mask.parentNode) mask.parentNode.removeChild(mask); }
-    mask.addEventListener("click", function(e){
-      if(e.target === mask){ close(); return; }
-      var act = (e.target.getAttribute && e.target.getAttribute("data-act")) || "";
-      if(act === "cancel"){ close(); return; }
-      if(act !== "ok") return;
-      var seen = {}, out = [];
-      ta.value.split(/\r?\n/).forEach(function(x){
-        var t = String(x).trim();
-        if(!t || seen[t]) return;
-        seen[t] = 1;
-        out.push(t);
-      });
-      var txt = JSON.stringify(out);
-      var hid = document.querySelector("#settings input[type='hidden'][data-k='phrase_filter_list']");
-      if(hid) hid.value = txt;
-      if(configCache) configCache.phrase_filter_list = txt;
-      phraseServer = out;   // 用户 m07085 第 7 条：自己刚存的这份也算最新，别被旧值盖回去
-      var btn = document.getElementById("btn-phrases");
-      if(btn) btn.textContent = "编辑清单（" + out.length + " 条）";
-      dirty = true;
-      scheduleSave();
-      close();
-    });
+        "<div class='ctl'>" + swPill("phrase_filter_enabled", on, "开启", "关闭", hint) + "</div>" +
+      "</div>" +
+      "<div class='blk-list'><div class='chips' id='ph-chips'>" + phraseChipsHtml(p) + "</div></div>" +
+      "<input type='hidden' data-k='phrase_filter_list' value='" + esc(JSON.stringify(keep)) + "'>";
   }
 
   // v3.30：用不上的参数行灰掉。普通模式列里计数/概率各自的参数分开灰，伪随机那两个数
@@ -5194,7 +5584,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(pNm){
         pNm.textContent = pName;
         var pNmBox = pNm.parentNode;
-        if(pNmBox && pNmBox.setAttribute) pNmBox.setAttribute("title", "prob_pseudo：" + pHint);
+        if(pNmBox && pNmBox.setAttribute) pNmBox.setAttribute("title", pHint);
       }
       if(pDs){ pDs.textContent = pHint; pDs.setAttribute("title", pHint); }
     }
@@ -5220,6 +5610,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(!sw || !ns) return;
       ns.classList.toggle("dimv", !sw.checked);
     });
+    // 用户 m01445：决策模式（advanced_enabled）一开一关，唤醒那几行的「必回」跟着亮 / 灰。
+    Array.prototype.forEach.call(document.querySelectorAll("#settings .sw3"), function(box){
+      box.classList.toggle("no-must", !advOn);
+    });
     // 用户 m10749 第 1 条：配额两档的灰化跟着一起刷（刷新 / 切页后状态不能丢）
     paintQuotaMutex();
   }
@@ -5244,6 +5638,77 @@ var DM_SPECIAL = { trigger_probability: 1 };
     });
     return out;
   })(SET_GROUPS);
+
+  // 用户 m06193：用户黑名单——按 QQ 号整条剔除。窗口页把鼠标放到名字上也能拉黑。
+  // 用户 m07418：总表从四列表格改成页内胶囊——一人一枚，× 就是解黑，末尾「+」手动填 QQ 拉黑。
+  // 拉黑只影响请求上下文：窗口页照常显示（默认折叠），拉黑之前的历史也照留。
+  var ublkCache = null;
+  function ublkChipsHtml(p){
+    var items = (p && p.items) || [];
+    var off = (p && p.unblock_items) || [];
+    // 空表提示跟「+」排在同一行，别让加号孤零零挂在下面一行
+    var empty = (items.length || off.length) ? "" :
+      "<span class='blk-empty'>还没有拉黑任何人。在窗口页把鼠标放到名字上，点「拉黑」就能加进来；" +
+      "也可以点右边的 + 手动填 QQ 号。</span>";
+    return empty + items.map(function(it){
+      var uid = String(it.uid || "");
+      var nm = String(it.name || "");
+      var ts = Number(it.ts || 0);
+      var when = ts ? new Date(ts * 1000).toLocaleString() : "";
+      var tip = "QQ " + uid + (when ? " · " + when : "");
+      return "<span class='chip' data-uid='" + esc(uid) + "' data-name='" + esc(nm) + "' title='" + esc(tip) + "'>" +
+        (nm ? esc(nm) + "<em class='aq'>" + esc(uid) + "</em>" : "<em class='aq'>" + esc(uid) + "</em>") +
+        "<b data-udel='1'>×</b></span>";
+    }).join("") + off.map(function(it){
+      // 用户 m07715：全局拉黑被本会话解除的，变灰留在原地，点一下恢复
+      var uid = String(it.uid || "");
+      var nm = String(it.name || "");
+      return "<span class='chip off' data-uid='" + esc(uid) + "' data-name='" + esc(nm) + "' data-urestore='1'" +
+        " title='全局拉黑，本会话已解除；点一下恢复'>" +
+        (nm ? esc(nm) + "<em class='aq'>" + esc(uid) + "</em>" : "<em class='aq'>" + esc(uid) + "</em>") +
+        "<em class='aq'>已解除</em></span>";
+    }).join("") +
+      "<button type='button' class='chip-add' data-uadd='1' title='手动拉黑一个 QQ'>+</button>";
+  }
+  function ublkPaint(){
+    var box = document.getElementById("ublk-chips");
+    if(!box) return;
+    box.innerHTML = ublkChipsHtml(ublkCache || { items: [], unblock_items: [] });
+  }
+  function ublkLoad(){
+    return get(API + "/user-blacklist?sid=" + encodeURIComponent(scopeSid || "")).then(function(d){
+      if(!d || !d.ok) return;
+      ublkCache = { items: Array.isArray(d.items) ? d.items : [],
+                    unblock_items: Array.isArray(d.unblock_items) ? d.unblock_items : [] };
+      ublkPaint();
+    }).catch(function(){ /* 静默：没登录 / 接口报错就保持「读取中」 */ });
+  }
+  function ublackBlockHtml(){
+    setTimeout(ublkLoad, 0);
+    // 用户 m07157：整块加个总开关。用户 m07715：开关的说明改成「被拉黑的人…」那段，
+    // 原来那句「关掉后名单还在…」删掉，说明直接挂在开关这一行右边。
+    var uOn = !!(configCache && configCache.user_blacklist_enabled);
+    var uF = (schemaCache && schemaCache.user_blacklist_enabled) || {};
+    var uHint = "被拉黑的人，消息不进请求上下文；窗口页照常显示，默认折叠，点开还能看。" +
+      "拉黑之前已经在窗口里的历史照留，只剔之后的新消息。";
+    return "<div class='ublk' id='ublk-box'>" +
+      "<div class='setrow inline' data-row='user_blacklist_enabled'>" +
+        "<div class='nm' title='" + esc(uHint) + "'>启用拉黑" +
+          defaultBadge(uF, "user_blacklist_enabled") + "</div>" +
+        "<div class='ds' title='" + esc(uHint) + "'>" + esc(uHint) + "</div>" +
+        "<div class='ctl'>" + swPill("user_blacklist_enabled", uOn, "开启", "关闭", uHint) + "</div>" +
+      "</div>" +
+      "<div class='blk-list'>" +
+        "<div class='chips' id='ublk-chips'>" + ublkChipsHtml(ublkCache || { items: [], unblock_items: [] }) + "</div>" +
+        "<div class='blk-form' id='ublk-form' hidden>" +
+          "<input class='ub-name' type='text' placeholder='名字（可空）' autocomplete='off'>" +
+          "<input class='ub-qq' type='text' placeholder='QQ 号' autocomplete='off'>" +
+          "<button type='button' class='blk-ok' data-uok='1'>拉黑</button>" +
+          "<button type='button' class='blk-x' data-ucancel='1' title='取消（Esc）'>×</button>" +
+        "</div>" +
+      "</div>" +
+    "</div>";
+  }
 
   function renderSettings(){
     var box = document.getElementById("settings");
@@ -5291,7 +5756,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
           sectRows += rowLineHtml(mg);
         });
         // 用户 m18050：小节标题右侧也能挂一枚琥珀提醒（进阶模式那句「多一次调用」）。
-        var sectWarn = g.warn ? ("<span class='warnpill'>" + esc(g.warn) + "</span>") : "";
+        var sectWarn = warnPills(g.warn);
         var sectSub = "<div class='sub sect'><h3><span class='gt'>" + esc(g.t) + "</span>" + sectWarn + "</h3>" +
                       (sectRows ? ("<div class='rows'>" + sectRows + "</div>") : "") + "</div>";
         if(g.split){
@@ -5361,6 +5826,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
       // v3.54（用户本轮第 4 条）：缓存整块——表格 + 合计 + 没进表的兜底行 + 按类型清空（v3.56 起这一页叫「缓存记录」）。
       // 三个上限行也在 cacheBlockHtml 里画（表格要排在最前面），所以 keys 那轮只标已用。
       if(g.custom === "cache"){ rows += cacheBlockHtml(); }
+      // 用户 m06193：用户黑名单整块（总表 + 解黑）
+      if(g.custom === "ublack"){ rows += ublackBlockHtml(); }
       // m01209 图3：决策侧不再引用人格（人格改为提示词页里的「角色扮演（Persona）」模块挑文件），
       // 这块卡片整段撤掉，只留模型与重试、工具勾选。
       if(g.custom === "dmodel"){ rows += dmodelBlockHtml(); }
@@ -5402,12 +5869,15 @@ var DM_SPECIAL = { trigger_probability: 1 };
       var bCfgOn = !!(configCache && configCache.bands_enabled);
       var h3sw = modeKey ? ("<label class='msw' data-msw='" + esc(modeKey) + "' title='切到这一档'>" +
                            "<input type='checkbox'" + (modeKey === "bands" ? " data-k='bands_enabled'" + (bCfgOn ? " checked" : "") : "") +
-                           "><span class='tr'></span></label>") : "";
+                           "><span class='tr' data-on='使用中' data-off='未使用'></span></label>") : "";
       // v3.41（第 6 条）：原来那条 .subsw（计数 / 概率两个子开关）取消——两个开关已经并进
       // 各自的参数行（见 paramRowHtml），g.sub 现在是「这一组用行内开关切档」的标记。
       // v3.92：rowline 组不画标题行——标题已经在那一行里了。
       var inner = (g.rowline || g.bare) ? ("<div class='rows'>" + rows + "</div>")
-        : ("<h3><span class='gt'>" + esc(g.t) + "</span>" + badge + note + h3sw + "</h3>" + body);
+        // 用户 m05550：普通组也能在组名右边挂警告色胶囊（跟 sect 分支的 sectWarn 一个样式）。
+        : ("<h3><span class='gt'>" + esc(g.t) + "</span>" +
+           warnPills(g.warn) +
+           badge + note + h3sw + "</h3>" + body);
       if(g.split){
         var n = g.split;
         if(splitCols.length && (splitPage !== (g.p || "basic") || splitN !== n)) flushSplit();
@@ -5484,7 +5954,6 @@ var DM_SPECIAL = { trigger_probability: 1 };
     paintQuotaMutex();
     refreshModeBadges();
     bindBandBox();
-    bindPhraseBox();
     bindCacheClear();
     mountCacheBlock();   // v3.62：装「作用范围」选择器 + 按当前作用域重画缓存表（真值等 loadCacheStats 回来再刷）
     loadPricing();
@@ -6245,6 +6714,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(add){ jevAddPage(); return; }
     var del = (e.target && e.target.closest) ? e.target.closest("[data-jev-pagedel]") : null;
     if(del){ var pgDel = jevPage(); mdConfirm("删掉第 " + String(pgDel.id || "1") + " 页？", {title:"删除这一页", danger:true, ok:"删除"}).then(function(ok){ if(ok) jevDelPage(); }); return; }
+    // 用户 m01978 第 3 条：点「填入API」那一行的名字改名。
+    var ren = (e.target && e.target.closest) ? e.target.closest("[data-jev-rename]") : null;
+    if(ren){ jevRenamePage(); return; }
     // 点清单里的模型名 = 填进输入框，并写回当前这一页。
     var mitem = (e.target && e.target.closest) ? e.target.closest("[data-jev-model]") : null;
     if(mitem){
@@ -6338,9 +6810,194 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(row){
       var ds = row.querySelector("[data-fwddesc]");
       if(ds) ds.textContent = fwdModeDesc(v);
+      var nm = row.querySelector(".nm");
+      if(nm) nm.setAttribute("title", fwdModeDesc(v));
     }
     dirty = true;
     saveNow();
+  });
+  // 用户 m07418：黑名单页两个清单都是页内胶囊——短语的 + / ×、用户黑名单的 + / × 与手动拉黑，
+  // 全部就地改：短语走隐藏 input + 自动保存，用户黑名单直接打接口（立刻生效）。
+  function blkFormOf(node){
+    return (node && node.closest) ? node.closest(".blk-form") : null;
+  }
+  function closeBlkForm(form){
+    if(!form) return;
+    form.hidden = true;
+    var n0 = form.querySelector(".ub-name"), q0 = form.querySelector(".ub-qq");
+    if(n0) n0.value = "";
+    if(q0) q0.value = "";
+  }
+  function closeBlkInput(inp){
+    if(!inp) return;
+    inp.value = "";
+    inp.hidden = true;
+    var add = inp.parentNode && inp.parentNode.querySelector(".chip-add");
+    if(add) add.hidden = false;
+  }
+  function ublkPost(qs){
+    // qs 可能以 ? 开头（老调用点），统一改成 & 拼在 sid 后面，别拼出第二个问号
+    var tail = String(qs || "").replace(/^\?/, "");
+    var url = API + "/user-blacklist?sid=" + encodeURIComponent(scopeSid || "") + (tail ? "&" + tail : "");
+    return fetch(url, { method: "POST", credentials: "same-origin" })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(d && d.ok){
+          ublkCache = { items: Array.isArray(d.items) ? d.items : [],
+                        unblock_items: Array.isArray(d.unblock_items) ? d.unblock_items : [] };
+          ublkPaint();
+        }
+        return d;
+      });
+  }
+  function ublkCommit(){
+    var frm = document.getElementById("ublk-form");
+    if(!frm) return;
+    var qq = ((frm.querySelector(".ub-qq") || {}).value || "").trim();
+    var nm = ((frm.querySelector(".ub-name") || {}).value || "").trim();
+    if(!/^\d{4,12}$/.test(qq)){ mdAlert("QQ 号要填数字（4–12 位）。", {title:"填错了"}); return; }
+    ublkPost("?uid=" + encodeURIComponent(qq) + "&name=" + encodeURIComponent(nm) + "&action=add")
+      .then(function(d){
+        if(d && d.ok){ closeBlkForm(frm); }
+        else { mdAlert("没加上：" + ((d && d.detail) || "接口没返回 ok")); }
+      })
+      .catch(function(err){ mdAlert("没加上：" + (err && err.message ? err.message : err)); });
+  }
+  document.getElementById("settings").addEventListener("click", function(e){
+    var t = e.target;
+    if(!t || !t.getAttribute) return;
+    // 短语：+ 开输入框 / × 删一枚
+    if(t.getAttribute("data-padd")){
+      var boxP = t.parentNode, inpP = boxP && boxP.querySelector(".blk-in");
+      if(inpP){ inpP.hidden = false; t.hidden = true; try{ inpP.focus(); }catch(err){} }
+      return;
+    }
+    if(t.getAttribute("data-pdel")){
+      var chipP = t.parentNode;
+      var wordP = (chipP && chipP.classList.contains("chip")) ? phraseChipText(chipP) : "";
+      if(!wordP) return;
+      // 用户 m07715：单群 / 私聊删全局条目＝只对本会话解除，后端返回的 unblock_items 会把它画成灰的
+      phrasePost(phraseQs("&text=" + encodeURIComponent(wordP) + "&action=remove"))
+        .catch(function(){ /* 静默：接口报错就保持原样 */ });
+      return;
+    }
+    // 用户 m07715：灰胶囊（全局拉黑、本会话已解除）点一下恢复。
+    // 点到的可能是里面的 <em>，所以用 closest 往上找，别只看 e.target。
+    var chipOff = (t.closest ? t.closest(".chip[data-pun], .chip[data-urestore]") : null);
+    if(chipOff){
+      if(chipOff.getAttribute("data-pun")){
+        var wordO = phraseChipText(chipOff);
+        if(!wordO) return;
+        phrasePost(phraseQs("&text=" + encodeURIComponent(wordO) + "&action=restore"))
+          .catch(function(){ /* 静默 */ });
+        return;
+      }
+      var uidR = chipOff.getAttribute("data-uid") || "";
+      if(!uidR) return;
+      ublkPost("?uid=" + encodeURIComponent(uidR) + "&action=restore").catch(function(){ /* 静默 */ });
+      return;
+    }
+    // 用户黑名单：+ 开表单 / × 解黑 / 拉黑 / 取消
+    if(t.getAttribute("data-uadd")){
+      var frmU = document.getElementById("ublk-form");
+      if(frmU){
+        frmU.hidden = false;
+        var neU = frmU.querySelector(".ub-name");
+        try{ if(neU) neU.focus(); }catch(err){}
+      }
+      return;
+    }
+    if(t.getAttribute("data-ucancel")){ closeBlkForm(blkFormOf(t)); return; }
+    if(t.getAttribute("data-uok")){ ublkCommit(); return; }
+    if(t.getAttribute("data-udel")){
+      var chipU = t.parentNode;
+      var uidU = chipU ? (chipU.getAttribute("data-uid") || "") : "";
+      if(!uidU) return;
+      var nmU = chipU.getAttribute("data-name") || "";
+      var whoU = nmU ? ("「" + nmU + "」") : ("QQ " + uidU);
+      // 用户 m07715：单群 / 私聊解除全局拉黑只影响本会话，全局名单不动
+      var qU = scopeSid
+        ? ("把" + whoU + "在本会话解除拉黑？全局名单不动，切回全局还能看到他。")
+        : ("把" + whoU + "从黑名单里放出来？");
+      mdConfirm(qU, {title:"解除拉黑", ok:"解黑"}).then(function(ok){
+        if(!ok) return;
+        // 参数走 query：后端按函数签名从 query 取值，JSON body 它读不到（实测解黑没反应）。
+        ublkPost("?uid=" + encodeURIComponent(uidU) + "&action=remove").catch(function(){ /* 静默 */ });
+      });
+      return;
+    }
+  });
+  // 短语输入框：回车加一枚、Esc 收起；失焦且没填就收起（跟外号那套一个手感）
+  document.getElementById("settings").addEventListener("keydown", function(e){
+    var t = e.target;
+    if(t && t.classList && (t.classList.contains("ub-name") || t.classList.contains("ub-qq"))){
+      if(e.key === "Escape"){ e.preventDefault(); closeBlkForm(blkFormOf(t)); return; }
+      if(e.key !== "Enter") return;
+      e.preventDefault();
+      ublkCommit();
+      return;
+    }
+    if(!t || !t.classList || !t.classList.contains("blk-in")) return;
+    if(e.key === "Escape"){ e.preventDefault(); closeBlkInput(t); return; }
+    if(e.key !== "Enter") return;
+    e.preventDefault();
+    var v = (t.value || "").trim();
+    if(!v) return;
+    var boxC = t.parentNode;
+    var dup = false;
+    Array.prototype.forEach.call(boxC.querySelectorAll(".chip"), function(c){
+      if(phraseChipText(c) === v) dup = true;
+    });
+    if(dup){ closeBlkInput(t); return; }
+    closeBlkInput(t);
+    // 用户 m07715：单群 / 私聊里点「+」新增也写全局（用户拍板），加完所有群一起生效
+    phrasePost(phraseQs("&text=" + encodeURIComponent(v) + "&action=add"))
+      .then(function(d){
+        if(d && d.ok === false) mdAlert("没加上：" + (d.detail || "接口没返回 ok"));
+      })
+      .catch(function(err){ mdAlert("没加上：" + (err && err.message ? err.message : err)); });
+  });
+  document.getElementById("settings").addEventListener("focusout", function(e){
+    var t = e.target;
+    if(t && t.classList && (t.classList.contains("ub-name") || t.classList.contains("ub-qq"))){
+      var frmF = blkFormOf(t);
+      setTimeout(function(){
+        if(!frmF || !document.body.contains(frmF)) return;
+        var ae = document.activeElement;
+        if(ae && frmF.contains(ae)) return;
+        var n0 = frmF.querySelector(".ub-name"), q0 = frmF.querySelector(".ub-qq");
+        if(!((n0 && n0.value) || "").trim() && !((q0 && q0.value) || "").trim()) closeBlkForm(frmF);
+      }, 120);
+      return;
+    }
+    if(!t || !t.classList || !t.classList.contains("blk-in")) return;
+    setTimeout(function(){ if(!(t.value || "").trim()) closeBlkInput(t); }, 120);
+  });
+  // v3.92（用户 m00697 第 15 条）：三档开关点哪段切哪段——两个隐藏 input 同步，再派一次 change
+  // 走既有的自动保存（wakeMutex 的互斥也挂在那条链上）。
+  document.getElementById("settings").addEventListener("click", function(e){
+    var seg = (e.target && e.target.closest) ? e.target.closest(".sw3 b") : null;
+    if(!seg) return;
+    var box = seg.parentNode;
+    var v = seg.getAttribute("data-v");
+    if(!box || !v) return;
+    // 用户 m01445：决策模式没开时「必回」拨不过去。
+    if(v === "always" && box.classList.contains("no-must")) return;
+    box.setAttribute("data-v", v);
+    var k1 = box.getAttribute("data-3k"), k2 = box.getAttribute("data-3a");
+    var i1 = box.querySelector("input[data-k='" + k1 + "']");
+    var i2 = box.querySelector("input[data-k='" + k2 + "']");
+    if(i1) i1.checked = (v === "trigger");
+    if(i2) i2.checked = (v === "always");
+    if(i1) i1.dispatchEvent(new Event("change", {bubbles: true}));
+  });
+  // v3.92（用户 m00697 第 1 条）：机器人昵称的框跟着输入内容变宽，文字右对齐。
+  document.getElementById("settings").addEventListener("input", function(e){
+    var el = e.target;
+    if(!el || !el.getAttribute || el.getAttribute("data-k") !== "bot_name") return;
+    var s = String(el.value || ""), w = 0;
+    for(var i = 0; i < s.length; i++) w += (s.charCodeAt(i) > 255 ? 14 : 7.6);
+    el.style.width = Math.max(72, Math.min(200, Math.round(w) + 26)) + "px";
   });
   document.getElementById("settings").addEventListener("change", function(e){
     // v3.30：伪随机兜底开关变了，用不上的参数行要跟着灰/亮
@@ -6416,6 +7073,32 @@ var DM_SPECIAL = { trigger_probability: 1 };
         danger: true
       }).then(function(ok){
         fsw.checked = !!ok;
+        if(configCache) configCache[dk0] = !!ok;
+        dirty = true;
+        saveNow();
+      });
+      return;
+    }
+
+    // 用户 m06007：重试取舍这两个开关是双刃剑，拨到开启先弹一次风险确认；
+    // 点「点错」就把开关弹回去，不写盘。
+    if(dk0 === "retry_take_pending" || dk0 === "timeout_no_retry"){
+      var rsw = e.target;
+      if(!rsw.checked){
+        if(configCache) configCache[dk0] = false;
+        dirty = true;
+        saveNow();
+        return;
+      }
+      var rf = (schemaCache && schemaCache[dk0]) || {};
+      mdDialog({
+        title: "是否开启风险选项",
+        message: (rf.hint || "") + "\n这是双刃剑功能，开之前想清楚代价。",
+        ok: "确定",
+        cancel: "点错",
+        danger: true
+      }).then(function(ok){
+        rsw.checked = !!ok;
         if(configCache) configCache[dk0] = !!ok;
         dirty = true;
         saveNow();
@@ -6822,7 +7505,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
   function cacheRowTitle(k, it){
     var f = (schemaCache && schemaCache[k]) || {};
     var nm = (it && it.label) || nameOf(k, f) || k;
-    return f.hint ? (k + "：" + f.hint) : nm;
+    return f.hint || nm;
   }
   // 这个格是不是这个会话单独设过的：是就挂一个「单独」胶囊 + ×（点 × 删掉这条覆盖，恢复跟随全局）。
   function cacheOwnPill(k){
@@ -7013,28 +7696,29 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // 所以这里不再列它们——列了反而会在表格下面多出三行重复的（用户 m09738）。
   // v4.90（用户 m01133 第 2 条）：三种快照合成一个「窗口快照」，表格里只剩一行；
   // 回复 / 决策记录页各自列多少条不再管磁盘留存，降级成显示条数。
-  // 用户 m17752：这些显示条数后来搬去了基础设置左列（见 showRowsHtml），缓存页只剩表格。
+  // 用户 m17752：这些显示条数后来搬去了设置页的独立一组（见 showRowsHtml），缓存页只剩表格。
+  // 用户 m05550：那一组又从基础设置挪到了「窗口设置」页，跟窗口相关的项摆在一起。
   var CACHE_SET_KEYS = ["media_cache_limit", "media_cache_keep_days",
     "media_other_limit", "media_other_limit_dm", "media_other_keep_days",
     "forward_media_keep", "forward_proof_keep", "retry_keep",
     "forward_media_keep_days", "forward_proof_keep_days", "retry_keep_days"];
-  // 基础设置里那三行：回复记录 / 决策记录 / 窗口快照，每行「群聊 + 私聊」两个数字框。
+  // 「窗口设置」页那一组：回复记录 / 决策记录 / 窗口快照，每行「群聊 + 私聊」两个数字框。
   var SHOW_ROWS = [
     {t: "回复记录", k: "trace_keep", kd: "trace_keep_dm", d: "回复记录页最多列多少条"},
     {t: "决策记录", k: "decision_keep", kd: "decision_keep_dm", d: "决策记录页最多列多少条"},
     {t: "窗口快照", k: "window_show", kd: "window_show_dm", d: "走势图和快照列表最多画多少条"}
   ];
-  // 用户 m17752：原来缓存记录页右边那张卡片，现在长在基础设置左列里——三行普通行，
+  // 用户 m17752：原来缓存记录页右边那张卡片，现在是一组普通行——三行，
   // 名称 + 说明 + 右侧「群聊 / 私聊」两个数字框，跟「配额」那两行同一套写法。
   function showRowsHtml(){
     return SHOW_ROWS.map(function(r){
       var f = schemaCache[r.k] || {}, fd = schemaCache[r.kd] || {};
       return "<div class='setrow inline showrow' data-row='" + esc(r.k) + "'>" +
-        "<div class='nm'>" + esc(r.t) + defaultBadge(f, r.k) + "</div>" +
-        "<div class='ds'>" + esc(r.d) + "</div>" +
+        "<div class='nm' title='" + esc(r.d) + "'>" + esc(r.t) + defaultBadge(f, r.k) + "</div>" +
+        "<div class='ds' title='" + esc(r.d) + "'>" + esc(r.d) + "</div>" +
         "<div class='ctl pair'>" +
-          "<span class='nspan'><b>群聊</b>" + fieldControl(r.k, f, configCache[r.k]) + "</span>" +
-          "<span class='nspan'><b>私聊</b>" + fieldControl(r.kd, fd, configCache[r.kd]) + "</span>" +
+          "<span class='nspan'><b>群聊</b>" + fieldControl(r.k, f, configCache[r.k], "条") + "</span>" +
+          "<span class='nspan'><b>私聊</b>" + fieldControl(r.kd, fd, configCache[r.kd], "条") + "</span>" +
         "</div></div>";
     }).join("");
   }
@@ -7943,12 +8627,12 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 原来「动态调整」列标题上的那个开关（切 trigger_mode=adaptive）随整组撤掉，
     // 挪到这一行最前面——不然页面上再没有入口能切到动态模式。
     var h = "<span class='ad-item ad-mode' data-arow='dynamic'><span class='ad-lb'>动态调整</span>" +
-            "<label class='sw2'><input type='checkbox' data-adtrg='1'><span class='tr'></span>" + ST_SW + "</label></span>";
+            "<label class='sw2'><input type='checkbox' data-adtrg='1'><span class='tr' data-on='开启' data-off='关闭'></span></label></span>";
     ADAPTIVE_ROWS.forEach(function(it){
       var f = schemaCache[it.k];
       if(!f) return;
       var v = configCache ? configCache[it.k] : null;
-      var tip = it.k + (f.hint ? "：" + f.hint : "");
+      var tip = f.hint || "";
       h += "<span class='ad-item' data-arow='" + esc(it.k) + "' title='" + esc(tip) + "'>" +
            "<span class='ad-lb'>" + esc(ADAPTIVE_NAME[it.k] || nameOf(it.k, f)) + "</span>" +
            "<span class='ad-ctl'>" + fieldControl(it.k, f, v, it.unit, ADAPTIVE_LIM[it.k]) + "</span>" +
@@ -7964,16 +8648,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
       var wv = (configCache && configCache["adaptive_weekday_window_weeks"] != null) ? configCache["adaptive_weekday_window_weeks"] : 8;
       // v3.74（用户 m00024 第 4-d 条）：「使用星期数据」是另一个功能（按星期分桶统计），
       // 前面加一道竖线跟「每轮调整 / 数据使用」分开。
-      h += "<span class='ad-item ad-sep' data-arow='adaptive_weekday_bucket' title='" +
-           esc("adaptive_weekday_bucket" + (fb.hint ? "：" + fb.hint : "")) + "'>" +
+    h += "<span class='ad-item ad-sep' data-arow='adaptive_weekday_bucket'" + (fb.hint ? " title='" + esc(fb.hint) + "'" : "") + ">" +
            "<span class='ad-lb'>" + esc(nameOf("adaptive_weekday_bucket", fb)) + "</span>" +
            "<span class='ad-ctl" + (onW ? "" : " dimv") + "' data-adwk='1'>" +
              (fw ? fieldControl("adaptive_weekday_window_weeks", fw, wv, "周",
                                 ADAPTIVE_LIM["adaptive_weekday_window_weeks"]) : "") +
            "</span>" +
-           "<label class='sw2' title='" + esc(fb.hint || "") + "'>" +
-             "<input type='checkbox' data-k='adaptive_weekday_bucket'" + (onW ? " checked" : "") + ">" +
-             "<span class='tr'></span>" + ST_SW + "</label></span>";
+           swPill("adaptive_weekday_bucket", onW, "开启", "关闭", fb.hint || "") + "</span>";
     }
     // v3.84（用户 m04162）：这一行最后加一句实话——现在的动态调整只按固定公式慢慢挪概率，
     // 收益不高，用户自己也说以后可能整块重做；写在页面上，别让人白花力气调。
@@ -8172,7 +8853,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
            "</div>" +
            "<label class='sw2 bd-hide' title='只留曲线：藏起时间段色块、分界线与月亮'>" +
              "<span class='ad-lb'>隐藏划分</span>" +
-             "<input type='checkbox' id='bd-hide-seg'><span class='tr'></span></label>" +
+             "<input type='checkbox' id='bd-hide-seg'><span class='tr' data-on='开启' data-off='关闭'></span></label>" +
            "</div>" +
            "<div class='bd-chart' id='bd-chart'></div>" +
            "<div class='bd-axis' id='bd-axis'></div>" +
@@ -9065,6 +9746,23 @@ var DM_SPECIAL = { trigger_probability: 1 };
     flushPendingSave();   // v3.71：先把还没提交的改动补发出去，再跳
     try{ localStorage.setItem("mdp_page", "home"); }catch(x){}
     location.href = "/page/plugin/" + encodeURIComponent(PLUGIN_ID) + "/decision-log/";
+  };
+  // 用户 m19731：设置页也能直接重载，不用切回首页再点。走的是首页那个 POST /reload。
+  document.getElementById("btn-reload").onclick = async function(){
+    var b = this;
+    if(b.disabled) return;
+    b.disabled = true;
+    try{
+      flushPendingSave();   // 先把防抖里还没提交的改动补发出去，再重载
+      var r = await fetch(CORE + "/reload", {method: "POST", credentials: "same-origin"});
+      if(!r.ok) throw new Error("HTTP " + r.status);
+      setSub("已重载，正在刷新…");
+      setTimeout(function(){ location.reload(); }, 600);
+    }catch(e){
+      mdAlert("重载失败：" + (e && e.message ? e.message : e));
+    }finally{
+      b.disabled = false;
+    }
   };
 
   window.addEventListener("message", function(e){

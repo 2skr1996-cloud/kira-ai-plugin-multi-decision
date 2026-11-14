@@ -59,8 +59,8 @@
 })();
 </script>
 <style>
-:root{--bg:#f6f8fc;--card:#fff;--line:#e3e9f3;--text:#1f2937;--muted:#6b7280;--accent:#3b82f6;--ok:#10b981;--warn:#f59e0b;--bad:#ef4444;--soft:rgba(127,127,127,.08);}
-html[data-theme="dark"]{--bg:#0f172a;--card:#16213a;--line:#26344f;--text:#e5edff;--muted:#93a4c4;--accent:#60a5fa;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--soft:rgba(255,255,255,.06);}
+:root{--bg:#f6f8fc;--card:#fff;--line:#e3e9f3;--text:#1f2937;--muted:#6b7280;--accent:#3b82f6;--reload:#7c3aed;--reload-soft:rgba(124,58,237,.10);--ok:#10b981;--warn:#f59e0b;--bad:#ef4444;--soft:rgba(127,127,127,.08);}
+html[data-theme="dark"]{--bg:#0f172a;--card:#16213a;--line:#26344f;--text:#e5edff;--muted:#93a4c4;--accent:#60a5fa;--reload:#a78bfa;--reload-soft:rgba(167,139,250,.16);--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--soft:rgba(255,255,255,.06);}
 html[data-theme="dark"] .list .it:hover{background:rgba(255,255,255,.10);}
 *{box-sizing:border-box;}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;}
@@ -70,8 +70,8 @@ header{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wra
 .navseg{display:inline-flex;align-items:center;gap:2px;padding:2px;border-radius:11px;background:var(--soft);border:1px solid var(--line);height:32px;}
 .navbtn{height:26px;padding:0 15px;border-radius:9px;border:0;background:transparent;color:var(--muted);font-size:13px;font-weight:500;cursor:pointer;line-height:1;transition:background .15s,color .15s;}
 .navbtn:hover{color:var(--text);}
-.navbtn.on{background:var(--card);color:var(--accent);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.10);}
-html[data-theme="dark"] .navbtn.on{background:rgba(255,255,255,.10);}
+/* 用户 m19542 第 4 条：选中的按钮统一换成实心蓝底白字，跟「美化 / 对照 / 原文」那组一致 */
+.navbtn.on{background:var(--accent);color:#fff;font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.10);}
 h1{font-size:20px;margin:0;font-weight:600;}
 .sub{color:var(--muted);font-size:12px;}
 /* 用户 m07864 第 1 条：刷新时这句长度一变，右边的热重载按钮就像被推了一下。
@@ -139,11 +139,13 @@ button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(-
 button:hover{border-color:var(--accent);color:var(--accent);}
 button.on{background:var(--accent);border-color:var(--accent);color:#fff;}
 button.mini{padding:2px 8px;font-size:12px;border-radius:6px;}
-/* 用户 m07085 新2：热重载是改完设置/代码后的常用动作，换成强调色实心按钮，
-   别再跟旁边那些普通小按钮一个灰样。 */
-header #btn-reload{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
-header #btn-reload:hover{filter:brightness(1.08);color:#fff;border-color:var(--accent);}
-header #btn-reload:disabled{opacity:.55;cursor:default;filter:none;}
+/* 用户 m19731：「重载」并进导航胶囊当第三段，用紫色跟「页面切换」的蓝色区分开，
+   前面加刷新图标，中间一条竖线说明它是动作不是页面。 */
+.navseg .navsep{width:1px;height:16px;background:var(--line);margin:0 3px;flex:none;}
+.navbtn.nav-reload{display:inline-flex;align-items:center;gap:5px;padding:0 12px;color:var(--reload);background:var(--reload-soft);font-weight:600;}
+.navbtn.nav-reload svg{width:13px;height:13px;display:block;flex:none;}
+.navbtn.nav-reload:hover{color:#fff;background:var(--reload);}
+.navbtn.nav-reload:disabled{opacity:.55;cursor:default;color:var(--reload);background:var(--reload-soft);}
 button.icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border-radius:7px;color:var(--muted);flex:none;}
 button.icon svg{width:15px;height:15px;display:block;}
 button.icon:hover{color:var(--accent);border-color:var(--accent);background:rgba(59,130,246,.10);}
@@ -158,15 +160,24 @@ button.icon.danger:hover{color:#fff;background:var(--bad);border-color:var(--bad
 /* 折叠柱子开关（用户 m02038 第 1 条）：比通用开关大一号，白色圆改成椭圆，
    椭圆里直接写「展开 / 折叠」，就不用再在外面写「折叠柱子」四个字了。 */
 .sw.sw-fold .tr{width:58px;height:24px;}
-.sw.sw-fold .tr:after{width:34px;height:20px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:600;color:var(--text);letter-spacing:.02em;content:"展开";}
+.sw.sw-fold .tr:after{width:34px;height:20px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:600;color:#1f2937;letter-spacing:.02em;content:"展开";}
 .sw.sw-fold.on .tr:after{content:"折叠";transform:translateX(20px);}
+/* 用户 m19542 第 1 条：启用 / 自动刷新 也做成折叠柱子那种「字写在轨道里」的开关，
+   轨道里直接写当前状态：关闭 / 启动、静止 / 刷新（用户 m19715：打开时显示的是状态，不是动作）。 */
+.sw.sw-state .tr{width:58px;height:24px;}
+.sw.sw-state .tr:after{width:34px;height:20px;border-radius:999px;display:flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:600;color:#1f2937;letter-spacing:.02em;}
+.sw.sw-state.on .tr:after{transform:translateX(20px);}
+#sw-plugin .tr:after{content:"关闭";}
+html.plugin-on #sw-plugin .tr:after{content:"启动";}
+#sw-auto .tr:after{content:"静止";}
+#sw-auto.on .tr:after{content:"刷新";}
 .sw.on{color:var(--text);}
 .sw.busy{opacity:.5;pointer-events:none;}
 /* 首帧引导：booting 期间禁用过渡，缓存态直接落位，刷新不再播放「自动重开」动画 */
 html.booting .sw .tr,html.booting .sw .tr:after{transition:none;}
 html.plugin-on #sw-plugin{color:var(--text);}
 html.plugin-on #sw-plugin .tr{background:var(--accent);}
-html.plugin-on #sw-plugin .tr:after{transform:translateX(18px);}
+html.plugin-on #sw-plugin .tr:after{transform:translateX(20px);}
 /* 会话状态点：绿=真实运行，红=运行异常，黄=排队，灰=等待或手动关闭 */
 .st{display:inline-flex;align-items:center;gap:5px;flex:none;margin-left:2px;}
 .st:empty{display:none;}
@@ -391,7 +402,7 @@ html[data-theme="dark"] .list .it .cfg.st .chip.on.hi-dec{background:rgba(167,13
 .pane-sw{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--soft);}
 .pane-sw button{border:0;background:transparent;color:var(--muted);font:inherit;font-size:13px;padding:3px 12px;line-height:1.2;cursor:pointer;letter-spacing:.02em;min-width:68px;text-align:center;}
 .pane-sw button+button{border-left:1px solid var(--line);}
-.pane-sw button.on{background:var(--card);color:var(--text);font-weight:600;}
+.pane-sw button.on{background:var(--accent);color:#fff;font-weight:600;}
 .trend-lg{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);font-weight:400;}
 .trend-lg .tb{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:-1px;position:relative;}
 .trend-lg .tb:not(:first-child){margin-left:12px;}
@@ -443,6 +454,18 @@ html[data-theme="dark"] .mgrp > .mc:hover{background:rgba(255,255,255,.05);}
 .mgrp-hd .gh-av.hasimg .gh-ch{visibility:hidden;}
 .mgrp-hd .gh-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1;}
 .mgrp-hd .gh-nm{font-size:13px;font-weight:600;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* 用户 m06193：用户黑名单——名字后面 hover 出「拉黑」；拉黑后整组默认折叠，组头留「已拉黑 + 展开」 */
+.mgrp-hd .gh-blk{display:none;height:20px;padding:0 8px;border-radius:999px;font-size:11px;line-height:18px;
+  border:1px solid var(--line);background:var(--soft);color:var(--muted);cursor:pointer;flex:0 0 auto;}
+.mgrp-hd:hover .gh-blk{display:inline-block;}
+.mgrp-hd .gh-blk:hover{border-color:var(--bad);color:var(--bad);}
+.mgrp-hd .gh-blk.on{display:inline-block;border-color:rgba(245,158,11,.38);background:rgba(245,158,11,.12);
+  color:#b45309;cursor:default;}
+html[data-theme="dark"] .mgrp-hd .gh-blk.on{color:#fbbf24;}
+.mgrp-hd .gh-exp{height:20px;padding:0 8px;border-radius:999px;font-size:11px;line-height:18px;
+  border:1px solid var(--line);background:var(--soft);color:var(--muted);cursor:pointer;flex:0 0 auto;}
+.mgrp-hd .gh-exp:hover{border-color:var(--accent);color:var(--accent);}
+.mgrp.blk:not(.open) > .mc{display:none;}
 .mgrp > .mc.user,.mgrp > .mc.assistant,.mgrp > .mc.system{display:grid;grid-template-columns:46px minmax(0,1fr);column-gap:8px;align-items:start;padding:2px 10px 3px;}
 .mgrp > .mc.user > .mc-hd,.mgrp > .mc.assistant > .mc-hd,.mgrp > .mc.system > .mc-hd{grid-column:1;padding:0;background:transparent;border:0;min-height:0;font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;}
 .mgrp > .mc.user > .mc-hd .k:not(.you),.mgrp > .mc.assistant > .mc-hd .k:not(.you){padding:0;background:none;border:0;font-size:11px;color:var(--muted);}
@@ -484,6 +507,8 @@ html[data-theme="dark"] .mgrp > .mc:hover{background:rgba(255,255,255,.05);}
 .mdp{margin:0 0 6px;white-space:pre-wrap;word-break:break-word;}
 .mdli{margin:0 0 3px;padding-left:12px;position:relative;white-space:pre-wrap;word-break:break-word;}
 .mdli:before{content:"\00b7";position:absolute;left:2px;color:var(--muted);}
+/* 用户 m26166：源码里空行隔开的块，美化后也空一行（一个行高 ≈ 20px） */
+.mdbox .mdgap{margin-top:20px;}
 .mdbox b{font-weight:600;color:var(--fg);}
 .mdbox code.ic{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;padding:0 4px;border-radius:4px;background:rgba(0,0,0,.06);}
 /* 字数紧贴正文末尾的小气泡（用户 m31639） */
@@ -1155,7 +1180,7 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
   header{gap:8px;margin-bottom:12px;}
   .navseg{height:44px;padding:2px;border-radius:12px;}
   .navbtn{height:40px;padding:0 14px;font-size:13px;}
-  header #btn-reload{min-height:40px;padding:0 12px;font-size:12.5px;}
+  .navbtn.nav-reload{padding:0 11px;font-size:12.5px;}
   .sw{min-height:40px;gap:7px;font-size:12.5px;}
   .sw .tr{width:44px;height:26px;}
   .sw.sw-fold .tr{width:62px;}
@@ -1273,15 +1298,16 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
     <span class="navseg">
       <button id="btn-home" class="navbtn on" title="回到首页">首页</button>
       <button id="btn-settings" title="打开设置页" class="navbtn">设置</button>
+      <!-- 用户 m19731：重载并进导航胶囊当第三段，紫色 + 刷新图标，跟页面切换区分开 -->
+      <span class="navsep"></span>
+      <button id="btn-reload" class="navbtn nav-reload" title="重载插件：改完设置或代码后不用回桌面端重启"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>重载</button>
     </span>
-    <label class="sw" id="sw-plugin" title="插件总开关"><span class="lb">启用</span><span class="tr"></span></label>
-    <label class="sw on" id="sw-auto" title="每 5 秒自动刷新"><span class="lb">自动刷新</span><span class="tr"></span></label>
-    <!-- v3.51（用户 m07385 第 3 条）：先用等宽占位顶住，等数据回来换成「更新于 HH:MM:SS」。
-         原来写「加载中…」比 HH:MM:SS 短，一换上字就变长，把右边的热重载按钮往右推一下。 -->
+    <!-- 用户 m19542 第 1 条：启用 / 自动刷新 改成折叠柱子那种「字写在轨道里」的开关 -->
+    <label class="sw sw-state" id="sw-plugin" title="插件总开关"><span class="tr"></span></label>
+    <label class="sw sw-state on" id="sw-auto" title="每 5 秒自动刷新"><span class="tr"></span></label>
+    <!-- v3.51（用户 m07385 第 3 条）：先用等宽占位顶住，等数据回来换成「更新于 HH:MM:SS」，
+         免得字一长一短把右边的东西推来推去。 -->
     <span class="sub" id="subtitle">更新于 --:--:--</span>
-    <!-- 用户 m06348 第 5 条：热重载挪到「更新于 HH:MM:SS」右边——它是看完更新时间之后
-         才会去点的动作，贴在时间后面顺手；导航胶囊里只留首页/设置。 -->
-    <button id="btn-reload" class="mini" title="热重载插件：改完设置或代码后不用回桌面端重启">热重载</button>
     <span class="grow"></span>
   </header>
 
@@ -3123,32 +3149,38 @@ var ctxSnapRequest = 0;
     return out;
   }
 
+  // 用户 m26166：源码里空行隔开的块，美化后也要空一行——模块之间、段落之间
+  // 都跟原文一样只有一个空行。空行断开的块加 mdgap，CSS 给一个行高的上边距。
   function mdLite(t){
     var lines = String(t == null ? "" : t).split(/\r?\n/);
-    var out = "", buf = [];
+    var out = "", buf = [], gap = false;
     function flush(){
       if(!buf.length) return;
-      out += "<div class='mdp'>" + inlineMd(buf.join("\n")) + "</div>";
+      out += "<div class='mdp" + (gap ? " mdgap" : "") + "'>" + inlineMd(buf.join("\n")) + "</div>";
       buf = [];
+      gap = false;
     }
     for(var i = 0; i < lines.length; i++){
       var ln = lines[i], m;
       if((m = ln.match(/^\s*#{1,6}\s+(.+?)\s*#*\s*$/))){
         flush();
-        out += "<div class='mdh'>" + inlineMd(m[1]) + "</div>";
+        out += "<div class='mdh" + (gap ? " mdgap" : "") + "'>" + inlineMd(m[1]) + "</div>";
+        gap = false;
         continue;
       }
       if((m = ln.match(/^\s*[-*+]\s+(.*)$/))){
         flush();
-        out += "<div class='mdli'>" + inlineMd(m[1]) + "</div>";
+        out += "<div class='mdli" + (gap ? " mdgap" : "") + "'>" + inlineMd(m[1]) + "</div>";
+        gap = false;
         continue;
       }
       if((m = ln.match(/^\s*(\d+[.)])\s+(.*)$/))){
         flush();
-        out += "<div class='mdli'>" + inlineMd(m[1] + " " + m[2]) + "</div>";
+        out += "<div class='mdli" + (gap ? " mdgap" : "") + "'>" + inlineMd(m[1] + " " + m[2]) + "</div>";
+        gap = false;
         continue;
       }
-      if(!ln.trim()){ flush(); continue; }
+      if(!ln.trim()){ flush(); gap = true; continue; }
       buf.push(ln);
     }
     flush();
@@ -3899,6 +3931,16 @@ var ctxSnapRequest = 0;
     });
     return s.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/^\s+|\s+$/g, "");
   }
+  // 用户 m21787 图3/图4：记录里的正文带着模型侧派生图的那句说明（「（动图 · 共 34 帧，上面是
+  // 等距抽的 9 帧拼图…）」）。美化档既然换回了聊天里原本那张图，这句说明就得一起去掉，
+  // 不然图是动图、字还写着「上面是九宫格」。对照 / 原文档保留原样。
+  function stripDeriveNote(t){
+    return String(t == null ? "" : t)
+      .replace(/（动图 · 共 \d+ 帧，[^）]*）/g, "")
+      .replace(/（这张是动图，按设置没有发给模型）/g, "")
+      .replace(/（另有 \d+ 张动图按设置没有发给模型）/g, "")
+      .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/^\s+|\s+$/g, "");
+  }
   function mediaOnlyBody(t){
     return /^(?:\s*\[(?:Image attached|Sticker(?::[^\]\r\n]*)?|image|图片|表情|语音|视频|文件)\]\s*)+$/i.test(String(t || ""));
   }
@@ -4335,7 +4377,16 @@ var ctxSnapRequest = 0;
     return { known: known, own: known ? (orderedSlots ? d.own_media.slice() : uniqueOwnerMedia(d.own_media)) : [],
       unassigned: uniqueOwnerMedia(unassigned),
       all: allMedia,
-      reply: d && d.direct_reply && d.direct_reply.id !== undefined ? { id: String(d.direct_reply.id) } : null,
+      // 用户 m21787 图1/图2：框架会把被引用那条消息的图也挂到引用它的消息上，靠外层 media
+      // 分不清归属。后端按 message_id 回插件索引认回了被引用消息自己的图，放在 direct_reply.media，
+      // 引用块优先用它（外层 unassigned_media 里对应的那几张后端已剔掉）。
+      reply: d && d.direct_reply && d.direct_reply.id !== undefined
+        ? { id: String(d.direct_reply.id),
+            media: Array.isArray(d.direct_reply.media) ? d.direct_reply.media.slice() : null }
+        : null,
+      // 用户 m21787 图3/图4：记录里的 media 是发给模型的那一份（动图九宫格 / 静态压缩），
+      // 美化档要显示聊天里原本那张；后端按 message_id 回索引取好放在 orig_media。
+      orig: d && Array.isArray(d.orig_media) ? d.orig_media.slice() : null,
       body: d && typeof d.own_body === "string" ? d.own_body : "",
       // 每条转发条目各带几张图（后端对齐成功才有）：卡片据此把图放到真正的那一条，
       // 正文里字面的 [图片] 不占位（用户 m16262 图2）。
@@ -4407,6 +4458,19 @@ var ctxSnapRequest = 0;
     function keyOf(n){ return String(n.getAttribute("data-qmiss") || n.getAttribute("data-qpic") || ""); }
     function replaceNode(n, k, hit){
       if(!document.contains(n) || !n.parentNode) return false;
+      // 用户 m21787 图4：后端只按 message_id 认回了图（source=media_index），没有正文/昵称。
+      // 这种时候别整块替换——原节点已经按引用里那行原文画好了名字和原话，只把图补进去。
+      if(!hit.body){
+        var _th = thumbsHtml(hit.media || []), _who = n.querySelector(".qwho");
+        if(_th && _who){
+          var _ph = n.querySelector(".qpic-ph");
+          if(_ph) _ph.parentNode.removeChild(_ph);
+          _who.insertAdjacentHTML("afterend", _th);
+          n.removeAttribute("data-qpic"); n.removeAttribute("data-qmiss");
+          fitForwardCards(n);
+          return true;
+        }
+      }
       var q = { id: k, text: hit.body, who: hit.name || hit.who, ts: hit.ts, display: hit.display };
       var html = quoteHtml(q, []);
       if(!html) return false;
@@ -4518,7 +4582,9 @@ var ctxSnapRequest = 0;
     var d = displayOf(hit || q), t;
     if(hit) t = ownBodyOf(hit, hit.body);
     else t = ownBodyOf(q, String(q.text || ""));
-    if(!t && !d.known && q.text) t = stripReplyTokens(q.text);
+    // 用户 m21787 图4：后端只按 message_id 认回了图（source=media_index），正文/昵称/时间
+    // 还是引用里那行原文——以前这里要求「归属未知」才回退，认回图之后原话就被吞了。
+    if(!t && q.text) t = stripReplyTokens(q.text);
     if(!t && !d.known && !hit){
       return "<div class='quote' data-qmiss='" + esc(id) + "'><span class='qwho'>引用了更早的一条消息</span>" +
         "<div class='qmiss'>#" + esc(id) + "</div></div>";
@@ -4534,7 +4600,14 @@ var ctxSnapRequest = 0;
     var qIsFwd = body.trim().indexOf("[Forward") === 0;
     // 用户 m00942 图1：转发卡要画全所有图，引用里的那份也一样——display.forward_media_all
     // 是这条转发消息的完整图集（own_media_known 仍为 false，不影响别处判定）。
-    var qsrc = d.known ? d.own : ((qIsFwd && d.all && d.all.length) ? d.all : (d.unassigned || []));
+    // 用户 m21787 图1/图2：被引用那条消息自己的图由后端按 message_id 认回来了（direct_reply.media），
+    // 优先用它——框架会把被引用的图也挂到外层消息上，光看外层 media 分不清归属。
+    var qown = Array.isArray(q.media) ? q.media : null;
+    var qsrc = (qown && qown.length) ? qown
+      : (d.known ? d.own : ((qIsFwd && d.all && d.all.length) ? d.all : (d.unassigned || [])));
+    // 用户 m21787 图4：引用里既然换成聊天里原本那张图，正文里「（动图 · 共 N 帧…）」这句
+    // 派生说明也得一起去掉，否则原图旁边还挂着一句「上面是等距抽的 9 帧拼图」。
+    if(qown && qown.length) body = stripDeriveNote(body);
     var qm = qIsFwd ? "" : thumbsHtml(qsrc);
     // known [] 是确定无图；图文并存时不因没有 Image 占位而清掉图或文字。
     if(qm || (d.known && !qsrc.length)) body = tidyBody(body)
@@ -4810,7 +4883,7 @@ var ctxSnapRequest = 0;
         // 用户 m28299 图1（转发的 emoji 没显示）：图都认领完了的那一支原来只 esc，
         // 弹层里 [Emoji 344] 就成了一行方括号。表情与正文同一套，一律过 emojiFaces。
         var _stripped = fwdStrip(r, got);
-        var video = nativeVideoHtml(_stripped, function(part){ return emojiFaces(esc(part)); }, false);
+        var video = nativeVideoHtml(_stripped, function(part){ return fwdPicChip(part, false); }, false);
         if(video !== null && r.n > 1) video = video.repeat(r.n);
         var txt = video !== null ? video
                 : (fwdPicChip(_stripped, false) + (r.n > 1 && _stripped ? " ×" + r.n : ""));
@@ -5689,6 +5762,9 @@ var ctxSnapRequest = 0;
              "<div class='mc-bd'>" + bodyHtml(raw, "(空)", 0, "rawtxt", (role === "assistant" || role === "system")) + "</div></div>";
     }
     var ownerDisplay = displayOf(m, m.media);
+    // 用户 m21787 图3/图4：美化档显示聊天里原本那张图（后端按 message_id 回索引取的 orig_media）。
+    // 只认调用方显式打的 origMedia 标记，请求快照那边照旧看模型侧那一份。
+    if(mode === "pretty" && m.origMedia && ownerDisplay.orig && ownerDisplay.orig.length) ownerDisplay.own = ownerDisplay.orig;
     var neutralMedia = ownerDisplay.unassigned;
     // 只改视图副本；真实发送用的 legacy m.media 不动。
     m = Object.assign({}, m, { chars: displayCharCount(m, preMeta), media: ownerDisplay.own });
@@ -6095,7 +6171,8 @@ var ctxSnapRequest = 0;
     if(!m || m.role !== "user") return "";
     var parts = splitMetaAll(tidyBody(m.text || ""));
     if(parts.length && parts[0].meta && parts[0].meta.uid) return String(parts[0].meta.uid).trim();
-    var pm = String(rawOf(m) || "").match(/\[user_id:\s*(\d{3,})/);
+    // 兜底：真实格式是「[user_nickname: 某, user_id: 123]」，user_id 前面没有独立的「[」。
+    var pm = String(rawOf(m) || "").match(/user_id:\s*(\d{3,})/);
     return pm ? pm[1] : "";
   }
   function youOf(m){
@@ -6143,6 +6220,51 @@ var ctxSnapRequest = 0;
            " · " + rawOf(m).length + " 字 · 原文";
   }
 
+  // 用户 m06193：用户黑名单（按 QQ 号整条剔除）。窗口页把鼠标放到名字上就能拉黑；
+  // 拉黑后这一组默认折叠，组头显示「已拉黑 + 展开」，点开还能看。
+  // 名单是全局的（用户 m06246 更正），只影响拉黑之后的新消息，已经在窗口里的历史不动。
+  var UBLK = {};        // uid -> 1，当前黑名单
+  // 用户 m07157：用户黑名单总开关。关掉时窗口页不画「拉黑」按钮、也不折叠，
+  // 名单本身还在（设置页照常能看能解黑），只是不再剔除消息。
+  var UBLK_ON = true;
+  var UBLK_OPEN = {};   // uid -> 1，这一组被手动展开了
+  var ublkSid = null, ublkAt = 0;
+  function ublkFill(d){
+    var m = {};
+    ((d && d.items) || []).forEach(function(it){
+      var u = String((it && it.uid) || "").trim();
+      if(u) m[u] = 1;
+    });
+    // 名单没变就别重画：窗口每 5 秒重画一次，白重画会打乱首屏计数和滚动位置。
+    var on = !(d && d.enabled === false);
+    var changed = (on !== UBLK_ON) || Object.keys(m).length !== Object.keys(UBLK).length;
+    if(!changed){ for(var k in m){ if(!UBLK[k]){ changed = true; break; } } }
+    UBLK_ON = on;
+    UBLK = m;
+    return changed;
+  }
+  // 名单按会话缓存 30 秒：窗口每 5 秒重画一次，不能每次都打接口；
+  // 但设置页那边刚拉黑的人，切回来最多半分钟就能看到。
+  function ublkLoad(sid){
+    var now = Date.now();
+    if(sid === ublkSid && (now - ublkAt) < 30000) return;
+    ublkSid = sid; ublkAt = now;
+    // 用户 m07715：带上 sid，后端会把「本会话已解除」的人从 items 里剔掉，窗口页跟着不折叠
+    get(API + "/user-blacklist?sid=" + encodeURIComponent(sid || "")).then(function(d){
+      if(!d || !d.ok) return;
+      if(ublkFill(d) && ctxWin && ctxPane === "window") renderCtxWindow(ctxWin, true);
+    }).catch(function(){});
+  }
+  function ublkSet(uid, name, action){
+    return post(API + "/user-blacklist?sid=" + encodeURIComponent(ublkSid || "") +
+                "&uid=" + encodeURIComponent(uid) +
+                "&name=" + encodeURIComponent(name || "") +
+                "&action=" + encodeURIComponent(action)).then(function(d){
+      if(!d || !d.ok) return d;
+      if(ublkFill(d) && ctxWin && ctxPane === "window") renderCtxWindow(ctxWin, true);
+      return d;
+    });
+  }
   // tools：这一段用了几次工具，紧跟在名字后面（用户 m17212 图1）。组头在整组还没读完时
   // 就得先画出来，所以调用方传 "\u0001" 占位，flush 时再换成真实次数（0 次就整块删掉）。
   function grpHeadHtml(role, who, uid, you, note, tools){
@@ -6150,8 +6272,19 @@ var ctxSnapRequest = 0;
     var decName = role === "assistant" && who === DEC_NOTE_NAME;
     var tcChip = (tools === 0 || tools === null || tools === undefined || tools === "") ? ""
       : "<span class='chb'>工具 ×" + tools + "</span>";
+    // 用户 m06193：真人名字后面挂「拉黑」（鼠标移上去才显示）。已经拉黑的换成
+    // 「已拉黑」常驻胶囊 + 展开/折叠，点开还能看这一组的内容。
+    var blkChip = "";
+    if(role === "user" && uid && UBLK_ON){
+      blkChip = UBLK[uid]
+        ? ("<span class='gh-blk on'>已拉黑</span>" +
+           "<button type='button' class='gh-exp' data-blk-exp='" + esc(uid) + "'>" +
+           (UBLK_OPEN[uid] ? "折叠" : "展开") + "</button>")
+        : ("<button type='button' class='gh-blk' data-blk-uid='" + esc(uid) +
+           "' data-blk-name='" + esc(who || "") + "'>拉黑</button>");
+    }
     return "<div class='mgrp-hd'>" + avatarFor(role, who, uid) +
-           "<span class='gh-info'><span class='gh-nm" + (decName ? " dec-name" : "") + "'>" + nm + "</span>" + tcChip +
+           "<span class='gh-info'><span class='gh-nm" + (decName ? " dec-name" : "") + "'>" + nm + "</span>" + blkChip + tcChip +
            (you && VIEW !== "mixed" ? "<span class='k you'>@你</span>" : "") +
            (note ? "<span class='gh-note'>" + note + "</span>" : "") +
            "</span></div>";
@@ -6841,7 +6974,7 @@ var ctxSnapRequest = 0;
       // 连续同一个发言人并成一块（用户 m31327 / m31526）：组头只留一份头像 + 名字，
       // 组内每条只剩「左时间 / 正文 / 右字数」。分组键是 role + 发言人，不是纯 role——
       // 一条 user 消息里常拼着好几个人，按 role 并会把不同人合成一组、名字只剩一个。
-      var grpKey = null, grpRole = null, grpBuf = "", grpHead = "", grpNote = "", grpTools = 0;
+      var grpKey = null, grpRole = null, grpUid = "", grpBuf = "", grpHead = "", grpNote = "", grpTools = 0;
       // v3.94（用户 m08398 图2/图3）：还没有对应回复的决策记录（判定不回那种）要画在
       // 待发区之后——它判的就是那几条待发，画在前面像在事前预言。
       var flushGrp = function(){
@@ -6851,8 +6984,11 @@ var ctxSnapRequest = 0;
           ? (grpTools > 0 ? grpHead.replace("工具 ×\u0001", "工具 ×" + grpTools)
                           : grpHead.replace("<span class='chb'>工具 ×\u0001</span>", ""))
           : "";
-        html += "<div class='mgrp " + esc(grpRole || "user") + "'>" + ghead + grpBuf + "</div>";
-        grpBuf = ""; grpHead = ""; grpTools = 0;
+        // 用户 m06193：拉黑的人整组默认折叠（只留组头），点「展开」才看内容
+        var blkCls = (UBLK_ON && grpRole === "user" && grpUid && UBLK[grpUid])
+          ? (" blk" + (UBLK_OPEN[grpUid] ? " open" : "")) : "";
+        html += "<div class='mgrp " + esc(grpRole || "user") + blkCls + "'>" + ghead + grpBuf + "</div>";
+        grpBuf = ""; grpHead = ""; grpTools = 0; grpUid = "";
       };
       msgs.forEach(function(m, i){
         if(m.role === "user"){
@@ -6868,7 +7004,7 @@ var ctxSnapRequest = 0;
         var gk = groupKeyOf(m, i);
         if(gk !== grpKey){
           flushGrp();
-          grpKey = gk; grpRole = m.role || "user";
+          grpKey = gk; grpRole = m.role || "user"; grpUid = uidOf(m);
           grpNote = (VIEW === "mixed" && (m.role === "user" || m.role === "assistant") && !multiOf(m))
             ? mixNoteOf(m) : "";
           grpHead = ((m.role === "user" || m.role === "assistant") && !multiOf(m))
@@ -6903,7 +7039,7 @@ var ctxSnapRequest = 0;
         var gk2 = prole + "|" + pwho + "|" + puid;
         if(gk2 !== grpKey){
           flushGrp();
-          grpKey = gk2; grpRole = prole;
+          grpKey = gk2; grpRole = prole; grpUid = puid;
           grpHead = grpHeadHtml(prole, pwho, puid, false);
         }
         grpBuf += pendCards(m, msgs.length + j + 1, VIEW, true);
@@ -6930,6 +7066,8 @@ var ctxSnapRequest = 0;
     markCards((d.sid || "") + (ctxSnap ? ":snapshot:" + ctxSnap.name : ""));
     // 拉黑按钮要知道「哪些已经在清单里」，切群才重拉一次（v3.36 用户第 13 条）
     loadPhraseBlock(d.sid || "");
+    // 用户 m06193：用户黑名单也要知道「谁已经在名单里」
+    ublkLoad(d.sid || "");
     restoreWinScroll(keepWinY);
   }
 
@@ -6974,6 +7112,30 @@ var ctxSnapRequest = 0;
 
   // 两页切换 + 展开全文 + 清空摘要，都挂在「当前上下文窗口」这个面板上
   async function winClick(ev){
+    // 用户 m06193：组头名字后面的「拉黑」/「展开·折叠」
+    var blkU = ev.target && ev.target.closest ? ev.target.closest("[data-blk-uid]") : null;
+    if(blkU){
+      var buid = blkU.getAttribute("data-blk-uid") || "";
+      var bname = blkU.getAttribute("data-blk-name") || "";
+      if(!buid) return;
+      var byes = await mdConfirm("把「" + (bname || buid) + "」拉黑？\n\n" +
+        "拉黑后他之后发的消息不再进入上下文（模型看不到），窗口里这一组默认折叠，点「展开」还能看。\n" +
+        "名单是全局的，所有群一起生效；已经在窗口里的历史消息不动。");
+      if(!byes) return;
+      ublkSet(buid, bname, "add").then(function(d){
+        if(!d || !d.ok){ mdAlert("拉黑失败：" + ((d && d.detail) || "未知错误")); return; }
+        mdAlert("已拉黑「" + (bname || buid) + "」 · 名单现在 " + (d.count || 0) + " 人");
+      }).catch(function(){ mdAlert("请求失败，看后台日志"); });
+      return;
+    }
+    var blkE = ev.target && ev.target.closest ? ev.target.closest("[data-blk-exp]") : null;
+    if(blkE){
+      var euid = blkE.getAttribute("data-blk-exp") || "";
+      if(!euid) return;
+      if(UBLK_OPEN[euid]) delete UBLK_OPEN[euid]; else UBLK_OPEN[euid] = 1;
+      if(ctxWin && ctxPane === "window") renderCtxWindow(ctxWin, true);
+      return;
+    }
     var pb = ev.target && ev.target.closest ? ev.target.closest("[data-pane]") : null;
     if(pb){ setCtxPane(pb.getAttribute("data-pane")); return; }
     var more = ev.target && ev.target.closest ? ev.target.closest("[data-more]") : null;
@@ -7665,7 +7827,7 @@ var ctxSnapRequest = 0;
         : "<span class='est'>" + est.toFixed(1) + "%</span>") + "</td>";
       var hit = (tk.cache_hit === null || tk.cache_hit === undefined) ? null : Number(tk.cache_hit);
       html += "<td class='num'>" +
-        (hit === null ? "<span class='dim'>—</span>" : hit.toFixed(1) + "%") + "</td>";
+        (hit === null ? (r.cache_unreported ? cacheUnreportedCell() : "<span class='dim'>—</span>") : hit.toFixed(1) + "%") + "</td>";
       // v4.01（用户 m11166 图3）：末列叫「触发类型」——概率类（概率 / 曲线 / 动态）
       // 写「触发概率 X %」；@、叫昵称这种没有概率的写来源，跟回复记录同一套叫法。
       var tp = Number(r.trigger_prob) || 0;
@@ -7716,6 +7878,12 @@ var ctxSnapRequest = 0;
     }
     if(!n) return null;
     return wsum > 0 ? (sum / wsum) : (plain / n);
+  }
+
+  // 用户 m25513：上游没回报缓存、又反推不出来时，别只画一个「—」——直接写清楚是上游没给。
+  // 跟「命中预估」不同：预估是我们自己算的，这一格是上游压根没给证据。
+  function cacheUnreportedCell(){
+    return "<span class='dim' title='" + esc("这个渠道没回报缓存用量，也反推不出来（它报的是完整 prompt），所以这一格没有数") + "'>上游未报</span>";
   }
 
   // 每步明细（只给 title 用）：「1步 12.3% · 2步 45.6% · …」，超过 6 步只写前 6 步。
@@ -7935,16 +8103,16 @@ var ctxSnapRequest = 0;
         if(stN > 1 && ss && ss.length > 1){
           var hAvg = stepAvgPct(ss, "hit_est");
           if(hAvg === null){
-            cacheCell = (chv !== null ? chv : "<span class='dim'>—</span>");
+            cacheCell = (chv !== null ? chv : cacheUnreportedCell());
           }else{
             cacheCell = "<span class='steps'>" + ss.length + " 步 ≈" + hAvg.toFixed(1) + "%</span>";
           }
         } else {
           var h0 = (ss && ss.length && ss[0] && ss[0].hit_est != null) ? ss[0].hit_est : null;
-          cacheCell = (h0 !== null) ? ("≈" + h0 + "%") : (chv !== null ? chv : "<span class='dim'>—</span>");
+          cacheCell = (h0 !== null) ? ("≈" + h0 + "%") : (chv !== null ? chv : cacheUnreportedCell());
         }
       } else if(tk.cache_hit === null || tk.cache_hit === undefined){
-        cacheCell = "<span class='dim'>—</span>";
+        cacheCell = r.cache_unreported ? cacheUnreportedCell() : "<span class='dim'>—</span>";
       } else if(stN > 1 && ss && ss.length > 1){
         var nAvg = stepAvgPct(ss, "hit");
         if(nAvg === null){
@@ -8206,7 +8374,7 @@ var ctxSnapRequest = 0;
       h += "<span class='tk'>模型调用 " + Number(modelSeconds.toFixed(3)) + " 秒</span>";
     }
     h += "<span class='tk'>输入 " + tokText(tot.input_tokens) + " · 输出 " + tokText(tot.output_tokens) + "</span>";
-    if(unreported) h += "<span class='tk'>缓存命中 —</span>";
+    if(unreported) h += "<span class='tk'>缓存命中 上游未报</span>";
     else if(tot.cache_hit !== null && tot.cache_hit !== undefined) h += "<span class='tk'>缓存命中 " + tot.cache_hit + "%</span>";
     return h + "<span class='dim'>（思考 · 工具调用与返回 · token）</span>";
   }
@@ -8226,7 +8394,8 @@ var ctxSnapRequest = 0;
       h += "<span class='tk'>入 " + tokText(s.input_tokens) + " · 出 " + tokText(s.output_tokens) + "</span>";
       var sRep = (s.cached_reported === false) || (s.cached_reported === undefined && !!unreported);
       if(sRep){
-        h += "<span class='tk'>命中 —</span>";
+        // 用户 m25513：这一步上游没回报缓存，跟上面那格一样写「上游未报」，别只留一个破折号。
+        h += "<span class='tk'>命中 上游未报</span>";
       } else if(s.cached_tokens !== null && s.cached_tokens !== undefined){
         h += "<span class='tk'>命中 " + tokText(s.cached_tokens) +
              (s.cache_hit !== null && s.cache_hit !== undefined ? "（" + s.cache_hit + "%）" : "") + "</span>";
@@ -8802,7 +8971,13 @@ var ctxSnapRequest = 0;
           var q0 = splitMetaAll(c)[0];
           if(q0 && q0.meta && q0.meta.ts) lastTs2 = shortTs(q0.meta.ts);
         }
-        var mm = {role: m.role, text: c, raw: rawContent(m.content), chars: c.length, media: dm.media || m.media || [],
+        // 用户 m21787 图3/图4：记录里的 media 是发给模型的那一份（动图九宫格 / 静态压缩），
+        // 美化档要显示聊天里原本那张；后端按 message_id 回索引取好放在 display.orig_media。
+        var orig2 = (VIEW === "pretty" && projected.display && projected.display.orig_media && projected.display.orig_media.length)
+          ? projected.display.orig_media : null;
+        if(orig2) c = stripDeriveNote(c);
+        var media2 = orig2 || dm.media || m.media || [];
+        var mm = {role: m.role, text: c, raw: rawContent(m.content), chars: c.length, media: media2, origMedia: !!orig2,
                   display: projected.display, who: m.who || "", name: m.name || "",
                   tools: dm.tools === undefined ? (m.tool_calls || []).length : dm.tools, tool_call_id: m.tool_call_id || "",
                   files: m.files || (dm && dm.files) || [],
@@ -8856,13 +9031,16 @@ var ctxSnapRequest = 0;
           // 用户 m20315 图1：工具回调带的图就是它自己的（nai 发出去的那张），
           // 不能画成「归属未确认的附件」；正文里的 [图片] 占位由缩略图顶掉。
           var media3 = m.media || [], disp3 = snapshotDisplay(m).display;
+          // 用户 m21787 图3/图4：③ 同理——美化档用聊天里原本那张图，不用发给模型的派生图。
+          var orig3 = (VIEW === "pretty" && disp3 && disp3.orig_media && disp3.orig_media.length) ? disp3.orig_media : null;
+          if(orig3){ media3 = orig3; text3 = stripDeriveNote(text3); }
           if(tool3 && media3.length){
             text3 = stripMediaTags(text3, media3.length);
             disp3 = {own_media_known:true, own_media:media3, unassigned_media:[],
                      own_body:text3, direct_reply:null, source:"tool_note"};
           }
           var mm3 = {role:role3,who:tool3 ? String(m.name || "") : (m.who || m.name || ""),name:m.name || "",text:text3,
-            raw:raw3,media:media3,display:disp3,chars:text3.length,
+            raw:raw3,media:media3,display:disp3,chars:text3.length,origMedia:!!orig3,
             files:m.files || [],
             tools:(m.tool_calls || []).length,tool_call_id:m.tool_call_id || "",tc:tcOf(m)};
           var gk3 = groupKeyOf(mm3, "f" + idx);
@@ -8879,14 +9057,17 @@ var ctxSnapRequest = 0;
         h += "</div>";
       }
       if(!isTrimSnap){
+        // 用户 m25513：详情这条路的记录没走列表的 _mark_cache_reported，但轨迹 totals 里带着 cache_reported，
+        // 上游没回报时同样写「上游未报」，别让 ④ 的 chip 还写「缓存命中 0%」。
+        var _unrep = !!(r.cache_unreported || (r.trace && r.trace.totals && r.trace.totals.cache_reported === false));
       // v3.90（用户 m05623 第 2 条）：裁切快照没有 agent 轨迹，④ 和那句空提示一起不画。
         // v3.93（用户 m07570 图7）：决策快照的 ④ 同样用 trace，不再整段跳过。
         if(VIEW === "mixed"){
           // 对照档要的是原文，④ 不能还是美化样式（用户 m51324 ⑧）
           h += rawBlock("④ agent 轨迹", "· 思考 · 工具调用 · 工具返回",
-                        traceRawText(r.trace) || "（这一轮没有 agent 轨迹）", "", traceChips(r.trace || {}, r.cache_unreported));
+                        traceRawText(r.trace) || "（这一轮没有 agent 轨迹）", "", traceChips(r.trace || {}, _unrep));
         } else {
-          var th = traceHtml(r.trace, r.cache_unreported);
+          var th = traceHtml(r.trace, _unrep);
           if(th){
             h += th;
           } else {

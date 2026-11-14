@@ -15,8 +15,9 @@ flush_session_messages 让框架带着完整系统提示词跑 agent。进阶模
 * 工具是双通道：勾选的工具既写进提示词（告诉模型能干什么），也作为原生 tool_set
   一起发；模型真发起 tool_calls 就执行并把结果回填，最多 tool_rounds 轮。
 * 模型链：主模型 → 失败重试 retry 次（每次间隔 retry_delay 秒）→ 连续
-  fail_switch 次整体失败后切 fallback 模型，并在 fallback_cooldown 秒内
-  直接用 fallback；冷却结束后先试主模型。
+  失败到 2 次（用户 m08153：fail_switch 改成开关，阈值固定 2）就切 fallback 模型，
+  并在 fallback_cooldown 秒内直接用 fallback；冷却结束后先试主模型。
+  开关打开时主模型最多试 2 次，第 3 次尝试直接交给 fallback。
 * 回不回都要在窗口里留一条决策记录（用户 m05834）：那是 assistant 角色的一条
   固定消息，不是动态段，所以下一轮决策还能看到它。
 """
@@ -143,7 +144,7 @@ reason 只说为什么回 / 为什么不回，半句话就够。
 # 用户 m36396：决策这一侧也补一段「强化格式遵守」，位置跟回复页那一块一模一样——贴在本轮消息最后。
 # 回复那块讲的是「用 <msg> 包气泡、空壳代表不发」；决策只回一个判断，这块讲的是「只准吐一个 JSON」。
 # 真踩过：模型不吐 JSON、只回一句聊天话（"[16:55] 判定不回（……）"），那一轮按失败算。
-DECISION_FORMAT_HARD = """【格式强化】
+DECISION_FORMAT_HARD = """## 格式强化（Format）
 只输出一个 JSON 对象，前后不写任何字、不加代码块，字段名照抄：
 {"reply": true, "reason": "一句话理由，20 字以内"}
 {"reply": false, "reason": "一句话理由，20 字以内"}
@@ -552,7 +553,8 @@ class DecisionOptions:
     fallback: str = ""
     retry: int = 2
     retry_delay: float = 3.0
-    fail_switch: int = 2
+    # 用户 m08153：连续失败切换从「几次」改成开关，阈值固定 2。
+    fail_switch: bool = True
     cooldown: float = 300.0
     timeout: float = 60.0
     fail_action: str = "allow"
@@ -594,6 +596,18 @@ def options_from_config(get) -> DecisionOptions:
             v = min(hi, v)
         return v
 
+    # 用户 m08153：连续失败切换改成开关，读配置时按布尔解析（老配置里的 2 也算开）。
+    def _bool(key, default):
+        try:
+            raw = get(key, default)
+        except Exception:
+            return bool(default)
+        if raw is None or raw == "":
+            return bool(default)
+        if isinstance(raw, str):
+            return raw.strip().lower() not in ("0", "false", "off", "no", "")
+        return bool(raw)
+
     tools = get("decision_tools", [])
     if isinstance(tools, str):
         try:
@@ -613,7 +627,7 @@ def options_from_config(get) -> DecisionOptions:
         # 用户 m07859：重试 / 重试间隔 / 单次超时不再各留一份，统一读基础设置页那三项。
         retry=_int("retry_max", 2, 0, 10),
         retry_delay=_num("retry_delay", 5, 0, 600),
-        fail_switch=_int("decision_fail_switch", 2, 1, 10),
+        fail_switch=_bool("decision_fail_switch", True),
         cooldown=float(_int("decision_fallback_cooldown", 300, 30, 3600)),
         timeout=float(_int("watchdog_seconds", 180, 30, 600)),
         fail_action=str(get("decision_fail_action", "allow") or "allow").strip().lower(),
@@ -1075,6 +1089,8 @@ class DecisionPhase:
             "out": token_out,
             "cached": token_cached,
             "cache_reported": getattr(resp, "cached_tokens", None) is not None,
+            # 用户 m01977：测试窗要能看模型的思考过程（上游给了 reasoning_content 才有）。
+            "reasoning": str(getattr(resp, "reasoning_content", "") or ""),
             "usage": usage,
         }
 
@@ -1131,14 +1147,25 @@ class DecisionPhase:
             calls = []
             media_all = []
             media_names = []
+            used_ids = set()
             for idx, raw in enumerate(last["tool_calls"]):
-                if isinstance(raw, dict):
-                    fn = raw.get("function") if isinstance(raw.get("function"), dict) else {}
-                    name = str(raw.get("name") or fn.get("name") or "").strip()
-                    args = raw.get("arguments", fn.get("arguments", {}))
-                    cid = str(raw.get("id") or raw.get("tool_call_id") or ("call_%d" % rounds))
-                else:
-                    name, args, cid = "", {}, ""
+                # D04（2026-11-13 交接文档）：非 dict 的块、没有名字的调用都没法回执
+                # （tool_call_id 会是空串，上游 422 missing field tool_call_id），
+                # 直接跳过——assistant 的 tool_calls 与 tool 回执仍然一一对应。
+                if not isinstance(raw, dict):
+                    continue
+                fn = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+                name = str(raw.get("name") or fn.get("name") or "").strip()
+                if not name:
+                    continue
+                args = raw.get("arguments", fn.get("arguments", {}))
+                cid = str(raw.get("id") or raw.get("tool_call_id") or "").strip()
+                if not cid:
+                    cid = "call_%d_%d" % (rounds, idx)
+                while cid in used_ids:
+                    # 同一轮撞了 id：加后缀，别让两条 tool 回执共用一个 tool_call_id
+                    cid = "%s_%d" % (cid, idx)
+                used_ids.add(cid)
                 if isinstance(args, str):
                     try:
                         args = json.loads(args) if args.strip() else {}
@@ -1214,7 +1241,8 @@ class DecisionPhase:
             tool_cache = {}
         budget = {"in": 0, "out": 0, "cached": 0, "usage": []}
         now = time.time()
-        tripped = self._fail_streak >= max(1, opt.fail_switch)
+        # 用户 m08153：开关打开时阈值固定 2——第一次失败算 1，重试第一次失败算 2。
+        tripped = bool(opt.fail_switch) and self._fail_streak >= 2
         cooling = self._fallback_until > 0 and now < self._fallback_until
         # M17：冷却到期后放一次主模型探测。探测期间先把冷却位占住，失败不会变成探测风暴，
         # 成功则清掉冷却；只有备用一直失败、fail_streak 没被清零时才需要这条出口。
@@ -1237,7 +1265,11 @@ class DecisionPhase:
             if client is None:
                 last = {"ok": False, "error": "模型不可用：" + (model or "快速模型")}
                 continue
+            # 用户 m08153：开关打开时主模型最多试 2 次（第一次 + 重试一次），
+            # 第三次尝试直接交给备用模型；0 次重试时就是「主模型 1 次 + 备用 1 次」。
             tries = (max(0, opt.retry) + 1) if kind == "main" else 1
+            if kind == "main" and bool(opt.fail_switch) and opt.fallback:
+                tries = min(tries, 2)
             note = ""
             for t in range(tries):
                 attempts += 1
@@ -1286,12 +1318,23 @@ class DecisionPhase:
             # 主模型整轮（含重试）都没成，才记账；fallback 失败不再加计
             if kind == "main":
                 self._fail_streak += 1
-                if self._fail_streak >= max(1, opt.fail_switch):
+                if bool(opt.fail_switch) and self._fail_streak >= 2:
                     self._fallback_until = time.time() + opt.cooldown
         last.update(budget)
         return last
 
     # ---------- 对外入口 ----------
+    async def one_shot(self, messages, client=None, model: str = "",
+                       timeout: float = 120.0) -> dict:
+        """发一次纯对话请求（回复页的「测试」按钮用，用户 m01977）。
+
+        跟决策链共用 _one_call，所以 token / 模型身份 / reasoning 的口径一致。
+        """
+        if client is None:
+            client = self._client_for(model)
+        if client is None:
+            return {"ok": False, "error": "取不到模型客户端"}
+        return await self._one_call(client, messages, [], timeout)
 
     async def decide(self, sid: str, messages, opt: DecisionOptions,
                      identity: str = "", images=None) -> dict:
@@ -1384,6 +1427,8 @@ class DecisionPhase:
             "reason": (parsed or {}).get("reason", ""),
             "say": (parsed or {}).get("say", ""),
             "raw": str(got.get("text") or "")[:4000],
+            # 用户 m01977：思考过程跟着结果一起回给页面（测试窗里显示）。
+            "reasoning": str(got.get("reasoning") or ""),
             "error": str(got.get("error") or ""),
             "model": str(got.get("model") or ""),
             "via": str(got.get("via") or ""),

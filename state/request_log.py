@@ -643,6 +643,18 @@ def _est_mid_of(text: str) -> str:
     return match.group(1) or match.group(2) or ""
 
 
+def _common_prefix_len(a: str, b: str) -> int:
+    """公共前缀长度。二分 + 切片比较，比逐字符循环快一个量级。"""
+    lo, hi = 0, min(len(a), len(b))
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if a[:mid] == b[:mid]:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
 def _token_share_estimate(series: list, data: dict) -> tuple:
     """这一轮大概能命中多少 token（百分比）；返回 (值, 依据)，算不出来时值给 None。"""
     try:
@@ -772,6 +784,11 @@ class RequestLog:
         # (sid, event_id) -> 落盘文件名。重试成功要把结果补写回「原错误那一轮」的
         # 记录，得先能按事件号找回那份文件；重启后索引是空的，_find_name 兜底扫盘。
         self._names: dict[tuple[str, str], str] = {}
+        # 用户 m26664：事件号 → 文件名 的整目录索引（每个 sid 一份，只补新文件）。
+        # 以前 name_of 找不到就按 event_id 从最新往回扫 300 份 JSON（每份 120 KB，一次 1.1 秒），
+        # 而重试链的根轮常常早被轮转掉了，扫完还是找不到、也不缓存，于是每次请求都白扫一遍
+        # ——列表里三行重试就是 3.7 秒。现在整目录扫一次建索引，之后只解析比上次更新的文件。
+        self._name_idx: dict[str, dict] = {}
         # v4.88：快照分类（reply / trim / decision）的记忆表。
         # 以前每次 _prune 都把目录里每份快照整份读一遍找标记，线上 474 份 / 42 MB，
         # 实测冷读 3.6 秒、热读 0.8 秒，而每落一份快照都要跑一次 _prune。
@@ -797,6 +814,12 @@ class RequestLog:
         # v4.80（2026-11-07 性能）：轻量行缓存，按 (文件名, mtime_ns, size) 命中。
         # 决策快照保留加深到 300 份后目录有六百来份文件，轮询只该解析新落的那一份。
         self._light_cache: dict[str, dict[tuple, dict]] = {}
+        # v5.x（用户 m26664 性能）：重摘要行也按 (文件名, mtime_ns, size) 增量缓存。
+        # 回复记录页每 5 秒轮询一次全量列表，以前每落一份新快照就要把整批
+        # （最多 1000 份 / 几十 MB）重新解析、重算前缀与 token 估算，页面就卡在
+        # 「点开要加载好一会、新回复要等好一会才出来」。现在只算新落的那一份。
+        self._rounds_row_cache: dict[str, dict[tuple, dict]] = {}
+        self._rounds_meta_cache: dict[str, dict[tuple, dict]] = {}
         # prefix-v2 按同类请求的记录投影比较连续前缀，不跨模型推断缓存共享。
         # (sid, "decision") 只跟上一次决策比，(sid, "reply") 只跟上一次回复请求比。
         self._prev_cache: dict[tuple[str, str], tuple] = {}
@@ -2110,7 +2133,9 @@ class RequestLog:
             head = part.strip().splitlines()[0] if part.strip() else ""
             head = head.strip("【】 ").strip()
             names.append(head or "提示词")
-        system_text = "\n\n".join(parts)
+        # 用户 m26166：决策侧真发出去的 system 是 _render 里逐段 rstrip 后拼的（compiled["system"]），
+        # 这里以前直接 "\n\n".join 原始段，段尾自带的换行就多出一个空行，记录页看着像模块间空了两行。
+        system_text = "\n\n".join(p.rstrip() for p in parts)
         transcript = str(data.get("transcript") or "")
         # 用户 m06046 图3：决策请求真正的 user 内容是「聊天记录 + 末尾动态段」。
         # 以前这里只写 transcript，页面上永远看不到动态段，看着像「开了也没注入」。
@@ -2539,26 +2564,43 @@ class RequestLog:
         cached = self._names.get((sid, event_id))
         if cached and (self.dir / _safe_sid(sid) / cached).is_file():
             return cached
-        found = self._find_name(sid, event_id)
+        found = self._name_index(sid).get(event_id, "")
         if found:
             self._names[(sid, event_id)] = found
         return found
 
-    def _find_name(self, sid: str, event_id: str, scan: int = 300) -> str:
-        """索引是内存里的，重启后为空，从最近的文件往回扫一遍补上。"""
+    def _name_index(self, sid: str) -> dict:
+        """事件号 → 文件名 的整目录索引（用户 m26664：记录页慢）。
+
+        只解析「比上次见过的最新文件还新」的那些，所以第一次建索引要读整个目录，
+        之后每来一份新记录只多读一份。目录被清空或轮转时旧条目留着也无害——
+        name_of 命中后还会 stat 一次，文件没了就当没找到。
+        """
         folder = self.dir / _safe_sid(sid)
+        slot = self._name_idx.get(sid)
+        if slot is None:
+            slot = self._name_idx[sid] = {"map": {}, "newest": ""}
         try:
-            files = sorted(folder.glob("*.json"), reverse=True)[: max(1, int(scan))]
+            names = sorted((p.name for p in folder.glob("*.json")), reverse=True)
         except Exception:
-            return ""
-        for path in files:
+            return slot["map"]
+        newest = slot["newest"]
+        todo = [n for n in names if n > newest] if newest else names
+        for name in todo:
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                data = json.loads((folder / name).read_bytes())
             except Exception:
                 continue
-            if str(data.get("event_id") or "") == event_id:
-                return path.name
-        return ""
+            event_id = str(data.get("event_id") or "")
+            if event_id:
+                slot["map"][event_id] = name
+        if names:
+            slot["newest"] = names[0]
+        return slot["map"]
+
+    def _find_name(self, sid: str, event_id: str, scan: int = 300) -> str:
+        """按事件号找文件名（用户 m26664：改走整目录索引，scan 只为兼容旧调用）。"""
+        return str(self._name_index(sid).get(str(event_id or ""), ""))
 
     # 注意：请求记录一律只读。原错误轮那份文件停在 failed 那一刻是**证据**，
     # 不能被后来的重试改写（v3.04 契约 test_original_message_and_request_files_remain_unchanged）。
@@ -2579,6 +2621,7 @@ class RequestLog:
             return 0
         for key in [k for k in self._names if k[0] == sid]:
             self._names.pop(key, None)
+        self._name_idx.pop(sid, None)
         try:
             n = len(list(folder.iterdir()))
             shutil.rmtree(folder)
@@ -3042,104 +3085,148 @@ class RequestLog:
             "reply_unwrapped": _unwrapped_reply(data.get("trace")),
         }
     def list_rounds(self, sid: str, limit: int = 20) -> list:
-        """列出某会话最近几轮的摘要（不含完整消息，避免一次传太大）。"""
+        """列出某会话最近几轮的摘要（不含完整消息，避免一次传太大）。
+
+        v5.x（用户 m26664 性能）：按 (文件名, mtime_ns, size) 增量缓存每一行的
+        计算结果。以前每落一份新快照，整批（最多 1000 份）都要重新解析、重算
+        前缀与 token 估算——回复记录页每 5 秒轮询一次，等于每 5 秒重读几十 MB，
+        页面就「点开要加载好一会、新回复要等好一会才出来」。现在只有新落的那
+        一份要算，其余直接复用上次算好的行。
+        """
         try:
             limit = max(1, min(int(limit or 20), 1000))
         except (TypeError, ValueError):
             limit = 20
         folder = self.dir / _safe_sid(sid)
         try:
-            # 多读一轮，为本页最老记录也提供同会话上一轮的字符前缀比较。
-            files = sorted(folder.glob("*.json"), reverse=True)[: limit + 1]
+            entries = []
+            for ent in os.scandir(folder):
+                if not ent.name.endswith(".json"):
+                    continue
+                try:
+                    st = ent.stat()
+                except OSError:
+                    continue
+                entries.append((ent.name, st.st_mtime_ns, st.st_size))
         except Exception:
             return []
-        records = []
-        for path in files:
-            try:
-                records.append((path, json.loads(path.read_text(encoding="utf-8"))))
-            except Exception:
-                continue
-
-        def _flat(rec: dict) -> str:
-            """序列化记录中的消息投影；不是 provider wire，也不是 token 序列。"""
-            return _flat_of(rec)
-
-        def _prefix(a: str, b: str) -> int:
-            """公共前缀长度。二分 + 切片比较，比逐字符循环快一个量级。"""
-            lo, hi = 0, min(len(a), len(b))
-            while lo < hi:
-                mid = (lo + hi + 1) // 2
-                if a[:mid] == b[:mid]:
-                    lo = mid
-                else:
-                    hi = mid - 1
-            return lo
-
-        out = []
-        for idx, (path, data) in enumerate(records):
-            if len(out) >= limit:
-                break
-            # 老记录里没存 payload_bytes（v2.91 之前），用当时的 assembled 现算一份，
-            # 不然整张表的老行体积列全是「—」
-            pbytes = data.get("payload_bytes") or 0
-            if not pbytes:
+        entries.sort(key=lambda x: x[0], reverse=True)
+        # 多读一轮，为本页最老记录也提供同会话上一轮的字符前缀比较。
+        entries = entries[: limit + 1]
+        cache = self._rounds_row_cache.setdefault(sid, {})
+        metas = self._rounds_meta_cache.setdefault(sid, {})
+        rows: list = [None] * len(entries)
+        # 从最老往新算：每行都要拿「上一轮」的投影做前缀比较，倒着走时上一轮
+        # （更老的那份）已经算完，不必为了比较再解析一遍。
+        for idx in range(len(entries) - 1, -1, -1):
+            name, mtime_ns, size = entries[idx]
+            key = (name, mtime_ns, size)
+            row = cache.get(key)
+            if row is not None:
+                # 窗口变深了：这一行当初在窗口末尾、没得比，现在后面有上一轮了，
+                # 得重算一次（否则命中预估永远停在「—」）。
+                meta = metas.get(key)
+                if meta is not None and not meta.get("same") and idx + 1 < len(entries):
+                    row = None
+            if row is None:
                 try:
-                    pbytes = len(
-                        json.dumps(
-                            data.get("assembled") or data.get("messages") or [],
-                            ensure_ascii=False,
-                        ).encode("utf-8")
-                    )
+                    # 用户 m26664：直接喂字节给 json，省掉一次整份解码（实测快一倍）。
+                    data = json.loads((folder / name).read_bytes())
                 except Exception:
-                    pbytes = 0
-            # JSON 字符前缀复用率仅诊断消息投影的稳定性，不预测缓存 token。
-            # 字符密度、provider 包装/工具、图片编码及缓存块粒度均不在该分母里。
-            est = None
-            prefix_chars = total_chars = 0
-            prefix_tokens = total_tokens = 0
-            previous_name = ""
-            gap_seconds = None
-            # v4.87（用户 m13442 第 2 条）：完整 prompt 的 token 估计，每一份都要，
-            # 不依赖有没有上一轮——最后一份记录也要能反推命中。
-            cur_flat = _flat(data)
-            prompt_tokens_est = _prompt_tokens_est(data, cur_flat)
-            # v5.x（用户 m12441）：token 份额口径的命中预估，分子是消息指纹公共前缀。
-            token_est, token_basis = _token_share_estimate(self._series_of(data), data)
-            if idx + 1 < len(records):
-                # v4.25（用户 m22166）：命中预估只跟**同类**的上一份比。
-                # 回复轮与决策轮的 assembled 结构完全不同（一个是 messages、
-                # 一个是 transcript），拿上一份文件不分类地比，前缀会整段断掉，
-                # 页面上的命中预估就常年是 0 或个位数，跟实测差几十个点。
-                cur_oc = _outcome_of(data)
-                prev_path = prev_data = None
-                for _k in range(idx + 1, len(records)):
-                    if _outcome_of(records[_k][1]) == cur_oc:
-                        prev_path, prev_data = records[_k]
-                        break
-                if prev_path is None:
-                    prev_path, prev_data = records[idx + 1]
-                if cur_flat:
-                    total_chars = len(cur_flat)
-                    prefix_chars = _prefix(cur_flat, _flat(prev_data))
-                    previous_name = prev_path.name
-                    # 距上一轮的间隔：provider 的 KV 缓存会过期，隔太久前缀再稳也命中不了
-                    try:
-                        gap_seconds = int((data.get("ts") or 0) - (prev_data.get("ts") or 0))
-                    except (TypeError, ValueError):
-                        gap_seconds = None
-                    est = round(prefix_chars * 100.0 / total_chars, 1)
-                    # v3.19：字符比例会被「中文/英文/JSON 结构」的比例带偏，
-                    # 换算成近似 token 再当分子，跟真实 input_tokens 才有可比性。
-                    total_tokens = _approx_tokens(cur_flat)
-                    prefix_tokens = _approx_tokens(cur_flat[:prefix_chars])
-            out.append(self._row_of(
-                path, data, pbytes=pbytes, est=est, prefix_chars=prefix_chars,
-                total_chars=total_chars, prefix_tokens=prefix_tokens,
-                total_tokens=total_tokens, previous_name=previous_name,
-                gap_seconds=gap_seconds, prompt_tokens_est=prompt_tokens_est,
-                token_est=token_est, token_basis=token_basis,
-            ))
-        return out
+                    continue
+                row = self._round_row(folder, folder / name, data, entries, idx, metas)
+                cache[key] = row
+            rows[idx] = row
+        out = [r for r in rows if r is not None][:limit]
+        # 被裁掉的旧文件不再占内存（留一点余量，别每轮都重建字典）。
+        if len(cache) > len(entries) * 2 + 50:
+            alive = {(n, m, z) for n, m, z in entries}
+            self._rounds_row_cache[sid] = {k: v for k, v in cache.items() if k in alive}
+            self._rounds_meta_cache[sid] = {k: v for k, v in metas.items() if k in alive}
+        return [dict(x) for x in out]
+
+    def _round_row(self, folder, path, data: dict, entries: list, idx: int,
+                   metas: dict) -> dict:
+        """算一行「重摘要」（带前缀复用与命中预估）。
+
+        entries 是从新到旧的 (文件名, mtime_ns, size)，idx 是本行位置，上一轮在
+        更老的那一侧。算完顺手把本行的投影与 outcome 记进 metas，给更新的一行用。
+        """
+        name, mtime_ns, size = entries[idx]
+        cur_outcome = _outcome_of(data)
+        pbytes = data.get("payload_bytes") or 0
+        if not pbytes:
+            try:
+                pbytes = len(
+                    json.dumps(
+                        data.get("assembled") or data.get("messages") or [],
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                )
+            except Exception:
+                pbytes = 0
+        est = None
+        prefix_chars = total_chars = 0
+        prefix_tokens = total_tokens = 0
+        previous_name = ""
+        gap_seconds = None
+        cur_flat = _flat_of(data)
+        prev = self._prev_meta(folder, entries, idx, metas, cur_outcome)
+        metas[(name, mtime_ns, size)] = {
+            "flat": cur_flat,
+            "ts": data.get("ts") or 0,
+            "outcome": cur_outcome,
+            # 有没有找到「同类」的上一轮。只找到兜底那一份时，窗口一变深就可能
+            # 冒出真正的同类，所以这种行下次要重算。
+            "same": prev is not None and prev[1].get("outcome") == cur_outcome,
+        }
+        prompt_tokens_est = _prompt_tokens_est(data, cur_flat)
+        token_est, token_basis = _token_share_estimate(self._series_of(data), data)
+        if prev is not None:
+            prev_name, prev_meta = prev
+            if cur_flat:
+                total_chars = len(cur_flat)
+                prefix_chars = _common_prefix_len(cur_flat, prev_meta.get("flat") or "")
+                previous_name = prev_name
+                try:
+                    gap_seconds = int((data.get("ts") or 0) - (prev_meta.get("ts") or 0))
+                except (TypeError, ValueError):
+                    gap_seconds = None
+                est = round(prefix_chars * 100.0 / total_chars, 1)
+                total_tokens = _approx_tokens(cur_flat)
+                prefix_tokens = _approx_tokens(cur_flat[:prefix_chars])
+        return self._row_of(
+            path, data, pbytes=pbytes, est=est, prefix_chars=prefix_chars,
+            total_chars=total_chars, prefix_tokens=prefix_tokens,
+            total_tokens=total_tokens, previous_name=previous_name,
+            gap_seconds=gap_seconds, prompt_tokens_est=prompt_tokens_est,
+            token_est=token_est, token_basis=token_basis,
+        )
+
+    def _prev_meta(self, folder, entries: list, idx: int, metas: dict,
+                   cur_outcome: str):
+        """上一轮（更老那一侧第一份同 outcome 的记录）的 (文件名, meta)。
+
+        找不到同类就退回紧挨着的那一份，跟以前 records[idx + 1] 的口径一致。
+        """
+        fallback = None
+        for k in range(idx + 1, len(entries)):
+            name, mtime_ns, size = entries[k]
+            key = (name, mtime_ns, size)
+            meta = metas.get(key)
+            if meta is None:
+                try:
+                    data = json.loads((folder / name).read_bytes())
+                except Exception:
+                    continue
+                meta = {"flat": _flat_of(data), "ts": data.get("ts") or 0,
+                        "outcome": _outcome_of(data)}
+                metas[key] = meta
+            if fallback is None:
+                fallback = (name, meta)
+            if meta.get("outcome") == cur_outcome:
+                return (name, meta)
+        return fallback
 
     def _rounds_sig(self, sid: str) -> tuple:
         """目录指纹：文件数 + 最新修改时间（纳秒）。用来判断摘要缓存要不要重算。"""
@@ -3281,6 +3368,7 @@ class RequestLog:
                 self._pending.pop(key, None)
         for key in [k for k in self._names if k[0] == sid]:
             self._names.pop(key, None)
+        self._name_idx.pop(sid, None)
 
     def shutdown(self) -> None:
         self._pending.clear()

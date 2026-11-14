@@ -116,6 +116,10 @@ def trim_message_to(msg: Any, keep_n: int) -> Any:
     会少好几条。所以边界那条按 message_id 切开，只留最新的 keep_n 条。
     改不了（多模态 content、找不到切点）就返回 None，调用方退回「整条保留」。
     """
+    if keep_n <= 0:
+        # D05（2026-11-13 交接文档）：keep_n=0 时下面 positions[len-positions-0]
+        # 会越界抛 IndexError。当前唯一调用点有 room>=1 保护，这里只是兜住复用的人。
+        return None
     content = _get(msg, "content")
     if not isinstance(content, str):
         return None
