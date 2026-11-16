@@ -63,10 +63,11 @@ def _clean_peak(value: Any) -> dict:
     """峰价显式扩展；多段列表权威，空价继承，0 是免费。"""
     if not isinstance(value, dict):
         raise ValueError("高峰设置必须是一组完整设置")
+    # 用户 m23442：周末默认按高峰算（不是谷价），所以 weekends 的缺省值是 True。
     out = {"enabled": False, "in": None, "out": None, "cache": None,
-           "start": "", "end": "", "weekends": False}
+           "start": "", "end": "", "weekends": True}
     for key in ("enabled", "weekends"):
-        item = value.get(key, False)
+        item = value.get(key, True if key == "weekends" else False)
         if not isinstance(item, bool):
             raise ValueError("高峰与周末开关必须是开启或关闭")
         out[key] = item
@@ -184,6 +185,11 @@ class Pricing:
                             # 旧价目文件没有 cache 字段：当 0，等于「没填缓存价」
                             "cache": _as_price(item.get("cache")),
                         }
+                        # 用户 m20332：框架不回报 provider 的模型（gemini-3.8-flash-high
+                        # 之类）渠道一直是空的，价目表里手填一个覆盖值，优先于账本和配置。
+                        _prov = str(item.get("provider") or "").strip()[:60]
+                        if _prov:
+                            models[key]["provider"] = _prov
                         if item.get("peak") is not None:
                             try:
                                 models[key]["peak"] = _clean_peak(item["peak"])
@@ -255,6 +261,7 @@ class Pricing:
         """整表保存；旧客户端省略 peak 时保留扩展，显式 null 才清除。"""
         clean: Dict[str, dict] = {}
         provided = set()
+        provided_prov = set()
         if isinstance(models, dict):
             for name, item in models.items():
                 key = str(name or "").strip()[:120]
@@ -264,6 +271,13 @@ class Pricing:
                 clean[key] = {"in": _as_price(row.get("in")),
                               "out": _as_price(row.get("out")),
                               "cache": _as_price(row.get("cache"))}
+                # 用户 m20332：手填的渠道跟着价目一起存；旧客户端不传这个键时
+                # 下面按 previous 补回旧值，不能因为一次保存就把渠道抹掉。
+                if "provider" in row:
+                    provided_prov.add(key)
+                    _prov = str(row.get("provider") or "").strip()[:60]
+                    if _prov:
+                        clean[key]["provider"] = _prov
                 if "peak" in row:
                     provided.add(key)
                     if row["peak"] is not None:
@@ -271,6 +285,10 @@ class Pricing:
         with self._lock:
             previous = self._read()
             for key in clean:
+                if key not in provided_prov:
+                    old_prov = previous.get(key, {}).get("provider")
+                    if old_prov:
+                        clean[key]["provider"] = old_prov
                 old_peak = previous.get(key, {}).get("peak")
                 if key not in provided and old_peak is not None:
                     clean[key]["peak"] = copy.deepcopy(old_peak)
@@ -304,6 +322,13 @@ class Pricing:
         def _kind_bucket(kind: str) -> Dict[str, Any]:
             return by_kind.setdefault(str(kind or "reply"), {
                 "cost": 0.0, "input": 0, "output": 0, "cached": 0, "calls": 0})
+        # 用户 m21592：柱顶要写「决策 / JEV 决策 / 回复」各花了多少，光有 kind 分不开
+        # JEV（JEV 也是一种 decision），所以再按事件上的 mode 记一份。
+        by_mode: Dict[str, Dict[str, Any]] = {}
+
+        def _mode_bucket(mode: str) -> Dict[str, Any]:
+            return by_mode.setdefault(str(mode), {
+                "cost": 0.0, "input": 0, "output": 0, "cached": 0, "calls": 0, "priced": False})
         for name, bucket in stats.items():
             if str(name) in gone or not isinstance(bucket, dict):
                 continue
@@ -352,6 +377,15 @@ class Pricing:
                 kb["cached"] += c
                 kb["calls"] += 1
                 part_kinds[str(event.get("kind") or "reply")] = part_kinds.get(str(event.get("kind") or "reply"), 0.0) + cost
+                _mode = str(event.get("mode") or "").strip().lower()
+                if _mode:
+                    mbm = _mode_bucket(_mode)
+                    mbm["priced"] = bool(mbm.get("priced")) or not is_unset
+                    mbm["cost"] += cost
+                    mbm["input"] += a
+                    mbm["output"] += b
+                    mbm["cached"] += c
+                    mbm["calls"] += 1
                 if is_peak:
                     peak_cost += cost
                 else:
@@ -377,9 +411,12 @@ class Pricing:
         kinds_out = {k: {"total": round(v["cost"], 4), "input": v["input"], "output": v["output"],
                         "cached": v["cached"], "calls": v["calls"],
                         "priced": bool(v.get("priced"))} for k, v in by_kind.items()}
+        modes_out = {k: {"total": round(v["cost"], 4), "input": v["input"], "output": v["output"],
+                        "cached": v["cached"], "calls": v["calls"],
+                        "priced": bool(v.get("priced"))} for k, v in by_mode.items()}
         return {"total": round(total, 4), "currency": _CURRENCY, "unit": PRICE_UNIT,
                 "priced": any(p["priced"] for p in parts), "parts": parts,
-                "by_kind": kinds_out,
+                "by_kind": kinds_out, "by_mode": modes_out,
                 "unpriced": [], "unset": unset, "normal_cost": round(normal_total, 4),
                 "peak_cost": round(peak_total, 4), "approximate": bool(any_approximate),
                 "unknown_time": bool(any_unknown)}

@@ -13,6 +13,7 @@ json 里，出问题能直接摊开看，不用再靠猜。
 
 from __future__ import annotations
 
+import bisect
 import copy
 import hashlib
 import json
@@ -20,6 +21,7 @@ import math
 import os
 import re
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -40,7 +42,9 @@ MODEL_UNKNOWN = "未记录模型"
 # v3.47（用户 2026-10-24 第 3/4 条）：24 小时 token/用时的账本只保留这么多天。
 # traces 每个会话只留 keep 份（默认 60），账本是另一份流水、不受 keep 影响，
 # 只按时间滚动清理，重写时原子替换。
-LEDGER_KEEP_DAYS = 30
+# 用户 m20332：用量数据要永久记录，所以默认 0 = 不删，只把往月的行按月挪进
+# stats/archive/tokens-YYYY-MM.jsonl（见 _rotate_ledger）；填正数才退回旧的按天清理。
+LEDGER_KEEP_DAYS = 0
 
 
 def _as_int(value) -> int:
@@ -60,6 +64,87 @@ def _blank_kind() -> dict:
     return {"rounds": 0, "calls": 0, "input": 0, "output": 0, "cached": 0,
             "cache_hit": None, "elapsed_sum": 0.0, "elapsed_rounds": 0, "avg_elapsed": None}
 
+
+def _blank_totals() -> dict:
+    """一轮统计的空白桶：字段与 recent_totals 的返回一致（分桶统计复用同一套累加）。"""
+    return {"input": 0, "output": 0, "cached": 0, "total": 0, "rounds": 0,
+            "cache_hit": None, "avg_elapsed": None, "elapsed_rounds": 0, "models": {},
+            "decision_rounds": 0, "reply_rounds": 0, "calls": 0,
+            # modes 是「决策再细分」的桶（用户 m21274：图上要按 决策 / JEV 决策 / 回复
+            # 分开画柱）。key 是账本行里的 mode 字段，没记就不建桶，老数据照旧全算普通决策。
+            "modes": {},
+            "kinds": {"reply": _blank_kind(), "decision": _blank_kind()}}
+
+
+def _finish_totals(out: dict) -> dict:
+    """收尾：总量、命中率、分 kind 的命中率与平均用时（口径与 recent_totals 一致）。"""
+    out["total"] = out["input"] + out["output"]
+    if out["input"]:
+        out["cache_hit"] = round(out["cached"] * 100.0 / out["input"], 1)
+    _finish_kinds(out)
+    return out
+
+
+def _bucket_starts(kind: str, span: int) -> List[datetime]:
+    """从当前这一桶往前数 span 个桶的起点（本地时间，按日历切，不是滚动窗口）。
+
+    用户 m19436：「不看最近，就是按日历来」——日 = 当天 00:00，周 = 周一 00:00，
+    月 = 1 号 00:00，所以 11 月 16 日看到的「按周」最后一根是 11 月 10 日那一周。
+    """
+    now = datetime.now()
+    if kind == "week":
+        cur = datetime(now.year, now.month, now.day) - timedelta(days=now.weekday())
+        return [cur - timedelta(weeks=i) for i in range(span - 1, -1, -1)]
+    if kind == "month":
+        out: List[datetime] = []
+        year, month = now.year, now.month
+        for _ in range(span):
+            out.append(datetime(year, month, 1))
+            month -= 1
+            if month == 0:
+                year, month = year - 1, 12
+        out.reverse()
+        return out
+    cur = datetime(now.year, now.month, now.day)
+    return [cur - timedelta(days=i) for i in range(span - 1, -1, -1)]
+
+
+def _bucket_next(kind: str, start: datetime) -> datetime:
+    """这一桶的右边界（也就是下一桶的起点）。"""
+    if kind == "week":
+        return start + timedelta(weeks=1)
+    if kind == "month":
+        year, month = start.year, start.month + 1
+        if month > 12:
+            year, month = year + 1, 1
+        return datetime(year, month, 1)
+    return start + timedelta(days=1)
+
+
+def _bucket_label(kind: str, start: datetime) -> str:
+    """图上那根柱子下面写什么：日 / 周写「月-日」，月写「N月」。"""
+    if kind == "month":
+        return "%d月" % start.month
+    return "%02d-%02d" % (start.month, start.day)
+
+
+def _range_starts(range_key: str) -> List[datetime]:
+    """价目页图表的一段自然日（用户 m19975：七天 / 本月 / 上月，默认本月）。
+
+    本月 = 1 号到今天，未来的日子不算进来（16 号看到的就是 1 号到 16 号）；
+    上月 = 上个月 1 号到月底；七天 = 含今天在内往前数 7 天。
+    """
+    now = datetime.now()
+    today = datetime(now.year, now.month, now.day)
+    key = str(range_key or "month").strip().lower()
+    if key in ("7d", "seven"):
+        return [today - timedelta(days=i) for i in range(6, -1, -1)]
+    if key in ("lastmonth", "last_month", "prev"):
+        last = datetime(now.year, now.month, 1) - timedelta(days=1)
+        first = datetime(last.year, last.month, 1)
+        return [first + timedelta(days=i) for i in range((last - first).days + 1)]
+    first = datetime(now.year, now.month, 1)
+    return [first + timedelta(days=i) for i in range((today - first).days + 1)]
 
 # ---------------------------------------------------------------- prompt 估算
 
@@ -591,6 +676,8 @@ class Tracer:
         # 账本跟 traces/ 并列放在 stats/ 下：<data>/stats/tokens.jsonl。
         self.ledger = self._data_dir / "stats" / "tokens.jsonl"
         self._ledger_cache: Optional[tuple] = None
+        # 用户 m20332：往月的行按月归档到 stats/archive/，每个文件按 mtime+大小缓存一份。
+        self._archive_cache: Dict[str, tuple] = {}
         self._ledger_trim_at = 0.0
         self._cfg_path: Optional[Path] = None
         self._cfg_mtime: Optional[float] = None
@@ -629,7 +716,7 @@ class Tracer:
 
     def begin(self, event: Any, request: Any, trigger_at: float = 0.0,
               debounce: float = 0.0, decision: float = 0.0,
-              model_hint: str = "") -> Optional[dict]:
+              model_hint: str = "", mode: str = "") -> Optional[dict]:
         """开始记一轮。
 
         trigger_at 是这一轮「被点起来」的墙钟（v3.51，用户 m07385 第 7 条）：
@@ -659,6 +746,9 @@ class Tracer:
             # 这一份 rec 里只留「请求本身」的耗时；老记录没有这两个值就退回老算法。
             "debounce_fixed": float(debounce or 0.0),
             "decision_elapsed": float(decision or 0.0),
+            # 用户 m21274：这一轮走的是普通决策还是 JEV 决策（回复轮留空），
+            # 账本里单独存一个 mode，价目页才能按功能分开画柱。
+            "mode": str(mode or "").strip().lower(),
             # v3.63（用户 m18492 第 9 条）：轨迹里不再抄任何请求内容。
             # 请求快照（requests/<sid>/<ts>.json）已经有 messages/sections/原文，
             # 页面 ④ 轨迹只读 steps/tools/totals，这一份是纯重复写入。
@@ -998,6 +1088,7 @@ class Tracer:
         totals = rec.get("totals") or {}
         row = {**usage_identity(rec), "ts": _number(rec.get("ended") or rec.get("started")),
                "sid": normalize_sid(str(rec.get("sid") or "")), "kind": self._kind(rec),
+               "mode": str(rec.get("mode") or "").strip().lower(),
                "event_id": str(rec.get("event_id") or ""), "key": self._ledger_key(rec),
                "input": totals.get("input_tokens"), "output": totals.get("output_tokens"),
                "cached": totals.get("cached_tokens"), "elapsed": rec.get("elapsed"),
@@ -1133,9 +1224,14 @@ class Tracer:
         stamp = _number(rec.get("ts"))
         event_id = "dec-%d" % int(stamp * 1000)
         usage = [usage_event(item) for item in rec.get("usage", []) if isinstance(item, dict)]
+        # 用户 m30734：账本行要带上这一轮走的是普通决策还是 JEV 决策，价目页才能把
+        # JEV 的 token 单独画一根柱子。以前这里没写 mode，所有决策都算成普通决策，
+        # 于是「明明用了 JEV，图上却没有 JEV 柱」。
+        mode = str(rec.get("decision_mode") or "").strip().lower()
         trace = {**usage_identity(rec), "sid": normalize_sid(sid), "kind": "decision",
                  "event_id": event_id, "started": stamp, "ended": stamp,
                  "elapsed": rec.get("elapsed"),
+                 "mode": ("jev" if mode == "jev" else ""),
                  "totals": {key: rec.get(key, 0) for key in ("input_tokens", "output_tokens", "cached_tokens")}}
         if "usage" in rec:
             trace["usage"] = usage
@@ -1186,7 +1282,12 @@ class Tracer:
                 pass
 
     def _trim_ledger(self) -> None:
-        """账本按时间滚动清理：只留最近 LEDGER_KEEP_DAYS 天，别让它无限长。
+        """账本滚动：默认永久保留，只把往月的行挪进 stats/archive/。
+
+        用户 m20332：用量数据要永久记录，所以 LEDGER_KEEP_DAYS 默认 0（不删）。
+        但账本每追加一轮都要整份读一遍，全留在一个文件里会越来越慢，所以按月
+        归档：tokens.jsonl 只放本月，往月的行追加到 archive/tokens-YYYY-MM.jsonl。
+        LEDGER_KEEP_DAYS > 0 时退回旧的「只留最近 N 天」行为（连归档一起清）。
 
         清理要把整份文件重写一遍，所以最多每小时一次，不跟着每轮追加都跑。
         """
@@ -1197,68 +1298,173 @@ class Tracer:
         try:
             if not self.ledger.exists():
                 return
-            cutoff = now - LEDGER_KEEP_DAYS * 86400
-            keep: List[str] = []
-            dropped = 0
-            with self.ledger.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    text = line.strip()
-                    if not text:
-                        continue
-                    try:
-                        ts = float(json.loads(text).get("ts") or 0)
-                    except Exception:
-                        dropped += 1  # 坏行顺手扔掉
-                        continue
-                    if ts >= cutoff:
-                        keep.append(text)
-                    else:
-                        dropped += 1
-            if dropped:
-                self._rewrite_ledger(keep)
+            if LEDGER_KEEP_DAYS > 0:
+                self._trim_ledger_days(now)
+            else:
+                self._rotate_ledger(now)
         except Exception:
             logger.debug("[multi-decision] 清理 24 小时 token 账本失败", exc_info=True)
 
+    def _trim_ledger_days(self, now: float) -> None:
+        """旧行为：只留最近 LEDGER_KEEP_DAYS 天，归档里超期的也一起清掉。"""
+        cutoff = now - LEDGER_KEEP_DAYS * 86400
+        keep: List[str] = []
+        dropped = 0
+        with self.ledger.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    ts = float(json.loads(text).get("ts") or 0)
+                except Exception:
+                    dropped += 1  # 坏行顺手扔掉
+                    continue
+                if ts >= cutoff:
+                    keep.append(text)
+                else:
+                    dropped += 1
+        if dropped:
+            self._rewrite_ledger(keep)
+        for path in self._archive_files():
+            try:
+                rows: List[str] = []
+                gone = 0
+                with path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        text = line.strip()
+                        if not text:
+                            continue
+                        try:
+                            ts = float(json.loads(text).get("ts") or 0)
+                        except Exception:
+                            gone += 1
+                            continue
+                        if ts >= cutoff:
+                            rows.append(text)
+                        else:
+                            gone += 1
+                if gone:
+                    tmp = path.parent / (path.name + ".tmp")
+                    with tmp.open("w", encoding="utf-8") as fh:
+                        fh.write("".join(text + "\n" for text in rows))
+                    os.replace(tmp, path)
+                    self._archive_cache.pop(str(path), None)
+            except Exception:
+                logger.debug("[multi-decision] 清理归档账本失败", exc_info=True)
+
+    def _rotate_ledger(self, now: float) -> None:
+        """把上个月及更早的行挪进按月归档，tokens.jsonl 只留本月。"""
+        first = time.mktime(time.localtime(now)[:3] + (1, 0, 0, 0, 0, -1))
+        keep: List[str] = []
+        buckets: Dict[str, List[str]] = {}
+        moved = 0
+        dropped = 0
+        with self.ledger.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    ts = float(json.loads(text).get("ts") or 0)
+                except Exception:
+                    dropped += 1  # 坏行顺手扔掉
+                    continue
+                if ts >= first:
+                    keep.append(text)
+                    continue
+                key = time.strftime("%Y-%m", time.localtime(ts)) if ts > 0 else "unknown"
+                buckets.setdefault(key, []).append(text)
+                moved += 1
+        if not (moved or dropped):
+            return
+        if buckets:
+            folder = self.ledger.parent / "archive"
+            folder.mkdir(parents=True, exist_ok=True)
+            for key, rows in buckets.items():
+                path = folder / ("tokens-" + key + ".jsonl")
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write("".join(text + "\n" for text in rows))
+                self._archive_cache.pop(str(path), None)
+        self._rewrite_ledger(keep)
+
     def _drop_ledger_sid(self, sid: str) -> None:
-        """删掉某个会话在账本里的行：清空会话记录后，统计里不该还留着已删的轮。"""
+        """删掉某个会话在账本里的行：清空会话记录后，统计里不该还留着已删的轮。
+
+        用户 m20332：账本永久保留后往月的行在 stats/archive/ 里，归档也要一起清，
+        否则清完会话记录、翻到上个月统计里那些轮又冒出来。
+        """
+        sid = str(sid or "")
         try:
-            if not self.ledger.exists():
-                return
-            sid = str(sid or "")
-            keep: List[str] = []
-            dropped = 0
-            with self.ledger.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    text = line.strip()
-                    if not text:
-                        continue
-                    try:
-                        row = json.loads(text)
-                    except Exception:
-                        dropped += 1
-                        continue
-                    if str(row.get("sid") or "") == sid:
-                        dropped += 1
-                    else:
-                        keep.append(text)
-            if dropped:
-                self._rewrite_ledger(keep)
+            if self.ledger.exists():
+                keep: List[str] = []
+                dropped = 0
+                with self.ledger.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        text = line.strip()
+                        if not text:
+                            continue
+                        try:
+                            row = json.loads(text)
+                        except Exception:
+                            dropped += 1
+                            continue
+                        if str(row.get("sid") or "") == sid:
+                            dropped += 1
+                        else:
+                            keep.append(text)
+                if dropped:
+                    self._rewrite_ledger(keep)
         except Exception:
             logger.debug("[multi-decision] 清理账本里的会话行失败", exc_info=True)
+        for path in self._archive_files():
+            try:
+                rows: List[str] = []
+                gone = 0
+                with path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        text = line.strip()
+                        if not text:
+                            continue
+                        try:
+                            row = json.loads(text)
+                        except Exception:
+                            gone += 1
+                            continue
+                        if str(row.get("sid") or "") == sid:
+                            gone += 1
+                        else:
+                            rows.append(text)
+                if gone:
+                    tmp = path.parent / (path.name + ".tmp")
+                    with tmp.open("w", encoding="utf-8") as fh:
+                        fh.write("".join(text + "\n" for text in rows))
+                    os.replace(tmp, path)
+                    self._archive_cache.pop(str(path), None)
+            except Exception:
+                logger.debug("[multi-decision] 清理归档账本里的会话行失败", exc_info=True)
 
-    def _ledger_rows(self) -> List[dict]:
-        """读账本里的全部行（按 mtime + 大小缓存，追加/清理后置空）。"""
+    def _archive_files(self) -> List[Path]:
+        """往月归档的账本文件（stats/archive/tokens-YYYY-MM.jsonl），按月份升序。"""
+        folder = self.ledger.parent / "archive"
         try:
-            stat = self.ledger.stat()
+            return sorted(folder.glob("tokens-*.jsonl"))
+        except OSError:
+            return []
+
+    def _archive_rows(self, path: Path) -> List[dict]:
+        """读一个归档文件（按 mtime + 大小缓存；归档写完基本不再变，命中率很高）。"""
+        try:
+            stat = path.stat()
         except OSError:
             return []
         mark = (stat.st_mtime_ns, stat.st_size)
-        cached = self._ledger_cache
+        cached = self._archive_cache.get(str(path))
         if cached and cached[0] == mark:
             return cached[1]
         rows: List[dict] = []
         try:
-            with self.ledger.open("r", encoding="utf-8") as fh:
+            with path.open("r", encoding="utf-8") as fh:
                 for line in fh:
                     text = line.strip()
                     if not text:
@@ -1271,7 +1477,50 @@ class Tracer:
                         rows.append(row)
         except Exception:
             return rows
-        self._ledger_cache = (mark, rows)
+        self._archive_cache[str(path)] = (mark, rows)
+        return rows
+
+    def _ledger_rows(self, since: float = 0.0) -> List[dict]:
+        """读账本里的全部行（按 mtime + 大小缓存，追加/清理后置空）。
+
+        用户 m20332：账本改成永久保留后，往月的行按月挪进 stats/archive/，这里
+        要把归档一起读进来；since > 0 时只读「月份不早于 since」的归档，不然账本
+        越攒越多，每轮都要把几年的归档全解析一遍。
+        """
+        rows: List[dict] = []
+        try:
+            stat = self.ledger.stat()
+        except OSError:
+            stat = None
+        if stat is not None:
+            mark = (stat.st_mtime_ns, stat.st_size)
+            cached = self._ledger_cache
+            if cached and cached[0] == mark:
+                rows = list(cached[1])
+            else:
+                try:
+                    with self.ledger.open("r", encoding="utf-8") as fh:
+                        for line in fh:
+                            text = line.strip()
+                            if not text:
+                                continue
+                            try:
+                                row = json.loads(text)
+                            except Exception:
+                                continue
+                            if isinstance(row, dict):
+                                rows.append(row)
+                except Exception:
+                    return rows
+                self._ledger_cache = (mark, rows)
+                rows = list(rows)
+        month = time.strftime("%Y-%m", time.localtime(since)) if since > 0 else ""
+        for path in self._archive_files():
+            if month:
+                key = path.stem[len("tokens-"):] if path.stem.startswith("tokens-") else ""
+                if key and key < month:
+                    continue
+            rows.extend(self._archive_rows(path))
         return rows
 
     def _backfill_ledger(self) -> None:
@@ -1402,6 +1651,18 @@ class Tracer:
         kb["input"] += inp
         kb["output"] += outp
         kb["cached"] += cached
+        # 用户 m21274：JEV 也是一种决策，kind 还是 decision，只在 modes 里另存一份，
+        # 这样老口径（决策总量 = decision）不变，前端拿 decision - jev 就是普通决策。
+        mode = str(row.get("mode") or "").strip().lower()
+        if mode:
+            modes = out.setdefault("modes", {})
+            if not isinstance(modes, dict):
+                modes = out["modes"] = {}
+            mb = modes.setdefault(mode, _blank_kind())
+            mb["rounds"] += 1
+            mb["input"] += inp
+            mb["output"] += outp
+            mb["cached"] += cached
         participating = set()
         for item in usage:
             name = self._model_name(item.get("model"), memo)
@@ -1418,6 +1679,10 @@ class Tracer:
             kb["calls"] += 1
             # 打上 kind 再进模型桶：花费卡片要按回复 / 决策分开算钱（pricing.summarize 读这个字段）。
             item["kind"] = kind
+            if mode:
+                # 用户 m21592：柱顶要按「决策 / JEV 决策 / 回复」分别写花费，
+                # 逐事件计价时得知道这次是不是 JEV，所以把 mode 也带上。
+                item["mode"] = mode
             bucket["usage"].append(copy.deepcopy(item))
             if name not in participating:
                 participating.add(name)
@@ -1437,7 +1702,7 @@ class Tracer:
             if _number(row.get("ts")) >= start:
                 snapshots.setdefault(self._row_key(row), row)
         seen = set()
-        for original in self._ledger_rows():
+        for original in self._ledger_rows(start):
             if _number(original.get("ts")) < start:
                 continue
             key = self._row_key(original)
@@ -1538,6 +1803,127 @@ class Tracer:
         _finish_kinds(out)
         self._recent_cache = (now, hours, _clone_totals(out))
         return _clone_totals(out)
+
+    # ------------------------------------------------------------ 分桶统计
+    def _totals_over(self, starts: List[datetime], kind: str = "day") -> dict:
+        """把每一行按桶边界累加一遍（bucket_totals / range_totals 共用）。"""
+        # 桶边界用 epoch 秒，bisect 找每一行落在哪一桶；最后一桶的右边界是下一桶的起点。
+        edges = [item.timestamp() for item in starts]
+        edges.append(_bucket_next(kind, starts[-1]).timestamp())
+        outs = [_blank_totals() for _ in starts]
+        all_out = _blank_totals()
+        memo: dict = {}
+        try:
+            rows = list(self._round_rows(edges[0]))
+            silent = self._silent_cache_models(rows)
+            for row in rows:
+                ts = _number(row.get("ts"))
+                if ts < edges[0]:
+                    continue
+                idx = bisect.bisect_right(edges, ts) - 1
+                if idx < 0 or idx >= len(outs):
+                    continue
+                self._add_round(outs[idx], row, memo, silent)
+                # 同一行再累加一次到总桶：_add_round 只往 out 里写、不改 row
+                # （usage 里的 kind 是幂等的），所以这里不用 deepcopy。
+                self._add_round(all_out, row, memo, silent)
+        except Exception:
+            logger.debug("[multi-decision] 分桶统计失败", exc_info=True)
+        buckets = []
+        for i, start in enumerate(starts):
+            buckets.append({
+                "key": start.strftime("%Y-%m-%d"),
+                "label": _bucket_label(kind, start),
+                "start": edges[i],
+                "end": edges[i + 1],
+                "totals": _finish_totals(outs[i]),
+            })
+        return {"count": len(starts), "start": edges[0],
+                "buckets": buckets, "all": _finish_totals(all_out)}
+
+    def bucket_totals(self, bucket: str = "day", count: int = 14) -> dict:
+        """按自然日 / 自然周 / 自然月分桶的 token 汇总（用户 m19357：价目页下面那两张图）。
+
+        桶边界按服务端本地时间切（用户 m19436：「不看最近，就是按日历来」）：
+        日 = 当天 00:00 起，周 = 周一 00:00 起，月 = 1 号 00:00 起。
+        没有用量的桶也照样返回（数字全 0），图上才不会缺一根柱子。
+        返回 {"bucket", "count", "start", "buckets": [{"key","label","start","end","totals"}], "all"}。
+        """
+        kind = str(bucket or "day").strip().lower()
+        if kind not in ("day", "week", "month"):
+            kind = "day"
+        try:
+            span = int(count)
+        except (TypeError, ValueError):
+            span = 0
+        if span <= 0:
+            span = {"day": 14, "week": 8, "month": 6}[kind]
+        span = max(1, min(60, span))
+        data = self._totals_over(_bucket_starts(kind, span), kind)
+        data["bucket"] = kind
+        return data
+
+    def range_totals(self, range_key: str = "month") -> dict:
+        """按日历切的一段自然日（用户 m19975：七天 / 本月 / 上月，默认本月）。
+
+        跟 bucket_totals 的区别是窗口不是「往前数 N 个桶」，而是自然月：
+        本月只算 1 号到今天（未来的日子不返回），上月是整月，七天是含今天往前 7 天。
+        """
+        key = str(range_key or "month").strip().lower()
+        if key == "week":
+            # 用户 m21274：再加一段「按周」——从本周一往前数 8 周，按真实日历切，
+            # 不是「最近 56 天」，每周一条，标签是那一周的周一。
+            data = self._totals_over(_bucket_starts("week", 8), "week")
+            data["range"] = key
+            return data
+        if key not in ("7d", "month", "lastmonth"):
+            key = "month"
+        data = self._totals_over(_range_starts(key), "day")
+        data["range"] = key
+        return data
+
+    def window_totals(self, start_day: str = "", end_day: str = "", days: int = 0) -> dict:
+        """任意一段自然日（用户 m23442：柱图默认 14 天、滚轮按天翻）。
+
+        start_day / end_day 是 YYYY-MM-DD 的本地日期，两端都算；给了 days 就按
+        「end_day 往前数 days 天」算（end_day 空 = 今天）。日期认不出来就退回最近
+        14 天；区间最长 62 天，超了从 end 往前截。
+        """
+        now = datetime.now()
+        today = datetime(now.year, now.month, now.day)
+
+        def _parse(txt):
+            s = str(txt or "").strip()
+            if not s:
+                return None
+            try:
+                parts = s.split("-")
+                return datetime(int(parts[0]), int(parts[1]), int(parts[2]))
+            except Exception:
+                return None
+
+        end = _parse(end_day) or today
+        if end > today:
+            end = today
+        start = _parse(start_day)
+        try:
+            span = int(days)
+        except (TypeError, ValueError):
+            span = 0
+        if span > 0:
+            start = end - timedelta(days=span - 1)
+        elif start is None:
+            start = end - timedelta(days=13)
+        if start > end:
+            start, end = end, start
+        if (end - start).days + 1 > 62:
+            start = end - timedelta(days=61)
+        starts = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+        data = self._totals_over(starts, "day")
+        data["range"] = "window"
+        data["start_day"] = start.strftime("%Y-%m-%d")
+        data["end_day"] = end.strftime("%Y-%m-%d")
+        return data
 
     def list_sessions(self) -> List[dict]:
         """有轨迹的会话（数据就在 requests/<sid>/ 的请求快照里）。"""

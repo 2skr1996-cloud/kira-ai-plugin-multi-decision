@@ -74,6 +74,7 @@ from .decision.forward_fetch import (
     fetch_forward_items,
     media_for_mid as forward_media_for_mid,
     media_db_clear as forward_media_clear,
+    media_db_gc as forward_media_gc,
     media_db_stats as forward_media_stats,
     set_display_proof_keep_days_fn as set_forward_proof_keep_days_fn,
     set_display_proof_keep_fn as set_forward_proof_keep_fn,
@@ -92,6 +93,7 @@ from .state.overrides import Overrides
 from .state.pricing import PRICE_UNIT, Pricing
 from .state.reply_prompt import PERSONA_NAME, ReplyPrompt, apply_reply_tools
 from .state.prompt_layout import PromptLayouts
+from .state.provider_bind import ProviderBindings
 from .state.request_log import RequestLog, payload_metrics
 from .state.retry_history import RetryHistory
 from .state.round_stats import merge_rounds
@@ -683,7 +685,8 @@ _BOUNDS = {
     "decision_tool_timeout": (0, 600),
     "decision_tool_output_tokens": (0, 200000),
     # 用户 m08153：三个「连续失败切换」从次数改成开关，阈值固定 2，不再有范围。
-    "decision_fallback_cooldown": (30, 3600),
+    # 用户 m10202：冷却改成按分钟填（界面 30 分钟 = 存盘 1800 秒），范围 1 分钟 ~ 24 小时。
+    "decision_fallback_cooldown": (60, 86400),
     # 回复链的次数 / 时间设置。
     "reply_tool_rounds": (1, 10),
     "reply_tool_calls_per_turn": (1, 20),
@@ -691,12 +694,12 @@ _BOUNDS = {
     "reply_tool_output_tokens": (0, 200000),
     # 用户 m06995 第 2 项：回复模型的切换阈值与冷却，范围跟决策那边一致。
     # 用户 m08153：reply_fail_switch 改成开关，不再走 _BOUNDS。
-    "reply_fallback_cooldown": (30, 3600),
+    "reply_fallback_cooldown": (60, 86400),
     # 用户 m06706：JEV 的不确定区间按「百分比」存（40 / 60），运行时再归一到 0~1。
     "jev_lower": (0, 100),
     "jev_upper": (0, 100),
     # 用户 m08153：jev_fail_switch 改成开关，不再走 _BOUNDS。
-    "jev_fallback_cooldown": (30, 3600),
+    "jev_fallback_cooldown": (60, 86400),
     "jitter_seconds": (0, None),
     "jitter_max_rounds": (1, 20),
     "burst_merge_seconds": (0, None),
@@ -1196,6 +1199,26 @@ def _install_agent_limit_patch() -> bool:
     return True
 
 
+def _remember_provider(store, keys, label: str, provider_id: str = "") -> None:
+    """把认出来的渠道名记到 model_providers.json（用户 m22269 第 3 条；失败不影响展示）。"""
+    if store is None or not label:
+        return
+    try:
+        store.remember(keys, label, provider_id=provider_id)
+    except Exception:
+        logger.exception("[multi-decision] 记录渠道绑定失败（忽略）")
+
+
+def _bound_provider(store, keys, provider_id: str = "") -> str:
+    """现读配置查不到渠道时的兜底：先按 provider_id，再按模型名/模型键。"""
+    if store is None:
+        return ""
+    try:
+        return store.lookup(keys, provider_id=provider_id)
+    except Exception:
+        return ""
+
+
 class MultiDecisionPlugin(BasePlugin):
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
@@ -1327,12 +1350,11 @@ class MultiDecisionPlugin(BasePlugin):
         self.reply_fallback_model = str(cfg.get("reply_fallback_model") or "")
         # 用户 m08153：连续失败切换改成开关（阈值固定 2），默认开。
         self.reply_fail_switch = _as_bool(cfg.get("reply_fail_switch"), True)
-        self.reply_fallback_cooldown = max(30, _as_int(cfg.get("reply_fallback_cooldown"), 300))
+        # 用户 m10202：冷却默认 30 分钟（存盘按秒，1800）。
+        self.reply_fallback_cooldown = max(60, _as_int(cfg.get("reply_fallback_cooldown"), 1800))
         self.reply_see_images = _as_bool(cfg.get("reply_see_images"), True)
-        # v4.85（用户 m10425 第 6 条）：JEV 那条链自己收不了图——decision 类模型只有
-        # choice()，没有图片入参；这个开关管的是「不确定 → 交给决策模型」那一次转交，
-        # 打开后转交的普通决策会带上这一轮的图。
-        self.jev_see_images = _as_bool(cfg.get("jev_see_images"), True)
+        # 用户 m09851：JEV 那个单独的「回退带图」开关撤了——「不确定 → 交给决策模型」
+        # 那一次转交要不要带图，统一看 decision_see_images（设置页「窗口设置 · 图片」）。
         # v3.44（用户本轮第 2 条）：连发合并同样加开关，默认关——关着时同一人连发
         # 每条都照常计数；开了才按 burst_merge_seconds 合并。
         self.burst_merge_enabled = _as_bool(cfg.get("burst_merge_enabled"), False)
@@ -1794,6 +1816,12 @@ class MultiDecisionPlugin(BasePlugin):
                 lambda sid: self.eff("retry_keep_days", sid))
         except Exception:
             logger.exception("[multi-decision] 注入缓存上限失败（已忽略）")
+        # 用户 m14353：启动时回收一次没人引用的转发图。裁索引只 pop 条目、不删文件，
+        # 以前每裁一次就留一批孤儿，实测堆了 1,077 张 / 720 MB。
+        try:
+            forward_media_gc()
+        except Exception:
+            logger.exception("[multi-decision] 回收孤儿转发图失败（已忽略）")
         # 用户 2026-11-06：转发图默认只挂前几张，模型需要时用 view_forward 看完整内容。
         try:
             set_forward_media_fn(forward_media_for_mid)
@@ -1815,6 +1843,8 @@ class MultiDecisionPlugin(BasePlugin):
         # 这一轮的文件（同一个 event_id），所以初始化完就把读写端注入进去。
         self.tracer.store = self.request_log
         self.pricing = Pricing(data_dir)
+        # 用户 m22269 第 3 条：渠道名第一次认出来就记下来，供应商那边删了模型也不丢。
+        self.provider_bind = ProviderBindings(data_dir)
         self.stats = AdaptiveStats(
             data_dir,
             self.stats_window_days,
@@ -2161,6 +2191,12 @@ class MultiDecisionPlugin(BasePlugin):
                 self.tracer.step(event, llm_resp)
             except Exception:
                 logger.exception("[multi-decision] 轨迹记录（响应）异常（已吞掉）")
+        # 用户 m10400 图7：这一轮调过工具的话先记下响应对象，结算时把「调用 + 结果」
+        # 补进实时窗（框架的记忆有时带工具往返、有时不带）。
+        try:
+            self.engine.note_tool_round(event, llm_resp)
+        except Exception:
+            logger.debug("[multi-decision] 记录工具往返异常（已吞掉）", exc_info=True)
         if getattr(llm_resp, "status", None) == "error":
             return
         # v3.54（用户 m14082「早上的几条消息 bot 会重复发送」）：模型偶尔把同一条
@@ -2367,8 +2403,13 @@ class MultiDecisionPlugin(BasePlugin):
             # 决策那一段单独交给轨迹，记录页才能写成「防抖 7s + 决策 5s + 12s」。
             jit = self.engine.round_jitter_at(sid) if sid else 0.0
             dec = self.engine.round_decision_at(sid) if sid else 0.0
+            # 用户 m21274：账本里记下这一轮走的是普通决策还是 JEV 决策（回复轮留空），
+            # 价目页的柱子才能按 决策 / JEV 决策 / 回复 分开画。
+            # 用户 m30734：这里以前写成「开了 JEV 就给回复轮标 jev」，结果回复的 token
+            # 全被算进 JEV 决策柱、普通决策反而归零。回复轮一律留空，JEV 只由决策轮
+            # 自己按 decision_mode 标（见 state/tracer.py 的 decision()）。
             self.tracer.begin(event, request, trigger_at=trig, debounce=jit, decision=dec,
-                              model_hint=self._trace_model_hint(event))
+                              model_hint=self._trace_model_hint(event), mode="")
         except Exception:
             logger.exception("[multi-decision] 轨迹记录（请求）异常（已吞掉）")
 
@@ -4695,12 +4736,20 @@ class MultiDecisionPlugin(BasePlugin):
                 break
         native_rows = await asyncio.to_thread(read_native_rows, raw_sid, mids)
         await self._refresh_forward_display_proofs(raw_sid, native_rows)
+        # 用户 m10400 图4：实时窗口也要能换回聊天里原本那张图（动图/原分辨率），
+        # 跟请求快照同一个口径——按 message_id 回插件索引取 orig_media。
         messages = project_items(messages, raw_sid, native_rows, public_media=public_media,
                                  text_of_content=content_text, forward_display_proof_for_mid=forward_display_proof_for_mid,
-                                 forward_proof_items=original_messages)
+                                 forward_proof_items=original_messages,
+                                 # 用户 m18581：实时窗口也要拿到这条转发的全部图（含贴纸），
+                                 # 否则卡片只画框架挂的前 3 张，后面全是 🖼 / 🙂 占位。
+                                 forward_media_for_mid=forward_media_for_mid,
+                                 original_media_for_mid=original_media_for_mid)
         pending = project_items(pending, raw_sid, native_rows, public_media=public_media,
                                 text_of_content=content_text, forward_display_proof_for_mid=forward_display_proof_for_mid,
-                                forward_proof_items=pending)
+                                forward_proof_items=pending,
+                                forward_media_for_mid=forward_media_for_mid,
+                                original_media_for_mid=original_media_for_mid)
         return {
             "ok": True,
             "sid": sid,
@@ -5061,6 +5110,9 @@ class MultiDecisionPlugin(BasePlugin):
                 "stalled", "last_error", "retry_count", "retry_in",
                 "muted", "muted_skipped", "last_mark", "last_mark_ago",
                 "counter", "threshold", "trigger_mode",
+                # 用户 m17375 第 4 条：新回复要马上出现在记录页。这两个字段一变，
+                # 前端那一秒的轮询就能立刻去拉回复记录，不用干等 5 秒那一拍。
+                "rounds", "last_ts",
             }
             for it in items:
                 eff = it.get("eff") or {}
@@ -5166,6 +5218,124 @@ class MultiDecisionPlugin(BasePlugin):
         logger.warning(f"[multi-decision] 已清空会话记录 {sid}：{counts}")
         return {"ok": True, "sid": sid, "counts": counts, "total": sum(counts.values())}
 
+    def _auto_provider(self, name: str, stat: dict) -> str:
+        """这一行「框架自己认出来的渠道」（不含价目表里手填的覆盖）。
+
+        用户 m00375 第 6 条：渠道以前只认响应对象上的 provider_name，框架根本不填，
+        第三方接口（custom:xxx）也不在框架配置里，整列都是「来源未记录」。这里按
+        provider_id / 模型名回框架配置里查一次，查不到才留空。
+        """
+        stat = stat if isinstance(stat, dict) else {}
+        auto = str(stat.get("provider_name") or "").strip()
+        if auto:
+            return auto
+        pid = str(stat.get("provider_id") or "").strip()
+        mid = str(stat.get("model_id") or "").strip()
+        if not pid and ":" in str(name or ""):
+            pid, _, mid = str(name or "").partition(":")
+        if pid == "custom":
+            return "自定义接口"
+        if self.tracer is None:
+            return ""
+        model_name = str(stat.get("model_name") or mid or name)
+        keys = (str(name or ""), model_name, mid)
+        auto = ""
+        used_pid = ""
+        if pid:
+            try:
+                auto = self.tracer.provider_label(pid, model_name)
+            except Exception:
+                auto = ""
+            if auto:
+                used_pid = pid
+        # 模型 id 本身可能带冒号（框架里 WorkBuddy 那个就叫 cn:deepseek-v4.1-flash），
+        # 按冒号拆出来的 pid 在配置里查不到，provider_label 会直接返回空。
+        # 这时拿整名再当模型名找一次，别让这一行白着。
+        if not auto:
+            try:
+                auto = self.tracer.provider_label("", str(name or ""))
+            except Exception:
+                auto = ""
+        if auto:
+            # 用户 m22269 第 3 条：第一次认出来就记下来（pid 与模型名各记一份），
+            # 以后供应商那边把模型删了、配置里再也查不到，也还能按记忆把渠道补回来。
+            _remember_provider(getattr(self, "provider_bind", None), keys, auto, used_pid)
+            return auto
+        return _bound_provider(getattr(self, "provider_bind", None), keys, pid)
+
+    def _model_alias(self, totals: dict) -> dict:
+        """同一个模型、同一个渠道在账本里可能落在两个 key 上（用户 m21592）。
+
+        框架有时回报 provider_id:model_id，有时只回报模型名，账本就落成两个 key
+        （例如 d9027599f69c:f5e6… 与 gemini-4-hydrogen-high），价目表只认得其中一个，
+        于是同一个模型被拆成「有价」和「未定价」两行。这里按（渠道, 模型名）分组，
+        组里有价目条目的 key 当代表，都没有价就取 token 最多的那个。
+        """
+        models = (totals or {}).get("models") if isinstance(totals, dict) else None
+        if not isinstance(models, dict) or not models:
+            return {}
+        try:
+            prices = self.pricing.all() if self.pricing is not None else {}
+        except Exception:
+            prices = {}
+        groups = {}
+        for name, stat in models.items():
+            if not isinstance(stat, dict):
+                continue
+            label = str(stat.get("model_name") or "").strip() or str(name)
+            prov = str(stat.get("provider_name") or "").strip()
+            if not prov:
+                prov = self._auto_provider(str(name), stat)
+            groups.setdefault((prov, label), []).append(str(name))
+        alias = {}
+        for names in groups.values():
+            if len(names) == 1:
+                alias[names[0]] = names[0]
+                continue
+            priced = [n for n in names if n in prices]
+            pool = priced or names
+            rep = max(pool, key=lambda n: (int((models.get(n) or {}).get("input") or 0)
+                                           + int((models.get(n) or {}).get("output") or 0)))
+            for n in names:
+                alias[n] = rep
+        return alias
+
+    def _merge_model_totals(self, totals: dict, alias: dict) -> dict:
+        """按 _model_alias 的对照表把模型桶合成一份（用户 m21592）。"""
+        if not isinstance(totals, dict) or not alias:
+            return totals
+        models = totals.get("models")
+        if not isinstance(models, dict) or not models:
+            return totals
+        if all(alias.get(str(k), str(k)) == str(k) for k in models):
+            return totals
+        out = {}
+        for name, stat in models.items():
+            if not isinstance(stat, dict):
+                continue
+            rep = alias.get(str(name), str(name))
+            dst = out.get(rep)
+            if dst is None:
+                dst = copy.deepcopy(stat)
+                dst["model"] = rep
+                out[rep] = dst
+                continue
+            for field in ("input", "output", "cached", "rounds", "decision_rounds",
+                          "reply_rounds", "calls"):
+                dst[field] = int(dst.get(field) or 0) + int(stat.get(field) or 0)
+            usage = dst.get("usage")
+            if isinstance(usage, list) and isinstance(stat.get("usage"), list):
+                usage.extend(copy.deepcopy(stat["usage"]))
+            if not str(dst.get("model_name") or "").strip():
+                dst["model_name"] = str(stat.get("model_name") or "")
+            if not str(dst.get("provider_name") or "").strip():
+                dst["provider_name"] = str(stat.get("provider_name") or "")
+            if dst.get("identity_source") != stat.get("identity_source"):
+                dst["identity_source"] = "mixed"
+        merged = dict(totals)
+        merged["models"] = out
+        return merged
+
     @_api("GET", "/pricing")
     async def api_pricing(self, hours: int = 24):
         """API 价目：手填的单价 + 最近一段时间的用量与花费。
@@ -5183,9 +5353,15 @@ class MultiDecisionPlugin(BasePlugin):
         models = self.pricing.all() if self.pricing is not None else {}
         seen = {}
         cost = None
+        alias = {}
         try:
             if self.tracer is not None:
                 totals = self.tracer.recent_totals(span) or {}
+                # 用户 m21592：同一个模型、同一个渠道在账本里可能落在两个 key 上
+                # （框架有时只回报模型名，有时回报 provider_id:model_id），表格里就
+                # 成了两行——一行有价、一行「未定价」。计价和展示前先归并成一份。
+                alias = self._model_alias(totals)
+                totals = self._merge_model_totals(totals, alias)
                 seen = totals.get("models") or {}
                 if self.pricing is not None:
                     cost = self.pricing.summarize(totals)
@@ -5200,10 +5376,26 @@ class MultiDecisionPlugin(BasePlugin):
                 gone = set(self.pricing.hidden())
             except Exception:
                 gone = set()
+        # 用户 m19842：不做折叠了，只把「所选区间里一次都没调用过」的模型藏起来。
+        # 用户 m20332：一次都没产生 token、也没花钱的模型不算「在用」——账本里
+        # 可能只留了它的空行（失败轮），图例和表格里不该冒出来。
+        cost_of = {}
+        for part in ((cost or {}).get("parts") or []):
+            cost_of[str(part.get("model") or "")] = float(part.get("cost") or 0.0)
+        active = set()
+        for _name, _stat in seen.items():
+            if not isinstance(_stat, dict):
+                continue
+            _tok = int(_stat.get("input") or 0) + int(_stat.get("output") or 0)
+            if _tok > 0 or cost_of.get(str(_name), 0.0) > 0:
+                active.add(str(_name))
         rows = []
         # 两边取并集：价目里有但最近没用到的也要列出来，不然想改价还得重新跑一遍
         for name in sorted(set(models) | set(seen)):
             if name in gone:
+                continue
+            # 归并时被并到别的 key 上的（价目表里还留着它自己），不再单列一行
+            if name not in seen and alias.get(name) and alias[name] != name:
                 continue
             price = models.get(name) or {}
             stat = seen.get(name) or {}
@@ -5213,31 +5405,16 @@ class MultiDecisionPlugin(BasePlugin):
             # 用户 m00375 第 6 条：渠道以前只认响应对象上的 provider_name，框架根本
             # 不填，第三方接口（custom:xxx）也不在框架配置里，整列都是「来源未记录」。
             # 这里按 provider_id / 模型名回框架配置里查一次，查不到才留空。
-            _prov = str(stat.get("provider_name") or "").strip()
-            if not _prov:
-                _pid = str(stat.get("provider_id") or "").strip()
-                _mid = str(stat.get("model_id") or "").strip()
-                if not _pid and ":" in name:
-                    _pid, _, _mid = name.partition(":")
-                if _pid == "custom":
-                    _prov = "自定义接口"
-                elif self.tracer is not None:
-                    try:
-                        _prov = self.tracer.provider_label(
-                            _pid, str(stat.get("model_name") or _mid or name))
-                    except Exception:
-                        _prov = ""
-                    # 模型 id 本身可能带冒号（框架里 WorkBuddy 那个就叫 cn:deepseek-v4.1-flash），
-                    # 按冒号拆出来的 pid 在配置里查不到，provider_label 会直接返回空。
-                    # 这时拿整名再当模型名找一次，别让这一行白着。
-                    if not _prov:
-                        try:
-                            _prov = self.tracer.provider_label("", name)
-                        except Exception:
-                            _prov = ""
+            # 用户 m20332：价目表里手填的渠道优先（框架不回报 provider 的模型只能靠人补）。
+            # 自动识别出来的渠道（框架回报 / 配置里查 / custom 前缀），只当占位符用
+            _auto = self._auto_provider(name, stat)
+            # 手填的优先，没填就用自动识别的
+            _prov = str(price.get("provider") or "").strip() or _auto
             rows.append(
                 {
                     "model": name,
+                    # 用户 m20332：价目表里手填的渠道（空 = 没填，前端拿自动识别的当占位）。
+                    "provider": str(price.get("provider") or ""),
                     "in": _as_price(price.get("in")),
                     "out": _as_price(price.get("out")),
                     # 缓存命中的单价单列一项（用户 m03616 第 1 条）：命中部分按它算钱
@@ -5253,17 +5430,223 @@ class MultiDecisionPlugin(BasePlugin):
                                       ("快速决策模型" if name == "fast" else name)),
                     "provider_id": str(stat.get("provider_id") or ""),
                     "provider_name": _prov,
+                    # 自动识别的渠道（不受手填影响），前端拿它当输入框的占位符
+                    "provider_auto": _auto,
                     "model_id": str(stat.get("model_id") or ""),
                     "identity_source": str(stat.get("identity_source") or "legacy_unknown"),
+                    "active": name in active,
+                    # 用户 m23442：没存过高峰设置的模型，周末按高峰算（勾选框默认不勾）。
                     "peak": price.get("peak") or {
                         "enabled": False, "in": None, "out": None, "cache": None,
-                        "start": "", "end": "", "weekends": False,
+                        "start": "", "end": "", "weekends": True,
                     },
                 }
             )
         zone = time.tzname[1 if time.daylight and time.localtime().tm_isdst > 0 else 0]
         return {"ok": True, "unit": PRICE_UNIT, "hours": span, "rows": rows, "cost": cost,
-                "timezone": zone}
+                "active": sorted(active), "timezone": zone}
+
+    @_api("GET", "/pricing/trend")
+    async def api_pricing_trend(self, range_key: str = "", bucket: str = "day", count: int = 0,
+                               start: str = "", end: str = ""):
+        """价目页下面那两张图：按自然日分桶的 token 与花费。
+
+        用户 m19357：柱 + 折线一张、饼图一张，两张同一行。
+        用户 m19975：切换改成 七天 / 本月 / 上月，默认本月；本月只算 1 号到今天，
+        未来的日子不返回。range_key 认 7d / week / month / lastmonth（用户 m21274 加了
+        按周：从本周一往前 8 周，按真实日历切）；不传就退回旧的
+        bucket=day|week|month（老接口和测试还在用）。
+        每根柱子按模型拆开（一天可能有多个柱子）；用户 m21274 之后前端改成按
+        「决策 / JEV 决策 / 回复」画柱，所以每个点另给一份 kinds。
+        """
+        key = str(range_key or "").strip().lower()
+        if key and key not in ("7d", "month", "lastmonth", "week", "window"):
+            key = "month"   # 乱填按本月，别悄悄退回旧的 bucket 模式
+        data = {}
+        if self.tracer is not None:
+            try:
+                if key == "window":
+                    # 用户 m23442：柱图改成 14 天窗口 + 滚轮按天翻，区间由前端算好传进来。
+                    data = self.tracer.window_totals(start, end) or {}
+                elif key in ("7d", "month", "lastmonth", "week"):
+                    data = self.tracer.range_totals(key) or {}
+                else:
+                    kind = str(bucket or "day").strip().lower()
+                    if kind not in ("day", "week", "month"):
+                        kind = "day"
+                    try:
+                        span = int(count)
+                    except (TypeError, ValueError):
+                        span = 0
+                    data = self.tracer.bucket_totals(kind, span) or {}
+            except Exception:
+                logger.debug("[multi-decision] 价目走势统计失败", exc_info=True)
+                data = {}
+        # 用户 m21592：同一个模型同一个渠道在账本里可能有两个 key，图上别拆成两个
+        # 模型。先用整段汇总建好「key -> 代表 key」的对照表，再按天归并。
+        alias = self._model_alias(data.get("all") or {})
+        # 用户 m20332：价目表里手填的渠道优先（框架不回报 provider 的模型只能靠人补）。
+        prov_of = {}
+        if self.pricing is not None:
+            try:
+                prov_of = {str(k): str((v or {}).get("provider") or "")
+                           for k, v in self.pricing.all().items()}
+            except Exception:
+                prov_of = {}
+        # 价目表里删掉的模型（hidden）在图上也不画：表格已经藏了，图上再冒出来
+        # 就成了「两个 deepseek-flash」那种重复图例（用户 m20332 截图里的问题）。
+        gone = set()
+        if self.pricing is not None:
+            try:
+                gone = set(self.pricing.hidden())
+            except Exception:
+                gone = set()
+        # 用户 m21274：柱子按功能分——决策 / JEV 决策 / 回复各自的 token。
+        # kinds.decision 里含 JEV，modes.jev 只记 JEV，所以普通决策 = decision - jev。
+        def _fn_tokens(bucket, minus=None):
+            bucket = bucket if isinstance(bucket, dict) else {}
+            minus = minus if isinstance(minus, dict) else {}
+            inp = int(bucket.get("input") or 0) - int(minus.get("input") or 0)
+            outp = int(bucket.get("output") or 0) - int(minus.get("output") or 0)
+            cac = int(bucket.get("cached") or 0) - int(minus.get("cached") or 0)
+            inp, outp, cac = max(0, inp), max(0, outp), max(0, cac)
+            return {"input": inp, "output": outp, "cached": cac, "tokens": inp + outp,
+                    "rounds": max(0, int(bucket.get("rounds") or 0) - int(minus.get("rounds") or 0))}
+
+        def _kinds_out(totals, money):
+            """每根柱子除了 token，还要给出这根柱子花了多少钱（用户 m21592）。
+
+            summarize 的 by_kind 只有 decision / reply，JEV 也是 decision，
+            所以普通决策 = decision - jev（by_mode 里另存了 jev 的花费）。
+            """
+            kinds = {
+                "decision": _fn_tokens((totals.get("kinds") or {}).get("decision"),
+                                       (totals.get("modes") or {}).get("jev")),
+                "jev": _fn_tokens((totals.get("modes") or {}).get("jev")),
+                "reply": _fn_tokens((totals.get("kinds") or {}).get("reply")),
+            }
+            by_kind = (money or {}).get("by_kind") or {}
+            by_mode = (money or {}).get("by_mode") or {}
+            jev_cost = float((by_mode.get("jev") or {}).get("total") or 0.0)
+            dec_cost = float((by_kind.get("decision") or {}).get("total") or 0.0)
+            rep_cost = float((by_kind.get("reply") or {}).get("total") or 0.0)
+            kinds["jev"]["cost"] = round(jev_cost, 4)
+            kinds["decision"]["cost"] = round(max(0.0, dec_cost - jev_cost), 4)
+            kinds["reply"]["cost"] = round(rep_cost, 4)
+            # 用户 m22269 第 2 条：有 token 却没价（模型身份没记下来、或那行被删了）时
+            # 别写「—」装没数据，标成「未定价」，前端据此写字。token 为 0 的不算未定价。
+            priced = {
+                "decision": bool((by_kind.get("decision") or {}).get("priced")),
+                "jev": bool((by_mode.get("jev") or {}).get("priced")),
+                "reply": bool((by_kind.get("reply") or {}).get("priced")),
+            }
+            for fn, bucket in kinds.items():
+                bucket["priced"] = bool(priced.get(fn)) or int(bucket.get("tokens") or 0) <= 0
+            return kinds
+
+        points = []
+        for item in (data.get("buckets") or []):
+            totals = self._merge_model_totals(item.get("totals") or {}, alias)
+            money = None
+            if self.pricing is not None:
+                try:
+                    money = self.pricing.summarize(totals)
+                except Exception:
+                    money = None
+            # 每个模型这一天的花费：summarize 的 parts 已经按模型算好了，直接建映射。
+            cost_of = {}
+            unset_of = {}
+            for part in ((money or {}).get("parts") or []):
+                name = str(part.get("model") or "")
+                cost_of[name] = float(part.get("cost") or 0.0)
+                unset_of[name] = bool(part.get("unset"))
+            models = []
+            for name, mb in (totals.get("models") or {}).items():
+                if not isinstance(mb, dict):
+                    continue
+                if str(name) in gone:
+                    continue
+                inp = int(mb.get("input") or 0)
+                outp = int(mb.get("output") or 0)
+                # 用户 m20332：0 token 又没花钱的模型不进图例（账本里可能只留了空行）。
+                if inp + outp <= 0 and cost_of.get(str(name), 0.0) <= 0:
+                    continue
+                models.append({
+                    "model": str(name),
+                    "model_name": str(mb.get("model_name") or name),
+                    "provider_name": (str(mb.get("provider_name") or "").strip()
+                                      or prov_of.get(str(name), "")
+                                      or self._auto_provider(str(name), mb)),
+                    "input": inp,
+                    "output": outp,
+                    "cached": int(mb.get("cached") or 0),
+                    "tokens": inp + outp,
+                    "cost": cost_of.get(str(name), 0.0),
+                    "unset": unset_of.get(str(name), False),
+                })
+            models.sort(key=lambda m: m["tokens"], reverse=True)
+            points.append({
+                "key": str(item.get("key") or ""),
+                "label": str(item.get("label") or ""),
+                "start": item.get("start"),
+                "end": item.get("end"),
+                "input": int(totals.get("input") or 0),
+                "output": int(totals.get("output") or 0),
+                "cached": int(totals.get("cached") or 0),
+                "tokens": int(totals.get("total") or 0),
+                "rounds": int(totals.get("rounds") or 0),
+                "cost": float((money or {}).get("total") or 0.0),
+                "priced": bool((money or {}).get("priced")),
+                "models": models,
+                "kinds": _kinds_out(totals, money),
+            })
+        # 饼图：整段窗口里各模型的花费占比（跟表格同一套计价，价目里删掉的模型不算）
+        parts = []
+        total = {"tokens": 0, "rounds": 0, "cost": 0.0, "priced": False}
+        currency = ""
+        all_totals = self._merge_model_totals(data.get("all") or {}, alias)
+        money_all = None
+        if self.pricing is not None:
+            try:
+                money_all = self.pricing.summarize(all_totals)
+            except Exception:
+                money_all = None
+            money = money_all
+            if money:
+                total["cost"] = float(money.get("total") or 0.0)
+                total["priced"] = bool(money.get("priced"))
+                currency = str(money.get("currency") or "")
+                for part in (money.get("parts") or []):
+                    pkey = str(part.get("model") or "")
+                    # 饼图图例要显示人看得懂的名字：模型桶里带着 model_name / provider_name，
+                    # 直接透给前端，省得前端再拿价目表反查（价目表只覆盖当前区间，查不全）。
+                    meta = (all_totals.get("models") or {}).get(pkey) or {}
+                    parts.append({
+                        "model": pkey,
+                        "model_name": str(meta.get("model_name") or ""),
+                        "provider_name": (str(meta.get("provider_name") or "").strip()
+                                          or prov_of.get(pkey, "")
+                                          or self._auto_provider(pkey, meta)),
+                        "cost": float(part.get("cost") or 0.0),
+                        "input": int(part.get("input") or 0),
+                        "output": int(part.get("output") or 0),
+                        "cached": int(part.get("cached") or 0),
+                        # 用户 m23442：下面几张饼还要按模型看 token 和调用次数。
+                        "tokens": int(part.get("input") or 0) + int(part.get("output") or 0),
+                        "calls": int(meta.get("calls") or 0),
+                        "unset": bool(part.get("unset")),
+                    })
+        total["tokens"] = int(all_totals.get("total") or 0)
+        total["rounds"] = int(all_totals.get("rounds") or 0)
+        zone = time.tzname[1 if time.daylight and time.localtime().tm_isdst > 0 else 0]
+        return {"ok": True, "range": str(data.get("range") or key or ""),
+                "start_day": str(data.get("start_day") or ""),
+                "end_day": str(data.get("end_day") or ""),
+                "kinds": _kinds_out(all_totals, money_all),
+                "bucket": str(data.get("bucket") or "day"),
+                "count": int(data.get("count") or 0),
+                "unit": PRICE_UNIT, "currency": currency, "points": points, "parts": parts,
+                "total": total, "timezone": zone}
 
     @_api("POST", "/pricing")
     async def api_pricing_set(self, values: str = ""):
@@ -5353,7 +5736,7 @@ class MultiDecisionPlugin(BasePlugin):
                  limit_follow: str = "", days=0, days_key: str = "",
                  per_session: bool = False, clearable: bool = True,
                  limit_dm=0, limit_key_dm: str = "", limit_fixed: bool = False,
-                 global_only: bool = False):
+                 global_only: bool = False, sub: str = ""):
             size = int(size or 0)
             out.append({
                 "key": key,
@@ -5378,6 +5761,8 @@ class MultiDecisionPlugin(BasePlugin):
                 # v4.84（用户 m09738）：这一类的上限 / 天数只按全局算（后端只吃全局值），
                 # 选中某个会话时这两格画成只读，别让人以为改了会生效。
                 "global_only": bool(global_only),
+                # 用户 m14353：数量那一格下面补一行小字（转发图片用它报「N 张图」）。
+                "sub": str(sub or ""),
             })
 
         # 图片缓存：上限 / 天数由媒体缓存自己那三条管，按张数算
@@ -5487,14 +5872,19 @@ class MultiDecisionPlugin(BasePlugin):
             fwd_media = forward_media_stats(sid) or fwd_media
         except Exception:
             logger.exception("[multi-decision] 统计转发配图缓存失败")
+        fwd_imgs = int(fwd_media.get("imgs") or 0)
         _row("forward_media", "转发图片", "条",
              "保存合并转发里的图片，之后翻到这条消息时还能看到。",
-             fwd_media.get("count"), fwd_media.get("bytes"),
+             fwd_media.get("count"),
+             # 用户 m14353：占用报图片本身的大小，以前报的是索引文件（82 KB），
+             # 1,163 MB 的转发图在账本上完全看不见。
+             fwd_media.get("img_bytes") or fwd_media.get("bytes"),
              limit=_eff("forward_media_keep"), limit_key="forward_media_keep",
              limit_dm=_dm("forward_media_keep"), limit_key_dm="forward_media_keep_dm",
              limit_unit="条/会话", per_session=True,
              days=_eff("forward_media_keep_days"),
-             days_key="forward_media_keep_days")
+             days_key="forward_media_keep_days",
+             sub=("{:,} 张图".format(fwd_imgs) if fwd_imgs else ""))
 
         fwd_proof = {"count": 0, "bytes": 0}
         try:

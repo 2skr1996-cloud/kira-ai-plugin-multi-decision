@@ -120,6 +120,7 @@ from ..window.manager import (
     tool_media_from_records,
     _data_root,
     text_of_content,
+    media_list,
     is_notice_shell_text,
     notice_shell_ts,
 )
@@ -1276,6 +1277,11 @@ class DecisionEngine:
         # 从 event.model_group / 适配器上取到就存这里，结算（含出错轮、看门狗）
         # 时按 (sid, event_id) 取回；取不到再退回 tracer 的默认模型名。
         self._round_reply_meta: dict[tuple[str, str], dict] = {}
+        # 用户 m10400 图7：这一轮回复里带 tool_calls 的 LLM 响应（按 sid+event_id 存）。
+        # 框架的记忆有时带工具往返、有时不带，不带的时候实时窗里就只剩「bot 说了
+        # 什么」。tool_results 是在这一步之后才填进同一个对象的，所以这里只留引用，
+        # 结算时再读出来补进窗口（window.commit_tool_round）。
+        self._round_tool_refs: dict[tuple[str, str], list] = {}
         # 用户 m06995 第 2 项：回复模型也有「连续失败切换 / 切回主模型等待」。
         # 只放内存：重启后从主模型重新试，没必要写进会话状态（会改持久化 schema）。
         self._reply_fail_streak: dict[str, int] = {}
@@ -1500,6 +1506,30 @@ class DecisionEngine:
             return []
         return tool_media_from_records(
             getattr(page, "messages", None) or [], _data_root(), until, skip)
+
+    def note_tool_round(self, event, llm_resp) -> None:
+        """记下这一轮回复里带 tool_calls 的响应，结算时补进实时窗（用户 m10400 图7）。
+
+        框架的记忆有时带工具往返、有时不带，不带的时候窗口里只剩「bot 说了什么」，
+        看不到它查过什么、查回来什么。这里只留引用：tool_results 是在这一步之后才
+        填进同一个对象的，等 _handle_final 结算时再读出来（window.commit_tool_round）。
+
+        只认框架真正跑 agent 的那个批次事件（_active_rounds 里登记过的 event_id）：
+        决策链不走事件总线、自己发请求，不会走到这里，所以决策轮的 view_forward
+        之类工具不会被误记进窗口。
+        """
+        try:
+            if not getattr(llm_resp, "tool_calls", None):
+                return
+            sid = normalize_sid(getattr(event, "sid", "") or getattr(getattr(event, "session", None), "sid", ""))
+            eid = str(getattr(event, "event_id", "") or "")
+            if not sid or not eid:
+                return
+            if self._active_rounds.get(sid) != eid:
+                return
+            self._round_tool_refs.setdefault((sid, eid), []).append(llm_resp)
+        except Exception:
+            logger.debug("[multi-decision] 记录工具往返失败（已忽略）", exc_info=True)
 
     async def _commit_tool_notes(self, sid: str, request) -> int:
         """把本轮的工具回调提前入窗，并从 user_prompt 里摘掉（用户 m20315）。
@@ -3344,6 +3374,15 @@ class DecisionEngine:
         except Exception:
             logger.exception("[multi-decision] 转发补取失败（已忽略）")
 
+        # 用户 m10400 图2：框架清 session_media 很快（几分钟），而插件以前只在
+        # 「页面渲染 / 快照落盘」时才把图复制进自己的缓存——页面没开、快照还没写，
+        # 图就已经被清掉，回看只剩「图片已清理」。这里在消息刚进来时先复制一份，
+        # 之后框架怎么清都不影响（复制失败不影响消息流转）。
+        try:
+            media_list(getattr(message, "content", None), self._raw_sids.get(_sid0, "") or _sid0)
+        except Exception:
+            logger.debug("[multi-decision] 消息入库时预复制图片失败（已忽略）", exc_info=True)
+
         # 机器人自己的名字：优先用适配器里的真实昵称（QQ 里别人看到的名字），
         # 而不是人格文件名。@ 消息里是 `[At 1429260473(nickname: 桃华)]`，
         # 历史里 assistant 前缀是【名字】——两边必须一致，模型才知道被 @ 的是自己。
@@ -4183,6 +4222,15 @@ class DecisionEngine:
                            **self._reply_meta_of(sid, eid, event)})
             except Exception:
                 logger.exception("[multi-decision] 落盘请求记录失败")
+        # 用户 m10400 图7：这一轮回复里调过的工具与结果补进实时窗。框架的记忆
+        # 有时带工具往返、有时不带，不带的时候窗口里只剩「bot 说了什么」。补在
+        # 结算这一刻，下一轮 collect 把回复正文并进来时正好排在工具行后面。
+        refs = self._round_tool_refs.pop(key, None)
+        if refs and self.window is not None:
+            try:
+                self.window.commit_tool_round(sid, refs)
+            except Exception:
+                logger.debug("[multi-decision] 工具往返入窗失败（已忽略）", exc_info=True)
         if tracked:
             self._settled_rounds[key] = time.time()
         self.health["finals"] += 1
@@ -5435,9 +5483,13 @@ class DecisionEngine:
         """这一轮回复该用哪些模型（用户 m06995 第 2 项）。
 
         跟决策链同一套语义：主模型连续失败到「连续失败切换」次就换备用，
-        用备用撑过「切回主模型等待」再试回主模型。框架的 agent_executor 本来
-        就按 model_group 顺序试、报错换下一个，所以这里只决定顺序。
-        取不到客户端就返回空，让框架按默认模型走。
+        用备用撑过「切回主模型等待」再试回主模型。
+
+        用户 m13272：这里只放一个模型。以前把主模型和备用一起塞进 model_group，
+        框架在同一轮里就会立刻试备用——主模型报的错被备用的错盖掉（记录里写着
+        DS，错误却是备用的 404），也跟设置页写的「连错 2 次才切备用」对不上。
+        现在主模型失败就如实报主模型的错，由插件自己的重试累计失败次数，
+        到 2 次才换备用。取不到客户端就返回空，让框架按默认模型走。
         """
         primary = str(self._c("reply_model", sid) or "").strip()
         fallback = str(self._c("reply_fallback_model", sid) or "").strip()
@@ -5450,7 +5502,8 @@ class DecisionEngine:
         # 用户 m08153：连续失败切换改成开关，阈值固定 2——第一次失败算 1，
         # 重试第一次失败算 2，第二次重试（第三次尝试）就直接走备用模型。
         switch_on = bool(self._c("reply_fail_switch", sid))
-        cooldown = max(30.0, float(self._c("reply_fallback_cooldown", sid) or 300.0))
+        # 用户 m10202：冷却默认 30 分钟（1800 秒），下界 60 秒。
+        cooldown = max(60.0, float(self._c("reply_fallback_cooldown", sid) or 1800.0))
         streak = int(self._reply_fail_streak.get(sid, 0) or 0)
         until = float(self._reply_fallback_until.get(sid, 0.0) or 0.0)
         tripped = bool(fallback) and switch_on and streak >= 2
@@ -5460,16 +5513,14 @@ class DecisionEngine:
             self._reply_fallback_until[sid] = now + cooldown
         # 用户 m08153：0 次重试时强制补的那一次，直接走备用模型。
         forced = bool(self._reply_force_fallback.pop(sid, False))
-        order = []
-        if forced and fallback:
-            order.append(fallback)
+        if (forced or cooling) and fallback:
+            key = fallback
+        elif primary:
+            key = primary
         else:
-            if not cooling and primary:
-                order.append(primary)
-            if fallback:
-                order.append(fallback)
+            key = fallback
         clients = []
-        for key in order:
+        if key:
             try:
                 client = ctx.get_llm_client(key)
             except Exception as exc:
@@ -5480,7 +5531,7 @@ class DecisionEngine:
         return clients
 
     def _apply_reply_models(self, sid: str, event) -> None:
-        """把这一轮回复要用的模型组挂到批次事件上（框架按顺序试，报错换下一个）。"""
+        """把这一轮回复要用的模型挂到批次事件上（用户 m13272：只挂一个，主备由插件自己按连续失败次数切）。"""
         try:
             clients = self._reply_model_clients(sid)
         except Exception:
@@ -5504,9 +5555,9 @@ class DecisionEngine:
         self._reply_fail_streak[sid] = streak
         try:
             switch_on = bool(self._c("reply_fail_switch", sid))
-            cooldown = max(30.0, float(self._c("reply_fallback_cooldown", sid) or 300.0))
+            cooldown = max(60.0, float(self._c("reply_fallback_cooldown", sid) or 1800.0))
         except Exception:
-            switch_on, cooldown = True, 300.0
+            switch_on, cooldown = True, 1800.0
         # 用户 m08153：阈值固定 2——第一次失败算 1，重试第一次失败算 2。
         if switch_on and streak >= 2:
             self._reply_fallback_until[sid] = time.time() + cooldown
@@ -6063,9 +6114,9 @@ class DecisionEngine:
         try:
             # v4.85（用户 m10425 第 6 条）：JEV 那条链自己只看文字（decision 类模型
             # 只有 choice()），这个开关管的是「不确定 → 交给决策模型」那一次转交——
-            # dec_imgs 会原样传给普通决策，所以按 mode 换一个键读。
-            _img_key = "jev_see_images" if mode == "jev" else "decision_see_images"
-            if self._c(_img_key, sid) is not False:
+            # dec_imgs 会原样传给普通决策。
+            # 用户 m09851：JEV 那个单独的「回退带图」开关撤了，两条链统一看「决策看图」。
+            if self._c("decision_see_images", sid) is not False:
                 dec_imgs = self.window.decision_images(sid, messages=msgs)
         except Exception:
             logger.exception("[multi-decision] 决策取图失败（这一轮按纯文字判）")
@@ -6553,6 +6604,7 @@ class DecisionEngine:
         self._round_jitter.clear()
         self._round_decision.clear()
         self._round_errors.clear()
+        self._round_tool_refs.clear()
         self._settled_rounds.clear()
         self._retry_events.clear()
         self._retry_roots.clear()

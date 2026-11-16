@@ -726,6 +726,84 @@ def _media_by_mid_index(mid: str) -> list:
     return out
 
 
+_PIC_SIG_MEMO = {}
+
+
+def _pic_sig(path):
+    """16×16 灰度指纹 + 原尺寸，用来判断两张图是不是同一张（大小不同也算）。"""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = (str(path), int(st.st_size), int(st.st_mtime_ns))
+    if key in _PIC_SIG_MEMO:
+        return _PIC_SIG_MEMO[key]
+    got = None
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            size = (int(im.width), int(im.height))
+            try:
+                # JPEG 走 DCT 域直接缩，不用把 2560×1440 整张解出来
+                im.draft("L", (32, 32))
+            except Exception:
+                pass
+            got = (list(im.convert("L").resize((16, 16)).tobytes()), size)
+    except Exception:
+        got = None
+    if len(_PIC_SIG_MEMO) > 4096:
+        _PIC_SIG_MEMO.clear()
+    _PIC_SIG_MEMO[key] = got
+    return got
+
+
+def _same_picture(a, b) -> bool:
+    """a、b 是同一张图，且其中一张是另一张缩下来的（长边 1280 那份是压缩副本）。"""
+    if not a or not b:
+        return False
+    ga, sa = a
+    gb, sb = b
+    if sa == sb:
+        return False
+    small, big = (sa, sb) if max(sa) < max(sb) else (sb, sa)
+    if max(small) > 1280 or max(big) <= 1280:
+        return False
+    diff = sum(abs(x - y) for x, y in zip(ga, gb)) / float(len(ga) or 1)
+    return diff <= 4.0
+
+
+def _drop_downscaled_copies(refs) -> list:
+    """同一张图的原件和压缩副本都在索引里时只留原件（用户 m18926）。
+
+    框架准备请求时会把大图压一份放进消息目录，插件按 message_id 扫索引时原件和
+    压缩副本都会被当成原图，页面就并排画两遍。压缩副本的长边正好是 1280、原件比
+    它大，所以「同一张图 + 长边更小」的那份剔掉。
+    """
+    if len(refs) < 2:
+        return refs
+    root = _data_root()
+    if root is None:
+        return refs
+    sigs = []
+    for ref in refs:
+        try:
+            sigs.append(_pic_sig(root / str((ref or {}).get("path") or "")))
+        except Exception:
+            sigs.append(None)
+    keep = []
+    for i, ref in enumerate(refs):
+        drop = False
+        for j in range(len(refs)):
+            if i == j or not sigs[i] or not sigs[j]:
+                continue
+            if _same_picture(sigs[i], sigs[j]) and max(sigs[i][1]) < max(sigs[j][1]):
+                drop = True
+                break
+        if not drop:
+            keep.append(ref)
+    return keep
+
+
 def original_media_for_mid(mid: str) -> list:
     """按 message_id 反查这条消息在聊天里**原本**的图（剔掉模型侧派生图）。
 
@@ -740,7 +818,7 @@ def original_media_for_mid(mid: str) -> list:
         if not name or name.startswith("mdp_"):
             continue
         out.append(ref)
-    return out
+    return _drop_downscaled_copies(out)
 
 
 # 用户 m11618（2026-10-29）：群里的图显示「图片已清理」，查下来一张都没丢——
@@ -1192,7 +1270,10 @@ def _media_bulk(texts, raw_sid: str = "") -> dict:
 # 只是换成 plugin_data/<插件>/media_cache/...，/media 同样放行这个目录。
 _PLUGIN_ID = "kira-ai-plugin-multi-decision"
 _MEDIA_CACHE_DIR = "media_cache"
-_MEDIA_COPY_LIMIT = 8 * 1024 * 1024
+#: 用户 m10400 图2：原来 8MB，超过就不复制——11-14 那两张 11.2MB / 15.3MB 的
+#: 大截图因此一张副本都没留，框架清掉 session_media 之后回看只剩「图片已清理」。
+#: 提到 32MB，正常截图（含长图）都能留一份。
+_MEDIA_COPY_LIMIT = 32 * 1024 * 1024
 _MEDIA_CACHE_LIMIT = 2000
 #: 用户 m11091 第 11 条：图片缓存的另外两条保留线，0 = 不限
 _MEDIA_CACHE_KEEP_DAYS = 0
@@ -2804,6 +2885,20 @@ def _public_media_uncached(rel: str, mime: str = "", sid: str = "") -> dict:
             return {"path": alt.relative_to(root).as_posix(), "mime": mime}
         except Exception:
             pass
+    # 5) 框架归档兜底：框架入库时会把图复制成 session_media/archive/<内容哈希>，
+    #    扁平、没有后缀。会话目录里的原图被清掉之后，这里还能捞回来
+    #    （用户 m10400 图2：页面显示「图片已清理」，其实归档里还有一份）。
+    #    只有「文件名恰好就是内容哈希」的那部分对得上，对不上就当没有。
+    try:
+        stem = Path(str(rel).replace("\\", "/")).stem
+        if len(stem) == 64 and all(c in "0123456789abcdef" for c in stem.lower()):
+            archived = root / "session_media" / "archive" / stem
+            if archived.is_file() and archived.stat().st_size > 0:
+                cached = _cache_media_file(archived, rel, sid)
+                if cached:
+                    return {"path": cached, "mime": mime or _sniff_image_mime(archived)}
+    except Exception:
+        pass
     return {"missing": 1, "path": rel, "mime": mime}
 
 
@@ -3939,6 +4034,8 @@ _PIC_TEXT_RE = re.compile(r"\[(?:图片|表情|Image attached|image|Image)\]", r
 #: - 动图：等距抽最多 9 帧，拼成九宫格，后面跟一句说明；
 #: - 静态大图：压到最长边 1280；压完反而更大就保留原图（已经压过的 JPEG 常见）；
 #: - 小于 1 MB 的静态图一律不动，原样发最清楚。
+#: - 例外：像素数超过 600 万的图（手机长截图那种）不管多大都要缩——上游按像素数
+#:   拒收，1600 万像素的图会让整轮回复失败（用户 m13535）。
 #:
 #: 文件名 = sha1(源文件内容) + 参数，同一个源永远算出同一个名字，字节也完全一样，
 #: 所以前缀缓存不会因为「每轮重算」而断。文件写在 session_media/derived 下——框架的
@@ -3952,6 +4049,9 @@ _DERIVE_GRID_Q = 88
 _DERIVE_STATIC_SIDE = 1280
 _DERIVE_STATIC_Q = 95
 _DERIVE_STATIC_MIN = 1024 * 1024
+#: 用户 m13535：上游按像素数拒收，600 万像素以内实测能过、800 万就 400。
+#: 这一项在设置页是锁死的开关，只用来告诉用户有这个功能，所以不做配置读取。
+_DERIVE_PIXEL_MAX = 6_000_000
 _DERIVE_KEEP_MAX = 600
 _DERIVE_SHA_CACHE: dict = {}
 _DERIVE_MEMO: dict = {}
@@ -4040,6 +4140,26 @@ def _shrink_jpeg(im) -> bytes:
     im.seek(0)
     frame = _frame_rgb(im)
     frame.thumbnail((_DERIVE_STATIC_SIDE, _DERIVE_STATIC_SIDE), Image.LANCZOS)
+    buf = io.BytesIO()
+    frame.save(buf, "JPEG", quality=_DERIVE_STATIC_Q, optimize=True)
+    return buf.getvalue()
+
+
+def _shrink_pixels(im, max_px: int) -> bytes:
+    """静态图按总像素缩（用户 m13535）。
+
+    长截图按最长边缩会变成一条看不清的细线（1250×12800 → 125×1280），
+    按像素预算缩才既过得了上游、又还看得清字。
+    """
+    from PIL import Image
+
+    im.seek(0)
+    frame = _frame_rgb(im)
+    w, h = frame.size
+    total = max(1, int(w) * int(h))
+    if total > max_px:
+        scale = (float(max_px) / float(total)) ** 0.5
+        frame = frame.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
     buf = io.BytesIO()
     frame.save(buf, "JPEG", quality=_DERIVE_STATIC_Q, optimize=True)
     return buf.getvalue()
@@ -4180,22 +4300,46 @@ def _derive_media(rel: str, gif_mode: str = "grid", *, _noop=None) -> Optional[d
                 except Exception:
                     return None
         else:
-            if src_size <= _DERIVE_STATIC_MIN:
-                if _noop is not None:
-                    _noop.append(True)
-                return None
-            tag = "s%d_%d" % (_DERIVE_STATIC_SIDE, _DERIVE_STATIC_Q)
-            hit = _read_derived_hit(droot, digest, tag, note, source_size=src_size)
-            if hit:
-                return hit
+            # 用户 m13535：像素数超标的图（手机长截图）不管文件多大都要缩——上游按像素数
+            # 拒收，1600 万像素的图会让整轮回复失败；按最长边 1280 缩会变成一条看不清的
+            # 细线，所以这一路改成按总像素缩。
+            px = 0
             try:
-                blob = _shrink_jpeg(im)
+                px = int(im.width) * int(im.height)
             except Exception:
-                return None
-            if not blob or len(blob) >= src_size:
+                px = 0
+            too_big = px > _DERIVE_PIXEL_MAX
+            if src_size <= _DERIVE_STATIC_MIN and not too_big:
                 if _noop is not None:
                     _noop.append(True)
                 return None
+            if too_big:
+                tag = "p%d_%d" % (_DERIVE_PIXEL_MAX // 10000, _DERIVE_STATIC_Q)
+                # 缩完可能比原图还大（原图已经压得很狠），不能按大小判缓存是否有效
+                hit = _read_derived_hit(droot, digest, tag, note)
+                if hit:
+                    return hit
+                try:
+                    blob = _shrink_pixels(im, _DERIVE_PIXEL_MAX)
+                except Exception:
+                    return None
+                if not blob:
+                    if _noop is not None:
+                        _noop.append(True)
+                    return None
+            else:
+                tag = "s%d_%d" % (_DERIVE_STATIC_SIDE, _DERIVE_STATIC_Q)
+                hit = _read_derived_hit(droot, digest, tag, note, source_size=src_size)
+                if hit:
+                    return hit
+                try:
+                    blob = _shrink_jpeg(im)
+                except Exception:
+                    return None
+                if not blob or len(blob) >= src_size:
+                    if _noop is not None:
+                        _noop.append(True)
+                    return None
     finally:
         im.close()
     name = "mdp_%s_%s.jpg" % (digest[:32], tag)
@@ -5116,6 +5260,10 @@ class WindowManager:
         msgs = strip_error_messages(msgs)
         # 用户 m17492 图5/图6：出口再兜一次，老窗口里残留的通知壳不上页面。
         msgs = strip_notice_shells(msgs)
+        # v4.92（用户 m13535）：开关打开时页面也不该再画工具往返——窗口本体要到
+        # 下一轮 collect 才清，这中间页面和发出去的请求会不一致。
+        if self._bool_eff("window_drop_tools", sid, False):
+            msgs, _gone_tool = drop_tool_rounds(msgs)
         # v4.03（用户 m11947）：注记就在窗口本体里，页面照着画，不再重插。
         msgs = shrink_timestamps(msgs)
         msgs = self._prefix_assistant(msgs, sid)
@@ -5844,6 +5992,72 @@ class WindowManager:
                     "，%d 张图" % len(refs) if refs else "")
         self.settle_decision_notes(sid)
         return 1
+
+    def commit_tool_round(self, sid: str, responses) -> int:
+        """把这一轮回复里真正调过的工具与结果记进窗口（用户 m10400 图7）。
+
+        框架的记忆有时带工具往返、有时不带——同一个群 600 多份快照里一次都没有，
+        于是窗口里只剩「bot 说了什么」，看不到它查过什么、查回来什么。这里在结算
+        时按标准形状补进去：一条带 tool_calls 的 assistant + 紧跟的 role=tool 结果
+        行，跟框架自己给的一模一样，页面和发请求那边都不用改。
+
+        responses 是这一轮带 tool_calls 的 LLM 响应对象：tool_results 是在这一步
+        之后才填进同一个对象的，所以引擎留的是引用、结算时才读。框架自己已经给过
+        的按 tool_call_id 认，不再补一遍。
+        """
+        st = self.state(sid)
+        if st is None or not responses:
+            return 0
+        # 开关打开（工具结果不进实时窗）时不补，否则刚摘掉的又被插回来
+        if self._bool_eff("window_drop_tools", sid, False):
+            return 0
+        have = set()
+        for m in st.messages:
+            for c in _get(m, "tool_calls") or []:
+                cid = _get(c, "id") or ""
+                if cid:
+                    have.add(str(cid))
+            cid = _get(m, "tool_call_id") or ""
+            if cid:
+                have.add(str(cid))
+        added = 0
+        for resp in responses:
+            calls = _tool_calls_of(_get(resp, "tool_calls") or [])
+            fresh = [c for c in calls if c.get("id") and c["id"] not in have]
+            if not fresh:
+                continue
+            results = {}
+            for r in _get(resp, "tool_results") or []:
+                cid = str(_get(r, "tool_call_id") or "")
+                if cid:
+                    results[cid] = r
+            at = time.time()
+            st.messages.append({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": c["id"], "type": "function",
+                                "function": {"name": c["name"], "arguments": c["args"]}}
+                               for c in fresh],
+                "ts": at,
+            })
+            added += 1
+            for c in fresh:
+                have.add(c["id"])
+                r = results.get(c["id"])
+                if r is None:
+                    continue
+                st.messages.append({
+                    "role": "tool",
+                    "tool_call_id": c["id"],
+                    "name": str(_get(r, "name") or c["name"] or ""),
+                    "content": text_of_content(_get(r, "content", "")),
+                    "ts": at,
+                })
+                added += 1
+        if added:
+            logger.info("[multi-decision] %s 工具往返入窗：%d 条", sid, added)
+            self.settle_decision_notes(sid)
+        return added
 
     def commit_round(self, sid: str, prompts, media_by_id=None) -> int:
         """把本轮真正发出去的消息记进窗口（v2.53：每轮都记）。

@@ -222,6 +222,8 @@ th{color:var(--muted);font-weight:500;background:var(--soft);white-space:nowrap;
 tr:last-child td{border-bottom:none;}
 td.num{font-variant-numeric:tabular-nums;white-space:nowrap;}
 .tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;border:1px solid var(--line);white-space:nowrap;}
+/* 用户 m13767：窗口条数那格里的「N 条」和后面的标签要锁在一行，别让标签掉到第二行。 */
+.wn{white-space:nowrap;}
 .tag.cut{background:rgba(6,182,212,.14);color:#0e7490;border-color:rgba(6,182,212,.45);}
 html[data-theme="dark"] .tag.cut{background:rgba(6,182,212,.22);color:#67e8f9;}
 .tag.ok{color:var(--ok);border-color:var(--ok);}
@@ -734,8 +736,9 @@ html[data-theme="dark"] .mc-bd .at{background:rgba(59,130,246,.26);color:#93c5fd
     .mc-bd .qcard .qc-live{display:inline-block;margin-left:6px;padding:0 5px;border-radius:6px;
       background:#f43f5e;color:#fff;font-size:10px;font-weight:600;line-height:15px;
       vertical-align:1px;white-space:nowrap;}
-    /* 徽标要跟标题同一行：.qc-t 平时是 2 行截断的 -webkit-box，子元素会各占一行 */
-    .mc-bd .qcard.live .qc-t{display:block;overflow:hidden;}
+    /* 徽标要跟标题同一行：.qc-t 平时是 2 行截断的 -webkit-box，子元素会各占一行，
+       所以直播间卡改成 block + 限高 2 行（用户 m10400 图6：所有卡片标题都只留 2 行）。 */
+    .mc-bd .qcard.live .qc-t{display:block;overflow:hidden;max-height:2.9em;}
     html[data-theme="dark"] .mc-bd .qcard.live{border-color:rgba(244,63,94,.46);}
     html[data-theme="dark"] .mc-bd .qcard .qc-logo.live{background:#f43f5e;border-color:#e11d48;}
     html[data-theme="dark"] .mc-bd .qcard .qc-live{background:#f43f5e;color:#fff;}
@@ -789,8 +792,9 @@ html[data-theme="dark"] .mc-bd .at{background:rgba(59,130,246,.26);color:#93c5fd
       font-family:"PingFang SC","Microsoft YaHei",sans-serif;letter-spacing:.5px;}
     html[data-theme="dark"] .mc-bd .qcard .qc-logo.dy{background:#fe2c55;border-color:#e02349;color:#fff;}
     /* v3.70（用户 m21533 第 5 条）：抖音卡不要左侧那条红边，跟其他分享卡同一张脸。 */
-    /* v3.69（用户 m21003 第 4 条）：抖音卡的标题不再截两行，按字数自动换行铺完。 */
-    .mc-bd .qcard.dycard .qc-t{display:block;overflow:visible;-webkit-line-clamp:unset;}
+    /* 用户 m10400 图6：抖音标题太长，卡片被撑得老高，改回跟其他分享卡一样截 2 行。
+       （v3.69 用户 m21003 第 4 条曾要求「不截、铺完」，这里按新要求收回。） */
+    .mc-bd .qcard.dycard .qc-t{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
     /* 位置分享卡（用户 m11820 图1/图2）：左边一块地图示意（纯装饰，不是真实地图截图），
        右边地址 + 「位置分享」。以前只显示 app 名 com.tencent.map 和带前缀的 [位置]地址。 */
     .mc-bd .qcard.loc .qcmap{flex:none;border-radius:10px;display:block;box-shadow:inset 0 0 0 1px rgba(16,24,40,.06);}
@@ -858,10 +862,16 @@ html[data-theme="dark"] .mc-bd .at{background:rgba(59,130,246,.26);color:#93c5fd
     .img-pop .ip-mask{position:absolute;inset:0;background:rgba(0,0,0,.62);}
     .img-pop .ip-box{position:relative;display:flex;align-items:center;justify-content:center;
       max-width:min(1200px,94vw);max-height:88vh;}
+    /* 用户 m10400：长图在 86vh 里被压扁，看不清。图本身仍按自适应尺寸排版，
+       缩放和平移只走 transform，不改变布局，所以「点空白处关闭」的判定范围不变。 */
     .img-pop .ip-img{display:block;max-width:100%;max-height:86vh;width:auto;height:auto;
-      object-fit:contain;border-radius:10px;background:var(--card);box-shadow:0 18px 52px rgba(0,0,0,.45);}
+      object-fit:contain;border-radius:10px;background:var(--card);box-shadow:0 18px 52px rgba(0,0,0,.45);
+      transform-origin:50% 50%;will-change:transform;}
+    .img-pop.zoomed .ip-img{cursor:grab;border-radius:0;box-shadow:none;}
+    .img-pop.dragging .ip-img{cursor:grabbing;}
+    .img-pop.dragging .ip-mask{background:rgba(0,0,0,.84);}
     /* 关闭按钮收进图片右上角内侧：深色半透明底 + 白 ×（用户 m03561：悬在外面的白圆点很难看） */
-    .img-pop .ip-x{position:absolute;top:10px;right:10px;width:30px;height:30px;padding:0;
+    .img-pop .ip-x{position:absolute;top:10px;right:10px;width:30px;height:30px;padding:0;z-index:3;
       display:flex;align-items:center;justify-content:center;line-height:1;
       border:0;border-radius:50%;background:rgba(0,0,0,.42);color:#fff;font-size:19px;font-family:inherit;
       cursor:pointer;opacity:.82;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
@@ -870,6 +880,25 @@ html[data-theme="dark"] .mc-bd .at{background:rgba(59,130,246,.26);color:#93c5fd
     .img-pop .ip-x:hover,.img-pop .ip-x:focus-visible{background:rgba(0,0,0,.68);opacity:1;outline:none;}
     .img-pop .ip-note{display:none;padding:18px 22px;border-radius:10px;background:var(--card);
       color:var(--muted);font-size:12.5px;box-shadow:0 18px 52px rgba(0,0,0,.3);}
+    /* 底部缩放条（用户 m10400）：缩小 / 当前比例 / 放大，右边是 1:1 与自适应两个还原按钮。
+       浮在遮罩上，不占图片位置；点它不触发「点空白关闭」。 */
+    .img-pop .ip-bar{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);
+      display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:999px;
+      background:rgba(0,0,0,.58);color:#fff;font-size:12px;line-height:1;z-index:3;
+      -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+      box-shadow:0 0 0 1px rgba(255,255,255,.14),0 6px 22px rgba(0,0,0,.42);}
+    .img-pop .ip-bar[hidden]{display:none;}
+    .img-pop .ip-btn{min-width:26px;height:26px;padding:0 9px;border:0;border-radius:999px;
+      display:flex;align-items:center;justify-content:center;
+      background:rgba(255,255,255,.13);color:#fff;font:inherit;font-size:12px;line-height:1;
+      cursor:pointer;transition:background .15s ease,opacity .15s ease;}
+    .img-pop .ip-btn:hover,.img-pop .ip-btn:focus-visible{background:rgba(255,255,255,.28);outline:none;}
+    .img-pop .ip-btn[disabled]{opacity:.32;cursor:default;}
+    .img-pop .ip-btn.on{background:rgba(255,255,255,.34);}
+    .img-pop .ip-btn-t{font-size:11.5px;letter-spacing:.2px;}
+    .img-pop .ip-zoom{min-width:78px;text-align:center;color:#fff;font-size:11.5px;
+      font-variant-numeric:tabular-nums;letter-spacing:.2px;user-select:none;}
+    .img-pop .ip-sep{width:1px;height:16px;background:rgba(255,255,255,.22);margin:0 2px;}
     /* 图片缩略图：点开看原图 */
     .mc-bd .thumbs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:7px;}
     .mc-bd .thumb{display:block;width:78px;height:78px;border:1px solid var(--line);border-radius:8px;
@@ -2006,10 +2035,14 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
     // （图片缓存 / 快照 / 窗口快照 / 消息日志 / 会话统计）加「摘要」和「其他」；
     // v4.00（用户 m10782）：requests 目录里现在既有回复快照也有决策快照，
     // 目录级统计拆不开，清单上就合称「快照」。
-    var MEM_GROUPS = [["图片缓存", "media_cache"], ["快照", "requests"],
+    // 用户 m14620：转发图片（fw_）和其他图片（tw_）以前没登记，全落进「其他」，
+    // 副行就出现两个「其他」。现在按真实类目登记。
+    var MEM_GROUPS = [["图片缓存", "media_cache"], ["转发图片", "forward_media"],
+                      ["其他图片", "media_other"], ["快照", "requests"],
                       ["窗口快照", "windows"], ["消息日志", "decisions"],
                       ["会话统计", "stats"], ["摘要", "summaries"]];
-    var PIE_SHORT = { "图片缓存": "图片", "快照": "快照", "窗口快照": "窗口",
+    var PIE_SHORT = { "图片缓存": "图片", "转发图片": "转发", "其他图片": "其他图",
+                      "快照": "快照", "窗口快照": "窗口",
                       "消息日志": "消息", "会话统计": "统计", "摘要": "摘要", "其他": "其他" };
     var memGroups = MEM_GROUPS.map(function(g){
       var mb = 0, bytes = 0, cnt = 0;
@@ -2027,16 +2060,17 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
     // 固定 7 项，其他就算是 0 也留着占位，不然目录一变清单的行数就跟着变。
     memGroups.push({ name: "其他", mb: otherMb, bytes: otherBytes, cnt: otherCnt,
                      lbl: fmtMb(otherMb, otherBytes) });
-    // v4.86（用户 m11062）：副行只列最大的两类，剩下的一起算「其他」——
-    // 七类全列会把卡片顶得比旁边六张高（用户 m10425 说过排不下就合并类目）。
+    // v4.86（用户 m11062）：副行只列最大的几类，别把卡片顶得比旁边六张高。
+    // 用户 m14620：列最大的三类、用真实类目名；尾巴不再拼一个「其他」——
+    // 以前「其他」既可能是没登记的最大类目、又可能是剩下的尾巴，于是同时出现两个。
     var memBySize = memGroups.filter(function(g){ return (g.bytes || 0) > 0 || (g.mb || 0) > 0; })
-      .sort(function(a2, b2){ return (b2.bytes || 0) - (a2.bytes || 0); });
-    var memSub = memBySize.slice(0, 2).map(function(g){
+      // 用户 m14620：后端只给 mb、没给 bytes 时也要按大小排，不然顺序会退回类目表顺序。
+      .sort(function(a2, b2){
+        return ((b2.bytes || 0) - (a2.bytes || 0)) || ((b2.mb || 0) - (a2.mb || 0));
+      });
+    var memSub = memBySize.slice(0, 3).map(function(g){
       return (PIE_SHORT[g.name] || g.name) + " " + g.lbl;
     }).join(" · ");
-    var restMb = 0, restBytes = 0;
-    memBySize.slice(2).forEach(function(g){ restMb += (g.mb || 0); restBytes += (g.bytes || 0); });
-    if(restMb > 0 || restBytes > 0) memSub += " · 其他 " + fmtMb(restMb, restBytes);
     items.push(["插件数据", tot == null ? "—" : tot.toFixed(1), tot == null ? "" : "MB", "",
                 tot == null ? "" : memSub, null, ""]);
     var cardsHtml = items.map(function(it){
@@ -3412,6 +3446,60 @@ var ctxSnapRequest = 0;
   // ---- 图片大图层（用户 m03343 第 2 条）
   // 页面上所有缩略图（正文、引用块、待发、转发弹层里）都带 data-img，点一下就地弹大图，
   // 不再 target='_blank' 开新标签页；图按原比例缩进视口，只缩不放，不裁切。
+  // 用户 m10400：长图在 86vh 里被压扁看不清，补滚轮缩放、底部缩放条、1:1 与自适应还原。
+  // 缩放只改 transform、不动布局，所以「点空白处关闭」的判定范围还是那张自适应尺寸的图。
+  var IP = { zoom: 1, tx: 0, ty: 0, fit: 1, one: 1, drag: null, moved: false, pending: false };
+  var IP_MIN = 0.2, IP_MAX = 12;
+  function ipBox(){ return document.getElementById("img-pop"); }
+  function ipImg(){ var b = ipBox(); return b ? b.querySelector(".ip-img") : null; }
+  function ipMeasure(){
+    var im = ipImg();
+    if(!im || !im.naturalWidth) return;
+    // offsetWidth 是布局宽度（transform 不影响它），也就是「自适应」时的显示宽度
+    var w = im.offsetWidth || im.naturalWidth;
+    IP.fit = w / im.naturalWidth;
+    IP.one = IP.fit > 0 ? 1 / IP.fit : 1;
+  }
+  function ipLabel(){
+    var box = ipBox();
+    if(!box) return;
+    var lab = box.querySelector(".ip-zoom");
+    var pct = Math.round(IP.zoom * IP.fit * 100);
+    var atFit = Math.abs(IP.zoom - 1) < 0.001;
+    var atOne = Math.abs(IP.zoom - IP.one) < 0.01;
+    if(lab) lab.textContent = atFit ? ("自适应 " + pct + "%") : (atOne ? ("1:1 " + pct + "%") : ("放大 " + pct + "%"));
+    var fb = box.querySelector("[data-ipzoom='fit']");
+    var ob = box.querySelector("[data-ipzoom='one']");
+    if(fb) fb.classList.toggle("on", atFit);
+    if(ob) ob.classList.toggle("on", atOne);
+    var out = box.querySelector("[data-ipzoom='out']");
+    var inn = box.querySelector("[data-ipzoom='in']");
+    if(out) out.disabled = IP.zoom <= IP_MIN + 1e-6;
+    if(inn) inn.disabled = IP.zoom >= IP_MAX - 1e-6;
+  }
+  function ipApply(){
+    var box = ipBox(), im = ipImg();
+    if(!box || !im) return;
+    im.style.transform = "translate(" + IP.tx + "px," + IP.ty + "px) scale(" + IP.zoom + ")";
+    box.classList.toggle("zoomed", Math.abs(IP.zoom - 1) > 0.001);
+    ipLabel();
+  }
+  function ipReset(){ IP.zoom = 1; IP.tx = 0; IP.ty = 0; ipApply(); }
+  // 以 (cx,cy) 为锚点缩放：锚点下面那个像素缩放前后停在原地
+  function ipZoomAt(z2, cx, cy){
+    var im = ipImg();
+    if(!im) return;
+    z2 = Math.max(IP_MIN, Math.min(IP_MAX, z2));
+    if(Math.abs(z2 - IP.zoom) < 1e-6) return;
+    var r = im.getBoundingClientRect();
+    var ox = cx - (r.left + r.width / 2);
+    var oy = cy - (r.top + r.height / 2);
+    var k = 1 - z2 / IP.zoom;
+    IP.tx += ox * k;
+    IP.ty += oy * k;
+    IP.zoom = z2;
+    ipApply();
+  }
   function ensureImgPop(){
     var box = document.getElementById("img-pop");
     if(box) return box;
@@ -3424,40 +3512,144 @@ var ctxSnapRequest = 0;
       "<div class='ip-note'>图片加载失败</div>" +
       "<button class='ip-x' type='button' data-imgpop='close' title='关闭' aria-label='关闭'>" +
         "<svg viewBox='0 0 24 24' width='13' height='13' aria-hidden='true'><path d='M6 6l12 12M18 6L6 18' " +
-        "stroke='currentColor' stroke-width='2.2' stroke-linecap='round'/></svg></button></div>";
+        "stroke='currentColor' stroke-width='2.2' stroke-linecap='round'/></svg></button></div>" +
+      "<div class='ip-bar' hidden>" +
+        "<button class='ip-btn' type='button' data-ipzoom='out' title='缩小（滚轮向下 / 减号）' aria-label='缩小'>−</button>" +
+        "<span class='ip-zoom' title='当前显示比例'>自适应</span>" +
+        "<button class='ip-btn' type='button' data-ipzoom='in' title='放大（滚轮向上 / 加号）' aria-label='放大'>+</button>" +
+        "<span class='ip-sep'></span>" +
+        "<button class='ip-btn ip-btn-t' type='button' data-ipzoom='one' title='按原图像素 1:1 显示'>1:1</button>" +
+        "<button class='ip-btn ip-btn-t' type='button' data-ipzoom='fit' title='缩回自适应屏幕'>自适应</button>" +
+      "</div>";
     document.body.appendChild(box);
     var im = box.querySelector(".ip-img");
+    var bar = box.querySelector(".ip-bar");
     im.addEventListener("error", function(){
       im.style.display = "none";
       box.querySelector(".ip-note").style.display = "block";
+      bar.hidden = true;
     });
-    im.addEventListener("click", function(){ closeImgPop(); });   // 点大图本身也能关
+    im.addEventListener("load", function(){
+      if(!IP.pending) return;
+      IP.pending = false;
+      bar.hidden = false;
+      ipMeasure();
+      IP.zoom = 1; IP.tx = 0; IP.ty = 0;
+      ipApply();
+    });
+    // 点大图本身也能关；放大之后不关，免得想拖动时误关
+    im.addEventListener("click", function(){
+      if(IP.moved){ IP.moved = false; return; }
+      if(Math.abs(IP.zoom - 1) > 0.001) return;
+      closeImgPop();
+    });
+    // 双击：放大状态回到自适应
+    im.addEventListener("dblclick", function(ev){
+      if(Math.abs(IP.zoom - 1) < 0.001) return;
+      ev.preventDefault();
+      ipReset();
+    });
+    // 滚轮缩放：以鼠标位置为锚点
+    box.addEventListener("wheel", function(ev){
+      if(box.hidden) return;
+      ev.preventDefault();
+      var d = ev.deltaY || 0;
+      var step = Math.abs(d) < 40 ? (d > 0 ? 1 / 1.06 : 1.06) : (d > 0 ? 1 / 1.18 : 1.18);
+      ipZoomAt(IP.zoom * step, ev.clientX, ev.clientY);
+    }, { passive: false });
+    // 放大后按住拖动平移
+    box.addEventListener("mousedown", function(ev){
+      if(box.hidden || ev.button !== 0) return;
+      var t = ev.target;
+      if(t && t.closest && (t.closest("[data-imgpop]") || t.closest(".ip-bar"))) return;
+      if(Math.abs(IP.zoom - 1) < 0.001) return;
+      IP.drag = { x: ev.clientX, y: ev.clientY, tx: IP.tx, ty: IP.ty };
+      IP.moved = false;
+      box.classList.add("dragging");
+      ev.preventDefault();
+    });
     box.addEventListener("click", function(ev){
       var t = ev.target;
+      var zb = t && t.closest ? t.closest("[data-ipzoom]") : null;
+      if(zb){
+        ev.preventDefault();
+        ev.stopPropagation();
+        var act = zb.getAttribute("data-ipzoom");
+        var cx = window.innerWidth / 2, cy = window.innerHeight / 2;
+        if(act === "in") ipZoomAt(IP.zoom * 1.25, cx, cy);
+        else if(act === "out") ipZoomAt(IP.zoom / 1.25, cx, cy);
+        else if(act === "one") ipZoomAt(IP.one, cx, cy);
+        else ipReset();
+        return;
+      }
       if(t && t.closest && t.closest("[data-imgpop]")) closeImgPop();
-      else if(t && t.closest && !t.closest(".ip-box")) closeImgPop();
+      else if(t && t.closest && (t.closest(".ip-box") || t.closest(".ip-bar"))) return;
+      else closeImgPop();
     });
     return box;
   }
+  document.addEventListener("mousemove", function(ev){
+    if(!IP.drag) return;
+    var dx = ev.clientX - IP.drag.x, dy = ev.clientY - IP.drag.y;
+    if(Math.abs(dx) > 3 || Math.abs(dy) > 3) IP.moved = true;
+    IP.tx = IP.drag.tx + dx;
+    IP.ty = IP.drag.ty + dy;
+    ipApply();
+  });
+  document.addEventListener("mouseup", function(){
+    if(!IP.drag) return;
+    IP.drag = null;
+    var box = ipBox();
+    if(box) box.classList.remove("dragging");
+  });
+  // 大图打开时的缩放快捷键：+/- 缩放、0 自适应、1 按原像素
+  document.addEventListener("keydown", function(e){
+    var box = ipBox();
+    if(!box || box.hidden) return;
+    var k = e.key;
+    var cx = window.innerWidth / 2, cy = window.innerHeight / 2;
+    if(k === "+" || k === "="){ e.preventDefault(); ipZoomAt(IP.zoom * 1.25, cx, cy); }
+    else if(k === "-" || k === "_"){ e.preventDefault(); ipZoomAt(IP.zoom / 1.25, cx, cy); }
+    else if(k === "0"){ e.preventDefault(); ipReset(); }
+    else if(k === "1"){ e.preventDefault(); ipZoomAt(IP.one, cx, cy); }
+  }, true);
   function openImgPop(src, title){
     if(!src) return;
     var box = ensureImgPop();
     var im = box.querySelector(".ip-img");
     var note = box.querySelector(".ip-note");
+    var bar = box.querySelector(".ip-bar");
     im.style.display = "";
     note.style.display = "none";
+    im.style.transform = "";
+    IP.zoom = 1; IP.tx = 0; IP.ty = 0; IP.drag = null; IP.moved = false;
+    IP.pending = true;
+    box.classList.remove("zoomed", "dragging");
+    bar.hidden = true;
     im.src = src;
     im.alt = title || "图片";
     im.title = title || "";
     box.hidden = false;
     document.body.classList.add("img-pop-open");
+    // 图已经在缓存里时 load 不会再触发，这里补一次
+    if(im.complete && im.naturalWidth){
+      IP.pending = false;
+      bar.hidden = false;
+      ipMeasure();
+      ipApply();
+    }
   }
   function closeImgPop(){
     var box = document.getElementById("img-pop");
     if(!box || box.hidden) return;
     box.hidden = true;
+    box.classList.remove("zoomed", "dragging");
+    IP.drag = null; IP.moved = false; IP.pending = false;
+    IP.zoom = 1; IP.tx = 0; IP.ty = 0;
     var im = box.querySelector(".ip-img");
-    if(im) im.removeAttribute("src");   // 关掉就把图卸掉，不留在页面上
+    if(im){ im.style.transform = ""; im.removeAttribute("src"); }   // 关掉就把图卸掉，不留在页面上
+    var bar = box.querySelector(".ip-bar");
+    if(bar) bar.hidden = true;
     document.body.classList.remove("img-pop-open");
   }
   // 捕获阶段拦缩略图的点击：先于卡片自己的点击逻辑（转发弹层、拉黑等）生效
@@ -4443,6 +4635,9 @@ var ctxSnapRequest = 0;
     return html ? "<div class='unassigned-media' data-media-owner='unknown'><span class='dim'>归属未确认的附件</span>" + html + "</div>" : "";
   }
   var QUOTE_IDX = {};
+  // 用户 m10400 图5：记录页 ② 历史消息补进引用索引的条目。换记录时按值回收，
+  // 免得开过的记录越攒越多（只删自己加的那份，③ 本轮与窗口重建的条目不动）。
+  var QUOTE_HIST_ADDED = {};
   // 用户 m02993 图10：窗口里查不到时，再由后端翻历史记录补一遍；补到的放这儿，
   // 重画时不用再问一次。QUOTE_SID 跟着当前会话走。
   var QUOTE_FAR = {};
@@ -4732,8 +4927,14 @@ var ctxSnapRequest = 0;
     // 总数正好等于这一条的图片数才敢用，多一张少一张都退回占位顺序认领。
     if((!slots || slots.length !== entries.length) && media && media.length){
       var hostSlots = entries.map(function(raw){
-        var hm = String(raw || "").match(/\[image(?:\s+attached)?\]/gi);
-        return hm ? hm.length : 0;
+        // 用户 m18581：贴纸（[Sticker attached]）也是媒体槽。只数 [Image attached]
+        // 会让槽位总数对不上媒体池，整张表被弃用，贴纸的图就落到后面的图片条目上。
+        // 还有一层：正文进到这里之前已经过 tidyBody，[Image attached] / [Sticker attached]
+        // 早被洗成 [图片] / [表情] 了，只认英文标记的话总数恒为 0，槽位表永远用不上。
+        var s = String(raw || ""), n = 0;
+        s.replace(/\[(?:image|sticker)(?:\s+attached|:[^\]\r\n]*)?\]/gi, function(){ n++; return ""; })
+         .replace(/\[(?:图片|表情|语音|视频)\](?:\s*×\s*(\d+))?/g, function(_m, k){ n += (k ? (parseInt(k, 10) || 1) : 1); return ""; });
+        return n;
       });
       var hostTotal = hostSlots.reduce(function(a, b){ return a + b; }, 0);
       if(hostTotal === media.length) slots = hostSlots;
@@ -4841,8 +5042,14 @@ var ctxSnapRequest = 0;
     // 图片先占满 [图片] 槽，多出来的才轮到 [表情]（第二遍认领），所以两种占位分开剥。
     function fwdStrip(r, got){
       var need = fwdNeed(r), shown = fwdShownN(got);
-      var picGot = Math.min(shown, need.pic), emoGot = Math.max(0, shown - need.pic);
       var out = String(r.text || "");
+      // 用户 m18581：槽位表把贴纸也算进去了，图到手就两种占位一起剥；
+      // 只按 [图片] 剥的话贴纸条目会同时画一张图和一个 🙂。
+      if(r.slotN >= 0){
+        if(shown >= (r.slotN | 0)) out = stripFwdKind(stripFwdKind(out, "图片"), "表情");
+        return out;
+      }
+      var picGot = Math.min(shown, need.pic), emoGot = Math.max(0, shown - need.pic);
       if(need.pic > 0 && picGot >= need.pic) out = stripFwdKind(out, "图片");
       if(need.emo > 0 && emoGot >= need.emo) out = stripFwdKind(out, "表情");
       return out;
@@ -5765,6 +5972,20 @@ var ctxSnapRequest = 0;
     // 用户 m21787 图3/图4：美化档显示聊天里原本那张图（后端按 message_id 回索引取的 orig_media）。
     // 只认调用方显式打的 origMedia 标记，请求快照那边照旧看模型侧那一份。
     if(mode === "pretty" && m.origMedia && ownerDisplay.orig && ownerDisplay.orig.length) ownerDisplay.own = ownerDisplay.orig;
+    // 用户 m10400 图3：框架会把被引用那条消息的图也挂到引用它的消息上，引用块画一遍、
+    // 正文再画一遍就是重复。引用块已经画了同一批图时，正文这份不再画。
+    if(ownerDisplay.reply && ownerDisplay.reply.media && ownerDisplay.reply.media.length && ownerDisplay.own.length){
+      var _qset = Object.create(null);
+      ownerDisplay.reply.media.forEach(function(r){
+        var _p = (typeof r === "string") ? r : String((r && (r.path || r.url)) || "");
+        if(_p) _qset[_p] = 1;
+      });
+      var _ownKept = ownerDisplay.own.filter(function(r){
+        var _p = (typeof r === "string") ? r : String((r && (r.path || r.url)) || "");
+        return !(_p && _qset[_p]);
+      });
+      if(_ownKept.length !== ownerDisplay.own.length) ownerDisplay.own = _ownKept;
+    }
     var neutralMedia = ownerDisplay.unassigned;
     // 只改视图副本；真实发送用的 legacy m.media 不动。
     m = Object.assign({}, m, { chars: displayCharCount(m, preMeta), media: ownerDisplay.own });
@@ -6995,6 +7216,13 @@ var ctxSnapRequest = 0;
           var q0 = splitMetaAll(tidyBody(m.text || ""))[0];
           if(q0 && q0.meta && q0.meta.ts) lastTs = shortTs(q0.meta.ts);
         }
+        // 用户 m10400 图4：实时窗口以前不认 orig_media，动图在美化档里还是九宫格 +
+        // 「（动图 · 共 N 帧…）」那句说明。跟请求快照一个口径：美化档换成聊天里原本那张图。
+        var mv = m;
+        if(VIEW === "pretty" && m.display && m.display.orig_media && m.display.orig_media.length){
+          var mt = stripDeriveNote(m.text || "");
+          mv = Object.assign({}, m, { origMedia: true, text: mt, chars: mt.length });
+        }
         // v3.94（用户 m08398 图2/图3）：决策记录已经插在它促成的回复之前（后端算的槽位），
         // 窗口末尾不再补一份。单独成组：跟上一条 bot 回复并组会把它的名字吃掉，
         // 看着就像 bot 自己说的话。
@@ -7014,13 +7242,13 @@ var ctxSnapRequest = 0;
         // v3.89（用户 m05321 第 1 条）：裁切快照里的待发要标出来——卡尾挂「待发」，
         // 整张卡换成虚线框（跟实时窗口的待发区长一个样）
         if(m.pending){
-          var pCard = msgCards(m, i + 1, VIEW, lastTs, true,
+          var pCard = msgCards(mv, i + 1, VIEW, lastTs, true,
                                "<span class='chb tag pendtag'>待发</span>");
           pCard = String(pCard).replace(/<div class='mc (user|assistant|summary)/g,
                                           "<div class='mc pend $1");
           grpBuf += pCard;
         } else {
-          grpBuf += msgCards(m, i + 1, VIEW, lastTs, true);
+          grpBuf += msgCards(mv, i + 1, VIEW, lastTs, true);
         }
       });
       flushGrp();
@@ -7228,9 +7456,16 @@ var ctxSnapRequest = 0;
   // 但两次预取之间至少隔 120ms，免得横扫时一口气发十几个请求。
   var snapPrefetchTimer = null, snapPrefetchLast = "", snapPrefetchAt = 0;
   document.addEventListener("pointerover", function(ev){
-    var b = ev.target && ev.target.closest ? ev.target.closest("[data-trend]") : null;
-    if(!b || !ctxSid) return;
-    var name = b.getAttribute("data-trend");
+    var t = ev.target && ev.target.closest ? ev.target : null;
+    if(!t || !ctxSid) return;
+    // 用户 m17375 第 3 条：表格行也预取。以前只认走势图柱子，从回复记录表
+    // 点进去要现等一秒多（转发图证明那一步最慢）；鼠标扫过行就先取一份。
+    var b = t.closest("[data-trend]");
+    var name = b ? (b.getAttribute("data-trend") || "") : "";
+    if(!name){
+      var tr = t.closest("tr.round-row[data-round]");
+      if(tr) name = tr.getAttribute("data-round") || "";
+    }
     if(!name || name === snapPrefetchLast || snapCacheGet(ctxSid, name)) return;
     snapPrefetchLast = name;
     if(snapPrefetchTimer) clearTimeout(snapPrefetchTimer);
@@ -7243,6 +7478,28 @@ var ctxSnapRequest = 0;
       try{ fetchRound(sid, name).catch(function(){}); }catch(e){}
     }, wait);
   }, true);
+  // 用户 m17375 第 3 条：列表画好后空闲预取最新两份快照。用户十有八九点的是最新那条，
+  // 等鼠标扫过去再取就来不及了（一份要一秒多）。同一个「最新两份」只取一次。
+  var snapPrefetchNewest = "";
+  function prefetchRecentSnaps(){
+    if(!ctxSid || !ctxRounds || !ctxRounds.length) return;
+    var names = [];
+    for(var i = 0; i < ctxRounds.length && names.length < 1; i++){
+      var nm = ctxRounds[i] && ctxRounds[i].name;
+      if(nm && !snapCacheGet(ctxSid, nm)) names.push(nm);
+    }
+    if(!names.length) return;
+    var sig = ctxSid + "|" + names.join(",");
+    if(sig === snapPrefetchNewest) return;
+    snapPrefetchNewest = sig;
+    var sid = ctxSid;
+    names.forEach(function(nm, i){
+      setTimeout(function(){
+        if(sid !== ctxSid || document.hidden || snapCacheGet(sid, nm)) return;
+        try{ fetchRound(sid, nm).catch(function(){}); }catch(e){}
+      }, 600 + i * 1200);
+    });
+  }
 
   // 剪贴板：navigator.clipboard 在 http://127.0.0.1 下可用；万一被拒（老浏览器 / 没权限）
   // 退回 textarea + execCommand，别让「点了没反应」。
@@ -7548,6 +7805,8 @@ var ctxSnapRequest = 0;
   var roundRecCache = Object.create(null);
   var ctxDecisionsInFlight = null;
   var ctxDecisionsInFlightSid = "";
+  // 用户 m17375 第 5 条：决策记录后台预取过一次的会话，别重复预取。
+  var ctxDecPrefetched = "";
 
   function loadCtxDecisions(sid, force){
     if(!sid) return Promise.resolve();
@@ -7777,7 +8036,7 @@ var ctxSnapRequest = 0;
         itag = " <span class='dim' title='" + esc("这一轮请求里带了 " + icnt + " 张图（含转发实际暴露的、历史里的、待发的）" +
             (ifb ? "，" + fbTip : "")) + "'>· 图" + icnt + "</span>";
       }else{
-        itag = (ifb && !r.failed) ? " <span class='tag warn' title='" + esc(fbTip) + "'>看图退回</span>" : "";
+        itag = (ifb && !r.failed) ? " <span class='tag warn' title='" + esc(fbTip) + "'>回退</span>" : "";
       }
       // 用户 m05124 第 8 条：决策轮也要看得到防抖——「防抖 7s + 2s」。
       var del = Number(r.decision_debounce) || 0;
@@ -7803,7 +8062,8 @@ var ctxSnapRequest = 0;
       // 待发不再单独标出来——它还没并进窗口，混进条数里会让人以为窗口有 50 多条。
       var dTot = Number(r.window_total) || 0;
       var dUser = (typeof r.window_user === "number" && r.window_user > 0) ? r.window_user : dTot;
-      html += "<td class='num'>" + (dTot || dUser) + " 条" + itag + "</td>";
+      // 用户 m13767：这一格里的「N 条」和标签锁在一行——以前标签会掉到第二行，看着像两行数据。
+      html += "<td class='num'><span class='wn'>" + (dTot || dUser) + " 条" + itag + "</span></td>";
       html += "<td class='num tokc'>" + (tk.input
         ? "<span class='tokw'>" + tokText(tk.input) + " / " + tokText(tk.output) + "</span>"
         : "<span class='dim'>—</span>") + "</td>";
@@ -8159,6 +8419,7 @@ var ctxSnapRequest = 0;
       row.parentNode.replaceChild(old, row);
       if(old.previousElementSibling) old.previousElementSibling.classList.toggle("open", old.style.display !== "none");
     });
+    prefetchRecentSnaps();
   }
 
   // 请求索引也要轮询；未变化不碰 DOM，变化时复用详情节点，保留内部展开与媒体状态。
@@ -8243,6 +8504,7 @@ var ctxSnapRequest = 0;
     ctxSnapTotal = 0;
     ctxDecisionsInFlight = null;
     ctxDecisionsInFlightSid = "";
+    ctxDecPrefetched = "";
     roundRecCache = Object.create(null);
     ctxRoundsLoading = "";
     ctxRoundsFull = false;
@@ -8937,6 +9199,27 @@ var ctxSnapRequest = 0;
       // 三档共享 canonical 消息数组及轮次边界；显示投影只提供媒体/装饰。
       var bound2 = boundX;
       var hist = partition.messages.slice(0, bound2);
+      // 用户 m10400 图5：② 历史消息里的转发被引用时，引用块里只剩 [Forward] 这个空标记，
+      // 内容其实就在同一份快照的历史里。先把历史编进引用索引（③ 本轮优先，不覆盖），
+      // 引用块才能按 id 找到那条转发、把里面的聊天记录画出来。
+      Object.keys(QUOTE_HIST_ADDED).forEach(function(k){
+        if(QUOTE_IDX[k] === QUOTE_HIST_ADDED[k]) delete QUOTE_IDX[k];
+      });
+      QUOTE_HIST_ADDED = {};
+      var histIdx2 = buildQuoteIdx(hist.map(function(m, i){
+        var pj5 = snapshotDisplay(m, (r.display_messages || [])[i]);
+        var d5 = pj5.view || {};
+        var t5 = typeof d5.text === "string" ? d5.text : contentText(m.content);
+        // raw 直接给 content：displayTextOf 只挑 text 段，不会把 JSON 串当引用正文。
+        return {role: m.role, text: t5, raw: m.content, chars: t5.length,
+                media: d5.media || m.media || [], display: pj5.display,
+                who: m.who || "", name: m.name || ""};
+      }), []);
+      Object.keys(histIdx2).forEach(function(k){
+        if(QUOTE_IDX[k]) return;
+        QUOTE_IDX[k] = histIdx2[k];
+        QUOTE_HIST_ADDED[k] = histIdx2[k];
+      });
       var preLen = partition.prefixKnown ? partition.prefixLen : -1;
       var hits2 = Math.max(0,Math.min(bound2,preLen)), miss2 = bound2-hits2;
       var chars2 = partition.historyChars;
@@ -9298,6 +9581,15 @@ var ctxSnapRequest = 0;
         if(!ctxRoundsFull && ctxPane !== "rounds") setTimeout(function(){
           if(ctxSid && !ctxRoundsFull) refreshCtxRounds(ctxSid, true);
         }, 1200);
+        // 用户 m17375 第 5 条：决策记录页点进去会先空一下再长出来（接口 300ms）。
+        // 跟回复记录一样，趁用户还停在别的页签时后台先拉一次，点过去就是现成的。
+        // 每个会话只预取一次，别让 5 秒的刷新一直白拉 240KB。
+        if(ctxPane !== "decisions" && ctxDecPrefetched !== ctxSid) setTimeout(function(){
+          if(ctxSid && ctxPane !== "decisions" && ctxDecPrefetched !== ctxSid){
+            ctxDecPrefetched = ctxSid;
+            loadCtxDecisions(ctxSid);
+          }
+        }, 2200);
       }
       else if(ctxSessions.length) openCtx(ctxSessions[0].sid);
       else {
@@ -9367,6 +9659,10 @@ var ctxSnapRequest = 0;
     }, 1000);
   }
   function stopStateTimer(){ if(stateTimer){ clearInterval(stateTimer); stateTimer = null; } }
+  // 用户 m17375 第 4 条：新回复要马上出现在记录页。轻量轮询现在也带
+  // rounds / last_ts，这两个值一变就说明刚来了一轮，立刻去拉记录，
+  // 不用干等 5 秒那一拍（实测 4-5 秒能压到 1-2 秒）。
+  var pollRoundSig = Object.create(null);
   function pollStates(){
     if(document.hidden) return;
     var list = document.getElementById("ctx-list");
@@ -9376,6 +9672,16 @@ var ctxSnapRequest = 0;
       var map = {};
       (d.items || []).forEach(function(s){ map[s.sid] = s; });
       paintStateNodes(map);
+      var _cur = ctxSid ? map[ctxSid] : null;
+      if(_cur){
+        var _sig = (Number(_cur.rounds) || 0) + ":" + (Number(_cur.last_ts) || 0);
+        var _old = pollRoundSig[ctxSid];
+        pollRoundSig[ctxSid] = _sig;
+        if(_old !== undefined && _old !== _sig){
+          if(ctxPane === "decisions") loadCtxDecisions(ctxSid, true);
+          else refreshCtxRounds(ctxSid);
+        }
+      }
       (ctxSessions || []).forEach(function(s){
         var n = map[s.sid];
         if(!n) return;

@@ -245,7 +245,7 @@ html.booting *,html.booting *::before,html.booting *::after{transition:none!impo
 .chips{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
 /* 列表类设置（外号/唤醒词）撑满整行，否则输入框缩在左边、右边一大片空 */
 .setrow.wide .chips{width:100%;}
-.chip{display:inline-flex;align-items:center;gap:5px;padding:4px 11px;border-radius:999px;border:1px solid var(--line);background:var(--soft);font-size:13.5px;}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:4px 11px;border-radius:8px;border:1px solid var(--line);background:var(--soft);font-size:13.5px;}
 .chip b{cursor:pointer;color:var(--muted);font-weight:400;}
 .chip b:hover{color:var(--bad);}
 #check-bar{margin-bottom:12px;}
@@ -258,7 +258,7 @@ html.booting *,html.booting *::before,html.booting *::after{transition:none!impo
 #check-bar .chk.error{background:rgba(239,68,68,.09);border-color:rgba(239,68,68,.35);color:var(--bad);}
 #check-bar .chk.warn{background:rgba(245,158,11,.10);border-color:rgba(245,158,11,.38);color:var(--warn);}
 #check-bar .chk .txt{flex:1 1 auto;text-align:left;padding:0 12px 0 54px;color:var(--text);}
-.chip-in{min-width:160px;flex:1;border:1px dashed var(--line);border-radius:999px;background:transparent;padding:4px 11px;font-size:13.5px;}
+.chip-in{min-width:160px;flex:1;border:1px dashed var(--line);border-radius:8px;background:transparent;padding:4px 11px;font-size:13.5px;}
 .chip-in:focus{outline:none;border-color:var(--accent);border-style:solid;}
 /* v3.12：外号 / 唤醒词这组 chips 与输入框一起美化（用户 m39759 ⑤）：
    胶囊改实底带阴影，输入框从虚线框换成软底圆角，聚焦时描边发光。 */
@@ -611,8 +611,25 @@ html[data-theme="dark"] .h3use.todo{background:rgba(251,191,36,.15);color:#fbbf2
   /* 用户 m02469：标签列收窄，输入框整体往左靠、右边自适应拉长。
      用户 m02950：再收到 56px，控件起点落在标签文字刚结束的位置（红竖线处）。 */
   .jev-col .drow > .dlb{flex:0 0 56px;}
+  /* 用户 m09611：决策 / 回复的设置也套成 JEV 那种两列卡片；这两页的标签更长，标签列给 112px。 */
+  .jev-col.dcol .drow > .dlb{flex:0 0 112px;}
+  /* 用户 m15201：标签列以前固定 112px，可标签只有 50–84px 宽，中间空出一截、控件被推远。
+     改成两列网格：标签列按这一列最长的标签自适应，控件紧贴标签、吃满剩下的宽度。 */
+  .jev-col.dcol .drows{display:grid;grid-template-columns:max-content minmax(0,1fr);column-gap:8px;row-gap:8px;align-items:center;}
+  .jev-col.dcol .drow{display:contents;}
+  .jev-col.dcol .drow.pair2{display:flex;flex-wrap:wrap;grid-column:1/-1;gap:10px;align-items:center;}
+  /* 用户 m16307 图1：pair2 那行的标签列要跟网格第一列一样宽，开关才跟上面的下拉左边缘对齐。
+     第一列是 max-content（决策卡最长标签 5 字、回复卡 4 字，两张卡宽度不一样），所以由 ppSyncPairLabel() 量出来写进 --dlbw。 */
+  .jev-col.dcol .drow.pair2 > .p2{gap:8px;}
+  .jev-col.dcol .drow.pair2 > .p2:first-child .dlb{flex:0 0 auto;min-width:var(--dlbw,5em);}
+  .jev-col.dcol .drow > .dlb{flex:0 0 auto;min-width:0;}
   /* 用户 m01978 第 1/2 条：两项并一行——每格「短标签 + 控件」，控件自己撑开。 */
-  .jev-col .drow.pair2{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:center;}
+  /* 用户 m15201：窗口窄到一格放不下「标签 + 框 + 单位」时（实测 1256 宽下每格只有 118px，「分钟」被挤成竖排），
+     两格自动落成一格；宽屏仍是并排两格。
+     用户 m15691：第一格按内容宽度（开关后面不再留一截空白），第二格吃掉剩下的宽度，输入框跟着变长。 */
+  .jev-col .drow.pair2{display:flex;flex-wrap:wrap;gap:10px;align-items:center;}
+  .jev-col .drow.pair2 > .p2:first-child{flex:0 0 auto;}
+  .jev-col .drow.pair2 > .p2:last-child{flex:1 1 190px;min-width:0;}
   .jev-col .drow.pair2 > .p2{display:flex;align-items:center;gap:6px;min-width:0;}
   .jev-col .drow.pair2 .dlb{flex:0 0 56px;gap:4px;white-space:nowrap;}
   .jev-col .drow.pair2 .dipt{min-width:0;flex:1 1 auto;width:auto;}
@@ -626,6 +643,8 @@ html[data-theme="dark"] .h3use.todo{background:rgba(251,191,36,.15);color:#fbbf2
   .jev-col .ipt.has-unit{position:relative;display:inline-flex;align-items:center;flex:1 1 auto;min-width:0;}
   .jev-col .ipt.has-unit > input{width:100%;min-width:0;padding-right:24px;}
   .jev-col .ipt.has-unit.uw2 > input{padding-right:36px;}
+  /* 用户 m09611：token 这种长单位（5 个字母）36px 留白不够，数字会贴上去，单独再放宽一档。 */
+  .jev-col .ipt.has-unit.uw3 > input{padding-right:48px;}
   .jev-col .ipt.has-unit > .unit{position:absolute;right:8px;top:50%;transform:translateY(-50%);
     pointer-events:none;color:var(--muted);font-size:12px;font-weight:600;line-height:1;}
   .jev-col .ipt.has-unit > input::-webkit-inner-spin-button,
@@ -641,20 +660,26 @@ html[data-theme="dark"] .h3use.todo{background:rgba(251,191,36,.15);color:#fbbf2
   .jev-col .drow.stack > .dlb{display:block;margin:0 0 2px;}
   .jev-col .drow.stack .dipt{width:100%;box-sizing:border-box;}
   .jev-col .drow.stack .jev-datarow .dipt{width:auto;flex:1 1 auto;}
-  /* 2026-11-08（用户本轮图3）：两个下拉 + 中间的「~」加起来，宽度跟同一列里普通 .dipt 选框一样
-     （.dipt 的 min-width 是 180px）：180 - 两个 6px 间距 - 「~」约 7px = 161，两个框各约 80px。 */
-  .jev-range{display:flex;align-items:center;gap:6px;width:auto;flex:1 1 auto;box-sizing:border-box;}
-  .jev-range .dipt{width:auto;min-width:0;}
-  .jev-range-sep{color:var(--muted);font-size:12px;flex:0 0 auto;}
-  /* 2026-11-08：不确定区间的 % 放进框里（原来在框外单独一个 %）。 */
-  .jev-range .jev-unit{display:inline-flex;align-items:center;height:30px;box-sizing:border-box;
-    flex:1 1 0;min-width:0;
-    border:1px solid var(--line);border-radius:7px;background:var(--bg,#fff);padding:0 6px 0 0;}
-  .jev-range .jev-unit .dipt{height:28px;border:0;background:transparent;padding:0 0 0 8px;
-    flex:1 1 0;width:auto;min-width:0;text-align:right;-webkit-appearance:none;appearance:none;}
-  .jev-range .jev-unit .jev-pct{font-size:12px;color:var(--muted);padding:0 1px;flex:0 0 auto;}
-  .jev-range .jev-unit::after{content:"";width:0;height:0;margin:0 2px 0 4px;flex:0 0 auto;
-    border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--muted);}
+  /* 用户 m16307 图2：不确定段从「两个下拉 + ~」改成一根长条——每 5% 一格刻度，
+     25%~75% 那段高亮，中间显示「25%~75%」。拖动逻辑在 jevSliderPaint / jevSliderCommit。 */
+  .jev-slider{position:relative;display:flex;align-items:center;flex:1 1 auto;min-width:0;height:30px;
+    box-sizing:border-box;}
+  .jev-slider-track{position:relative;flex:1 1 auto;min-width:0;height:22px;border-radius:7px;background:var(--line);
+    --kw:11px;--kr:11px;}
+  .jev-slider-clip{position:absolute;inset:0;border-radius:7px;overflow:hidden;pointer-events:none;}
+  .jev-slider-fill{position:absolute;top:0;bottom:0;background:var(--accent);}
+  .jev-slider-ticks{position:absolute;inset:0;pointer-events:none;color:var(--text);opacity:.22;
+    background:repeating-linear-gradient(to right,currentColor 0 1px,transparent 1px 5%);}
+  .jev-slider-knob{position:absolute;top:50%;transform:translateY(-50%);width:var(--kw);height:calc(var(--kr) * 2);
+    padding:0;border:2px solid var(--accent);background:#fff;box-sizing:border-box;
+    cursor:grab;touch-action:none;z-index:2;}
+  .jev-slider-knob[data-h='lo']{margin-left:calc(var(--kw) * -1);border-radius:var(--kr) 0 0 var(--kr);}
+  .jev-slider-knob[data-h='hi']{border-radius:0 var(--kr) var(--kr) 0;}
+  .jev-slider-knob:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+  .jev-slider-knob.dragging{cursor:grabbing;}
+  .jev-slider-tag{position:absolute;top:50%;transform:translate(-50%,-50%);z-index:3;pointer-events:none;
+    font-size:11px;line-height:1;padding:3px 7px;border-radius:6px;white-space:nowrap;
+    background:var(--card);border:1px solid var(--line);color:var(--text);}
   .jev-col .drow.stack .jev-datarow .dbtn{flex:0 0 auto;}
   .jev-keyrow{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:2px;}
   .jev-keyrow .dbtn{white-space:nowrap;}
@@ -774,7 +799,7 @@ html.booting .msw .tr,html.booting .msw .tr:after{transition:none;}
 .setrow.inline .ctl.list .chips{justify-content:flex-end;}
 .setrow.inline .ctl.list .chips:empty{display:none;}
 /* 外号不再常驻一个输入框，改成列表末尾一个「+」，点开才出现输入框 */
-.chips .chip-add{width:26px;height:26px;padding:0;border-radius:50%;border:1px dashed var(--line);background:transparent;color:var(--muted);font-size:15px;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:border-color .15s,color .15s,background .15s;}
+.chips .chip-add{width:26px;height:26px;padding:0;border-radius:8px;border:1px dashed var(--line);background:transparent;color:var(--muted);font-size:15px;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:border-color .15s,color .15s,background .15s;}
 .chips .chip-add:hover{border-color:var(--accent);color:var(--accent);background:var(--soft);}
 .chips .chip-add[hidden]{display:none;}
 .chips .chip-in{min-width:110px;flex:0 1 auto;}
@@ -866,6 +891,9 @@ html[data-theme="dark"] .bp-line .lline{stroke:rgba(255,255,255,.32);}
 .msw.soon{opacity:.45;cursor:not-allowed;}
 .sw2.soon{opacity:.5;cursor:not-allowed;}
 .sw2.soon input,.sw2.soon .tr{cursor:not-allowed;}
+/* 用户 m13535：长图自动缩小是锁死的开关——只用来告诉用户有这个功能，点不动。 */
+.sw2.lock{opacity:.75;cursor:default;}
+.sw2.lock input,.sw2.lock .tr{cursor:default;}
 .bandfoot button{height:28px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font-size:12.5px;cursor:pointer;}
 .bandfoot button:hover{border-color:var(--accent);color:var(--accent);}
 .band-dlg{width:min(940px,94vw);max-height:92vh;overflow:auto;}
@@ -1169,6 +1197,13 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .ptable .psrc-lb{color:var(--muted);font-size:11px;flex-shrink:0;}
   .ptable .psource{display:block;color:var(--muted);font-size:12px;font-weight:400;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  /* 用户 m20332：渠道改成可手填——框架不回报 provider 的模型（gemini-3.8-flash-high）
+     账本里永远是空的，只能靠人补；没填时把自动识别的结果当占位提示。 */
+  .ptable .psrc-inp{min-width:0;flex:1 1 auto;max-width:150px;height:20px;padding:0 2px;
+    border:0;border-bottom:1px dashed var(--line);border-radius:0;background:transparent;
+    color:var(--text);font:inherit;font-size:12px;font-weight:400;outline:none;}
+  .ptable .psrc-inp:focus{border-bottom-color:var(--accent);}
+  .ptable .psrc-inp::placeholder{color:var(--muted);opacity:.85;}
   .ppair{display:grid;gap:4px;}
   .ppair label{display:flex;align-items:center;gap:4px;min-width:0;}
   .ppair label>span{color:var(--muted);font-size:10px;flex-shrink:0;width:20px;}
@@ -1180,6 +1215,10 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .ptable .pl{display:block;font-size:11px;line-height:1.35;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .ptable .pt .pl{color:var(--muted);}
+  .ptable .pt .pl .plt{font-style:normal;font-weight:600;margin-right:2px;}
+  .ptable .pt .pl .plt-in{color:#3b82f6;}
+  .ptable .pt .pl .plt-hit{color:#10b981;}
+  .ptable .pt .pl .plt-out{color:#8b5cf6;}
   .ptable .ph{font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums;}
   .ptable .ph .pdim{color:var(--muted);font-weight:400;}
   /* 用户本轮：第 8 列「费用」——当前区间这一行花了多少钱；数字写法与顶部总计同一套（数字 + 小号单位）。 */
@@ -1220,13 +1259,150 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
     .ptable .pschedule{grid-column:1/-1;}
     .pschedule .ptimes{justify-content:flex-start;}
   }
+  /* 用户 m19842：不做折叠了，只把所选区间里一次都没调用过的模型藏起来（tr.pidle）。 */
+  .ptable tbody tr.pidle{display:none;}
+  /* 用户 m23331：「另有 N 个模型没调用」挪到顶部总花费右边，紧挨着「近似估算」。 */
+  .pcost .cmore{min-width:0;color:var(--muted);font-size:11.5px;white-space:nowrap;}
+  /* 用户 m19357：表格下面两张图。用户 m23216：柱图铺满整行、饼图挪到下面，柱子才宽得下柱底那两行字。 */
+  /* 用户 m29560 第 1 条：三张饼并排一行，柱图还是独占一整行。 */
+  .pcharts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:16px 0 0;}
+  .pchart:not(.pchart-pie){grid-column:1/-1;}
+  .pchart{border:1px solid var(--line);border-radius:12px;background:var(--card);
+    padding:10px 12px 8px;min-width:0;display:flex;flex-direction:column;position:relative;}
+  .pchart-h{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;padding:0 0 6px;position:relative;}
+  .pchart-h b{font-size:12.5px;font-weight:600;color:var(--text);}
+  .pchart-sub{font-size:12.5px;color:var(--muted);}
+  .pchart-range{position:absolute;right:0;top:50%;transform:translateY(-50%);margin-left:0;height:26px;}
+  .pchart-range button{height:20px;padding:0 9px;font-size:11.5px;}
+  .pchart-body{min-width:0;flex:1 1 auto;display:flex;flex-direction:column;justify-content:center;overflow:hidden;}
+  .pchart-svg{display:block;width:100%;height:auto;}
+  /* 用户 m29478：翻窗口时给柱图一点过渡，别硬切。 */
+  /* 用户 m29560 第 3 条：翻窗口要像「滑过去」，不是重新加载——整块从行进方向滑进来，不再整块淡出。 */
+  .pchart-anim{animation:pchartIn .38s cubic-bezier(.22,.61,.36,1) both;}
+  @keyframes pchartIn{from{opacity:.55;transform:translateX(var(--pdx,0px));}to{opacity:1;transform:none;}}
+  /* 用户 m29560 第 3 条：日期和数字像翻牌一样翻进来。 */
+  .pflip{display:inline-block;transform-origin:50% 100%;animation:pflipIn .36s cubic-bezier(.2,.7,.3,1) both;}
+  @keyframes pflipIn{from{transform:perspective(340px) rotateX(-82deg);opacity:.25;}to{transform:none;opacity:1;}}
+  .pnum{transform-box:fill-box;transform-origin:50% 100%;animation:pnumIn .36s cubic-bezier(.2,.7,.3,1) both;}
+  @keyframes pnumIn{from{transform:translateY(7px);opacity:0;}to{transform:none;opacity:1;}}
+  .pgrid{stroke:var(--line);stroke-width:1;stroke-dasharray:3 4;}
+  /* 用户 m21592：左右两侧光写数字不好看，补上轴线和小刻度 */
+  .paxis{stroke:var(--line);stroke-width:1.2;}
+  .ptick{stroke:var(--muted);stroke-width:1;opacity:.55;}
+  /* 用户 m21274：柱子改成按功能上色（决策 / JEV 决策 / 回复），颜色还是由每根 rect 自己的
+     fill 决定，这里不能再写 fill，否则 CSS 会盖掉属性、所有柱子都变成主题蓝。 */
+  .pbar{opacity:1;}
+  /* 用户 m23216：每根柱子底部各写各的——第一行这根的 token 消耗，第二行这根的命中率（不带「命中」两字）。
+     用户 m23442：改成白字、不用描边，字号也能大一点；浅色深色都一样（柱子都是深色，白字压得住）。 */
+  .pinlab{fill:#fff;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;pointer-events:none;}
+  .pinlab2{font-size:11px;font-weight:500;fill:rgba(255,255,255,.9);}
+  /* 用户 m29560 第 5 条：矮柱子（<30px）用紧凑字号，两行字才不会顶出柱顶。 */
+  .pinlab-sm{font-size:10.5px;}
+  .pinlab2.pinlab-sm{font-size:9.5px;}
+  /* 用户 m22269：折线换个颜色——原来跟正文同一个灰，压在柱子上就分不清。
+     橙色跟柱子那三色（蓝 / 紫 / 绿）都分得开，也不再是「输出段橙色」那套旧配色了。 */
+  .pline{fill:none;stroke:#f97316;stroke-width:2;stroke-linejoin:round;stroke-linecap:round;opacity:.95;}
+  .pdot{fill:#f97316;opacity:.95;}
+  .pxlab{fill:var(--muted);font-size:12px;}
+  .pylab{fill:var(--muted);font-size:12px;}
+  /* 用户 m20332：折线每个点顶上直接写花费，不用悬浮才看得到（m21274：永远在点上方）。
+     用户 m22009：描一圈卡片底色的边（paint-order 让边垫在字下面），压在柱子上也看得清。 */
+  .pcost{fill:var(--text);font-size:11.5px;font-weight:600;font-variant-numeric:tabular-nums;
+    paint-order:stroke;stroke:var(--card);stroke-width:3px;stroke-linejoin:round;}
+  /* 用户 m22126：柱子上的金额横排写在柱子外面正上方（次要色），撞位时只留高的那根。 */
+  .pval{font-size:10.5px;font-variant-numeric:tabular-nums;fill:var(--muted);
+    paint-order:stroke;stroke:var(--card);stroke-width:2.4px;stroke-linejoin:round;}
+  /* 用户 m19975：柱子按模型分组，图下面要有图例（三段颜色 + 模型色）。 */
+  .pbar-legend{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:4px 13px;margin-top:2px;font-size:12.5px;color:var(--muted);}
+  .pbl{display:inline-flex;align-items:center;gap:4px;min-width:0;}
+  .pbl-s{width:11px;height:11px;border-radius:2px;flex:none;display:inline-block;}
+  .pbl-sep{width:1px;height:11px;background:var(--line);margin:0 2px;}
+  .pbl-more{color:var(--muted);}
+  .pbl-l{width:14px;height:2px;border-radius:1px;flex:none;display:inline-block;background:#f97316;opacity:.95;}
+  .pchart-empty{color:var(--muted);font-size:12px;padding:30px 4px;text-align:center;}
+  /* 用户 m23442：每张饼右上角点开是区间选择——六个快捷 + 两个日历框。 */
+  .pdp{position:absolute;right:12px;top:44px;z-index:40;display:flex;flex-direction:column;gap:8px;
+    min-width:252px;padding:10px;border:1px solid var(--line);border-radius:12px;background:var(--card);
+    box-shadow:0 14px 34px rgba(15,23,42,.18);}
+  .pdp-q{display:flex;flex-wrap:wrap;gap:6px;}
+  .pdp-qb{height:24px;padding:0 9px;border:1px solid var(--line);border-radius:8px;background:var(--soft);
+    color:var(--text);font-size:12px;cursor:pointer;}
+  .pdp-qb:hover{border-color:var(--accent);color:var(--accent);}
+  .pdp-d{display:flex;gap:8px;}
+  .pdp-d label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);}
+  .pdp-in{height:26px;padding:0 6px;border:1px solid var(--line);border-radius:8px;background:var(--soft);
+    color:var(--text);font-size:12px;}
+  .pdp-f{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.pdp-span{font-size:11.5px;color:var(--muted);}
+/* 用户 m29947：区间面板里直接摆左右两个日历，不用再点一下。 */
+.pcal-pair{display:flex;gap:10px;}
+.pcal-pair .pcal{min-width:206px;}
+.pcal-pair .pcal-h{justify-content:space-between;}
+.pcal-pair .pcal-h b{font-size:12px;}
+.pcal-pair .pcal-d{height:22px;font-size:11.5px;}
+/* 用户 m29947：翻窗口改成整块平移一天的距离，坐标轴和网格不动。 */
+.pplot.pan{animation:ppan .52s cubic-bezier(.2,.7,.3,1) both;}
+@keyframes ppan{from{transform:translateX(var(--pdx,0px));}to{transform:none;}}
+/* 用户 m30335：翻窗口时上一帧的柱线层跟着一起滑出去，两层叠着走才像真的在滚，
+   而不是新图凭空从边上滑进来。 */
+.pghost{animation:ppanOut .52s cubic-bezier(.2,.7,.3,1) both;pointer-events:none;}
+@keyframes ppanOut{from{transform:translateX(var(--pdx0,0px));}to{transform:translateX(var(--pdx2,0px));}}
+/* 用户 m29947：记分牌式翻字——只让变了的那个字上下滚，没变的原地不动。 */
+.droll{display:inline-block;transform-box:fill-box;transform-origin:50% 50%;
+  animation:drollUp .3s cubic-bezier(.2,.7,.3,1) both;}
+.droll.dn{animation-name:drollDn;}
+.droll.still{animation:none;}
+@keyframes drollUp{from{transform:translateY(74%);opacity:0;}to{transform:none;opacity:1;}}
+@keyframes drollDn{from{transform:translateY(-74%);opacity:0;}to{transform:none;opacity:1;}}
+  .pdp-ok{height:26px;padding:0 14px;border:1px solid var(--accent);border-radius:8px;background:var(--accent);
+    color:#fff;font-size:12px;cursor:pointer;}
+  /* 用户 m29560 第 7 条：柱图右上角点开是真正的月历，不是两个日期框。 */
+  .pcal{min-width:238px;}
+  .pcal-h{display:flex;align-items:center;justify-content:space-between;gap:6px;}
+  .pcal-h b{font-size:12.5px;font-weight:600;color:var(--text);}
+  .pcal-nav{width:22px;height:22px;padding:0;border:1px solid var(--line);border-radius:7px;
+    background:var(--soft);color:var(--text);font-size:13px;line-height:1;cursor:pointer;}
+  .pcal-nav:hover{border-color:var(--accent);color:var(--accent);}
+  .pcal-w,.pcal-g{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;}
+  .pcal-w span{text-align:center;font-size:11px;color:var(--muted);padding:2px 0;}
+  .pcal-d{height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--text);
+    font-size:12px;font-variant-numeric:tabular-nums;cursor:pointer;}
+  .pcal-d:hover{background:var(--soft);}
+  .pcal-d.mute{background:transparent;cursor:default;}
+  .pcal-d.in{background:rgba(59,130,246,.18);}
+  html[data-theme="dark"] .pcal-d.in{background:rgba(96,165,250,.24);}
+  .pcal-d.s,.pcal-d.e{background:var(--accent);color:#fff;}
+  .pcal-d.today{box-shadow:inset 0 0 0 1px var(--accent);}
+  .pcal-f{display:flex;align-items:center;justify-content:space-between;gap:8px;
+    font-size:11.5px;color:var(--muted);}
+  /* 用户 m23216：饼图挪到柱图下面以后整行都是它，图例被拉得太开，这里收成一块。 */
+  /* 用户 m29560 第 1 条：饼图并排以后每张只有三分之一宽，图例改到饼下面竖着排。 */
+  .ppie-wrap{display:flex;flex-direction:column;align-items:stretch;gap:10px;min-width:0;}
+  /* 用户 m29560 第 1 条：三张饼并排以后，饼要顶对齐，不然三张卡里的饼高低不齐。 */
+  .pchart-pie .pchart-body{justify-content:flex-start;}
+  .ppie-svg{width:150px;height:150px;flex:none;align-self:center;}
+  .ppie-num{fill:var(--text);font-size:17px;font-weight:700;}
+  .ppie-sub{fill:var(--muted);font-size:11.5px;}
+  .plegend{min-width:0;flex:1 1 auto;display:flex;flex-direction:column;gap:7px;max-height:210px;overflow:auto;}
+  /* 用户 m20332：模型名太长，一行放不下会被截成「deepseek-…」，改成名字一行、金额一行。 */
+  .pleg{display:grid;grid-template-columns:8px minmax(0,1fr) auto;grid-template-areas:"dot name name" "dot val pct";
+        align-items:center;column-gap:6px;font-size:12.5px;line-height:1.32;min-width:0;}
+  .pleg i{grid-area:dot;width:8px;height:8px;border-radius:2px;align-self:start;margin-top:5px;}
+  .pleg-n{grid-area:name;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
+  .pleg-v{grid-area:val;color:var(--muted);font-variant-numeric:tabular-nums;}
+  .pleg-p{grid-area:pct;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums;}
+  .pleg-note{font-size:11px;color:var(--muted);line-height:1.5;margin-top:2px;}
+  @media(max-width:1120px){
+    .pcharts{grid-template-columns:1fr;}
+    .pchart-pie{grid-column:auto;}
+  }
   /* v3.54（用户本轮第 4 条）：记录页的「缓存记录」——按类型一张账本表 + 合计 + 各会话小表。
      表格沿用全局 table 的观感（见上面 th,td 那段），这里只补列宽、数字右对齐、内联数字框和清空按钮。 */
   /* 用户 m07418：黑名单页两个清单都改成页内胶囊（跟外号 / 管理员一个手感）——
      短语黑名单不再用「编辑清单」弹窗，用户黑名单不再用四列表格，拉黑了谁直接列出来。 */
   .ublk{padding:2px 0 2px;}
-  .blk-desc{color:var(--muted);font-size:12px;line-height:1.6;margin:0 14px 8px;}
-  .blk-list{padding:0 14px 12px;}
+  .blk-desc{color:var(--muted);font-size:12px;line-height:1.6;margin:0 10px 8px;}
+  .blk-list{padding:0 10px 12px;}
   .blk-list .chips{justify-content:flex-start;gap:8px;}
   .blk-empty{color:var(--muted);font-size:12px;line-height:1.6;}
   .blk-in{min-width:150px;flex:0 1 auto;border:1px solid transparent;border-radius:10px;
@@ -1262,6 +1438,9 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .cachebox .ctable td.cname .cnote{color:var(--muted);font-size:11.5px;font-weight:400;line-height:1.45;
     margin-top:2px;white-space:normal;}
   .cachebox .ctable td.cnote{color:var(--muted);font-size:12px;line-height:1.5;}
+  /* 用户 m14620：数量格里的补充说明（转发图片的「N 张图」）要跟数量锁在同一行，
+     所以用行内 span 而不是块级 div，不然会掉到第二行。 */
+  .cachebox .ctable td.num .csub{color:var(--muted);font-size:11.5px;font-weight:400;}
   .cachebox .ctable td.bad{color:var(--bad);}
   .cachebox .ctable th.num,.cachebox .ctable td.num{text-align:right;white-space:nowrap;
     font-variant-numeric:tabular-nums;}
@@ -1431,7 +1610,9 @@ html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
 .pp-prev-h h4{margin:0;font-size:12.5px;font-weight:600;}
 .pp-prev-h .pp-h4s{font-size:11px;font-weight:400;color:var(--muted);}
 .pp-prev-acts{margin-left:auto;display:flex;gap:3px;}
-.pp-prev-acts .pm-ico{width:auto;min-width:0;padding:0 7px;font-size:11px;height:22px;}
+/* 用户 m15201：复制 / 放大改成两个图标，紧凑靠右（以前是文字按钮，占得宽）。 */
+.pp-prev-acts .pm-ico{width:22px;min-width:0;padding:0;font-size:13px;height:22px;}
+.pp-prev-acts .pm-ico.ok{color:var(--ok);}
 .psegbox{display:flex;flex-direction:column;gap:4px;}
 .pp-prev .psegbox{margin:0 -12px;padding:8px 12px;border-top:1px solid var(--line);max-height:34vh;overflow:auto;}
 .pseg{border:1px solid var(--line);border-radius:8px;background:rgba(127,127,127,.04);overflow:hidden;}
@@ -1469,6 +1650,9 @@ html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
   font-size:10px;font-weight:600;letter-spacing:.02em;color:var(--muted);}
 .pp-prev-box.dyn .pp-prev-cap{color:var(--accent);border-color:rgba(59,130,246,.45);}
 .pp-prev-box>.dpre{margin:0;border:0;border-radius:0;background:transparent;padding:8px 12px 10px;}
+/* 用户 m09611：系统提示词那块左边没缩进——.dpre.tall 的 margin:0 -12px 跟上面那条同权重、写在后面，
+   把 margin 又拉回去了，正文比下面的动态段靠左 12px。这里按更高权重把 margin 压回 0。 */
+.pp-prev-box>.dpre.tall{margin:0;}
 .pp-prev .pm-dyn{margin:0;border:0;border-radius:0;padding:4px 12px 10px;background:transparent;
   max-height:min(26vh,260px);overflow:auto;font-size:11.5px;line-height:1.7;
   white-space:pre-wrap;overflow-wrap:anywhere;}
@@ -1556,21 +1740,42 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
 .pp-right .dpre.tall{max-height:min(46vh,430px);}
 .pp-prev .psegbox{max-height:22vh;}
 .panel.pp-panel{overflow:visible;}
-@media (max-width:1180px){.pp-right{max-height:none;overflow:visible;}}
+/* 用户 m14864：1024–1180 这段宽度下左右两栏已经叠成一列（见下面 .pp-pane 的 1180 断点），
+   但「整页不滚、左右各自滚」的定高布局还在，两栏各被压到一百多像素高，预览卡里的系统提示词
+   盒子被挤成 0 高、正文溢出盖到下面的动态段上，看起来像两版提示词叠在一起。
+   所以把提示词页的自然流规则提到 1180 断点，跟叠列同步生效。 */
+@media (max-width:1180px){
+  .pp-right{max-height:none;overflow:visible;}
+  .pp{height:auto!important;min-height:0!important;}
+  .pp-pane{flex:none!important;min-height:0!important;overflow:visible!important;}
+  .pp-left,.pp-right{height:auto!important;max-height:none!important;overflow:visible!important;}
+  .pp-left-body{overflow:visible!important;height:auto!important;flex:none!important;}
+  .pp-right>.dcard{flex:none!important;overflow:visible!important;}
+  .pp-prev{height:auto!important;}
+  .pp-prev-box{flex:0 0 auto!important;min-height:0!important;}
+  .dpre.tall,.pp-right .dpre.tall,.pp-prev .dpre.tall{max-height:none!important;min-height:0!important;}
+  .pp-prev .psegbox{max-height:none!important;}
+  .pp-prev .pm-dyn{max-height:none!important;overflow:visible;}
+}
 /* v4.10 三轮：整页不滚，左栏、右栏各自滚，页签常驻（高度由 ppLayout 按窗口现算）。 */
 .pp{display:flex;flex-direction:column;gap:8px;min-height:420px;}
 .pp-tabs{flex:none;}
 .pp-pane{flex:1 1 auto;min-height:0;overflow:hidden;}
 .pp-left,.pp-right{height:100%;min-height:0;overflow:auto;padding-right:2px;}
 /* 用户 m03104：左栏整块套一张卡片——滚动条落在卡片右内沿，跟右边预览卡完全对称。
-   两张内层卡片拍平成区块（同底色，只留一条分隔线），否则会变成卡片套卡片。 */
+   两张内层卡片拍平成区块（同底色、不再画分隔线），否则会变成卡片套卡片。 */
 .pp-left{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:0;overflow:hidden;gap:0;}
 /* 用户 m03247：工具条那排右边露着一截滚动条，切掉——工具条挪成卡头（不滚），
    下面这块才是滚动层，杆子从卡头下面才开始。 */
 .pp-left-head{flex:none;padding:0 12px;}
 .pp-left-body{flex:1 1 auto;min-height:0;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;}
 .pp-left-body>.dcard{background:transparent;border:0;border-radius:0;padding:0;margin:0;}
-.pp-left-body>.dcard+.dcard{border-top:1px solid var(--line);margin-top:10px;padding-top:10px;}
+/* 用户 m18454：提示词第一次读回来之前，编辑器只有一行「读取中」，下面的设置卡会顶到最上面，
+   等正文到了再被挤下去，看着像闪一下。加载态先占满整栏高度，设置卡一开始就在折叠线以下。 */
+.pp-left-body>.pm-editor.pm-loading{min-height:calc(100% + 12px);display:flex;flex-direction:column;justify-content:center;align-items:center;gap:8px;}
+/* 「重新读取」是 .dmini，自带 margin-left:auto 会被推到右边，加载态里要跟上面那行字对齐。 */
+.pp-left-body>.pm-editor.pm-loading .dmini{margin-left:0;}
+/* 用户 m18016：新增模块卡和下面设置之间那根线去掉，三页一起变紧凑（原来 border-top + 上下各 10px）。 */
 .pp-right{max-height:none;}
 /* 用户 m02469：左栏那根上下滑动杆以前贴着栏边——而且 scrollbar-width:thin 会让 Chromium
    忽略 ::-webkit-scrollbar，等于没做。这里去掉 scrollbar-width，改用 webkit 伪元素：
@@ -1601,6 +1806,44 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
 .pp-right>.dcard{flex:1 1 auto;min-height:0;overflow:hidden;}
 .pp-prev{height:100%;}
 .pp-prev .dpre.tall{flex:1 1 auto;min-height:150px;max-height:none;}
+/* 用户 m16904 图1：点「测试」后结果框一出现，系统提示词那块被挤到 103px，
+   里面的 pre 有 min-height:150px，撑出盒子盖住「实时窗口」分隔条和动态注入框。
+   这里给 sys 块兜住最小高度，结果框自己缩、自己滚。 */
+.pp-prev-box.sys{flex:1 1 0;min-height:150px;}
+/* 放大看的时候 sys 块本来就不设下限，这里只把基准也改成 0，别把结果框挤没。 */
+.pp-prev.big .pp-prev-box.sys{flex:1 1 0;min-height:150px;}
+/* 点开试跑结果时，动态注入那块让一让，别把结果框挤成一条。 */
+.pp-prev:has(.pp-test:not([hidden])) .pm-dyn{max-height:180px;}
+/* 用户 m16904 第 2、3 条：试跑结果改成「一行信息胶囊 + 分段块」。 */
+.pp-test{flex:0 1 auto;min-height:0;overflow:auto;margin:0 -12px;padding:8px 12px 10px;border-top:1px solid var(--line);}
+.pp-test h4{margin:0 0 7px;font-size:12.5px;font-weight:600;}
+.pp-test-meta{display:flex;flex-wrap:wrap;gap:5px;margin:0 0 9px;}
+.pp-test-chip{display:inline-flex;align-items:baseline;gap:5px;max-width:100%;padding:2px 8px;border:1px solid var(--line);border-radius:7px;background:rgba(127,127,127,.06);font-size:11px;line-height:16px;color:var(--muted);}
+.pp-test-chip b{font-weight:600;color:var(--text);}
+.pp-test-chip i{font-style:normal;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pp-test-sec{margin:0 0 8px;}
+.pp-test-sec:last-child{margin-bottom:0;}
+.pp-test-sech{display:flex;align-items:center;gap:6px;margin:0 0 4px;font-size:11px;font-weight:600;color:var(--muted);}
+.pp-test-sech:before{content:"";flex:none;width:3px;height:11px;border-radius:2px;background:var(--accent);opacity:.75;}
+.pp-test-sect{margin:0;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:rgba(127,127,127,.05);font-size:11.5px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;}
+.pp-test-sec.bad .pp-test-sech:before{background:var(--bad);}
+.pp-test-sec.bad .pp-test-sect{border-color:rgba(239,68,68,.45);background:rgba(239,68,68,.07);}
+.pp-test-sec.ok .pp-test-sech:before{background:var(--ok);}
+.pp-test-sec.ok .pp-test-sect{border-color:rgba(16,185,129,.4);background:rgba(16,185,129,.06);}
+.pp-test-empty{color:var(--muted);font-size:11.5px;line-height:1.6;}
+/* 用户 m17185：回复那一段按气泡显示，标签正常 / 不合规各挂一个角标。 */
+.pp-test-badge{margin-left:auto;flex:none;font-size:10.5px;font-weight:600;line-height:15px;padding:0 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted);}
+.pp-test-badge.ok{color:var(--ok);border-color:rgba(16,185,129,.45);background:rgba(16,185,129,.08);}
+.pp-test-badge.bad{color:var(--bad);border-color:rgba(239,68,68,.45);background:rgba(239,68,68,.08);}
+.pp-test-bub{margin:0 0 6px;padding:7px 10px;border:1px solid rgba(16,185,129,.4);border-radius:8px;background:rgba(16,185,129,.06);font-size:11.5px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;}
+.pp-test-bub:last-child{margin-bottom:0;}
+/* 用户 m17185：上面两个预览框各加一个折叠按钮，默认展开，折起来只留一行标签。 */
+.pp-prev-cap{display:inline-flex;align-items:center;gap:2px;pointer-events:auto;}
+.pp-cap-tg{flex:none;width:15px;height:15px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--muted);font-size:10px;line-height:15px;text-align:center;cursor:pointer;}
+.pp-cap-tg:hover{background:rgba(127,127,127,.2);color:var(--text);}
+.pp-prev-box.folded{min-height:28px;}
+.pp-prev-box.folded>.dpre{display:none;}
+.pp-prev .pp-prev-box.sys.folded{flex:0 0 auto;min-height:28px;}
 .pp-prev .psegbox{flex:0 0 auto;}
 .pp-prev .pm-dyn{flex:0 0 auto;}
 /* v4.85（用户 m10425 第 2 条）：左边「编辑方式」那排改成和右边「提示词预览」一样的卡头——
@@ -1619,24 +1862,46 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
 .pp-tab{padding:0 12px;height:30px;}
 .pp-tab .pp-sub{margin-left:6px;font-size:10.5px;color:var(--muted);font-weight:400;}
 .pp-tab.on .pp-sub{color:inherit;opacity:.85;}
-.pp-pane-wide{display:block;overflow:auto;}
-#pp-tpl{max-width:none;}
+.pp-pane-wide{display:flex;flex-direction:column;align-items:stretch;overflow:hidden;}
+#pp-tpl{max-width:none;display:flex;flex-direction:column;min-height:0;flex:1 1 auto;}
 /* v4.84（用户 m09179 第 7 条）：自定义页不再分「改过的默认模板 / 另存的模板」两种，
    只按来源分三竖列（决策 / JEV / 回复）；模板库那套新建 / 编辑 / 删除的界面整块撤掉。 */
-.ptpl-cols{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:8px 0;}
-.ptpl-col{min-width:0;border:1px solid var(--line);border-radius:10px;background:var(--card);padding:8px 9px;}
+.ptpl-cols{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:8px 0 0;flex:1 1 auto;min-height:0;}
+.ptpl-col{min-width:0;border:1px solid var(--line);border-radius:10px;background:var(--card);padding:8px 9px;
+  display:flex;flex-direction:column;min-height:0;}
 .ptpl-colh{display:flex;align-items:baseline;gap:6px;font-size:12px;font-weight:600;margin:0 0 7px;
-  padding-bottom:5px;border-bottom:1px solid var(--line);}
+  padding-bottom:5px;border-bottom:1px solid var(--line);flex:none;}
 .ptpl-colh .dhead-x{margin-left:auto;font-weight:400;}
-.ptpl-col .ptpl-card{margin:0 0 8px;}
-.ptpl-col .ptpl-card:last-child{margin-bottom:0;}
+/* 用户 m18121：自定义页先只摆标题小卡，点开谁就在这一列下面展开编辑框，编辑框尽量铺到页面底部。 */
+.ptpl-list{flex:0 0 auto;max-height:45%;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:6px;}
+.ptpl-mini{display:flex;align-items:baseline;gap:6px;width:100%;text-align:left;font-family:inherit;
+  border:1px solid var(--line);border-radius:9px;background:var(--soft);padding:6px 9px;cursor:pointer;
+  color:var(--text);transition:border-color .12s,background .12s;}
+.ptpl-mini:hover{border-color:var(--accent);}
+.ptpl-mini.on{border-color:var(--accent);background:rgba(59,130,246,.10);color:var(--text);}
+.ptpl-mini b{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
+.ptpl-mini .ptpl-n{margin-left:auto;}
+.ptpl-detail{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;margin-top:8px;}
+.ptpl-detail .ptpl-card{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;margin:0;overflow:hidden;}
+.ptpl-detail .ptpl-self{flex:1 1 auto;min-height:0;resize:none;}
 .ptpl-empty{font-size:11.5px;color:var(--muted);line-height:1.6;}
-@media (max-width:900px){.ptpl-cols{grid-template-columns:1fr;}}
+/* 用户 m18347：自定义页顶上那段说明精简成一句半，并且居中。 */
+/* 用户 m18421：这行说明原来跟着 .pm-note 用 11px，比列标题还小，放大到 12.5px（跟页签同号）。 */
+.ptpl-note{text-align:center;max-width:960px;margin:0 auto;font-size:12.5px;line-height:1.6;}
+@media (max-width:900px){
+  .pp-pane-wide{display:block;overflow:auto;}
+  #pp-tpl{display:block;}
+  .ptpl-cols{grid-template-columns:1fr;flex:none;}
+  .ptpl-col{display:block;}
+  .ptpl-list{max-height:none;overflow:visible;}
+  .ptpl-detail{display:block;}
+  .ptpl-detail .ptpl-self{min-height:150px;resize:vertical;}
+  /* 用户 m18454：窄屏是整页滚动，百分比高度算不出来，加载态给个固定占位，别让设置卡先顶上来。 */
+  .pp-left-body>.pm-editor.pm-loading{min-height:520px;}
+}
 .ptpl-card{border:1px solid var(--line);border-radius:9px;background:var(--soft);padding:8px 9px;min-width:0;}
 /* 2026-11-08：自定义页三张卡原来太矮（正文框只露 4 行），把正文框拉高一点。 */
 .ptpl-self{min-height:150px;}
-.ptpl-h{display:flex;align-items:baseline;gap:6px;margin:0 0 5px;}
-.ptpl-h b{font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ptpl-n{margin-left:auto;font-size:11px;color:var(--muted);flex:none;}
 .ptpl-acts{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
 .ptpl-acts .dmini{margin-left:0;height:22px;padding:0 8px;font-size:11px;}
@@ -1853,7 +2118,8 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     .dtool{min-height:40px;}
     .pseg>summary{min-height:40px;}
     .bd-pop .bp-x{width:40px;height:40px;top:2px;right:2px;}
-    .jev-range .jev-unit{height:auto;min-height:40px;}
+    .jev-slider{height:auto;min-height:40px;}
+    .jev-slider-track{--kw:13px;--kr:13px;}
     .setrow .ctl{gap:8px;}
     .drow{gap:8px;}
     /* 图内微控件（垃圾桶 / 月亮 / 概率胶囊里的输入）不能跟着放大，否则会盖住曲线 */
@@ -1877,17 +2143,8 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     /* 5) 标签 / 说明不再 nowrap，长名字换行而不是把控件顶出去 */
     .setrow .nm,.setrow.inline .nm{white-space:normal;overflow:visible;text-overflow:clip;}
     .setrow.inline .ds{white-space:normal;overflow:visible;text-overflow:clip;}
-    /* 6) 提示词页：撤掉「整页不滚、左右各自滚」的定高布局（ppLayout 会写内联 height），改回自然流 */
-    .pp{height:auto!important;min-height:0!important;}
-    .pp-pane{flex:none!important;min-height:0!important;overflow:visible!important;}
-    .pp-left,.pp-right{height:auto!important;max-height:none!important;overflow:visible!important;}
-    .pp-left-body{overflow:visible!important;height:auto!important;flex:none!important;}
-    .pp-right>.dcard{flex:none!important;overflow:visible!important;}
-    .pp-prev{height:auto!important;}
-    .pp-prev-box{flex:0 0 auto!important;min-height:0!important;}
-    .dpre.tall,.pp-right .dpre.tall,.pp-prev .dpre.tall{max-height:none!important;min-height:0!important;}
-    .pp-prev .psegbox{max-height:none!important;}
-    .pp-prev .pm-dyn{max-height:none!important;overflow:visible;}
+    /* 6) 提示词页的自然流规则已提到 1180 断点（用户 m14864：1024–1180 两栏已经叠成一列，
+       定高布局会把预览卡挤坏），这里不再重复。 */
     /* 7) 缓存记录页：上下堆叠，表格横向滑 */
     .cachebox .cmain{flex-direction:column;align-items:stretch;gap:10px;}
     .cachebox .cmain-l,.cachebox .cmain-r{flex:1 1 auto;width:100%;}
@@ -1966,7 +2223,7 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     .drow>.dlb{flex:0 0 auto!important;width:auto!important;white-space:normal!important;}
     .drow>.dipt,.drow>.darea,.drow>.num{width:100%!important;min-width:0!important;max-width:100%!important;}
     .dipt.wide{min-width:0!important;max-width:100%!important;}
-    .jev-range{width:100%!important;}
+    .jev-slider{width:100%!important;}
     .jev-datarow{flex-wrap:wrap;}
     .jev-datarow>.dipt{flex:1 1 100%;}
     .drows.cols2{grid-template-columns:1fr!important;}
@@ -2253,6 +2510,10 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
       note: "只影响窗口显示条数，磁盘上留多少份由「窗口快照上限」决定",
       keys: ["trace_keep", "trace_keep_dm", "decision_keep", "decision_keep_dm",
              "window_show", "window_show_dm"] },
+    // 用户 m09851：两个「看图」开关从提示词页的模型卡搬到这里，跟图片压缩摆一块——
+    // 它们管的都是「图片怎么进请求」，跟选哪个模型不是一回事。
+    { p: "window", t: "图片", custom: "img",
+      keys: ["decision_see_images", "reply_see_images"] },
     // v4.45（用户 m22611）：历史里的动图怎么发给模型，三档互斥、默认九帧拼图；
     // 三个都不开＝跳过（图上不来，正文只留 [图片]）。判定在后端 _gif_mode。
     { p: "window", t: "动图设置",
@@ -2331,6 +2592,34 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     // 所以界面上从来没出现过它。这里把死条目一并删掉。
   ];
   var curPage = "basic";
+  // 用户 m29560 第 2 条：刷新时留在原来那一页，只有重新进插件才回首页。
+  // 用 sessionStorage + 导航类型判断：reload / 前进后退才恢复，正常进入一律回第一页。
+  function rememberPage(){
+    try{ sessionStorage.setItem("mdp_cur_page", curPage); }catch(e){}
+  }
+  (function(){
+    try{
+      var nav = (performance.getEntriesByType && performance.getEntriesByType("navigation")[0]) || null;
+      var ntype = nav ? String(nav.type || "") : "";
+      if(!ntype && performance.navigation){
+        ntype = performance.navigation.type === 1 ? "reload" : "navigate";
+      }
+      // 用户 m30734：插件页在面板的 iframe 里，父页面按 F5 时 iframe 自己拿到的是
+      // navigate（不是 reload），只看自己的导航类型就会退回第一页。父页面同源，
+      // 顺手读一下它的导航类型，父页面是刷新/前进后退就一起算刷新。
+      var ptype = "";
+      try{
+        var pnav = (window.parent && window.parent !== window && window.parent.performance)
+          ? window.parent.performance.getEntriesByType("navigation")[0] : null;
+        ptype = pnav ? String(pnav.type || "") : "";
+      }catch(e2){ ptype = ""; }
+      if(ntype === "reload" || ntype === "back_forward" ||
+         ptype === "reload" || ptype === "back_forward"){
+        var saved = sessionStorage.getItem("mdp_cur_page") || "";
+        if(saved) curPage = saved;
+      }
+    }catch(e){}
+  })();
   // 用户 m07864 第 1 条：头部说明文字统一走 setSub()，顺手记进 sessionStorage。
   // 再进这一页时脚本一开始就把上次的文案写回去，不会先闪「加载中…」再跳成长句。
   var SET_SUB_KEY = "mdp_set_sub_text";
@@ -2533,6 +2822,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
                    band_rest_probability: 1,
                    // v3.81（用户 m02645 图2）：旧的「加多少概率」两项已退役，节奏松紧是无单位刻度
                     };
+  // 用户 m10202：「切换模型」在界面上按分钟填，存盘仍是秒（后端与老配置都按秒）。
+  // 值 = 一秒换多少分钟，60 表示「界面数字 × 60 = 存盘秒数」。
+  var MIN_KEYS = { decision_fallback_cooldown: 60, reply_fallback_cooldown: 60, jev_fallback_cooldown: 60 };
   // 用户 m01432：唤醒那几行的默认值按三档的说法写——「默认 触发 / 默认 关闭」。
   // 用户 m03761：其余开关的默认值角标也统一成「默认 开启 / 默认 关闭」，不再写「开 / 关」。
   var WAKE_DEF_TEXT = { mention_trigger: 1, nickname_wake: 1, name_wake: 1, rest_wake_trigger: 1 };
@@ -2546,6 +2838,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(d === null || d === undefined || d === "") return "无";
     if(Array.isArray(d)) return d.length ? d.join(" / ") : "无";
     var s = String(d);
+    // 用户 m10202：按分钟显示的键，默认值角标也跟着换算（存的是秒）。
+    var mk = MIN_KEYS[String(k || "")];
+    if(mk && isFinite(Number(d))) s = String(Math.round(Number(d) / mk));
     // 用户 2026-11-07：枚举角标先查下拉选项的中文名（如 forward_mode 的 on_demand → 按需查看），
     // 再退到老的那张枚举表，最后原样显示。
     if(t === "enum" || t === "select") s = (OPTION_TEXT[String(k || "")] || {})[s] || ENUM_TEXT[s] || s;
@@ -2779,27 +3074,47 @@ var DM_SPECIAL = { trigger_probability: 1 };
 
   // 用户 m13442 第 4 条：新加的键在用户还没存过之前 configCache 里没有，
   // 这时按 schema 的默认值显示，别让输入框空着（空着在单群模式下等于「跟随全局」）。
+  // 用户 m09611：单位搬进框里（跟 JEV 卡同一套 .ipt.has-unit），不再挂在框右边。
   function dnum(k, unit, dft){
     var v = dVal(k, dft === undefined ? "" : dft);
-    return "<input class='dipt num' type='number' data-k='" + esc(k) + "' value='" + esc(v) + "'>" +
-      (unit ? "<span class='dunit'>" + esc(unit) + "</span>" : "");
+    var u = unit ? String(unit) : "";
+    // 用户 m10202：按分钟填的键，显示时把存盘的秒换算成分钟，提交时再乘回去。
+    var mul = MIN_KEYS[String(k || "")] || 0;
+    if(mul && v !== "" && v !== null && v !== undefined && isFinite(Number(v))) v = Math.round(Number(v) / mul);
+    return "<span class='ipt" + (u ? (" has-unit" + (u.length > 1 ? " uw2" : "") + (u.length >= 4 ? " uw3" : "")) : "") + "'><input class='dipt num' type='number' data-k='" +
+      esc(k) + "'" + (mul ? " data-mul='" + mul + "'" : "") + " value='" + esc(v) + "'>" + (u ? "<b class='unit'>" + esc(u) + "</b>" : "") + "</span>";
+  }
+  // 用户 m10202：两行并一行——每格「短标签 + 控件」，跟 JEV 卡同一套 .drow.pair2。
+  function dPair(l1, c1, l2, c2){
+    function cell(l, c){
+      return "<span class='p2'><label class='dlb'>" + esc(l) + "</label>" + c + "</span>";
+    }
+    return "<div class='drow pair2'>" + cell(l1, c1) + cell(l2, c2) + "</div>";
   }
 
-  // 2026-11-08（J）：不确定区间改成一行两个下拉，省得手打数字还打错。
-  // 存着的值不是 5 的倍数（老配置手填过 43）也照样列出来，不然下拉会跳回 0。
-  function dsel(k, dft){
-    var v = dVal(k, dft);
-    var n = parseInt(v, 10);
-    if(isNaN(n)) n = dft;
-    var vals = [];
-    for(var i = 0; i <= 100; i += 5) vals.push(i);
-    if(n >= 0 && n <= 100 && vals.indexOf(n) < 0) vals.push(n);
-    vals.sort(function(a, b){ return a - b; });
-    var h = "<select class='dipt num' data-k='" + esc(k) + "'>";
-    vals.forEach(function(x){
-      h += "<option value='" + x + "'" + (x === n ? " selected" : "") + ">" + x + "</option>";
-    });
-    return h + "</select>";
+  // 用户 m16307 图2：不确定段从「一行两个下拉」改成一根长条——每 5% 一格刻度，
+  // 25%~75% 那段高亮，中间显示「25%~75%」。两个 hidden input 保留 data-k，
+  // 保存链路（collectSettings / 上下限夹紧 / 700ms 防抖存盘）跟原来的下拉完全一样。
+  // 存着的值不是 5 的倍数（老配置手填过 43）也照原位画，拖一下才吸附到 5 的倍数。
+  function dRange(klo, khi, dlo, dhi){
+    var lo = parseInt(dVal(klo, dlo), 10); if(isNaN(lo)) lo = dlo;
+    var hi = parseInt(dVal(khi, dhi), 10); if(isNaN(hi)) hi = dhi;
+    lo = Math.max(0, Math.min(100, lo));
+    hi = Math.max(0, Math.min(100, hi));
+    if(lo > hi){ var t = lo; lo = hi; hi = t; }
+    return "<div class='jev-slider' data-lo='" + lo + "' data-hi='" + hi + "'>" +
+      "<div class='jev-slider-track'>" +
+        "<div class='jev-slider-clip'>" +
+          "<div class='jev-slider-fill' style='left:" + lo + "%;right:" + (100 - hi) + "%'></div>" +
+          "<div class='jev-slider-ticks'></div>" +
+        "</div>" +
+        "<button type='button' class='jev-slider-knob' data-h='lo' style='left:" + lo + "%' aria-label='不确定段下限'></button>" +
+        "<button type='button' class='jev-slider-knob' data-h='hi' style='left:" + hi + "%' aria-label='不确定段上限'></button>" +
+        "<span class='jev-slider-tag' style='left:" + Math.min(92, Math.max(8, (lo + hi) / 2)) + "%'>" + lo + "%~" + hi + "%</span>" +
+      "</div>" +
+      "<input type='hidden' data-k='" + esc(klo) + "' value='" + lo + "'>" +
+      "<input type='hidden' data-k='" + esc(khi) + "' value='" + hi + "'>" +
+    "</div>";
   }
 
   function dmodelBlockHtml(){
@@ -2816,28 +3131,32 @@ var DM_SPECIAL = { trigger_probability: 1 };
       "<input type='hidden' data-k='decision_tools' id='dec-tools' value='" +
         esc(JSON.stringify(dPickedRaw())) + "'>" +
       // 用户 m04343 第 8 条：两个模型选择框各自贴在标题右边，标题和下面六行同一列左对齐。
-      "<div class='drows cols2'>" +
-        row("决策模型", "<select class='dipt' data-k='decision_model' id='dec-model'>" +
-          dModelOpts(String(dVal("decision_model", "")), "跟随默认模型") + "</select>",
-          "它只负责看窗口判断回不回；真正的回复还是框架默认模型来写。") +
-        row("备用模型", "<select class='dipt' data-k='decision_fallback_model' id='dec-fb'>" +
-          dModelOpts(String(dVal("decision_fallback_model", "")), "未选择模型") + "</select>",
-          "主模型连续失败到「连续失败切换」那个次数，才切到它。") +
-        // 用户 m08678：决策页保留自己的一套，默认值与回复一致，可各自调整。
-        row("连续失败切换", swPill("decision_fail_switch", dVal("decision_fail_switch", true)), "连着几轮失败，就把主模型换成备用。") +
-        row("切回主模型等待", dnum("decision_fallback_cooldown", "秒", 300), "用备用模型撑过这段时间，再试回主模型。") +
-        row("最大代理循环次数", dnum("decision_tool_loop", "轮", 5), "最多调用几轮工具，最后判断那一轮不算。") +
-        row("单轮工具调用上限", dnum("decision_tool_calls_per_turn", "个", 5), "一轮里最多调几个工具，多出来的不执行。") +
-        row("工具调用超时", dnum("decision_tool_timeout", "秒", 180), "单个工具最多等多久，0 = 不限制。") +
-        row("工具输出上限", dnum("decision_tool_output_tokens", "token", 10000), "工具结果最多留多少，超了保留首尾，0 = 不限制。") +
-        // 用户 m07859：重试 / 重试间隔 / 单次超时不再各留一份，统一在「基础设置 · 重试」里改。
-      "</div><div class='drows cols2'>" +
-        row("决策失败时", "<select class='dipt' data-k='decision_fail_action' id='dec-fail'>" +
-          "<option value='allow'" + (act === "allow" ? " selected" : "") + ">跳过决策调用回复</option>" +
-          "<option value='block'" + (act === "block" ? " selected" : "") + ">这一轮不回</option></select>",
-          "决策模型挂了的时候：跳过判断、直接交给回复模型，还是这一轮干脆不回。") +
-        row("决策看图", swPill("decision_see_images", dVal("decision_see_images", true)),
-          "决策模型也看一眼这一轮消息里的图。它本身得是能看图的模型；万一上游不认图，会自动退回纯文字再判一次。") +
+      // 用户 m09611：跟 JEV 卡一样套成两列小卡——左边模型与失败处理，右边工具那几项。
+      "<div class='jev-cols'>" +
+        "<div class='jev-col dcol'><div class='drows'>" +
+          row("决策模型", "<select class='dipt' data-k='decision_model' id='dec-model'>" +
+            dModelOpts(String(dVal("decision_model", "")), "跟随默认模型") + "</select>",
+            "它只负责看窗口判断回不回；真正的回复还是框架默认模型来写。") +
+          row("备用模型", "<select class='dipt' data-k='decision_fallback_model' id='dec-fb'>" +
+            dModelOpts(String(dVal("decision_fallback_model", "")), "未选择模型") + "</select>",
+            "主模型连续失败到「失败切换」那个次数，才切到它。") +
+          // 用户 m08678：决策页保留自己的一套，默认值与回复一致，可各自调整。
+          // 用户 m10202：这两行并成一行；等待时间按分钟填（存盘仍是秒）。
+          // 用户 m15201：「连续失败切换」改名「失败切换」，「单轮工具调用上限」改名「单轮工具上限」。
+          dPair("失败切换", swPill("decision_fail_switch", dVal("decision_fail_switch", true)),
+            "切换模型", dnum("decision_fallback_cooldown", "分钟", 1800)) +
+          row("决策失败时", "<select class='dipt' data-k='decision_fail_action' id='dec-fail'>" +
+            "<option value='allow'" + (act === "allow" ? " selected" : "") + ">跳过决策调用回复</option>" +
+            "<option value='block'" + (act === "block" ? " selected" : "") + ">这一轮不回</option></select>",
+            "决策模型挂了的时候：跳过判断、直接交给回复模型，还是这一轮干脆不回。") +
+          // 用户 m09851：「决策看图」搬到窗口设置页的「图片」组了，这里不再重复一份。
+        "</div></div>" +
+        "<div class='jev-col dcol'><div class='drows'>" +
+          row("Agent循环次数", dnum("decision_tool_loop", "轮", 5), "最多调用几轮工具，最后判断那一轮不算。") +
+          row("单轮工具上限", dnum("decision_tool_calls_per_turn", "个", 5), "一轮里最多调几个工具，多出来的不执行。") +
+          row("工具调用超时", dnum("decision_tool_timeout", "秒", 180), "单个工具最多等多久，0 = 不限制。") +
+          row("工具输出上限", dnum("decision_tool_output_tokens", "token", 10000), "工具结果最多留多少，超了保留首尾，0 = 不限制。") +
+        "</div></div>" +
       "</div></div>";
   }
 
@@ -2851,23 +3170,28 @@ var DM_SPECIAL = { trigger_probability: 1 };
       return "<div class='drow'><label class='dlb'>" + esc(label) + "</label>" + ctl + "</div>";
     }
     return "<div class='dcard'>" +
-      "<div class='drows cols2'>" +
-        row("回复模型", "<select class='dipt' data-k='reply_model' id='rep-model'>" +
-          dModelOpts(String(dVal("reply_model", "")), "跟随默认模型") + "</select>",
-          "真正写回复的那个模型。留空 = 用框架的默认模型。") +
-        row("备用模型", "<select class='dipt' data-k='reply_fallback_model' id='rep-fb'>" +
-          dModelOpts(String(dVal("reply_fallback_model", "")), "未选择模型") + "</select>",
-          "主模型连续失败到「连续失败切换」那个次数，才切到它。") +
-        // 用户 m07859：重试 / 重试间隔 / 单次超时统一在「基础设置 · 重试」里改，这里不再重复。
-        row("连续失败切换", swPill("reply_fail_switch", dVal("reply_fail_switch", true)), "连着几轮回复失败，就把主模型换成备用。") +
-        row("切回主模型等待", dnum("reply_fallback_cooldown", "秒", 300), "用备用模型撑过这段时间，再试回主模型。") +
-        row("最大代理循环次数", dnum("reply_tool_rounds", "轮", 5), "回复时最多调用几轮工具，最后写回复那一轮不算。") +
-        row("单轮工具调用上限", dnum("reply_tool_calls_per_turn", "个", 5), "一轮里最多调几个工具，多出来的不执行。") +
-        row("工具调用超时", dnum("reply_tool_timeout", "秒", 180), "单个工具最多等多久，0 = 不限制。") +
-        row("工具输出上限", dnum("reply_tool_output_tokens", "token", 10000), "工具结果最多留多少，超了保留首尾，0 = 不限制。") +
-      "</div><div class='drows cols2'>" +
-        row("回复看图", swPill("reply_see_images", dVal("reply_see_images", true)),
-          "回复模型也看一眼历史与本轮消息里的图。关掉后只发文字，图片位置留 [图片] 占位。") +
+      // 用户 m09611：跟 JEV 卡一样套成两列小卡——左边模型与看图，右边工具那几项。
+      "<div class='jev-cols'>" +
+        "<div class='jev-col dcol'><div class='drows'>" +
+          row("回复模型", "<select class='dipt' data-k='reply_model' id='rep-model'>" +
+            dModelOpts(String(dVal("reply_model", "")), "跟随默认模型") + "</select>",
+            "真正写回复的那个模型。留空 = 用框架的默认模型。") +
+          row("备用模型", "<select class='dipt' data-k='reply_fallback_model' id='rep-fb'>" +
+            dModelOpts(String(dVal("reply_fallback_model", "")), "未选择模型") + "</select>",
+            "主模型连续失败到「失败切换」那个次数，才切到它。") +
+          // 用户 m07859：重试 / 重试间隔 / 单次超时统一在「基础设置 · 重试」里改，这里不再重复。
+          // 用户 m10202：这两行并成一行；等待时间按分钟填（存盘仍是秒）。
+          // 用户 m15201：跟决策卡一样，「连续失败切换」改名「失败切换」，「单轮工具调用上限」改名「单轮工具上限」。
+          dPair("失败切换", swPill("reply_fail_switch", dVal("reply_fail_switch", true)),
+            "切换模型", dnum("reply_fallback_cooldown", "分钟", 1800)) +
+          // 用户 m09851：「回复看图」搬到窗口设置页的「图片」组了，这里不再重复一份。
+        "</div></div>" +
+        "<div class='jev-col dcol'><div class='drows'>" +
+          row("Agent循环次数", dnum("reply_tool_rounds", "轮", 5), "回复时最多调用几轮工具，最后写回复那一轮不算。") +
+          row("单轮工具上限", dnum("reply_tool_calls_per_turn", "个", 5), "一轮里最多调几个工具，多出来的不执行。") +
+          row("工具调用超时", dnum("reply_tool_timeout", "秒", 180), "单个工具最多等多久，0 = 不限制。") +
+          row("工具输出上限", dnum("reply_tool_output_tokens", "token", 10000), "工具结果最多留多少，超了保留首尾，0 = 不限制。") +
+        "</div></div>" +
       "</div></div>";
   }
 
@@ -3073,8 +3397,11 @@ var DM_SPECIAL = { trigger_probability: 1 };
     function dnumIn(k, unit, dft){
       var v = dVal(k, dft === undefined ? "" : dft);
       var u = unit ? String(unit) : "";
-      return "<span class='ipt has-unit" + (u.length > 1 ? " uw2" : "") + "'><input class='dipt num' type='number' data-k='" +
-        esc(k) + "' value='" + esc(v) + "'>" + (u ? "<b class='unit'>" + esc(u) + "</b>" : "") + "</span>";
+      // 用户 m10202：按分钟填的键，显示时把存盘的秒换算成分钟，提交时再乘回去。
+      var mul = MIN_KEYS[String(k || "")] || 0;
+      if(mul && v !== "" && v !== null && v !== undefined && isFinite(Number(v))) v = Math.round(Number(v) / mul);
+      return "<span class='ipt" + (u ? (" has-unit" + (u.length > 1 ? " uw2" : "") + (u.length >= 4 ? " uw3" : "")) : "") + "'><input class='dipt num' type='number' data-k='" +
+        esc(k) + "'" + (mul ? " data-mul='" + mul + "'" : "") + " value='" + esc(v) + "'>" + (u ? "<b class='unit'>" + esc(u) + "</b>" : "") + "</span>";
     }
     // 用户 m01978 第 3 条：这一行的标签就是接口页的名字，点一下能改名。
     // 用户 m02469：名字后面挂一把铅笔（跟首页改名那个图标同款），悬浮说明去掉。
@@ -3099,20 +3426,18 @@ var DM_SPECIAL = { trigger_probability: 1 };
           jevModelOpts(String(dVal("jev_fallback_model", "")), "未选择模型") + "</select>") +
         // 用户 m01978 第 1 条：这两项并成一行，名字缩短，单位（次 / 秒）搬进框里。
         pair2("失败切换", swPill("jev_fail_switch", dVal("jev_fail_switch", true)),
-          "切换模型", dnumIn("jev_fallback_cooldown", "秒", 300)) +
+          "切换模型", dnumIn("jev_fallback_cooldown", "分钟", 1800)) +
         // 用户 m02469：名字从「不确定区间」改成「不确定段」。
-        row("不确定段", "<div class='jev-range'>" +
-          "<span class='jev-unit'>" + dsel("jev_lower", 25) + "<span class='jev-pct'>%</span></span>" +
-          "<span class='jev-range-sep'>~</span>" +
-          "<span class='jev-unit'>" + dsel("jev_upper", 75) + "<span class='jev-pct'>%</span></span></div>") +
+        // 用户 m16307 图2：两个下拉换成一根长条（dRange）。
+        row("不确定段", dRange("jev_lower", "jev_upper", 25, 75)) +
         // 用户 m01978 第 2 条：这两项也并成一行。
         // v4.85（用户 m10425 第 6 条）：JEV 自己收不了图（decision 类模型只有 choice()），
-        // 「回退带图」管的是「不确定 → 交给决策模型」那一次转交要不要带图。
-        pair2("不确定时", "<select class='dipt' data-k='jev_action' id='jev-act'>" +
+        // 「不确定 → 交给决策模型」那一次转交要不要带图，用户 m09851 起统一由窗口页
+        // 「图片」组里的「决策看图」决定，这里不再单独留一个「回退带图」开关。
+        row("不确定时", "<select class='dipt' data-k='jev_action' id='jev-act'>" +
           "<option value='no_reply'" + (act === "no_reply" ? " selected" : "") + ">不回复</option>" +
           "<option value='reply'" + (act === "reply" ? " selected" : "") + ">回复</option>" +
-          "<option value='decision'" + (act === "decision" ? " selected" : "") + ">交给决策模型</option></select>",
-          "回退带图", swPill("jev_see_images", dVal("jev_see_images", true), "带图", "不带")) +
+          "<option value='decision'" + (act === "decision" ? " selected" : "") + ">交给决策模型</option></select>") +
       "</div>";
     // ---- 右边：第一列是接口页签，第二列是当前页的表单 ----
     // 用户 m01978 第 3 条：页签还是编号，悬浮能看到这一页的名字。
@@ -3265,7 +3590,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
   }
 
   function dtoolsBlockHtml(){
-    var hint = "勾选的工具作为原生工具发送，是否写入 system 由工具模块决定；模型要调就真的去调，最多连着调几轮由「回复提示词」页的「最大代理循环次数」决定。";
+    var hint = "勾选的工具作为原生工具发送，是否写入 system 由工具模块决定；模型要调就真的去调，最多连着调几轮由「回复提示词」页的「Agent循环次数」决定。";
     return "<div class='dcard'><div class='dhead'>决策可用的工具" +
       "<span class='dhead-x'>最多 <b id='dec-rounds-hint'>5</b> 轮</span></div>" +
       "<input type='hidden' data-k='decision_tools' id='dec-tools' value='" + esc(JSON.stringify(dPickedRaw())) + "'>" +
@@ -3411,7 +3736,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         seen[defHit.type + "\n" + String(defHit.key || "")] = true;
       }else{
         refs.push({type:"text", key:"", label:headName, available:true, group:"custom",
-                   suffix:(forAdd ? "自定义" : (defHit ? (tweakedTpl ? "自定义" : "默认模板") : (isTextNow ? "自写" : "自定义")))});
+                   suffix:(forAdd ? "自定义" : (defHit ? (tweakedTpl ? "自定义" : "默认") : (isTextNow ? "自写" : "自定义")))});
         seen["text\n"] = true;
       }
     }
@@ -3436,9 +3761,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
       // 否则下拉会把「工具说明」显示成「自写文本」，看着像数据丢了。
       var sfx = (module.type === "text")
         ? (defHit ? (tweakedTpl ? "自定义" : ppSuffixOf(defHit)) : "自写")
-        : ({text:"自定义", custom:"自定义", decision_format:"默认模板", decision_prompt:"默认模板",
+        : ({text:"自定义", custom:"自定义", decision_format:"默认", decision_prompt:"默认",
         persona:"人格", identity:"只读", tools:"工具", realtime_marker:"位置", dynamic_marker:"位置",
-        dynamic:"动态段", framework:"原段"}[module.type] || "自定义");
+        dynamic:"", framework:"默认"}[module.type] || "自定义");
       refs.push({type:module.type,key:module.key,label:module.label || module.type,group:"custom",suffix:sfx});
     }
     // 用户 m01209 图4：自己的模板一律排前面，默认模板统统排后面。
@@ -3453,9 +3778,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
       var label = String(c.label || c.type);
       // 同一类默认模板有多条（比如好几个人格文件）时带上区分名，否则下拉里全一样。
       if(!own(c) && counts[String(c.label || c.type) + '\n' + c.type] > 1 && c.tag) label += " · " + String(c.tag);
-      // 用户 m01209 图2/图4：只有真正的模板才标「默认模板」；身份/工具/人格/位置/
+      // 用户 m01209 图2/图4：只有真正的模板才标「默认」；身份/工具/人格/位置/
       // 自己拆的小模块各自标清是什么，下拉一眼能分。
-      var suffix = "（" + ppSuffixOf(c) + "）";
+      var sfxTxt = ppSuffixOf(c);
+      var suffix = sfxTxt ? "（" + sfxTxt + "）" : "";
       return "<option value='" + esc(value) + "'" + (selected === value ? " selected" : "") + ">" +
         esc(label + suffix) + (c.available === false ? "（不可用）" : "") + "</option>";
     }).join("");
@@ -3474,7 +3800,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         if(seen[sig]) return;
         seen[sig] = true;
         out += "<option value='" + esc(JSON.stringify(["clone", s.kind + "#" + i])) + "'>" +
-          esc(nm + "（自定义 · 再复制一份）") + "</option>";
+          esc(nm + "（自定义）") + "</option>";
       });
     }
     return out ? ("<optgroup label='你的自定义模块'>" + out + "</optgroup>") : "";
@@ -3489,7 +3815,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
       (index === undefined ? "" : " data-pm-index='" + index + "'") + (disabled ? " disabled" : "") + ">" + text + "</button>";
   }
   function ppSuffixOf(c){
-    return String(c.suffix || ((c.group || "default") === "custom" ? "自定义" : "默认模板"));
+    // 用户 m15846：下拉里的括注只留「默认 / 自定义 / 自写 / 人格 / 只读 / 工具 / 位置」这几种。
+    // 「默认模板」缩成「默认」，「原段」也归到「默认」；动态段自己就是一段模板，不再括注。
+    if(String(c.type || "") === "dynamic") return "";
+    var sfx = String(c.suffix || "");
+    if(sfx === "默认模板" || sfx === "原段") return "默认";
+    if(sfx) return sfx;
+    return (c.group || "default") === "custom" ? "自定义" : "默认";
   }
   // 用户 m09506：以前点中过那条同名的「空 key」选项——正文是模板的字，key 却是空的，
   // 下拉里就多出一条看着像「默认模板」的重复项，来回切还会变成「自定义」。
@@ -3875,20 +4207,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
           "<select class='dipt pm-zone-src' data-pm-zone aria-label='加到哪一段' tabindex='-1' aria-hidden='true'>" +
             "<option value='system'" + (zonePick === "dynamic" ? "" : " selected") + ">加到系统段</option>" +
             "<option value='dynamic'" + (zonePick === "dynamic" ? " selected" : "") + ">加到动态段</option></select>" +
-          ppButton(s,"add","＋ 新增") + "</div></div>" +
-        "<div class='pm-foot'>" +
-        // 用户 m05124 图2：说明跟按钮并成一段，左边缘跟「新增模块」卡对齐；全文放 title。
-        "<div class='pm-tip' title='" + esc((s.kind === "reply"
-          ? "上面那几段是引用，想改就直接在下面的正文框里改，会存成「原名·复制（自写）」，默认模板不会被覆盖；"
-          : "判断规则可以拆成几块写，谁写长了就单独挪；") +
-          "删光模块就是空 system，这里只改草稿，点上面的「保存此提示词」才生效。") + "'>" +
-          esc((s.kind === "reply" ? "改引用会先存成你的模板；" : "判断规则可拆几块写；") +
-              "保存后生效。") + "</div>" +
-      "</div>";
+          ppButton(s,"add","＋ 新增") + "</div></div>";
   }
   function promptEditorBlockHtml(kind){
     var s = ppState(kind);
-    return "<div class='dcard pp-compact pm-editor' id='pp-edit-" + kind + "' data-pp-editor='" + kind + "'>" + ppEditorInner(s) + "</div>";
+    // 用户 m18454：提示词还没读回来时这块只有一行「读取中」，下面的设置卡就会顶到最上面，
+    // 等正文到了再被挤下去，看着像闪一下。加载态挂 pm-loading，CSS 让它先占满整栏高度。
+    return "<div class='dcard pp-compact pm-editor" + (s.loaded ? "" : " pm-loading") + "' id='pp-edit-" + kind + "' data-pp-editor='" + kind + "'>" + ppEditorInner(s) + "</div>";
   }
   // 用户 m03247：工具条要当卡头用——它要是留在滚动层里，滚动条滑块就会跟它并排露在右上角。
   // 每次重画编辑器都是一套新 DOM，所以画完把新工具条搬进卡头，卡头里旧的整块丢掉。
@@ -3915,6 +4240,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
       }
     }
     root.innerHTML = ppEditorInner(s);
+    // 用户 m18454：读回来之后去掉加载态，占位高度让给真正的正文。
+    root.classList.toggle("pm-loading", !s.loaded);
     ppHoistToolbar(s);
     // 用户 m09506：JEV 卡整块重画完要把「实际请求地址」补上，
     // 否则刚打开页面那会儿这处是空的，要等动一下输入框才出现。
@@ -3938,6 +4265,14 @@ var DM_SPECIAL = { trigger_probability: 1 };
     }
     ppPaintStatus(s);
   }
+  // 用户 m15201：预览刷新时同一段文本会被重复写两遍（先按旧结果重画一次、拿到响应再画一次），
+  // 每次写 textContent 都会让整段一千多字的预览重新排版——滚轮滚动时正好撞上就会顿一下。
+  // 内容没变就不碰 DOM。
+  function ppSetText(el, text){
+    if(!el) return;
+    var next = String(text == null ? "" : text);
+    if(el.textContent !== next) el.textContent = next;
+  }
   function ppPaintStatus(s){
     if(!ppCurrent(s)) return;
     var root = document.getElementById("pp-edit-" + s.kind);
@@ -3947,24 +4282,32 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(s.saving) bits.push("保存中（仍可继续编辑）");
     if(s.error) bits.push(s.error);
     if(s.notice) bits.push(s.notice);
-    if(node) node.textContent = bits.join(" · ");
+    ppSetText(node, bits.join(" · "));
     if(root){
       var owner = document.getElementById("pp-head-" + s.kind) || root;
       var saves = owner.querySelectorAll("[data-pm-action='save']");
       if(!saves.length) saves = root.querySelectorAll("[data-pm-action='save']");
       for(var si = 0; si < saves.length; si++){
         saves[si].disabled = s.saving || !s.dirty;
-        saves[si].textContent = s.saving ? "保存中…" : "保存此提示词";
+        ppSetText(saves[si], s.saving ? "保存中…" : "保存此提示词");
       }
     }
     var testBtn = document.getElementById(ppPrefix(s.kind) + "-test");
     if(testBtn) testBtn.disabled = !s.loaded || s.dirty || s.saving;
   }
   function ppCopy(kind, button){
-    var s = ppState(kind), text = s && s.preview ? String(s.preview.system || "") : "", old = button.textContent;
+    var s = ppState(kind), text = s && s.preview ? String(s.preview.system || "") : "";
+    // 用户 m15201：按钮改成图标了，反馈也换成图标（✓ / ✕）+ 悬浮说明，不再把文字塞进去撑宽。
+    var old = button.textContent, oldTitle = button.getAttribute("title") || "";
     function done(ok){
-      button.textContent = ok ? "已复制" : "没有可复制的预览";
-      setTimeout(function(){ button.textContent = old; }, 1200);
+      button.textContent = ok ? "\u2713" : "\u2715";
+      button.setAttribute("title", ok ? "已复制" : "没有可复制的预览");
+      button.classList.toggle("ok", !!ok);
+      setTimeout(function(){
+        button.textContent = old;
+        button.setAttribute("title", oldTitle);
+        button.classList.remove("ok");
+      }, 1200);
     }
     if(!text){ done(false); return; }
     function fallback(){
@@ -3985,13 +4328,16 @@ var DM_SPECIAL = { trigger_probability: 1 };
   }
   function ppPaintPreview(s){
     if(!ppCurrent(s)) return;
+    // 用户 m15846 图4：三个页签各有一块预览 DOM，但预热另一页时也会走到这里，
+    // 把还没读到的空预览画进隐藏的那一页，切回去就一直是「等待读取模板…」。
+    if(s.kind !== ppPane) return;
     var prefix = ppPrefix(s.kind), out = document.getElementById(prefix + "-prev-sys");
     if(!out) return;
     var preview = s.preview;
-    out.textContent = preview ? String(preview.system || "") : "";
+    ppSetText(out, preview ? String(preview.system || "") : "");
     var status = document.getElementById(prefix + "-prev-status");
-    if(status) status.textContent = s.previewError ? s.previewError : (s.previewPending ? "正在用当前草稿重新组装…" :
-      (preview ? "" : "等待读取模板…"));
+    ppSetText(status, s.previewError ? s.previewError : (s.previewPending ? "正在用当前草稿重新组装…" :
+      (preview ? "" : "等待读取模板…")));
     // 用户 m03408：不再把每段摊成一串折叠行（静态段上面已经整段预览过），改成
     // 「实时窗口」一条分界线，界线下面把动态段也拼成一段正文，跟 system 预览一个观感。
     var partList = preview ? (preview.parts || []) : [];
@@ -4008,13 +4354,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var div = document.getElementById(prefix + "-prev-div");
     if(div) div.hidden = !preview || !rtSeen || !hasDyn;
     var divSub = document.getElementById(prefix + "-prev-divs");
-    if(divSub) divSub.textContent = String(s.rtInfo || "");
+    ppSetText(divSub, s.rtInfo || "");
     var dynBox = document.getElementById(prefix + "-prev-dynbox");
     if(dynBox) dynBox.hidden = !preview || !hasDyn;
     var dynPre = document.getElementById(prefix + "-prev-dyn");
-    if(dynPre) dynPre.textContent = dynText;
+    ppSetText(dynPre, dynText);
     var warnings = document.getElementById(prefix + "-prev-warnings");
-    if(warnings) warnings.textContent = preview ? (preview.warnings || []).map(function(w){ return String(w && w.message ? w.message : w); }).join("\n") : "";
+    ppSetText(warnings, preview ? (preview.warnings || []).map(function(w){ return String(w && w.message ? w.message : w); }).join("\n") : "");
     ppPaintStatus(s);
   }
   function ppPreview(s){
@@ -4074,7 +4420,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var sel = head ? head.querySelector(".pm-src") : null;
     if(sel && sel.options && sel.selectedIndex >= 0){
       sel.options[sel.selectedIndex].textContent = String(module.label || "自写文本") +
-        "（" + (tweaked ? "自定义" : (defTpl ? "默认模板" : "自写")) + "）";
+        "（" + (tweaked ? "自定义" : (defTpl ? "默认" : "自写")) + "）";
     }
   }
   function ppChanged(s, redraw){
@@ -4379,6 +4725,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     else if(action === "edit_tpl" && module && module.type === "custom"){
       // v4.84（用户 m09179 第 7 条）：模板库的编辑界面撤了，这个按钮改成跳到自定义页
       // 对应的那张卡上——正文就在那儿改，改完点「保存这一段」。
+      ppTplSel[s.kind] = s.kind + "#" + index;
       ppSetPane("templates");
       setTimeout(function(){
         var card = document.querySelector("#pp-tpl [data-self-card='" + s.kind + "#" + index + "']");
@@ -4424,11 +4771,12 @@ var DM_SPECIAL = { trigger_probability: 1 };
     return "<div class='dcard pp-prev' data-pp-prev='" + kind + "'>" +
       "<div class='pp-prev-h'><h4>提示词预览</h4><span class='pp-h4s'>当前草稿 · 自动刷新</span>" +
       "<span class='pp-prev-acts'>" +
-        "<button class='pm-ico' id='" + prefix + "-copy' type='button' data-pp-copy='" + kind + "' title='复制这份 system'>复制</button>" +
-        "<button class='pm-ico' id='" + prefix + "-expand' type='button' data-pp-expand='" + kind + "' title='放大看 / 还原'>放大</button>" +
+        // 用户 m15201：复制 / 放大改成两个图标（⧉ / ⤢），用途写在悬浮说明里。
+        "<button class='pm-ico' id='" + prefix + "-copy' type='button' data-pp-copy='" + kind + "' title='复制这份 system'>\u29c9</button>" +
+        "<button class='pm-ico' id='" + prefix + "-expand' type='button' data-pp-expand='" + kind + "' title='放大看'>\u2922</button>" +
       "</span></div>" +
       "<div class='pp-prev-box sys' id='" + prefix + "-prev-sysbox'>" +
-        "<div class='pp-prev-cap'>系统提示词</div>" +
+        "<div class='pp-prev-cap'><span>系统提示词</span><button class='pp-cap-tg' type='button' title='折叠'>\u25be</button></div>" +
         "<pre class='dpre tall pm-system' id='" + prefix + "-prev-sys'></pre></div>" +
       "<div class='pm-note' id='" + prefix + "-prev-status' role='status' aria-live='polite'>等待读取模板…</div>" +
       "<div class='pm-warning' id='" + prefix + "-prev-warnings' role='status'></div>" +
@@ -4436,18 +4784,19 @@ var DM_SPECIAL = { trigger_probability: 1 };
         "<span class='pp-prev-divn'>实时窗口</span><span class='pp-prev-divl'></span>" +
         "<span class='pp-prev-divs' id='" + prefix + "-prev-divs'></span></div>" +
       "<div class='pp-prev-box dyn' id='" + prefix + "-prev-dynbox' hidden>" +
-        "<div class='pp-prev-cap'>动态注入部分</div>" +
+        "<div class='pp-prev-cap'><span>动态注入部分</span><button class='pp-cap-tg' type='button' title='折叠'>\u25be</button></div>" +
         "<pre class='dpre pm-dyn' id='" + prefix + "-prev-dyn'></pre></div>" +
       // 用户 m08755 第 5 条：JEV 页也要「测试」，用实时窗那份真实聊天记录试跑。
       (kind === "decision" || kind === "jev" || kind === "reply"
         ? "<div class='pm-toolbar'><button class='dbtn ghost' id='" + prefix + "-test' type='button' disabled>测试</button>" +
-          "<span class='dtip' style='margin:0'>仅测已保存提示词；会真调一次" +
-          (kind === "jev" ? "JEV 判断（用实时窗那份聊天记录）"
-                          : (kind === "reply" ? "回复模型（用实时窗那份聊天记录）" : "决策模型")) +
-          "，结果只显示在下面。" +
-          (kind === "jev" ? "不写记录、不发言、不转交。" : (kind === "reply" ? "不写记录、不发言。" : "")) +
+          "<button class='dbtn ghost' id='" + prefix + "-test-clear' type='button' hidden>清空结果</button>" +
+          "<span class='dtip' style='margin:0'>只测已保存的提示词，真调一次" +
+          (kind === "jev" ? " JEV 判断" : (kind === "reply" ? "回复模型" : "决策模型")) +
+          (kind === "decision" ? "。" : (kind === "jev" ? "，不写记录、不发言、不转交。" : "，不写记录、不发言。")) +
           "</span></div>" +
-          "<div class='drow col' id='" + prefix + "-test-box' hidden><h4>试跑结果</h4><pre class='dpre' id='" + prefix + "-test-out'></pre></div>"
+          "<div class='pp-test' id='" + prefix + "-test-box' hidden><h4>试跑结果</h4>" +
+          "<div class='pp-test-meta' id='" + prefix + "-test-meta'></div>" +
+          "<div class='pp-test-body' id='" + prefix + "-test-out'></div></div>"
         : "") + "</div>";
   }
   // v4.84（用户 m09179 第 7 条）：模板库那套「新建 / 编辑 / 删除」的界面整块撤掉。
@@ -4491,9 +4840,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // 就自动出现在对应那一列里，不用另外存模板。
   var PP_SELF_COLS = [["decision", "决策提示词"], ["jev", "JEV 提示词"], ["reply", "回复提示词"]];
   function ppSelfCardHtml(r){
+    // 用户 m18121：标题已经由上面那张小卡带着了，这里不再重复一遍，正文框直接铺满。
     return "<div class='ptpl-card' data-self-card='" + r.kind + "#" + r.index + "'>" +
-      "<div class='ptpl-h'><b>" + esc(r.name) + "</b>" +
-      "<span class='ptpl-n'>第 " + (r.index + 1) + " 段 · " + r.body.length + " 字符" + (r.on ? "" : " · 已停用") + "</span></div>" +
       "<textarea class='darea ptpl-self' rows='4' aria-label='" + esc(r.name) + "（自写模块正文）'" +
       " data-self-field='content' data-self-kind='" + r.kind + "' data-self-index='" + r.index + "'>\n" + esc(r.body) + "</textarea>" +
       "<div class='ptpl-acts'><button type='button' class='dmini' data-self-act='save' data-self-kind='" + r.kind +
@@ -4501,16 +4849,27 @@ var DM_SPECIAL = { trigger_probability: 1 };
       "<button type='button' class='dmini' data-self-act='jump' data-self-kind='" + r.kind +
       "' data-self-index='" + r.index + "'>去提示词页看</button></div></div>";
   }
+  // 用户 m18121：三列里先只摆标题小卡，点开谁就在那一列下面展开编辑框（编辑框铺到底部）。
+  var ppTplSel = {decision:"", jev:"", reply:""};
   function ppSelfModHtml(){
     var rows = ppSelfModRows();
-    var head = "<div class='pm-note'>三个提示词页里改过或自己写的那几段会列在下面，没改过的默认模板不算（只在上头三页原样带着）。" +
-      "这里的正文和提示词页是同一份：这边改完点「保存这一段」，那边立刻就是新的；改默认模板时会先存一份「原名·复制（自写）」，原件不动。</div>";
+    var head = "<div class='pm-note ptpl-note'>只列改过或自己写的段，默认模板不列。正文和提示词页是同一份，" +
+      "点「保存这一段」那边立刻同步；改默认模板会先复制一份「原名·复制（自写）」，原件不动。</div>";
     var cols = PP_SELF_COLS.map(function(p){
       var k = p[0], list = rows.filter(function(r){ return r.kind === k; });
+      var selKey = ppTplSel[k] || "", sel = null;
+      list.forEach(function(r){ if(!sel && (r.kind + "#" + r.index) === selKey) sel = r; });
+      if(!sel) ppTplSel[k] = "";
+      var mini = list.map(function(r){
+        var key = r.kind + "#" + r.index, on = !!(sel && key === selKey);
+        return "<button type='button' class='ptpl-mini" + (on ? " on" : "") + "' data-self-pick='" + key +
+          "' aria-pressed='" + (on ? "true" : "false") + "'><b>" + esc(r.name) + "</b>" +
+          "<span class='ptpl-n'>第 " + (r.index + 1) + " 段 · " + r.body.length + " 字符" + (r.on ? "" : " · 已停用") + "</span></button>";
+      }).join("");
       return "<div class='ptpl-col'><div class='ptpl-colh'>" + p[1] +
         "<span class='dhead-x'>" + list.length + " 个</span></div>" +
-        (list.length ? list.map(ppSelfCardHtml).join("")
-                     : "<div class='ptpl-empty'>这一页还没有改过或自己写的段。</div>") + "</div>";
+        "<div class='ptpl-list'>" + (list.length ? mini : "<div class='ptpl-empty'>这一页还没有改过或自己写的段。</div>") + "</div>" +
+        (sel ? "<div class='ptpl-detail'>" + ppSelfCardHtml(sel) + "</div>" : "") + "</div>";
     }).join("");
     return head + "<div class='ptpl-cols'>" + cols + "</div>";
   }
@@ -4565,6 +4924,16 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(ppPane === "templates"){ ppEnsureTplStates(); ppTplRender(); return; }
     ppAutoPreview();
   }
+  // 用户 m16307 图1：pair2 那行的标签列要跟网格第一列一样宽，开关才跟上面的下拉左边缘对齐。
+  // 第一列是 max-content（决策卡最长标签 5 字、回复卡 4 字，两张卡宽度不一样），所以量出来写进 --dlbw。
+  function ppSyncPairLabel(){
+    Array.prototype.forEach.call(document.querySelectorAll("#settings .jev-col.dcol .drows"), function(g){
+      var lb = g.querySelector(".drow > .dlb");
+      if(!lb) return;
+      var w = Math.round(lb.getBoundingClientRect().width * 100) / 100;
+      if(w > 0) g.style.setProperty("--dlbw", w + "px");
+    });
+  }
   // v4.10：提示词页外层 .panel 带着 overflow:hidden，会把右栏的 position:sticky 一起废掉（右栏不再吸顶）。
   // 只给这一页的 panel 打标记，让它单独改成 overflow:visible，别动全局那条规则。
   function ppMarkPanel(){
@@ -4575,6 +4944,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // v4.10：整页不滚，改成左栏、右栏各自滚（页签常驻），高度按窗口现算，省得右栏跟内容一起跑掉。
   function ppLayout(){
     ppMarkPanel();
+    ppSyncPairLabel();
     var pp = document.querySelector(".pp"), tabs = document.querySelector(".pp-tabs");
     if(!pp || !tabs) return;
     var top = tabs.getBoundingClientRect().top;
@@ -4596,7 +4966,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(ppPane === "templates"){ ppEnsureTplStates(); ppTplRender(); return; }
     var s = ppState(ppPane);
     ppRenderEditor(s); ppPaintPreview(s);
-    var p = s.loaded ? ppPreview(s) : ppLoad(s,false);
+    // 用户 m15846 图4：读到了布局却没拿到预览（预热那条路）时补一次，别让预览区空着。
+    var p = (s.loaded && s.preview) ? ppPreview(s) : ppLoad(s,false);
     // 另一页只用来填「＋ 新增」下拉：等当前页首屏出来再读，别跟首屏抢请求。
     Promise.resolve(p).then(function(){ ppWarmOther(ppPane); }, function(){ ppWarmOther(ppPane); });
     return p;
@@ -4647,99 +5018,203 @@ var DM_SPECIAL = { trigger_probability: 1 };
 
 
 
-  function dcTest(){
-    var box = document.getElementById("dec-test-box");
-    var out = document.getElementById("dec-test-out");
-    if(!box || !out) return;
-    var sid = dScopeSidForDecision();
+  // 用户 m16904 第 2、3 条：试跑结果以前是一坨纯文本，模型还显示成内部引用
+  // （52acaec3deeb:c725ed8dfa5f4e4e91343d4c1dd6ed76 这种）。现在统一成
+  // 「一行信息胶囊 + 分段块」，模型名按设置页下拉里的名字显示。
+  function ppModelLabel(ref){
+    var v = String(ref || "");
+    if(!v) return "";
+    var hit = "";
+    var sels = document.querySelectorAll("select[data-k$='_model']");
+    for(var i = 0; i < sels.length && !hit; i++){
+      var op = sels[i].options || [];
+      for(var j = 0; j < op.length; j++){
+        if(op[j].value === v){ hit = String(op[j].text || ""); break; }
+      }
+    }
+    return hit || v;
+  }
+  function ppTestMeta(meta){
+    var h = "";
+    (meta || []).forEach(function(it){
+      if(!it) return;
+      var k = String(it[0] || "");
+      var v = (it[1] === undefined || it[1] === null) ? "" : String(it[1]);
+      if(!k || !v) return;
+      h += "<span class='pp-test-chip'" + (it[2] ? (" title='" + esc(it[2]) + "'") : "") + "><b>" + esc(k) + "</b><i>" + esc(v) + "</i></span>";
+    });
+    return h;
+  }
+  // 用户 m17185：分段块支持挂角标（标签正常 / 不合规），也支持直接给 HTML（回复气泡）。
+  function ppTestSec(title, text, tone, extra){
+    var ex = extra || {};
+    var t = (text === undefined || text === null) ? "" : String(text);
+    if(!ex.html && !t) return "";
+    var body = ex.html ? ex.html : ("<div class='pp-test-sect'>" + esc(t) + "</div>");
+    return "<div class='pp-test-sec" + (tone ? (" " + tone) : "") + "'>" +
+      "<div class='pp-test-sech'>" + esc(title) +
+      (ex.badge ? ("<span class='pp-test-badge " + (ex.badge.tone || "") + "'>" + esc(ex.badge.text) + "</span>") : "") +
+      "</div>" + body + "</div>";
+  }
+  // 用户 m17185：思考过程里的空行去掉，省点高度。
+  function ppTight(text){
+    return String(text == null ? "" : text).split(/\r?\n/)
+      .filter(function(l){ return l.trim() !== ""; }).join("\n");
+  }
+  // 用户 m17185：回复按 <msg><text>…</text></msg> 拆成气泡。标签外面还有字、
+  // 或者某个 msg 里没有 text，都算不合规——不合规就不包装，原样带标签显示。
+  function ppParseReply(raw){
+    var t = String(raw == null ? "" : raw).trim();
+    var out = { ok: false, bubbles: [], raw: t };
+    if(!t) return out;
+    var re = /<msg>([\s\S]*?)<\/msg>/g, m, last = 0, outside = "";
+    while((m = re.exec(t))){
+      if(m.index > last) outside += t.slice(last, m.index);
+      last = re.lastIndex;
+      var inner = m[1];
+      out.bubbles.push({ body: inner.replace(/<\/?text>/g, "").trim(),
+                         hasText: /<text>[\s\S]*?<\/text>/.test(inner) });
+    }
+    outside += t.slice(last);
+    out.ok = out.bubbles.length > 0 && outside.trim() === "" &&
+      out.bubbles.every(function(b){ return b.hasText && b.body !== ""; });
+    return out;
+  }
+  function ppTestClear(prefix){
+    var box = document.getElementById(prefix + "-test-box");
+    var clr = document.getElementById(prefix + "-test-clear");
+    var mEl = document.getElementById(prefix + "-test-meta");
+    var oEl = document.getElementById(prefix + "-test-out");
+    if(box) box.hidden = true;
+    if(mEl){ mEl.innerHTML = ""; mEl.hidden = true; }
+    if(oEl) oEl.innerHTML = "";
+    if(clr) clr.hidden = true;
+  }
+  function ppTestShow(prefix, meta, secs, emptyText){
+    var box = document.getElementById(prefix + "-test-box");
+    var mEl = document.getElementById(prefix + "-test-meta");
+    var oEl = document.getElementById(prefix + "-test-out");
+    var clr = document.getElementById(prefix + "-test-clear");
+    if(!box || !oEl) return;
     box.hidden = false;
-    out.textContent = "跑一次决策…（超时就按失败算，别关页面）";
+    if(clr) clr.hidden = false;
+    if(mEl){ mEl.innerHTML = ppTestMeta(meta); mEl.hidden = !mEl.innerHTML; }
+    var h = "";
+    (secs || []).forEach(function(s){ if(s) h += ppTestSec(s[0], s[1], s[2], s[3]); });
+    oEl.innerHTML = h || ("<div class='pp-test-empty'>" + esc(emptyText || "没有内容") + "</div>");
+  }
+  function ppTestWait(prefix, text){
+    var box = document.getElementById(prefix + "-test-box");
+    var mEl = document.getElementById(prefix + "-test-meta");
+    var oEl = document.getElementById(prefix + "-test-out");
+    var clr = document.getElementById(prefix + "-test-clear");
+    if(!box || !oEl) return;
+    box.hidden = false;
+    if(clr) clr.hidden = false;
+    if(mEl){ mEl.innerHTML = ""; mEl.hidden = true; }
+    oEl.innerHTML = "<div class='pp-test-empty'>" + esc(text) + "</div>";
+  }
+  function ppTestFail(prefix, err){
+    ppTestShow(prefix, [], [["错误", (err && err.message ? err.message : String(err)), "bad"]]);
+  }
+
+  function dcTest(){
+    var sid = dScopeSidForDecision();
+    ppTestWait("dec", "跑一次决策…（超时就按失败算，别关页面）");
     post(API + "/decision-test" + (sid ? "?sid=" + encodeURIComponent(sid) : ""))
       .then(function(d){
         var r = (d && d.result) || {};
-        if(!d || !d.ok){ out.textContent = "试跑失败：" + ((d && d.error) || "接口没回数据"); return; }
-        var lines = [];
-        lines.push("结论：" + (r.failed ? "失败（按「决策失败时」的设置处理）" : (r.reply ? "建议回复" : "建议不回")));
-        if(r.reason) lines.push("理由：" + r.reason);
-        // m01209 图3：决策只判断回不回，不再顺带指定要说什么。
-        lines.push("模型：" + (r.model || "（未记录）") + (r.via === "fallback" ? "（备用）" : "") +
-                   " · 尝试 " + (r.attempts || 1) + " 次 · 用时 " + (r.elapsed || 0) + " 秒");
-        if(r.tools_used && r.tools_used.length) lines.push("用了工具：" + r.tools_used.join("、"));
-        if(r.error) lines.push("错误：" + r.error);
-        if(r.reasoning) lines.push("", "思考过程：", String(r.reasoning).slice(0, 4000));
-        if(r.raw) lines.push("", "原始返回：", String(r.raw).slice(0, 1200));
-        out.textContent = lines.join("\n");
+        if(!d || !d.ok){ ppTestShow("dec", [], [["错误", (d && d.error) || "接口没回数据", "bad"]]); return; }
+        var meta = [];
+        meta.push(["结论", r.failed ? "失败（按「决策失败时」的设置处理）" : (r.reply ? "建议回复" : "建议不回")]);
+        if(r.model) meta.push(["模型", ppModelLabel(r.model) + (r.via === "fallback" ? "（备用）" : "")]);
+        meta.push(["尝试", (r.attempts || 1) + " 次"]);
+        if(r.elapsed) meta.push(["用时", r.elapsed + " 秒"]);
+        if(r.tools_used && r.tools_used.length) meta.push(["用了工具", r.tools_used.join("、")]);
+        var secs = [];
+        if(r.reason) secs.push(["理由", r.reason]);
+        if(r.error) secs.push(["错误", r.error, "bad"]);
+        if(r.reasoning) secs.push(["思考过程", ppTight(String(r.reasoning).slice(0, 4000))]);
+        if(r.raw) secs.push(["原始返回", String(r.raw).slice(0, 1200)]);
+        ppTestShow("dec", meta, secs, "模型没给理由");
       })
-      .catch(function(err){ out.textContent = "试跑失败：" + (err && err.message ? err.message : err); });
+      .catch(function(err){ ppTestFail("dec", err); });
   }
 
   // 用户 m08755 第 5 条：JEV 页的「测试」用实时窗那份真实聊天记录试跑，不写记录、不发言、不转交。
   function jevTest(){
-    var box = document.getElementById("jev-test-box");
-    var out = document.getElementById("jev-test-out");
-    if(!box || !out) return;
     var s = ppState("jev");
     var sid = ppRtSid(s);
-    box.hidden = false;
-    out.textContent = "跑一次 JEV 判断…（会真调一次，超时按失败算，别关页面）";
+    ppTestWait("jev", "跑一次 JEV 判断…（会真调一次，超时按失败算，别关页面）");
     post(API + "/jev-test" + (sid ? "?sid=" + encodeURIComponent(sid) : ""))
       .then(function(d){
-        if(!d || !d.ok){ out.textContent = "试跑失败：" + ((d && d.error) || "接口没回数据"); return; }
+        if(!d || !d.ok){ ppTestShow("jev", [], [["错误", (d && d.error) || "接口没回数据", "bad"]]); return; }
         var r = d.result || {};
         var j = r.jev || {};
-        var lines = [];
-        lines.push("会话：" + (sid ? sidLabel(sid) : "（没有可用会话，用了空窗口）"));
-        lines.push("接口：" + (j.backend === "custom"
-          ? ("自定义第三方 · " + String(j.api_base || "") + (j.api_model ? (" · " + j.api_model) : ""))
-          : "宿主 decision 模型"));
+        var meta = [];
+        meta.push(["会话", sid ? sidLabel(sid) : "（没有可用会话，用了空窗口）"]);
+        var apiBase = String(j.api_base || "");
+        var apiFull = j.backend === "custom"
+          ? ("自定义第三方 · " + apiBase + (j.api_model ? (" · " + j.api_model) : ""))
+          : "宿主 decision 模型";
+        // 用户 m16904：接口那格以前把整条 base URL 铺出来，一行放不下就换行。
+        // 现在只留「自定义第三方」，完整地址挂在悬浮说明里；模型名单独一格。
+        meta.push(["接口", (j.backend === "custom" && j.model) ? "自定义第三方" : apiFull, apiFull]);
         var prob = (j.prob_reply === null || j.prob_reply === undefined) ? null : Number(j.prob_reply);
-        if(prob === null && j.prob_reply_display) lines.push("概率：" + String(j.prob_reply_display));
+        if(prob === null && j.prob_reply_display) meta.push(["概率", String(j.prob_reply_display)]);
         else if(prob !== null && isFinite(prob)){
-          lines.push("概率：" + (j.prob_reply_display || (Math.round(prob * 100) + "%")) +
-                     "（区间 " + Math.round(Number(j.lower || 0) * 100) + "%～" + Math.round(Number(j.upper || 0) * 100) + "%）");
+          meta.push(["概率", (j.prob_reply_display || (Math.round(prob * 100) + "%")) +
+                     "（区间 " + Math.round(Number(j.lower || 0) * 100) + "%～" + Math.round(Number(j.upper || 0) * 100) + "%）"]);
         }
-        lines.push("结论：" + (r.failed ? "失败（按「决策失败时」的设置处理）" : (r.reply ? "建议回复" : "建议不回")));
-        if(r.failed) lines.push("错误：" + String(r.error || j.error || "没给原因"));
+        meta.push(["结论", r.failed ? "失败（按「决策失败时」的设置处理）" : (r.reply ? "建议回复" : "建议不回")]);
         var zoneText = {reply:"回复区", no_reply:"不回复区", uncertain:"不确定区"}[String(j.zone || "")];
-        if(zoneText) lines.push("落在：" + zoneText);
-        if(j.transfer_skipped) lines.push("不确定时设的是「交给决策模型」：试跑不转交，线上会再多调一次普通决策。");
-        if(j.model) lines.push("模型：" + j.model + (Number(j.attempts || 1) > 1 ? ("（第 " + j.attempts + " 次才成）") : ""));
-        if(r.reason) lines.push("理由：" + String(r.reason));
-        if(j.elapsed) lines.push("用时：" + j.elapsed + " 秒");
-        out.textContent = lines.join("\n");
+        if(zoneText) meta.push(["落在", zoneText]);
+        if(j.model) meta.push(["模型", ppModelLabel(j.model) + (Number(j.attempts || 1) > 1 ? ("（第 " + j.attempts + " 次才成）") : "")]);
+        if(j.elapsed) meta.push(["用时", j.elapsed + " 秒"]);
+        var secs = [];
+        if(r.reason) secs.push(["理由", String(r.reason)]);
+        if(r.failed) secs.push(["错误", String(r.error || j.error || "没给原因"), "bad"]);
+        if(j.transfer_skipped) secs.push(["提示", "不确定时设的是「交给决策模型」：试跑不转交，线上会再多调一次普通决策。"]);
+        ppTestShow("jev", meta, secs, "这次没给理由");
       })
-      .catch(function(err){ out.textContent = "试跑失败：" + (err && err.message ? err.message : err); });
+      .catch(function(err){ ppTestFail("jev", err); });
   }
 
   // 用户 m01977：回复页也加「测试」——用实时窗那份纯文字记录真调一次回复模型，
   // 顺便把模型的思考过程（上游给了 reasoning_content 才有）显示出来。
   function repTest(){
-    var box = document.getElementById("rep-test-box");
-    var out = document.getElementById("rep-test-out");
-    if(!box || !out) return;
     var s = ppState("reply");
     var sid = ppRtSid(s);
-    box.hidden = false;
-    out.textContent = "跑一次回复…（会真调一次，超时按失败算，别关页面）";
+    ppTestWait("rep", "跑一次回复…（会真调一次，超时按失败算，别关页面）");
     post(API + "/reply-test" + (sid ? "?sid=" + encodeURIComponent(sid) : ""))
       .then(function(d){
-        if(!d || !d.ok){ out.textContent = "试跑失败：" + ((d && d.error) || "接口没回数据"); return; }
+        if(!d || !d.ok){ ppTestShow("rep", [], [["错误", (d && d.error) || "接口没回数据", "bad"]]); return; }
         var r = d.result || {};
-        var lines = [];
-        lines.push("会话：" + (sid ? sidLabel(sid) : "（没有可用会话，用了空窗口）"));
-        lines.push("喂进去：" + (r.messages || 0) + " 条纯文字消息 · 系统提示词 " + (r.system_chars || 0) + " 字");
-        if(!r.ok) lines.push("错误：" + String(r.error || "回复模型没有返回"));
-        if(r.model) lines.push("模型：" + r.model);
-        if(r.elapsed) lines.push("用时：" + r.elapsed + " 秒");
+        var meta = [];
+        meta.push(["会话", sid ? sidLabel(sid) : "（没有可用会话，用了空窗口）"]);
+        meta.push(["喂进去", (r.messages || 0) + " 条纯文字消息 · 系统提示词 " + (r.system_chars || 0) + " 字"]);
+        if(r.model) meta.push(["模型", ppModelLabel(r.model)]);
+        if(r.elapsed) meta.push(["用时", r.elapsed + " 秒"]);
         if(r.input_tokens || r.output_tokens){
-          lines.push("token：入 " + (r.input_tokens || 0) + " · 出 " + (r.output_tokens || 0) +
-                     (r.cached_tokens ? (" · 缓存 " + r.cached_tokens) : ""));
+          meta.push(["token", "入 " + (r.input_tokens || 0) + " · 出 " + (r.output_tokens || 0) +
+                     (r.cached_tokens ? (" · 缓存 " + r.cached_tokens) : "")]);
         }
-        if(r.reasoning) lines.push("", "思考过程：", String(r.reasoning).slice(0, 4000));
-        if(r.text) lines.push("", "回复：", String(r.text).slice(0, 4000));
-        out.textContent = lines.join("\n");
+        var secs = [];
+        if(!r.ok) secs.push(["错误", String(r.error || "回复模型没有返回"), "bad"]);
+        if(r.reasoning) secs.push(["思考过程", ppTight(String(r.reasoning).slice(0, 4000))]);
+        if(r.text){
+          // 用户 m17185：回复按气泡显示、标签去掉；标签不合规就原样带标签出来，标题边上挂红角标。
+          var pr = ppParseReply(r.text);
+          if(pr.ok){
+            var bub = pr.bubbles.map(function(b){ return "<div class='pp-test-bub'>" + esc(b.body) + "</div>"; }).join("");
+            secs.push(["回复", "", "ok", { badge: { text: "标签正常", tone: "ok" }, html: bub }]);
+          }else{
+            secs.push(["回复", String(r.text).slice(0, 4000), "bad", { badge: { text: "标签不合规", tone: "bad" } }]);
+          }
+        }
+        ppTestShow("rep", meta, secs, "模型没给内容");
       })
-      .catch(function(err){ out.textContent = "试跑失败：" + (err && err.message ? err.message : err); });
+      .catch(function(err){ ppTestFail("rep", err); });
   }
 
   // v3.92（用户 m06951 第 6 条）：提示词页停在哪一半——decision / reply。
@@ -4835,6 +5310,18 @@ var DM_SPECIAL = { trigger_probability: 1 };
       var tab = t.closest ? t.closest("[data-pp]") : null;
       if(tab){ ppSetPane(tab.getAttribute("data-pp")); e.preventDefault(); return; }
       // v4.10：右栏标题带上的「复制 / 放大」，以及模块正文折叠状态的记忆（折叠状态存在 s.open，重渲染后不丢）。
+      // 用户 m18121：自定义页先只露标题，点一下就在那一列下面展开编辑框；再点一下收起。
+      var pick = t.closest ? t.closest("[data-self-pick]") : null;
+      if(pick){
+        e.preventDefault();
+        var pk = pick.getAttribute("data-self-pick") || "";
+        var pkind = pk.split("#")[0];
+        if(pkind === "decision" || pkind === "jev" || pkind === "reply"){
+          ppTplSel[pkind] = (ppTplSel[pkind] === pk) ? "" : pk;
+          ppTplRender();
+        }
+        return;
+      }
       var selfBtn = t.closest ? t.closest("[data-self-act]") : null;
       if(selfBtn){
         e.preventDefault();
@@ -4864,7 +5351,12 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(expandBtn){
         var exKind = expandBtn.getAttribute("data-pp-expand");
         var exPane = document.querySelector(".pp-prev[data-pp-prev='" + exKind + "']");
-        if(exPane){ expandBtn.textContent = exPane.classList.toggle("big") ? "还原" : "放大"; }
+        if(exPane){
+          // 用户 m15201：图标按钮，放大 / 还原靠字形和悬浮说明区分。
+          var big = exPane.classList.toggle("big");
+          expandBtn.textContent = big ? "\u2921" : "\u2922";
+          expandBtn.setAttribute("title", big ? "还原" : "放大看");
+        }
         e.preventDefault(); return;
       }
       var sum = t.closest ? t.closest("summary") : null;
@@ -4875,6 +5367,22 @@ var DM_SPECIAL = { trigger_probability: 1 };
           // 点 summary 时浏览器还没翻转 open，等一拍再读。
           setTimeout(function(){ if(!isNaN(sumIx)) ppState(sumKind).open[sumIx] = !!sumDet.open; },0);
         }
+      }
+      // 用户 m17185：清空试跑结果，把上面的预览空间还回去。
+      if(t.id === "dec-test-clear" || t.id === "jev-test-clear" || t.id === "rep-test-clear"){
+        ppTestClear(t.id.replace("-test-clear", ""));
+        e.preventDefault(); return;
+      }
+      // 用户 m17185：预览框右上角的折叠按钮，默认展开。
+      var capTg = t.closest ? t.closest(".pp-cap-tg") : null;
+      if(capTg){
+        var capBox = capTg.closest(".pp-prev-box");
+        if(capBox){
+          var folded = capBox.classList.toggle("folded");
+          capTg.textContent = folded ? "\u25b8" : "\u25be";
+          capTg.setAttribute("title", folded ? "展开" : "折叠");
+        }
+        e.preventDefault(); return;
       }
       if(t.id === "dec-test"){
         var ds = ppState("decision");
@@ -5785,7 +6293,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         used[k] = 1;
         // v3.54：配额（两行「开关+数字框」）与缓存记录（先表后设置）都由 custom 块整块画，
         // 这里只把键标成已用，免得它们再渲染一份重复行。
-        if(g.custom === "quota" || g.custom === "cache" || g.custom === "show") return;
+        if(g.custom === "quota" || g.custom === "cache" || g.custom === "show" || g.custom === "img") return;
         // v3.33：开关与清单合成一个两行块，别各占一行
         if(k === "phrase_filter_enabled") return;
         if(k === "phrase_filter_list"){ rows += phraseRowHtml(); return; }
@@ -5823,6 +6331,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(g.custom === "quota"){ rows += quotaRowsHtml(); }
       // 用户 m17752：显示条数三行（回复记录 / 决策记录 / 窗口快照），每行右侧两个数字框。
       if(g.custom === "show"){ rows += showRowsHtml(); }
+      // 用户 m09851：窗口页「图片」组——两个看图开关 + 框架那边的图片压缩四项。
+      if(g.custom === "img"){ rows += imgBlockHtml(); }
       // v3.54（用户本轮第 4 条）：缓存整块——表格 + 合计 + 没进表的兜底行 + 按类型清空（v3.56 起这一页叫「缓存记录」）。
       // 三个上限行也在 cacheBlockHtml 里画（表格要排在最前面），所以 keys 那轮只标已用。
       if(g.custom === "cache"){ rows += cacheBlockHtml(); }
@@ -6139,6 +6649,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var list = PAGES.filter(function(p){ return has[p.id]; });
     if(!list.length){ box.innerHTML = ""; return; }
     if(!list.some(function(p){ return p.id === curPage; })) curPage = list[0].id;
+    rememberPage();
     box.innerHTML = list.map(function(p){
       return "<button data-page='" + p.id + "'" + (p.id === curPage ? " class='on'" : "") + ">" + esc(p.t) + "</button>";
     }).join("");
@@ -6166,7 +6677,12 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(scopeSid && t !== "switch" && t !== "bool" && t !== "boolean" &&
          (node.value == null || String(node.value).trim() === "")){ out[k] = null; return; }
       if(t === "switch" || t === "boolean" || t === "bool") out[k] = !!node.checked;
-      else if(t === "integer") out[k] = parseInt(node.value, 10) || 0;
+      else if(t === "integer"){
+        var iv = parseInt(node.value, 10) || 0;
+        // 用户 m10202：界面上按分钟填的键，存盘换回秒。
+        var mul = parseInt(node.getAttribute("data-mul"), 10) || 0;
+        out[k] = mul ? iv * mul : iv;
+      }
       else if(t === "float" || t === "number") out[k] = parseFloat(node.value) || 0;
       else if(t === "multi_select" || t === "list" || t === "array"){
         var arr = [];
@@ -6278,10 +6794,17 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var tasks = [get(CORE + "/config"), get(API + "/ui-schema")];
     // 全局模式也要拿一次：上下限（bounds）只在 /overrides 里给
     tasks.push(get(API + "/overrides" + (scopeSid ? "?sid=" + encodeURIComponent(scopeSid) : "")));
+    // 用户 m09851：窗口页「图片」组要显示框架那边的图片压缩四项（存在 system_config.json），
+    // 顺手跟配置一起拉；拉不到就留 null，那一组会显示「读取框架配置失败」。
+    tasks.push(get("/api/configuration").catch(function(){ return null; }));
     Promise.all(tasks).then(function(res){
       if(requestedScopeVersion !== saveScopeVersion || requestedEditVersion !== saveEditVersion || requestedSid !== String(scopeSid || "") || dirty) return;
       var d = res[0] || {};
       var ov = res[2];
+      var coreCfg = (res[3] && res[3].configuration) || null;
+      if(coreCfg){
+        coreImgCache = (coreCfg.bot_config && coreCfg.bot_config.image_compression) || {};
+      }
       schemaCache = (res[1] && res[1].schema) || d.schema || {};
       cacheDefCfg = fillSchemaDefaults(d.config || {});
       var sub = document.getElementById("set-sub");
@@ -6695,6 +7218,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var b = e.target && e.target.closest ? e.target.closest("button[data-page]") : null;
     if(!b) return;
     curPage = b.getAttribute("data-page");
+    rememberPage();
     Array.prototype.forEach.call(document.querySelectorAll("#set-tabs button"), function(x){
       x.classList.toggle("on", x === b);
     });
@@ -6999,9 +7523,103 @@ var DM_SPECIAL = { trigger_probability: 1 };
     for(var i = 0; i < s.length; i++) w += (s.charCodeAt(i) > 255 ? 14 : 7.6);
     el.style.width = Math.max(72, Math.min(200, Math.round(w) + 26)) + "px";
   });
+  // ===== 不确定段长条（用户 m16307 图2）=====
+  // 拖动只改样式，松手才写回两个 hidden input 并派发 change——走原来的上下限夹紧 + 700ms 防抖存盘。
+  function jevSliderPaint(box, lo, hi){
+    box.setAttribute("data-lo", String(lo));
+    box.setAttribute("data-hi", String(hi));
+    var fill = box.querySelector(".jev-slider-fill");
+    if(fill){ fill.style.left = lo + "%"; fill.style.right = (100 - hi) + "%"; }
+    var kl = box.querySelector(".jev-slider-knob[data-h='lo']");
+    var kh = box.querySelector(".jev-slider-knob[data-h='hi']");
+    // 用户 m16691：两个把手改成半圆，贴着高亮段的两头往外鼓；到 0% / 100% 时用 clamp 卡住，别戳出轨道。
+    if(kl) kl.style.left = "clamp(var(--kw)," + lo + "%,100%)";
+    if(kh) kh.style.left = "clamp(0px," + hi + "%,calc(100% - var(--kw)))";
+    var tag = box.querySelector(".jev-slider-tag");
+    if(tag){
+      tag.textContent = lo + "%~" + hi + "%";
+      tag.style.left = Math.min(92, Math.max(8, (lo + hi) / 2)) + "%";
+    }
+  }
+  function jevSliderCommit(box){
+    var lo = parseInt(box.getAttribute("data-lo"), 10) || 0;
+    var hi = parseInt(box.getAttribute("data-hi"), 10) || 0;
+    [["jev_lower", lo], ["jev_upper", hi]].forEach(function(p){
+      var n = box.querySelector("input[data-k='" + p[0] + "']");
+      if(!n || n.value === String(p[1])) return;
+      n.value = String(p[1]);
+      n.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+  (function(){
+    var drag = null;
+    function pctOf(box, clientX){
+      var track = box.querySelector(".jev-slider-track");
+      if(!track) return null;
+      var r = track.getBoundingClientRect();
+      if(r.width <= 0) return null;
+      var p = Math.round(((clientX - r.left) / r.width) * 100 / 5) * 5;
+      return Math.max(0, Math.min(100, p));
+    }
+    function apply(box, h, pct){
+      var lo = parseInt(box.getAttribute("data-lo"), 10) || 0;
+      var hi = parseInt(box.getAttribute("data-hi"), 10) || 0;
+      if(h === "lo") lo = Math.min(pct, hi); else hi = Math.max(pct, lo);
+      jevSliderPaint(box, lo, hi);
+    }
+    var host = document.getElementById("settings");
+    if(!host) return;
+    host.addEventListener("pointerdown", function(e){
+      var k = (e.target && e.target.closest) ? e.target.closest(".jev-slider-knob") : null;
+      if(!k) return;
+      var box = k.closest(".jev-slider");
+      if(!box) return;
+      e.preventDefault();
+      k.focus();
+      drag = { box: box, h: k.getAttribute("data-h") };
+      k.classList.add("dragging");
+      try{ k.setPointerCapture(e.pointerId); }catch(_e){}
+    });
+    document.addEventListener("pointermove", function(e){
+      if(!drag) return;
+      var p = pctOf(drag.box, e.clientX);
+      if(p === null) return;
+      apply(drag.box, drag.h, p);
+    });
+    function endDrag(){
+      if(!drag) return;
+      var box = drag.box;
+      drag = null;
+      Array.prototype.forEach.call(box.querySelectorAll(".jev-slider-knob.dragging"), function(n){ n.classList.remove("dragging"); });
+      jevSliderCommit(box);
+    }
+    document.addEventListener("pointerup", endDrag);
+    document.addEventListener("pointercancel", endDrag);
+    host.addEventListener("keydown", function(e){
+      var k = (e.target && e.target.closest) ? e.target.closest(".jev-slider-knob") : null;
+      if(!k) return;
+      var step = (e.key === "ArrowLeft" || e.key === "ArrowDown") ? -5 : ((e.key === "ArrowRight" || e.key === "ArrowUp") ? 5 : 0);
+      if(!step) return;
+      var box = k.closest(".jev-slider");
+      if(!box) return;
+      e.preventDefault();
+      var h = k.getAttribute("data-h");
+      var cur = parseInt(box.getAttribute(h === "lo" ? "data-lo" : "data-hi"), 10) || 0;
+      apply(box, h, Math.max(0, Math.min(100, cur + step)));
+      jevSliderCommit(box);
+    });
+  })();
   document.getElementById("settings").addEventListener("change", function(e){
     // v3.30：伪随机兜底开关变了，用不上的参数行要跟着灰/亮
     var dk0 = (e.target && e.target.getAttribute) ? e.target.getAttribute("data-k") : null;
+    // 用户 m09851：窗口页「图片」组里那四项是框架的图片压缩设置（system_config.json），
+    // 不在插件配置里，走 data-core 单独存，别混进 collectSettings。
+    var coreF = (e.target && e.target.getAttribute) ? e.target.getAttribute("data-core") : null;
+    if(coreF){
+      var coreV = (e.target.type === "checkbox") ? !!e.target.checked : (parseInt(e.target.value, 10) || 0);
+      saveCoreImg(coreF, coreV);
+      return;
+    }
     // v3.62（用户 m18059）：缓存记录页签里的两处交互，必须在通用 data-k 分支之前拦掉——
     //   1) 顶部「作用范围」下拉：换页面的作用域（等于顶部那个全局/单群选择器）；
     //   2) data-ck 的数字框：选中某个会话时，写的是它自己的覆盖，不能走全局自动保存（会被后端丢掉）。
@@ -7645,7 +8263,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
     return "<tr data-ckind='" + esc(key) + "'>" +
       "<td class='cname'><b>" + esc((it && it.label) || key) + "</b>" +
         (note ? "<div class='cnote'>" + esc(note) + "</div>" : "") + "</td>" +
-      "<td class='num'>" + esc(fmtNum(cnt) + " " + unit) + "</td>" +
+      // 用户 m14353：数量那一格可以带一小段说明（转发图片用它报「N 张图」）。
+      // 用户 m14620：说明跟数量锁在同一行，别换行。
+      "<td class='num'>" + esc(fmtNum(cnt) + " " + unit) +
+        ((it && it.sub) ? "<span class='csub'> · " + esc(it.sub) + "</span>" : "") + "</td>" +
       "<td class='num'>" + esc(cacheSize(mb)) + "</td>" +
       "<td class='cset'>" + cacheLimitCell(it) + "</td>" +
       "<td class='cset'>" + cacheDaysCell(it) + "</td>" +
@@ -7721,6 +8342,99 @@ var DM_SPECIAL = { trigger_probability: 1 };
           "<span class='nspan'><b>私聊</b>" + fieldControl(r.kd, fd, configCache[r.kd], "条") + "</span>" +
         "</div></div>";
     }).join("");
+  }
+  // 用户 m09851：窗口页「图片」组。前两行是插件自己的两个看图开关（从提示词页的模型卡搬来），
+  // 后四行接管 KiraAI 基础设置里的「图片压缩」——那四项存在框架的 system_config.json
+  // （bot_config.image_compression），不在插件配置里，所以不带 data-k，走 data-core 单独保存。
+  var CORE_IMG_FIELDS = [
+    { k: "core_img_enabled", f: "enabled", t: "图片压缩", type: "switch",
+      d: "在 VLM 识图和原生多模态请求前压缩大图或高分辨率图片。" },
+    { k: "core_img_max", f: "max_size", t: "图片最长边", type: "integer", unit: "像素",
+      d: "压缩后的最长边，单位为像素。", min: 1, max: 8192 },
+    { k: "core_img_quality", f: "quality", t: "JPEG 质量", type: "integer", unit: "",
+      d: "JPEG 输出质量，范围为 1 到 100。", min: 1, max: 100 },
+    { k: "core_img_minmb", f: "min_file_size_mb", t: "压缩阈值", type: "integer", unit: "MB",
+      d: "仅在图片超过该 MB 大小或最长边超限时压缩。", min: 0 }
+  ];
+  var coreImgCache = null;   // 框架 bot_config.image_compression 的当前值，loadSettings 里拉
+  function coreImgVal(field, dft){
+    var ic = coreImgCache || {};
+    var v = ic[field];
+    return (v === undefined || v === null) ? dft : v;
+  }
+  function coreImgRow(it){
+    var ctl;
+    if(it.type === "switch"){
+      ctl = "<label class='sw2'><input type='checkbox' data-core='" + esc(it.f) + "'" +
+        (coreImgVal(it.f, false) ? " checked" : "") +
+        "><span class='tr' data-on='开启' data-off='关闭'></span></label>";
+    } else {
+      var u = it.unit || "";
+      ctl = "<span class='ipt" + (u ? (" has-unit" + (u.length > 1 ? " uw2" : "") + (u.length >= 4 ? " uw3" : "")) : "") +
+        "'><input class='dipt num' type='number' data-core='" + esc(it.f) + "' value='" + esc(coreImgVal(it.f, "")) + "'" +
+        (it.min === undefined ? "" : " min='" + it.min + "'") +
+        (it.max === undefined ? "" : " max='" + it.max + "'") + ">" +
+        (u ? "<b class='unit'>" + esc(u) + "</b>" : "") + "</span>";
+    }
+    return "<div class='setrow inline' data-row='" + esc(it.k) + "'>" +
+      "<div class='nm' title='" + esc(it.d) + "'>" + esc(it.t) + "</div>" +
+      "<div class='ds' title='" + esc(it.d) + "'>" + esc(it.d) + "</div>" +
+      "<div class='ctl'>" + ctl + "</div></div>";
+  }
+  function imgBlockHtml(){
+    var h = "";
+    ["decision_see_images", "reply_see_images"].forEach(function(k){
+      var f = schemaCache[k];
+      if(f) h += rowHtml(k, f);
+    });
+    if(!coreImgCache){
+      // 框架配置没读回来（接口挂了 / 没登录）时别画一排空框，给一句能看懂的提示。
+      h += "<div class='setrow inline' data-row='core_img_note'>" +
+        "<div class='nm'>图片压缩</div>" +
+        "<div class='ds'>读取框架配置失败，刷新页面再试。</div>" +
+        "<div class='ctl'></div></div>";
+      return h;
+    }
+    // 用户 m13535：像素数超标的图（手机长截图）会先缩小再发，不然上游按像素数拒收。
+    // 这一项固定开启，开关只用来告诉用户有这个功能，所以不带 data-k / data-core，点不动。
+    h += "<div class='setrow inline' data-row='image_pixel_guard'>" +
+      "<div class='nm' title='超过 600 万像素的图会先缩小再发，避免上游拒收。这一项固定开启。'>长图自动缩小</div>" +
+      "<div class='ds' title='超过 600 万像素的图会先缩小再发，避免上游拒收。这一项固定开启。'>超过 600 万像素的图会先缩小再发，避免上游拒收。这一项固定开启。</div>" +
+      "<div class='ctl'><label class='sw2 lock'><input type='checkbox' checked disabled>" +
+      "<span class='tr' data-on='开启' data-off='关闭'></span></label></div></div>";
+    h += CORE_IMG_FIELDS.map(coreImgRow).join("");
+    return h;
+  }
+  // 框架的图片压缩只能走框架自己的接口：整份读回来 → 改 bot_config.image_compression → 整份写回去。
+  // 插件配置接口（PUT /config）改不到 system_config.json，混进去只会被后端丢掉。
+  function saveCoreImg(field, val){
+    var msg = document.getElementById("set-msg");
+    if(msg) msg.textContent = "保存中…";
+    return get("/api/configuration").then(function(d){
+      var cfg = (d && d.configuration) || null;
+      if(!cfg) throw new Error("读不到框架配置");
+      var bot = cfg.bot_config || (cfg.bot_config = {});
+      var ic = bot.image_compression || (bot.image_compression = {});
+      ic[field] = val;
+      return fetch("/api/configuration", {
+        method: "POST", credentials: "same-origin",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(cfg)
+      }).then(function(r){
+        if(!r.ok) throw new Error("HTTP " + r.status);
+        coreImgCache = ic;
+        if(msg) msg.textContent = "图片压缩已保存";
+      });
+    }).catch(function(e){
+      if(msg) msg.textContent = "图片压缩保存失败：" + ((e && e.message) || e);
+      // 失败就把界面拉回真实值，别让用户以为存上了。
+      return get("/api/configuration").then(function(d){
+        var ic2 = d && d.configuration && d.configuration.bot_config &&
+                  d.configuration.bot_config.image_compression;
+        if(ic2) coreImgCache = ic2;
+        renderSettings();
+      }).catch(function(){});
+    });
   }
   function cacheExtraHtml(kinds){
     var box = document.getElementById("cache-extra");
@@ -8071,7 +8785,37 @@ var DM_SPECIAL = { trigger_probability: 1 };
   var pricingInFlight = null, pricingInFlightHours = "";
   var pricingCacheAt = 0, pricingCacheHours = "", pricingCacheWriteVersion = -1;
   var pricingTimezone = "";
+  // 用户 m23331：表格底部那两行小字不要了；「另有 N 个模型没有调用」挪到顶部总花费右边。
+  var pricingIdleCount = 0;
   var pricingRemoved = Object.create(null);
+  // 用户 m19975：图表按日历切——七天 / 本月 / 上月，默认本月；跟上面表格的
+  // 「最近 24 小时 / 7 天 / 30 天」不是一回事，本月只画 1 号到今天（未来的日子不算）。
+  // 用户 m20332：刷新后固定回到「本月」，不再记住上次选的区间。
+  // 用户 m23442：柱图改成 14 天窗口、滚轮按天翻（一个月 30 根柱子挤不下柱底那两行字）；
+  // 下面三张饼各自选区间，默认本月。
+  // 用户 m29560 第 8 条：只剩 默认 / 本周 / 上周 / 本月 / 上月 五档，外加月历自选。
+  var pricingTrendMode = "default";
+  // 用户 m29560 第 7 条：右上角月历（点开才展开，展开就是真正的月历）。
+  var pricingCal = { open: false, ym: "", start: "", end: "", target: "" };
+  // 用户 m29947：柱图绘图区在屏幕上的位置，滚轮只在这块里翻图。
+  var pricingGeom = null;
+  // 用户 m29560 第 8 条：月历选出来的自定义区间。
+  var pricingCustom = { start: "", end: "" };
+  // 用户 m29478：滚轮翻窗口时给个方向，画完就清掉（0 = 不播动画）。
+  var pricingAnimDir = 0;
+  // 用户 m30335：这一下滚了几格（正 = 往后翻）。平移距离按格数算，滚快了图跟着多滑一段。
+  var pricingPanDays = 0;
+  // 用户 m30335：上一帧此刻滑到哪儿。新的一帧要从这个位置接着走，
+  // 不然连着滚的时候每一格都从原位重新起步，看着就是一跳一跳的。
+  var pricingPanFrom = 0;
+  var pricingWinEnd = "";
+  var pricingWinTimer = 0;
+  var pricingTrend = null, pricingTrendSeq = 0, pricingTrendAt = 0, pricingTrendRangeLoaded = "";
+  var pricingPies = [
+    { id: "cost", title: "花费占比", sub: "按模型", start: "", end: "", data: null, tag: "", at: 0, seq: 0, open: false },
+    { id: "tokens", title: "Token 占比", sub: "按模型", start: "", end: "", data: null, tag: "", at: 0, seq: 0, open: false },
+    { id: "calls", title: "调用分布", sub: "按功能", start: "", end: "", data: null, tag: "", at: 0, seq: 0, open: false }
+  ];
 
   function setPMsg(text, cls){
     var el = document.getElementById("p-stat");
@@ -8110,6 +8854,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var abs = Math.abs(v);
     if(abs >= 1e9) return (v / 1e9).toFixed(1) + "B";
     if(abs >= 1e6) return (v / 1e6).toFixed(1) + "M";
+    // 用户 m23535：10 万以上直接换成 M，字更短（100K 写成 0.1M，650.2K 写成 0.65M）。
+    if(abs >= 1e5) return (v / 1e6).toFixed(2).replace(/\.?0+$/, "") + "M";
     if(abs >= 1e3) return (v / 1e3).toFixed(1) + "K";
     return fmtNum(v);
   }
@@ -8128,6 +8874,30 @@ var DM_SPECIAL = { trigger_probability: 1 };
     return n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
+  // 柱子顶上那点钱常常只有几厘（回复一天也就 0.004 元），两位小数会全变成 0.00，
+  // 写了等于没写；不到一分时多给一位，才看得出是多少（用户 m21592）。
+  function barCostText(v){
+    var n = Number(v || 0);
+    // 用户 m22683：单价记成 0 的模型（比如免费渠道）照实写 0.00，别再留一个看不懂的「—」。
+    if(!isFinite(n) || n <= 0) return priceMoneyText(0);
+    if(n < 0.01) return n.toFixed(3);
+    return priceMoneyText(n);
+  }
+
+  // 用户 m22269：有 token 却没价（模型身份没记下来、或那行被价目表删了）不是「没有数据」，
+  // 柱子上写「未定价」，别跟真没花钱混成同一个「—」。
+  function barCostLabel(kb){
+    var kcost = Number((kb || {}).cost) || 0;
+    if(kcost <= 0 && (kb || {}).priced === false) return "未定价";
+    return barCostText(kcost);
+  }
+  // 标签宽度估算：「未定价」是中文，按 5.9px 一个字算会窄一半，撞位判定就漏了。
+  function labTextWidth(txt){
+    var t = String(txt), w = 0;
+    for(var i = 0; i < t.length; i++){ w += t.charCodeAt(i) > 255 ? 10.4 : 5.9; }
+    return w + 3;
+  }
+
   // 用户 m10749 第 3 条：区间总花费。cost 为 null（后端统计失败）时显示「—」；
   // 有模型没在价目表里时补一行小字，说明这些按 0 元算。
   // 用户本轮第 6 条：数字在前、单位在后（原来单位粘在数字前面，读起来像代号）——
@@ -8144,16 +8914,20 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var html = "<span class='clab'>" + esc(label) + "共</span>" +
                "<span class='cnum'>" + esc(num) + "</span>" +
                (cur ? "<span class='cunit'>" + esc(cur) + "</span>" : "");
-    var unset = (c.unset || []).length, short = [], detail = [];
-    if(unset){ short.push(fmtNum(unset) + " 模型未设价"); detail.push(fmtNum(unset) + " 个模型没在价目表里，按 0 元算"); }
-    if(c.approximate){ short.push("近似估算"); detail.push("近似估算：历史记录无逐次请求时间，按记录时间应用当前价目"); }
-    if(c.unknown_time){ short.push("缺时间按普通价"); detail.push("缺少有效时间的用量按普通价估算"); }
-    if(short.length) html += "<span class='cwarn' title='" + esc(detail.join("；")) + "'>" + esc(short.join(" · ")) + "</span>";
+    var unset = (c.unset || []).length, short = [];
+    if(unset){ short.push(fmtNum(unset) + " 模型未设价"); }
+    if(c.approximate){ short.push("近似估算"); }
+    if(c.unknown_time){ short.push("缺时间按普通价"); }
+    if(short.length) html += "<span class='cwarn'>" + esc(short.join(" · ")) + "</span>";
+    // 用户 m23331：这句放在「近似估算」右边。
+    if(pricingIdleCount) html += "<span class='cmore'>另有 " + esc(fmtNum(pricingIdleCount)) +
+      " 个模型这段时间没有调用，已隐藏。</span>";
     return html;
   }
 
   function pricingPeak(value){
-    var p = Object.assign({enabled:false,in:null,out:null,cache:null,start:"",end:"",weekends:false}, value || {});
+    // 用户 m23442：周末默认按高峰算，不再默认当谷价（勾选框默认不勾）。
+  var p = Object.assign({enabled:false,in:null,out:null,cache:null,start:"",end:"",weekends:true}, value || {});
     // An explicit list (including []) is authoritative; legacy fields mirror only its first interval.
     p.periods = Array.isArray(p.periods) ? p.periods.map(function(t){ return {start:String(t.start || ""),end:String(t.end || "")}; }) :
       (p.start || p.end ? [{start:p.start,end:p.end}] : []);
@@ -8206,9 +8980,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
     return "<div class='pperiods'>" + periods.map(function(t,i){
       var attrs=" data-pperiod='" + i + "'";
       return "<div class='ptimes'>" +
-        "<input type='time' step='1800' data-pfield='peak.start'" + attrs + " aria-label='第 " + (i+1) + " 段高峰开始时间' title='第 " + (i+1) + " 段开始（整点或半点）' value='" + esc(t.start) + "'>" +
+        "<input type='time' step='1800' data-pfield='peak.start'" + attrs + " aria-label='第 " + (i+1) + " 段高峰开始时间' value='" + esc(t.start) + "'>" +
         "<span class='psep'>–</span>" +
-        "<input type='time' step='1800' data-pfield='peak.end'" + attrs + " aria-label='第 " + (i+1) + " 段高峰结束时间' title='第 " + (i+1) + " 段结束（整点或半点）' value='" + esc(t.end) + "'>" +
+        "<input type='time' step='1800' data-pfield='peak.end'" + attrs + " aria-label='第 " + (i+1) + " 段高峰结束时间' value='" + esc(t.end) + "'>" +
         "</div>";
     }).join("") + "</div>";
   }
@@ -8284,6 +9058,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
         if(costEl) costEl.innerHTML = priceCostHtml();
         paintCostCells(box);
       }else paintPricing();
+      // 用户 m19357：图表跟表格是两个接口，表格画完顺手把图也拉一次（20 秒内不重复拉；
+      // 保存价目后的静默刷新要强制拉，不然花费还是改价前的）。
+      loadPricingTrend(pricingTrendMode, !!silent);
+      loadPricingPies(!!silent);
     }).catch(function(e){
       if(seq !== pricingLoadSeq) return;
       // Keep the editable table and drafts on a failed range reload.
@@ -8298,39 +9076,18 @@ var DM_SPECIAL = { trigger_probability: 1 };
   function pricePairHtml(field, value, peak){
     return "<td class='pprice'><div class='ppair'>" +
       "<label><span>普通</span><input class='p" + field + "' data-pfield='" + field + "' type='number' min='0' step='0.001' placeholder='未填' value='" + esc(value) + "'></label>" +
-      "<label class='ppeak'><span>高峰</span><input data-pfield='peak." + field + "' type='number' min='0' step='0.001' placeholder='继承' title='留空继承普通价；0 表示免费' value='" + esc(peak == null ? "" : peak) + "'></label>" +
+      "<label class='ppeak'><span>高峰</span><input data-pfield='peak." + field + "' type='number' min='0' step='0.001' placeholder='继承' value='" + esc(peak == null ? "" : peak) + "'></label>" +
       "</div></td>";
   }
 
   // 用户 m00443：缓存命中率 = 命中 token / 输入 token，没输入过就留一个破折号。
   function hitRateHtml(r){
     var inp = Number(r.input) || 0, hit = Number(r.cached) || 0;
-    if(!(inp > 0)) return "<span class='pdim' title='这段时间没有输入 token'>—</span>";
+    if(!(inp > 0)) return "<span class='pdim'>—</span>";
     var pct = Math.max(0, Math.min(100, hit / inp * 100));
-    return "<span title='" + esc("缓存 " + fmtNum(hit) + " / 完整 prompt " + fmtNum(inp) + "（未命中 " + fmtNum(inp - hit) + " + 缓存 " + fmtNum(hit) + "）") + "'>" + pct.toFixed(1) + "%</span>";
+    return "<span>" + pct.toFixed(1) + "%</span>";
   }
 
-  // 用户本轮：第 8 列「费用」——这一行模型在当前区间（24 小时 / 7 天 / 30 天）花了多少钱。
-  // 边界：cost 为 null（后端统计失败）→「—」；模型不在 cost.parts 里（这段没用量）→「—」；
-  // part.unset（没填单价，按 0 元算）→「未定价」；part.approximate → 数字后面跟「≈」。
-  // 精确金额、回复 / 决策拆分、含不含高峰价都放 title，跟同页其它列一个写法。
-  function partCostTitle(part){
-    var c = pricingCost;
-    var cur = String((c && c.currency != null) ? c.currency : "");
-    if(!c) return "这段时间的花费没统计出来（后端统计失败）";
-    if(!part) return "这段时间没有用量，也没有花费";
-    if(part.unset) return "这个模型没在价目表里填单价，花费按 0 元算";
-    var exact = function(v){
-      var n = Number(v || 0);
-      if(!isFinite(n)) n = 0;
-      return (Math.round(n * 10000) / 10000).toFixed(4);
-    };
-    var tip = priceRangeLabel(pricingHours) + "这个模型花了 " + exact(part.cost) + (cur ? " " + cur : "") +
-              "；回复 " + exact(part.reply_cost) + " / 决策 " + exact(part.decision_cost);
-    tip += Number(part.peak_cost) > 0 ? "；含高峰价 " + exact(part.peak_cost) : "；不含高峰价";
-    if(part.approximate) tip += "；近似估算：历史记录无逐次请求时间，按记录时间应用当前价目";
-    return tip;
-  }
 
   function partCostHtml(part){
     var c = pricingCost;
@@ -8339,7 +9096,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var cur = String(c.currency == null ? "" : c.currency);
     // 用户 m17492 图4：≈ 是「这个数不精确」的前缀，写在数字前面（≈0.08元），
     // 写在后面像单位一样跟着，读起来是「0.08 元约」。
-    return (part.approximate ? "<span class='pcf-e' title='近似估算'>≈</span>" : "") +
+    return (part.approximate ? "<span class='pcf-e'>≈</span>" : "") +
            "<span class='pcf-n'>" + esc(priceMoneyText(part.cost)) + "</span>" +
            (cur ? "<span class='pcf-u'>" + esc(cur) + "</span>" : "");
   }
@@ -8356,7 +9113,772 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(!cell) return;
       var part = parts[tr.getAttribute("data-pmodel")] || null;
       cell.innerHTML = partCostHtml(part);
-      cell.title = partCostTitle(part);
+    });
+  }
+
+  // ------------------------------------------------------------ 价目页图表
+  // 用户 m19357：价目表下面一行两张图——左边「柱 + 折线」（柱 = token 总量，折线 = 花费），
+  // 右边饼图（各模型花费占比）。用户 m19436：按日历切日 / 周 / 月，不是「最近 N 天」。
+  var PIE_COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4",
+                    "#ec4899", "#84cc16", "#f97316", "#14b8a6", "#6366f1", "#eab308"];
+
+  // ------------------------------------------------------------ 价目页：日期小工具
+  function pdToday(){ var d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+  function pdFmt(d){
+    return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2);
+  }
+  function pdParse(txt){
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(txt || ""));
+    if(!m) return null;
+    return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  }
+  function pdAdd(d, n){ return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n); }
+  function pdDays(a, b){ return Math.round((a.getTime() - b.getTime()) / 86400000); }
+  function pdShort(txt){
+    var d = pdParse(txt);
+    return d ? ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2) : "";
+  }
+  function pdSpanText(start, end){
+    var a = pdShort(start), b = pdShort(end);
+    if(!a || !b) return "";
+    return a === b ? a : (a + " ~ " + b);
+  }
+  // 用户 m29560 第 8 条：「默认」是最近 N 天的窗口，N 按卡片宽度自适应，最多 10 天，且不跨月份。
+  // 一天最多三根柱子、每根至少 14px、天与天之间留 6% 的缝，反推一天至少要 46px。
+  function pricingWinDays(){
+    if(pricingTrendMode === "custom"){
+      var ca = pdParse(pricingCustom.start), cb = pdParse(pricingCustom.end);
+      if(ca && cb) return Math.max(1, pdDays(cb, ca) + 1);
+    }
+    var w = pricingChartW || 900;
+    var plotW = Math.max(300, w - 128);
+    var days = Math.floor(plotW / 46);
+    if(days < 3) days = 3;
+    if(days > 10) days = 10;
+    return days;
+  }
+  function pricingWinScrollable(){ return pricingTrendMode === "default"; }
+  function pricingWinRange(){
+    var today = pdToday();
+    if(pricingTrendMode === "custom" && pricingCustom.start && pricingCustom.end){
+      return { start: pricingCustom.start, end: pricingCustom.end };
+    }
+    if(pricingTrendMode === "thisweek" || pricingTrendMode === "lastweek"){
+      return pricingQuickRange(pricingTrendMode);
+    }
+    var days = pricingWinDays();
+    var end = pdParse(pricingWinEnd) || today;
+    if(end > today) end = today;
+    var first = new Date(today.getFullYear(), today.getMonth(), 1);
+    var minEnd = pdAdd(first, days - 1);
+    if(minEnd > today) minEnd = today;
+    if(end < minEnd) end = minEnd;
+    var start = pdAdd(end, -(days - 1));
+    if(start < first) start = first;
+    return { start: pdFmt(start), end: pdFmt(end) };
+  }
+  // 用户 m29947：区间面板里直接摆左右两个日历（左边上个月、右边这个月），
+  // 点一下选起、再点一下选止，然后「应用」。
+  function pricingCalMonthHtml(y, mo, s, e, todayTxt, navL, navR){
+    var first = new Date(y, mo, 1);
+    var lead = (first.getDay() + 6) % 7;
+    var dim = new Date(y, mo + 1, 0).getDate();
+    var cells = [];
+    for(var i = 0; i < lead; i++) cells.push(0);
+    for(var dd = 1; dd <= dim; dd++) cells.push(dd);
+    while(cells.length % 7) cells.push(0);
+    var body = cells.map(function(d){
+      if(!d) return "<span class='pcal-d mute'></span>";
+      var txt = y + "-" + ("0" + (mo + 1)).slice(-2) + "-" + ("0" + d).slice(-2);
+      var cls = "pcal-d";
+      if(s && e && txt >= s && txt <= e) cls += " in";
+      if(txt === s) cls += " s";
+      if(txt === e) cls += " e";
+      if(txt === todayTxt) cls += " today";
+      return "<button type='button' class='" + cls + "' data-cal-d='" + txt + "'>" + d + "</button>";
+    }).join("");
+    return "<div class='pcal'>" +
+      "<div class='pcal-h'>" + (navL || "<span></span>") +
+      "<b>" + y + " 年 " + (mo + 1) + " 月</b>" + (navR || "<span></span>") + "</div>" +
+      "<div class='pcal-w'><span>一</span><span>二</span><span>三</span><span>四</span>" +
+      "<span>五</span><span>六</span><span>日</span></div>" +
+      "<div class='pcal-g'>" + body + "</div>" +
+      "</div>";
+  }
+  function pricingCalPairHtml(){
+    var today = pdToday();
+    var ym = pricingCal.ym || (today.getFullYear() + "-" + ("0" + (today.getMonth() + 1)).slice(-2));
+    var y = Number(ym.slice(0, 4)), mo = Number(ym.slice(5, 7)) - 1;
+    var y2 = mo + 1 > 11 ? y + 1 : y, mo2 = (mo + 1) % 12;
+    var s = pricingCal.start, e = pricingCal.end, todayTxt = pdFmt(today);
+    return "<div class='pcal-pair'>" +
+      pricingCalMonthHtml(y, mo, s, e, todayTxt,
+        "<button type='button' class='pcal-nav' data-cal-nav='-1'>‹</button>", "<span></span>") +
+      pricingCalMonthHtml(y2, mo2, s, e, todayTxt,
+        "<span></span>", "<button type='button' class='pcal-nav' data-cal-nav='1'>›</button>") +
+      "</div>";
+  }
+  function pricingCalSpanText(){
+    var s = pricingCal.start, e = pricingCal.end;
+    if(s && e) return pdSpanText(s, e);
+    return s ? (pdShort(s) + " 起") : "点日期选区间";
+  }
+  // 用户 m29947：点开面板时把当前区间灌进日历，左边那个月是「相关月份的前一个月」。
+  function seedPricingCal(target, start, end){
+    pricingCal.target = target || "trend";
+    pricingCal.start = start || "";
+    pricingCal.end = end || "";
+    var base = pdParse(start || "") || pdToday();
+    var prev = new Date(base.getFullYear(), base.getMonth() - 1, 1);
+    pricingCal.ym = prev.getFullYear() + "-" + ("0" + (prev.getMonth() + 1)).slice(-2);
+  }
+  // 用户 m29947：右上角只留一个按钮（显示当前区间），点开才是快捷区间 + 两个日历。
+  function pricingTrendRangeLabel(){
+    if(pricingTrendMode === "custom" && pricingCustom.start && pricingCustom.end)
+      return pdSpanText(pricingCustom.start, pricingCustom.end);
+    if(pricingTrendMode === "thisweek") return "本周";
+    if(pricingTrendMode === "lastweek") return "上周";
+    if(pricingTrendMode === "month") return "本月";
+    if(pricingTrendMode === "lastmonth") return "上月";
+    return "默认";
+  }
+  function pricingTrendRangeHtml(){
+    return "<button type='button' class='prb pdp-btn" + (pricingCal.open ? " on" : "") +
+           "' data-trange='1'>" + esc(pricingTrendRangeLabel()) + " ▾</button>";
+  }
+  function pricingTrendPopHtml(){
+    var opts = [{ k: "default", t: "默认" }, { k: "thisweek", t: "本周" }, { k: "lastweek", t: "上周" },
+                { k: "month", t: "本月" }, { k: "lastmonth", t: "上月" }];
+    return "<div class='pdp pdp-trend'>" +
+      "<div class='pdp-q'>" + opts.map(function(o){
+        return "<button type='button' class='pdp-qb" + (pricingTrendMode === o.k ? " on" : "") +
+               "' data-prange='" + o.k + "'>" + o.t + "</button>";
+      }).join("") + "</div>" +
+      pricingCalPairHtml() +
+      "<div class='pdp-f'><span class='pdp-span'>" + esc(pricingCalSpanText()) + "</span>" +
+      "<button type='button' class='pdp-ok' data-cal-apply='1'>应用</button></div>" +
+      "</div>";
+  }
+
+  // 环形扇区：外圈 r、内圈 ir，从 a1 扫到 a2（弧度，0 在 3 点方向）。
+  function pieArc(cx, cy, r, ir, a1, a2){
+    var large = (a2 - a1) > Math.PI ? 1 : 0;
+    var pt = function(rad, ang){
+      return (cx + rad * Math.cos(ang)).toFixed(2) + " " + (cy + rad * Math.sin(ang)).toFixed(2);
+    };
+    return "M" + pt(r, a1) + "A" + r + " " + r + " 0 " + large + " 1 " + pt(r, a2) +
+           "L" + pt(ir, a2) + "A" + ir + " " + ir + " 0 " + large + " 0 " + pt(ir, a1) + "Z";
+  }
+
+  // 用户 m21274：柱子改成按功能——决策 / JEV 决策 / 回复各自的 token 用量，柱顶写数字；
+  // 折线还是当天的总花费，右边单独一根价格轴；价格标签永远在点上方。
+  var FN_KEYS = ["decision", "jev", "reply"];
+  var FN_COLORS = { decision: "#3b82f6", jev: "#8b5cf6", reply: "#10b981" };
+  // 用户 m22998：一根柱子按 输入 / 命中 / 输出 从下往上拼三段，色相不变，靠纯度和亮度区分；
+  // 左下角图例不另加这三段（用户说不用加注释），还是只标 决策 / JEV 决策 / 回复。
+  var FN_SEG = {
+    decision: { input: "#3b82f6", cached: "#a5c9fd", output: "#1d4ed8" },
+    jev: { input: "#8b5cf6", cached: "#cbb8fd", output: "#6d28d9" },
+    reply: { input: "#10b981", cached: "#7ce7c4", output: "#047857" }
+  };
+  var FN_LABELS = { decision: "决策", jev: "JEV 决策", reply: "回复" };
+
+  // 用户 m29478：折线换成曲线——Catmull-Rom 转三次贝塞尔，控制点夹在绘图区里，不会甩出上下边界。
+  function smoothLinePath(pts, top, bottom){
+    if(!pts || pts.length < 2) return "";
+    var d = "M" + pts[0][0].toFixed(1) + " " + pts[0][1].toFixed(1);
+    for(var i = 0; i < pts.length - 1; i++){
+      var p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
+      var t = 0.16;
+      var c1x = p1[0] + (p2[0] - p0[0]) * t, c1y = p1[1] + (p2[1] - p0[1]) * t;
+      var c2x = p2[0] - (p3[0] - p1[0]) * t, c2y = p2[1] - (p3[1] - p1[1]) * t;
+      if(c1y < top) c1y = top;
+      if(c1y > bottom) c1y = bottom;
+      if(c2y < top) c2y = top;
+      if(c2y > bottom) c2y = bottom;
+      d += "C" + c1x.toFixed(1) + " " + c1y.toFixed(1) + " " + c2x.toFixed(1) + " " + c2y.toFixed(1) +
+           " " + p2[0].toFixed(1) + " " + p2[1].toFixed(1);
+    }
+    return d;
+  }
+
+  // 用户 m29947：记分牌式翻字——只让变了的那个字上下滚，没变的原地不动。
+  var _rollPrev = {}, _measCtx = null, _svgFontFam = "";
+  function _rollFontFam(){
+    if(_svgFontFam) return _svgFontFam;
+    try{
+      var el = document.querySelector("#p-charts .pchart-svg");
+      if(el){
+        var f = getComputedStyle(el).fontFamily || "";
+        if(f) _svgFontFam = f;
+      }
+    }catch(e){}
+    return _svgFontFam || "sans-serif";
+  }
+  function _rollMeasure(txt){
+    if(!_measCtx){ _measCtx = document.createElement("canvas").getContext("2d"); }
+    _measCtx.font = "12px " + _rollFontFam();
+    return _measCtx.measureText(txt).width;
+  }
+  function _rollChars(txt, prev){
+    var out = [];
+    for(var i = 0; i < txt.length; i++){
+      var ch = txt.charAt(i);
+      var same = i < prev.length && prev.charAt(i) === ch;
+      var up = i < prev.length ? (ch > prev.charAt(i)) : true;
+      out.push({ ch: ch, same: same, up: up });
+    }
+    return out;
+  }
+  function svgRollText(key, txt, x, y, anchor, cls){
+    var prev = _rollPrev[key];
+    _rollPrev[key] = txt;
+    if(prev === undefined || prev === txt || !pricingAnimDir){
+      return "<text class='" + cls + "' x='" + x + "' y='" + y + "' text-anchor='" + anchor + "'>" + esc(txt) + "</text>";
+    }
+    var total = _rollMeasure(txt);
+    var cx = anchor === "end" ? x - total : (anchor === "middle" ? x - total / 2 : x);
+    var out = "";
+    _rollChars(txt, prev).forEach(function(c){
+      var w = _rollMeasure(c.ch);
+      if(c.ch !== " "){
+        out += "<text class='" + cls + (c.same ? "" : (" droll" + (c.up ? "" : " dn"))) +
+               "' x='" + cx.toFixed(2) + "' y='" + y + "' text-anchor='start'>" + esc(c.ch) + "</text>";
+      }
+      cx += w;
+    });
+    return out;
+  }
+  function htmlRollText(key, txt){
+    var prev = _rollPrev[key];
+    _rollPrev[key] = txt;
+    if(prev === undefined || prev === txt || !pricingAnimDir) return esc(txt);
+    return _rollChars(txt, prev).map(function(c){
+      if(c.ch === " ") return " ";
+      return "<span class='droll" + (c.same ? " still" : (c.up ? "" : " dn")) + "'>" + esc(c.ch) + "</span>";
+    }).join("");
+  }
+
+  function pricingBarChartHtml(width){
+    var d = pricingTrend;
+    if(!d) return "<div class='pchart-empty'>正在统计…</div>";
+    if(d.error) return "<div class='pchart-empty'>图表读取失败：" + esc(d.error) + "</div>";
+    var pts = d.points || [];
+    if(!pts.length) return "<div class='pchart-empty'>这段时间还没有用量。</div>";
+    // 用户 m21274：图再大一点；左右两根轴都要留够地方放刻度。
+    var W = Math.max(520, Math.round(width || 900)), H = 440;
+    var padL = 62, padR = 66, padT = 34, padB = 38;
+    var plotW = W - padL - padR, plotH = H - padT - padB;
+    // 用户 m22998：柱高按 输入 + 命中 + 输出 三段之和算（以前只算输入 + 输出，命中没进柱子）。
+    // 用户 m23442：kinds.input 是「含命中的总输入」，cached 只是它里面的一部分。
+    // 以前把 cached 又加了一遍，柱高多算一截、柱底命中率也跟着偏小。
+    var tokOf = function(p, k){
+      var b = ((p.kinds || {})[k] || {});
+      return (Number(b.input) || 0) + (Number(b.output) || 0);
+    };
+    var tokMax = 0, dayMax = 0, costMax = 0, tokTotal = 0, costTotal = 0;
+    pts.forEach(function(p){
+      // 用户 m23442：峰值看的是「这一天几根柱子加起来」最高的那天，不是最高的那一根柱子。
+      var daySum = 0;
+      FN_KEYS.forEach(function(k){ var tv = tokOf(p, k); daySum += tv; tokMax = Math.max(tokMax, tv); tokTotal += tv; });
+      if(daySum > dayMax) dayMax = daySum;
+      var pv = Number(p.cost) || 0;
+      costMax = Math.max(costMax, pv);
+      costTotal += pv;
+    });
+    // 用户 m29889：左轴固定 1M 一段，顶 = 最高的那根柱子向上取整到 1M 再多 0.3M。
+    // 多出来的 0.3M 只是给柱顶数字留位置，本身不画刻度（用户 m29908 第 1 条）。
+    var tokTop = tokMax > 0 ? Math.ceil(tokMax / 1e6) * 1e6 + 0.3e6 : 1e6;
+    // 右轴固定 0.25 一段，顶 = 当天最高花费向上一档取整。
+    var costTop = costMax > 0 ? Math.floor(costMax / 0.25) * 0.25 + 0.25 : 0.25;
+    var slot = plotW / pts.length;
+    // 用户 m21592：一天里的几根柱子并在一起、不留缝；只在「天」之间留一点空隙，
+    // 不然一整排连成墙，看不出哪天是哪天。
+    // 用户 m23216：柱图铺满整行以后柱子能宽一截，柱底才写得下两行字；
+    // 一天有几根柱子就按几根分槽，只有一根的日子柱子不会被挤成三分之一。
+    // 用户 m29560 第 8 条：天与天之间的缝收小（0.86 → 0.94），柱子还能再宽一点。
+    var bwWide = Math.min(38, (slot * 0.94) / 3);
+    var dense = bwWide < 11;
+    // 用户 m22178：「按周」那档的横轴是每周的周一，柱子和悬浮里补一句「那周」。
+    var wk = !!(d && d.range === "week");
+    // 用户 m29947：数字不再一个个翻进来——翻窗口时整块平移，只有变了的字才滚。
+    var animOn = false;
+    var numCls = "";
+    var numDelay = function(ms){ return ""; };
+    var grid = "", bars = "", dots = "", lineDots = "", labels = "", linePts = [];
+    // 用户 m29889：左轴 1M 一段，网格线和刻度只画在整 M 上，顶上那 0.3M 不画。
+    for(var tv = 0; tv < tokTop; tv += 1e6){
+      var gy = (padT + plotH * (1 - tv / tokTop)).toFixed(1);
+      grid += "<line class='pgrid' x1='" + padL + "' y1='" + gy + "' x2='" + (W - padR) + "' y2='" + gy + "'/>" +
+              "<line class='ptick' x1='" + (padL - 6) + "' y1='" + gy + "' x2='" + padL + "' y2='" + gy + "'/>" +
+              "<text class='pylab' x='" + (padL - 8) + "' y='" + (Number(gy) + 4).toFixed(1) + "' text-anchor='end'>" +
+              esc(fmtBig(tv)) + "</text>";
+    }
+    // 右轴 0.25 一段，步长跟左轴对不上，所以只在自己的位置画刻度、不画网格线。
+    // 一分钱花费都没有的时候，右边那根轴画出来是假的 0~1 元，只留底下的 0.00。
+    for(var ci = 0; ci * 0.25 <= costTop + 1e-9; ci++){
+      var cv = ci * 0.25;
+      if(costMax <= 0 && cv > 0) break;
+      var cy2 = (padT + plotH * (1 - cv / costTop)).toFixed(1);
+      grid += "<line class='ptick' x1='" + (W - padR) + "' y1='" + cy2 + "' x2='" + (W - padR + 6) + "' y2='" + cy2 + "'/>" +
+              "<text class='pylab' x='" + (W - padR + 8) + "' y='" + (Number(cy2) + 4).toFixed(1) + "' text-anchor='start'>" +
+              esc(priceMoneyText(cv)) + "</text>";
+    }
+    // 左右两根轴线：只写数字看着像「干写」，补上轴线和刻度才像图（用户 m21592）。
+    grid += "<line class='paxis' x1='" + padL + "' y1='" + padT + "' x2='" + padL + "' y2='" + (padT + plotH) + "'/>" +
+            "<line class='paxis' x1='" + (W - padR) + "' y1='" + padT + "' x2='" + (W - padR) + "' y2='" + (padT + plotH) + "'/>";
+    var step = Math.max(1, Math.ceil(pts.length / 16));
+    pts.forEach(function(p, i){
+      var cx = padL + slot * (i + 0.5);
+      // 没有数据的那根柱子（比如 JEV 从来没跑过）不占位置：留着空档会看成「柱子之间有缝」。
+      var live = FN_KEYS.filter(function(k){ return tokOf(p, k) > 0; });
+      var bw = Math.max(3.5, Math.min(38, (slot * 0.94) / Math.max(1, live.length)));
+      var groupW = live.length * bw;
+      var x0 = cx - groupW / 2;
+      var tallest = 0, tallestK = "";
+      live.forEach(function(k){ if(tokOf(p, k) > tallest){ tallest = tokOf(p, k); tallestK = k; } });
+      var cost = Number(p.cost) || 0;
+      var cy = padT + plotH - plotH * cost / costTop;
+      // 用户 m22009：总价标签永远贴着点（不挪位置），柱子上的钱跟它撞上就不写——悬浮里还有，
+      // 免得同一小块地方挤两个数，也免得总价被推到离点老远的地方。
+      var costLabTxt = priceMoneyText(cost);
+      var costLabW = costLabTxt.length * 6.8 + 4;
+      var costLabTop = cy - 9 - 13, costLabBot = cy - 9 + 3;
+      // 用户 m23216：柱底的字跟着每根柱子走（自己的 token + 自己的命中率），不再写当天合计。
+      var pinHtml = "", pinRects = [];
+      var labCand = [];
+      live.forEach(function(k, j){
+        var v = tokOf(p, k);
+        var kb = (p.kinds || {})[k] || {};
+        var kcost = Number(kb.cost) || 0;
+        var x = x0 + j * bw;
+        var h = Math.max(1.5, plotH * v / tokTop);
+        var y = padT + plotH - h;
+        // 用户 m22998：从下往上 输入 → 命中 → 输出，三段严丝合缝拼成一根柱子。
+        var segCol = FN_SEG[k] || {};
+        // 输入段扣掉命中的那部分，三段加起来正好是「总输入 + 输出」，命中不会被画两遍。
+        var segUnc = Math.max(0, (Number(kb.input) || 0) - (Number(kb.cached) || 0));
+        var segs = [
+          { key: "input", n: segUnc },
+          { key: "cached", n: Number(kb.cached) || 0 },
+          { key: "output", n: Number(kb.output) || 0 }
+        ];
+        var segSum = 0;
+        segs.forEach(function(sg){ segSum += sg.n; });
+        if(segSum <= 0){ segSum = v || 1; }
+        var accH = 0;
+        segs.forEach(function(sg){
+          if(sg.n <= 0){ return; }
+          var sh = h * sg.n / segSum;
+          var sy = padT + plotH - accH - sh;
+          bars += "<rect class='pbar' x='" + x.toFixed(1) + "' y='" + sy.toFixed(1) + "' width='" + bw.toFixed(1) +
+                  "' height='" + (sh + 0.35).toFixed(1) + "' fill='" + (segCol[sg.key] || FN_COLORS[k]) + "'></rect>";
+          accH += sh;
+        });
+        // 用户 m23216：这根柱子自己的 token 和自己的命中率，横着写在这根柱子底部。
+        // 柱子太窄、两行字放不下就不写（窄的时候柱顶还有钱，悬浮里也还有数）。
+        if(v > 0){
+          // 命中率 = 命中 / 总输入，跟价目表「缓存命中率」那一列同口径（用户 m23442：之前算得不对）。
+          var pHit = Number(kb.cached) || 0;
+          var pIn = Number(kb.input) || 0;
+          var pL1 = fmtBig(v);
+          var pL2 = (pIn > 0 ? Math.min(100, pHit * 100 / pIn) : 0).toFixed(1) + "%";
+          // labTextWidth 是按 11px 的柱顶金额估的，这两行更小，量出来大概八折。
+          var pW = Math.max(labTextWidth(pL1), labTextWidth(pL2)) * 0.8;
+          // 用户 m29560 第 5 条：门槛从 30px 降到 25px——两行字本身只要 25px，
+          // 11-14 那根回复柱 27px 高，以前正好被挡掉，看着像「那天没数据」。
+          // 但 27px 的柱子塞 12px 两行字会顶出柱顶（白字压到卡片底色上就看不见了），
+          // 所以矮柱子换成 10.5 / 9.5px 的紧凑版，整块字仍然落在柱子里面。
+          var pinSm = h < 30;
+          if(pW <= bw - 1 && h >= (pinSm ? 22 : 25)){
+            var pCx = x + bw / 2;
+            var pY = padT + plotH - (pinSm ? 16 : 18);
+            var pGap = pinSm ? 10 : 12;
+            var pBox = { l: pCx - pW / 2 - 1, r: pCx + pW / 2 + 1, t: pY - (pinSm ? 9 : 11), b: pY + (pinSm ? 13 : 14) };
+            var pClash = cost > 0 && pBox.r > cx - costLabW / 2 - 2 && pBox.l < cx + costLabW / 2 + 2 &&
+                         pBox.b > costLabTop - 2 && pBox.t < costLabBot + 2;
+            if(!pClash){
+              pinRects.push(pBox);
+              var pinCls = pinSm ? " pinlab-sm" : "";
+              pinHtml += "<text class='pinlab" + pinCls + numCls + "' x='" + pCx.toFixed(1) + "' y='" + pY.toFixed(1) +
+                         "' style='" + numDelay(i * 14 + j * 26) + "' text-anchor='middle'>" +
+                         esc(pL1) + "</text>" +
+                         "<text class='pinlab pinlab2" + pinCls + numCls + "' x='" + pCx.toFixed(1) + "' y='" + (pY + pGap).toFixed(1) +
+                         "' style='" + numDelay(i * 14 + j * 26 + 40) + "' text-anchor='middle'>" +
+                         esc(pL2) + "</text>";
+            }
+          }
+        }
+        // 用户 m22126：柱子顶上的钱横排写一行，不再竖着——竖排读起来费劲。
+        // 用户 m22009：写在柱子「外面、正上方」，不压进柱子里面。
+        if(!dense || k === tallestK){
+          // 和当天总价一样的就不写了——决策通常就占了大头，同一个数字写两遍只是让图更乱。
+          var kLab = barCostLabel(kb);
+          if(kLab !== costLabTxt){
+            labCand.push({ txt: kLab, cx: x + bw / 2, top: y - 4, col: FN_COLORS[k] });
+          }
+        }
+      });
+      // 用户 m22009：总价标签永远贴着点；柱子上的钱要是撞上总价、或撞上隔壁那根柱子的钱，
+      // 就只留高的那根（撞掉的那根悬浮里还能看到）。
+      var labHtml = "", labRects = [];
+      pinRects.forEach(function(b){ labRects.push(b); });
+      labCand.sort(function(a, b){ return a.top - b.top; }).forEach(function(c){
+        var w = labTextWidth(c.txt);
+        var r = { l: c.cx - w / 2, r: c.cx + w / 2, t: c.top - 11, b: c.top };
+        var hit = cost > 0 && r.r > cx - costLabW / 2 - 2 && r.l < cx + costLabW / 2 + 2 &&
+                  r.b > costLabTop - 2 && r.t < costLabBot + 2;
+        for(var m = 0; !hit && m < labRects.length; m++){
+          var o = labRects[m];
+          if(r.r > o.l - 2 && r.l < o.r + 2 && r.b > o.t - 2 && r.t < o.b + 2){ hit = true; }
+        }
+        if(hit){ return; }
+        labRects.push(r);
+        labHtml += "<text class='pval" + numCls + "' x='" + c.cx.toFixed(1) + "' y='" + c.top.toFixed(1) +
+                   "' style='fill:" + (c.col || "var(--muted)") + ";" + numDelay(i * 14) + "' text-anchor='middle'>" +
+                   esc(c.txt) + "</text>";
+      });
+      linePts.push([cx, cy]);
+      lineDots += "<circle class='pdot' cx='" + cx.toFixed(1) + "' cy='" + cy.toFixed(1) + "' r='2.6'>" +
+              "</circle>";
+      // 用户 m21274：价格标签永远在点上方，不再上下错开。
+      // 用户 m22009：数字压在柱子或折线上就糊成一片，描一圈卡片底色的边（CSS 里 paint-order:stroke）。
+      if(cost > 0){
+        lineDots += "<text class='pcost" + numCls + "' x='" + cx.toFixed(1) + "' y='" + (cy - 9).toFixed(1) +
+                "' style='" + numDelay(i * 14) + "' text-anchor='middle'>" +
+                esc(priceMoneyText(cost)) + "</text>";
+      }
+      // 用户 m22009：柱顶金额在折线之后画，压在折线上也读得清。
+      dots += labHtml + pinHtml;
+      if(i % step === 0 || i === pts.length - 1){
+        labels += "<text class='pxlab" + numCls + "' x='" + cx.toFixed(1) + "' y='" + (H - 11) +
+                  "' style='" + numDelay(i * 14) + "' text-anchor='middle'>" + esc(p.label) + "</text>";
+      }
+    });
+    // 用户 m29560 第 4 条：曲线两头都延伸到图的左右边缘，但最新那天不延伸（不画到未来）。
+    var linePts2 = linePts.slice();
+    if(linePts2.length > 1){
+      var clampY = function(y){ return Math.max(padT, Math.min(padT + plotH, y)); };
+      var la = linePts2[0], lb = linePts2[1];
+      var lk = (lb[1] - la[1]) / ((lb[0] - la[0]) || 1);
+      linePts2.unshift([padL, clampY(la[1] + lk * (padL - la[0]))]);
+      var lastLab = String((pts[pts.length - 1] || {}).label || "");
+      if(lastLab !== pdShort(pdFmt(pdToday()))){
+        var ra = linePts2[linePts2.length - 2], rb = linePts2[linePts2.length - 1];
+        var rk = (rb[1] - ra[1]) / ((rb[0] - ra[0]) || 1);
+        linePts2.push([W - padR, clampY(rb[1] + rk * ((W - padR) - rb[0]))]);
+      }
+    }
+    var line = linePts2.length > 1 ? "<path class='pline' d='" + smoothLinePath(linePts2, padT, padT + plotH) + "'/>" : "";
+    var legend = "<div class='pbar-legend'>" +
+      FN_KEYS.map(function(k){
+        return "<span class='pbl'><i class='pbl-s' style='background:" + FN_COLORS[k] + "'></i>" + FN_LABELS[k] + "</span>";
+      }).join("") +
+      "<span class='pbl-sep'></span>" +
+      "<span class='pbl'><i class='pbl-l'></i>花费（右轴）</span>" +
+      "</div>";
+    // 用户 m29947：翻窗口改成整块平移一天的距离——坐标轴和网格不动，只有柱子和横轴日期滑。
+    // 用户 m30335：滚了几格就平移几格，滚快了不会只挪一天。
+    var panSteps = Math.max(1, Math.min(Math.abs(pricingPanDays) || 1, pts.length));
+    var panPx = pricingAnimDir ? (pricingAnimDir > 0 ? 1 : -1) * panSteps * slot + pricingPanFrom : 0;
+    var panStyle = pricingAnimDir ? " style='--pdx:" + panPx.toFixed(1) + "px'" : "";
+    var plotCls = pricingAnimDir ? "pplot pan" : "pplot";
+    // 滚轮只在这块里翻图（左右两根轴之间），轴外面滚的是整页。
+    pricingGeom = { W: W, padL: padL, padR: padR, padT: padT, plotH: plotH, slot: slot, n: pts.length };
+    // 用户 m30335：平移时把绘图区左右裁掉，滑出去的柱子不会压到两侧刻度上。
+    // 裁切放在不动的外层 <g> 上，内层平移时裁切框跟着走就白裁了。
+    var clip = "<defs><clipPath id='pclip'><rect x='" + padL + "' y='0' width='" + (W - padL - padR) +
+               "' height='" + H + "'/></clipPath></defs>";
+    return "<svg class='pchart-svg' viewBox='0 0 " + W + " " + H + "' role='img' aria-label='按天的 token 与花费'>" +
+      clip +
+      "<g class='pax'>" + grid + "</g>" +
+      "<g class='pclipwrap' clip-path='url(#pclip)'>" +
+      "<g class='" + plotCls + "'" + panStyle + ">" + bars + "<g class='plinewrap'>" + line + lineDots + "</g>" + dots + labels + "</g>" +
+      "</g>" +
+      // 用户 m22781：左上角除峰值再给这段的 token 总量，右上角除峰值再给这段的花费总价，跟着区间一起变。
+      // 用户 m29947：这两行改成记分牌翻字，只滚变了的字。
+      // 用户 m30920：峰值贴着图顶，跟右轴最顶那格价格文字（y = padT + 4）顶部对齐。
+      svgRollText("peakTok", "token 峰值 " + fmtBig(dayMax) + "　总量 " + fmtBig(tokTotal),
+                  padL + 6, padT + 4, "start", "pylab") +
+      svgRollText("peakCost", "花费峰值 " + priceMoneyText(costMax) + (d.currency ? " " + d.currency : "") +
+                  "　总价 " + priceMoneyText(costTotal) + (d.currency ? " " + d.currency : ""),
+                  W - padR - 6, padT + 4, "end", "pylab") +
+      "</svg>" + legend;
+  }
+
+  // 用户 m23442：下面三张饼各自选区间（花费占比 / Token 占比 / 调用分布），
+  // 每张饼右上角点开是快捷区间 + 两个日历框。
+  function pieSvgHtml(items, center, centerSub, note, aria, anim){
+    var sum = 0;
+    items.forEach(function(p){ sum += p.value; });
+    var cx = 78, cy = 78, r = 70, ir = 44, ang = -Math.PI / 2, slices = "";
+    items.forEach(function(p, i){
+      var frac = sum > 0 ? p.value / sum : 0;
+      var a2 = ang + frac * Math.PI * 2;
+      var color = PIE_COLORS[i % PIE_COLORS.length];
+      if(frac >= 0.9999){
+        slices += "<circle cx='" + cx + "' cy='" + cy + "' r='" + ((r + ir) / 2) + "' fill='none' stroke='" + color +
+                  "' stroke-width='" + (r - ir) + "'/>";
+      }else if(frac > 0){
+        slices += "<path d='" + pieArc(cx, cy, r, ir, ang, a2) + "' fill='" + color + "'/>";
+      }
+      ang = a2;
+    });
+    var legend = items.map(function(p, i){
+      var pct = sum > 0 ? p.value / sum * 100 : 0;
+      return "<div class='pleg'><i style='background:" + PIE_COLORS[i % PIE_COLORS.length] + "'></i>" +
+        "<span class='pleg-n'>" + esc(p.name) + "</span>" +
+        "<span class='pleg-v'>" + esc(p.valueText) + "</span>" +
+        "<span class='pleg-p'>" + pct.toFixed(1) + "%</span></div>";
+    }).join("");
+    return "<div class='ppie-wrap'><svg class='ppie-svg' viewBox='0 0 156 156' role='img' aria-label='" + esc(aria) + "'>" +
+      slices +
+      "<text class='ppie-num" + (anim ? " pnum" : "") + "' x='" + cx + "' y='" + (cy - 2) + "' text-anchor='middle'>" + esc(center) + "</text>" +
+      "<text class='ppie-sub' x='" + cx + "' y='" + (cy + 14) + "' text-anchor='middle'>" + esc(centerSub) + "</text>" +
+      "</svg><div class='plegend'>" + legend +
+      (note ? "<div class='pleg-note'>" + esc(note) + "</div>" : "") + "</div></div>";
+  }
+
+  function pricingPieById(id){
+    for(var i = 0; i < pricingPies.length; i++) if(pricingPies[i].id === id) return pricingPies[i];
+    return null;
+  }
+
+  // 快捷区间：今天 / 昨天 / 本周 / 上周 / 本月 / 上月（按真实日历，周一开始）。
+  function pricingQuickRange(kind){
+    var today = pdToday();
+    var monday = function(d){ return pdAdd(d, -((d.getDay() + 6) % 7)); };
+    if(kind === "today") return { start: pdFmt(today), end: pdFmt(today) };
+    if(kind === "yesterday"){ var y = pdAdd(today, -1); return { start: pdFmt(y), end: pdFmt(y) }; }
+    // 用户 m29973：本周 / 上周 都按「最近 7 天」算，不再取自然周——
+    // 周一当天点「本周」只剩一天，看着像没数据。
+    if(kind === "thisweek") return { start: pdFmt(pdAdd(today, -6)), end: pdFmt(today) };
+    if(kind === "lastweek") return { start: pdFmt(pdAdd(today, -13)), end: pdFmt(pdAdd(today, -7)) };
+    if(kind === "lastmonth"){
+      return { start: pdFmt(new Date(today.getFullYear(), today.getMonth() - 1, 1)),
+               end: pdFmt(new Date(today.getFullYear(), today.getMonth(), 0)) };
+    }
+    return { start: pdFmt(new Date(today.getFullYear(), today.getMonth(), 1)), end: pdFmt(today) };
+  }
+
+  function pricingPieItems(pie){
+    var d = pie.data;
+    if(!d) return null;
+    if(pie.id === "calls"){
+      var kinds = d.kinds || {}, items = [], total = 0;
+      FN_KEYS.forEach(function(k){
+        var n = Number((kinds[k] || {}).rounds) || 0;
+        if(n > 0){ items.push({ name: FN_LABELS[k], value: n, valueText: n + " 轮" }); total += n; }
+      });
+      return { items: items, center: String(total), centerSub: "轮", note: "",
+               empty: "这段时间还没有调用。" };
+    }
+    var totalCost = Number((d.total || {}).cost) || 0;
+    // 一个价都没填的时候画不出花费占比，退回按 token 占比画，图不至于空着。
+    var byCost = pie.id === "cost" && totalCost > 0;
+    var raw = (d.parts || []).map(function(p){
+      return { name: String(p.model_name || p.model || ""), cost: Number(p.cost) || 0,
+               unset: !!p.unset,
+               tokens: Number(p.tokens) || ((Number(p.input) || 0) + (Number(p.output) || 0)) };
+    });
+    // 没填单价的模型花费恒为 0，画进饼图只会变成看不见的 0% 碎片，改成在图例下面提一句。
+    var unsetCount = raw.filter(function(p){ return p.unset && p.tokens > 0; }).length;
+    var items = raw.filter(function(p){ return byCost ? p.cost > 0 : p.tokens > 0; });
+    items.sort(function(a, b){ return byCost ? b.cost - a.cost : b.tokens - a.tokens; });
+    items.forEach(function(p){
+      p.value = byCost ? p.cost : p.tokens;
+      p.valueText = byCost ? priceMoneyText(p.value) : fmtBig(p.value);
+    });
+    var note = "";
+    if(pie.id === "cost" && !byCost) note = "还没填单价，先按 token 占比画。";
+    else if(unsetCount) note = "另有 " + unsetCount + " 个模型没填单价，没算进占比。";
+    return { items: items,
+             center: byCost ? priceMoneyText(totalCost) : fmtBig((d.total || {}).tokens || 0),
+             centerSub: byCost ? String(d.currency || "") : "token",
+             note: note, empty: "这段时间还没有用量。" };
+  }
+
+  // 用户 m29947：饼图这边也改成「快捷 + 左右两个日历」，跟柱图一致。
+  function pricingPiePopHtml(pie){
+    var qs = [["today", "今天"], ["yesterday", "昨天"], ["thisweek", "本周"],
+              ["lastweek", "上周"], ["month", "本月"], ["lastmonth", "上月"]];
+    return "<div class='pdp'>" +
+      "<div class='pdp-q'>" + qs.map(function(o){
+        return "<button type='button' class='pdp-qb' data-pie='" + pie.id + "' data-q='" + o[0] + "'>" + o[1] + "</button>";
+      }).join("") + "</div>" +
+      pricingCalPairHtml() +
+      "<div class='pdp-f'><span class='pdp-span'>" + esc(pricingCalSpanText()) + "</span>" +
+      "<button type='button' class='pdp-ok' data-cal-apply='1'>应用</button></div>" +
+      "</div>";
+  }
+
+  function pricingPieCardHtml(pie){
+    var span = (pie.start && pie.end) ? pdSpanText(pie.start, pie.end) : "本月";
+    var head = "<div class='pchart-h'><b>" + esc(pie.title) + "</b>" +
+      "<span class='pchart-sub'>" + esc(pie.sub) + "　·　" + esc(span) + "</span>" +
+      "<span class='prange pchart-range'><button type='button' class='prb pdp-btn" + (pie.open ? " on" : "") +
+      "' data-pie='" + pie.id + "'>" + esc(span) + " ▾</button></span></div>";
+    var body;
+    if(!pie.data) body = "<div class='pchart-empty'>正在统计…</div>";
+    else if(pie.data.error) body = "<div class='pchart-empty'>图表读取失败：" + esc(pie.data.error) + "</div>";
+    else {
+      var built = pricingPieItems(pie);
+      if(!built || !built.items.length){
+        body = "<div class='pchart-empty'>" + esc((built && built.empty) || "这段时间还没有数据。") + "</div>";
+      }else{
+        body = pieSvgHtml(built.items, built.center, built.centerSub, built.note, pie.title, pie.anim);
+      }
+    }
+    return "<div class='pchart pchart-pie'>" + head +
+      "<div class='pchart-body" + (pie.anim ? " pchart-anim" : "") + "'>" + body + "</div>" +
+      (pie.open ? pricingPiePopHtml(pie) : "") + "</div>";
+  }
+
+  function loadPricingPie(id, force){
+    var pie = pricingPieById(id);
+    if(!pie) return Promise.resolve();
+    var r = (pie.start && pie.end) ? { start: pie.start, end: pie.end } : pricingQuickRange("month");
+    var tag = r.start + ":" + r.end;
+    if(!force && pie.data && pie.tag === tag && Date.now() - pie.at < 20000) return Promise.resolve();
+    var seq = ++pie.seq;
+    return get(API + "/pricing/trend?range_key=window&start=" + r.start + "&end=" + r.end).then(function(d){
+      if(seq !== pie.seq) return;
+      pie.data = (d && d.ok) ? d : { points: [], parts: [], total: {}, error: "接口没返回数据" };
+      pie.tag = tag; pie.at = Date.now(); pie.anim = 1;
+      paintPricingTrend();
+    }).catch(function(e){
+      if(seq !== pie.seq) return;
+      pie.data = { points: [], parts: [], total: {}, error: String((e && e.message) || e) };
+      pie.tag = tag; pie.at = Date.now(); pie.anim = 1;
+      paintPricingTrend();
+    });
+  }
+
+  function loadPricingPies(force){
+    pricingPies.forEach(function(p){ loadPricingPie(p.id, force); });
+  }
+
+  // 用户 m19975：图表按日历切，跟上面表格的区间不是一回事，标题里写清画的是哪一段。
+  function pricingTrendSpanText(){
+    var pts = (pricingTrend && pricingTrend.points) || [];
+    if(!pts.length) return "";
+    var a = pts[0].label || "", b = pts[pts.length - 1].label || "";
+    var txt = a === b ? a : (a + " ~ " + b);
+    // 用户 m21274：按周那一档的横轴是每周的周一，顺手把「几周」写出来。
+    if(pricingTrend && pricingTrend.range === "week") txt += "（" + pts.length + " 周）";
+    return txt;
+  }
+
+  function pricingChartsInner(width){
+    // 用户 m29947：区间那行日期也按记分牌翻——只滚变了的字。
+    var spanHtml = htmlRollText("trendSpan", pricingTrendSpanText());
+    return "<div class='pchart'>" +
+      // 用户 m22781：那行「柱 = … 折线 = …」的说明删掉，只留区间。
+      "<div class='pchart-h'><b>用量与花费</b><span class='pchart-sub'>" + spanHtml + "</span>" +
+      "<span class='prange pchart-range' id='p-trend-range'>" + pricingTrendRangeHtml() + "</span></div>" +
+      "<div class='pchart-body'>" + pricingBarChartHtml(width) + "</div>" +
+      (pricingCal.open ? pricingTrendPopHtml() : "") + "</div>" +
+      pricingPies.map(pricingPieCardHtml).join("");
+  }
+
+  var pricingChartRO = null, pricingChartW = 0;
+
+  // 图按左卡的实际宽度画：以前拿的是整行宽度，viewBox 被缩到 0.57 倍，字小得看不清。
+  function watchPricingCharts(){
+    var el = document.getElementById("p-charts");
+    if(!el || typeof ResizeObserver === "undefined") return;
+    if(pricingChartRO) pricingChartRO.disconnect();
+    pricingChartRO = new ResizeObserver(function(){
+      var card = el.querySelector(".pchart");
+      var w = card ? Math.round(card.clientWidth) : 0;
+      // 只认宽度变化：高度是内容撑出来的，跟着变会自己触发自己。
+      if(!w || Math.abs(w - pricingChartW) < 8) return;
+      pricingChartW = w;
+      el.innerHTML = pricingChartsInner(w);
+    });
+    pricingChartRO.observe(el);
+  }
+
+  function paintPricingTrend(){
+    var el = document.getElementById("p-charts");
+    if(!el) return;
+    // 用户 m30335：重画前先把上一帧的柱线层抓下来（连它此刻滑到哪儿一起抓），
+    // 画完垫在新图下面一起滑出去，两层接起来就是连续滚动。
+    var prevPlot = el.querySelector(".pchart-svg .pplot:not(.pghost)");
+    var prevHtml = prevPlot ? prevPlot.innerHTML : "";
+    var prevTx = 0;
+    if(prevPlot){
+      var mt = /matrix\(([^)]+)\)/.exec(String(getComputedStyle(prevPlot).transform || ""));
+      if(mt){
+        var nums = mt[1].split(",");
+        prevTx = parseFloat(nums[4]) || 0;
+      }
+    }
+    // 先铺一次骨架量出左卡真实宽度，再按这个宽度重画（柱图在 2.4fr 的左卡里，不是整行宽）。
+    // 先铺一次骨架量宽度，量完把翻字基准还原，免得第二次画的时候「已经一样了」不翻。
+    var rollSnap = JSON.parse(JSON.stringify(_rollPrev));
+    el.innerHTML = pricingChartsInner(0);
+    var card = el.querySelector(".pchart");
+    var w = card ? Math.round(card.clientWidth) : 0;
+    pricingChartW = w;
+    _rollPrev = rollSnap;
+    pricingPanFrom = prevTx;
+    el.innerHTML = pricingChartsInner(w);
+    if(pricingAnimDir && prevHtml){
+      var wrap = el.querySelector(".pchart-svg .pclipwrap");
+      var cur = wrap ? wrap.querySelector(".pplot:not(.pghost)") : null;
+      if(wrap && cur){
+        var gs = pricingGeom || {};
+        var gslot = Number(gs.slot) || 0;
+        var gsteps = Math.max(1, Math.min(Math.abs(pricingPanDays) || 1, Number(gs.n) || 1));
+        var g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        g.setAttribute("class", "pplot pghost");
+        g.innerHTML = prevHtml;
+        // 用户 m30734：上一帧的折线不跟着复制——两层各画一条橙线会交叉成「多余的线」。
+        var gl = g.querySelector(".plinewrap");
+        if(gl && gl.parentNode) gl.parentNode.removeChild(gl);
+        g.style.setProperty("--pdx0", prevTx.toFixed(1) + "px");
+        g.style.setProperty("--pdx2", (-pricingAnimDir * gsteps * gslot).toFixed(1) + "px");
+        wrap.insertBefore(g, cur);
+      }
+    }
+    pricingAnimDir = 0;
+    pricingPanDays = 0;
+    pricingPanFrom = 0;
+    pricingPies.forEach(function(p){ p.anim = 0; });
+    watchPricingCharts();
+  }
+
+  function loadPricingTrend(mode, force){
+    var m = (mode === "default" || mode === "thisweek" || mode === "lastweek" ||
+             mode === "month" || mode === "lastmonth" || mode === "custom") ? mode : "default";
+    pricingTrendMode = m;
+    var url, tag;
+    if(m !== "month" && m !== "lastmonth"){
+      var r = pricingWinRange();
+      url = "/pricing/trend?range_key=window&start=" + r.start + "&end=" + r.end;
+      tag = "window:" + r.start + ":" + r.end;
+    }else{
+      url = "/pricing/trend?range_key=" + m;
+      tag = m;
+    }
+    if(!force && pricingTrend && pricingTrendRangeLoaded === tag && Date.now() - pricingTrendAt < 20000){
+      paintPricingTrend();
+      return Promise.resolve();
+    }
+    var seq = ++pricingTrendSeq;
+    return get(API + url).then(function(d){
+      if(seq !== pricingTrendSeq) return;
+      pricingTrend = (d && d.ok) ? d : { points: [], parts: [], total: {}, error: "接口没返回数据" };
+      pricingTrendAt = Date.now();
+      pricingTrendRangeLoaded = tag;
+      paintPricingTrend();
+    }).catch(function(e){
+      if(seq !== pricingTrendSeq) return;
+      pricingTrend = { points: [], parts: [], total: {}, error: String((e && e.message) || e) };
+      pricingTrendAt = Date.now();
+      pricingTrendRangeLoaded = tag;
+      paintPricingTrend();
     });
   }
 
@@ -8369,54 +9891,80 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(pricingCost && pricingCost.parts) pricingCost.parts.forEach(function(p){
       if(p && p.model != null) costParts[p.model] = p;
     });
-    var rows = (pricingCache || []).map(function(r, i, arr){
+    // 用户 m19842：不做折叠了，只把所选区间里一次都没调用过的模型藏起来（tr.pidle）。
+    var list = pricingCache || [];
+    var lastVisible = -1, idleCount = 0;
+    list.forEach(function(r, i){
+      if(r.active === false){ idleCount++; return; }
+      lastVisible = i;
+    });
+    var rows = list.map(function(r, i, arr){
       var d = pricingDraft[r.model] || {};
       var p = pricingPeak(Object.assign(pricingPeak(r.peak), d.peak || {}));
       var inV = d.in !== undefined ? d.in : (r.in == null ? "" : r.in);
       var outV = d.out !== undefined ? d.out : (r.out == null ? "" : r.out);
       var cacheV = d.cache !== undefined ? d.cache : (r.cache == null ? "" : r.cache);
-      var source = r.provider_name || r.provider_id || "来源未记录";
+      // 用户 m20332：渠道可以手填（r.provider 是价目表里存的覆盖值），没填时把
+      // 自动识别的结果当占位提示，一眼能看出框架认成了什么。
+      // 占位符用后端单独给的 provider_auto（不受手填影响），不然保存后占位会变成刚填的值。
+      var autoSrc = r.provider_auto || r.provider_id || "来源未记录";
       // v4.9x（用户本轮图2 后半句）：最后一行下面补一根灰线，把价目表收个口（只加最后一行）
-      var lastCls = (i === arr.length - 1) ? " class='plast'" : "";
+      // 用户 m19357：收起时把最近 24 小时没用过的行标成 pidle（CSS 隐藏），
+      // 最后一行那根收口灰线跟着「最后一行看得见的」走。
+      var trCls = [];
+      if(i === lastVisible) trCls.push("plast");
+      if(r.active === false) trCls.push("pidle");
+      var lastCls = trCls.length ? " class='" + trCls.join(" ") + "'" : "";
       // 用户 m11550：输入只算没命中的那一截，缓存单列——跟上游后台的「输入 / 缓存」口径一致。
       // 后端 r.input 是完整 prompt（含缓存），计价公式要用它，所以这里减掉再显示。
       var unc = Math.max(0, (Number(r.input) || 0) - (Number(r.cached) || 0));
       return "<tr" + lastCls + " data-pmodel='" + esc(r.model) + "'>" +
-        "<td class='pm' title='" + esc(r.model) + "'><span class='pmc'>" +
-          "<button type='button' class='pdel' data-pdel='" + esc(r.model) + "' title='从价目表删除这个模型（要点两次确认）'>删除</button>" +
+        "<td class='pm'><span class='pmc'>" +
+          "<button type='button' class='pdel' data-pdel='" + esc(r.model) + "'>删除</button>" +
           "<span class='pname'>" + esc(r.model_name || r.model) + "</span></span>" +
-          "<span class='psrcline'><span class='psrc-lb'>渠道</span><span class='psource'>" + esc(source) + "</span></span></td>" +
+          "<span class='psrcline'><span class='psrc-lb'>渠道</span>" +
+            "<input class='psrc-inp' type='text' maxlength='60' data-pfield='provider' placeholder='" +
+            esc(autoSrc) + "' value='" +
+            esc(d.provider !== undefined ? d.provider : (r.provider || "")) + "'></span></td>" +
         pricePairHtml("in", inV, p.in) + pricePairHtml("cache", cacheV, p.cache) + pricePairHtml("out", outV, p.out) +
         // 用户 m00443：请求 / 决策 / 回复各一行，token 拆成入 / 缓存 / 出三行，再加一列缓存命中率。
         "<td class='pu'><span class='puc'><span class='pl'>请求 " + esc(fmtNum(r.calls)) + "</span>" +
           "<span class='pl'>决策 " + esc(fmtNum(r.decision_rounds)) + "</span>" +
           "<span class='pl'>回复 " + esc(fmtNum(r.reply_rounds)) + "</span></span></td>" +
-        "<td class='pt'><span class='puc'><span class='pl' title='" + esc("输入 " + fmtNum(unc) + "（未命中）") + "'>输入 " + esc(fmtBig(unc)) + "</span>" +
-          "<span class='pl' title='" + esc("缓存 " + fmtNum(r.cached)) + "'>缓存 " + esc(fmtBig(r.cached)) + "</span>" +
-          "<span class='pl' title='" + esc("输出 " + fmtNum(r.output)) + "'>输出 " + esc(fmtBig(r.output)) + "</span></span></td>" +
+        "<td class='pt'><span class='puc'>" +
+          "<span class='pl'><i class='plt plt-in'>输入</i> " + esc(fmtBig(unc)) + "</span>" +
+          "<span class='pl'><i class='plt plt-hit'>命中</i> " + esc(fmtBig(r.cached)) + "</span>" +
+          "<span class='pl'><i class='plt plt-out'>输出</i> " + esc(fmtBig(r.output)) + "</span></span></td>" +
         "<td class='ph'>" + hitRateHtml(r) + "</td>" +
         // 用户本轮：紧跟缓存命中率的「费用」列——这一行在当前区间的花费。
-        "<td class='pcostc' title='" + esc(partCostTitle(costParts[r.model] || null)) + "'>" +
+        "<td class='pcostc'>" +
           partCostHtml(costParts[r.model] || null) + "</td>" +
-        "<td class='psw'><input type='checkbox' data-pfield='peak.enabled' title='勾选后高峰时段按高峰价计费'" + (p.enabled ? " checked" : "") + "></td>" +
-        "<td class='psw'><input type='checkbox' data-pfield='peak.weekends' title='勾选后周末全天按普通价计费'" + (!p.weekends ? " checked" : "") + "></td>" +
+        "<td class='psw'><input type='checkbox' data-pfield='peak.enabled'" + (p.enabled ? " checked" : "") + "></td>" +
+        "<td class='psw'><input type='checkbox' data-pfield='peak.weekends'" + (!p.weekends ? " checked" : "") + "></td>" +
         "<td class='pschedule'>" + pricingPeriodsHtml(p) + "</td></tr>";
     }).join("");
     if(!rows) rows = "<tr><td colspan='11' class='pempty'>还没有用过的模型。插件跑过一轮之后这里会自动出现——模型名是自动识别的，不用手动添加。</td></tr>";
+    else if(lastVisible < 0) rows = "<tr><td colspan='11' class='pempty'>这段时间没有调用过任何模型，都藏起来了。</td></tr>";
+    pricingIdleCount = idleCount;
     box.innerHTML =
       "<div class='ptop'><span class='prange' id='p-range'>" + priceRangeHtml() + "</span>" +
-        "<span class='pcost' id='p-cost'>" + priceCostHtml() + "</span></div>" +
+        "<span class='pcost' id='p-cost'>" + priceCostHtml() + "</span>" +
+        "</div>" +
       "<table class='ptable'><thead><tr><th>模型 / 来源</th><th>输入单价</th><th>缓存命中单价</th><th>输出单价</th>" +
         "<th>请求</th><th>token</th><th>缓存命中率</th>" +
-        "<th title='这一行模型在所选区间内的花费（用量 × 价目）；没填单价的模型显示「未定价」'>费用</th>" +
+        "<th>费用</th>" +
         "<th>高峰价</th><th>周末谷价</th>" +
         // v4.85（用户 m10425 第 3 条）：高峰时段按哪个时区算，只放在表头的悬浮提示里。
-        "<th title='按服务端本地时间" + (pricingTimezone ? "（" + esc(pricingTimezone) + "）" : "") +
-        "解释，含起不含止，可跨午夜'>高峰时段</th></tr></thead><tbody>" + rows + "</tbody></table>" +
-      // v4.85（用户 m10425 第 3 条）：底部不再写「单位：元 / 百万 token」，#p-msg 只留给保存/删除的提示。
+        "<th" + (pricingTimezone ? " title='高峰时段按服务端本地时间（" + esc(pricingTimezone) + "）算，含起不含止，可跨午夜。'" : "") +
+          ">高峰时段</th></tr></thead><tbody>" + rows + "</tbody></table>" +
+      // 用户 m23331：底部那两行小字都撤了——「另有 N 个模型没调用」挪到顶部总花费右边，
+      // 高峰时段按哪个时区算收进表头「高峰时段」的悬浮提示里。
+      // 用户 m19357：表格下面一行两张图（柱 + 折线 / 饼图），内容由 paintPricingTrend 填。
+      "<div class='pcharts' id='p-charts'></div>" +
       "<div class='padd'><span class='phint' id='p-msg'></span>" +
         "<span class='pstat' id='p-stat'></span></div>";
     bindPricing();
+    paintPricingTrend();
     restorePricingFocus(box, focus);
     if(Object.keys(pricingDraft).length) setPMsg(pricingPendingMessage(pricingPartialSaved));
   }
@@ -8496,7 +10044,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
           peak.start=peak.periods.length ? peak.periods[0].start : "";
           peak.end=peak.periods.length ? peak.periods[0].end : "";
         }else peak[key]=key === "weekends" ? !value : value;
-      }else if(["in","out","cache"].indexOf(field) >= 0) d[field]=value;
+      }else if(["in","out","cache","provider"].indexOf(field) >= 0) d[field]=value;
       else return;
       // 用户 m00153：时间框在原生选择器里每点一下都会发 input，只记草稿；等 change（选完）再保存。
       if(target.type === "time" && ev.type === "input") return;
@@ -8504,6 +10052,128 @@ var DM_SPECIAL = { trigger_probability: 1 };
     }
     box.oninput=changed;
     box.onchange=changed;
+    // 用户 m19975：图表按日历切——七天 / 本月 / 上月，默认本月。
+    // 绑在 #p-charts 上而不是按钮本身：paintPricingTrend 会重画里面的按钮，绑按钮上会丢。
+    var tcharts = document.getElementById("p-charts");
+    if(tcharts) tcharts.onclick = function(ev){
+      var t = ev.target;
+      if(!t || !t.closest) return;
+      var b = t.closest("[data-prange]");
+      if(b){
+        var k = b.getAttribute("data-prange") || "default";
+        pricingCal.open = false;
+        if(k === pricingTrendMode && pricingTrend){ paintPricingTrend(); return; }
+        pricingWinEnd = "";
+        loadPricingTrend(k, true);
+        return;
+      }
+      // 用户 m29947：右上角只剩一个按钮，点开是快捷区间 + 左右两个日历。
+      var trBtn = t.closest("[data-trange]");
+      if(trBtn){
+        var wasOpen = pricingCal.open;
+        pricingCal.open = !wasOpen;
+        if(!wasOpen) seedPricingCal("trend", pricingCustom.start, pricingCustom.end);
+        paintPricingTrend();
+        return;
+      }
+      var calNav = t.closest("[data-cal-nav]");
+      if(calNav){
+        var ym0 = pricingCal.ym || pdFmt(pdToday()).slice(0, 7);
+        var nd = new Date(Number(ym0.slice(0, 4)), Number(ym0.slice(5, 7)) - 1 + Number(calNav.getAttribute("data-cal-nav")), 1);
+        pricingCal.ym = nd.getFullYear() + "-" + ("0" + (nd.getMonth() + 1)).slice(-2);
+        paintPricingTrend();
+        return;
+      }
+      var calD = t.closest("[data-cal-d]");
+      if(calD){
+        var dv = calD.getAttribute("data-cal-d");
+        if(!pricingCal.start || pricingCal.end || dv < pricingCal.start){
+          pricingCal.start = dv; pricingCal.end = "";
+        }else{
+          pricingCal.end = dv;
+        }
+        paintPricingTrend();
+        return;
+      }
+      var calOk = t.closest("[data-cal-apply]");
+      if(calOk){
+        if(!pricingCal.start) return;
+        var tgt = pricingCal.target || "trend";
+        var s0 = pricingCal.start, e0 = pricingCal.end || pricingCal.start;
+        if(tgt === "trend"){
+          pricingCustom.start = s0;
+          pricingCustom.end = e0;
+          pricingCal.open = false;
+          pricingWinEnd = "";
+          loadPricingTrend("custom", true);
+        }else{
+          var pie4 = pricingPieById(tgt);
+          if(!pie4) return;
+          pie4.start = s0; pie4.end = e0; pie4.open = false;
+          loadPricingPie(pie4.id, true);
+        }
+        return;
+      }
+      var qb = t.closest("[data-q]");
+      if(qb){
+        var pie = pricingPieById(qb.getAttribute("data-pie"));
+        if(!pie) return;
+        var q = pricingQuickRange(qb.getAttribute("data-q"));
+        pie.start = q.start; pie.end = q.end; pie.open = false;
+        pricingCal.open = false;
+        loadPricingPie(pie.id, true);
+        return;
+      }
+      var tb = t.closest(".pdp-btn");
+      if(tb){
+        var pie3 = pricingPieById(tb.getAttribute("data-pie"));
+        if(!pie3) return;
+        var was = pie3.open;
+        pricingPies.forEach(function(p){ p.open = false; });
+        pricingCal.open = false;
+        pie3.open = !was;
+        if(pie3.open) seedPricingCal(pie3.id, pie3.start, pie3.end);
+        paintPricingTrend();
+        return;
+      }
+      // 点别处收起日历（点日历里面不算）
+      if(!t.closest(".pdp") && (pricingPies.some(function(p){ return p.open; }) || pricingCal.open)){
+        pricingPies.forEach(function(p){ p.open = false; });
+        pricingCal.open = false;
+        paintPricingTrend();
+      }
+    };
+    // 用户 m23442：柱图上滚轮按天翻窗口（七天 / 十四天两档才翻）。
+    // 用户 m29947：方向反过来（往下滚 = 往后一天）；只有指针落在左右两根轴之间才翻图，
+    // 轴外面滚的是整页，不拦。
+    if(tcharts) tcharts.onwheel = function(ev){
+      if(ev.target && ev.target.closest && ev.target.closest(".pchart-pie")) return;
+      if(!pricingWinScrollable()) return;
+      var svg = ev.target && ev.target.closest ? ev.target.closest(".pchart-svg") : null;
+      if(!svg || !pricingGeom) return;
+      var rc = svg.getBoundingClientRect();
+      if(!rc.width) return;
+      var sc = rc.width / pricingGeom.W;
+      var x0 = rc.left + pricingGeom.padL * sc, x1 = rc.left + (pricingGeom.W - pricingGeom.padR) * sc;
+      if(ev.clientX < x0 || ev.clientX > x1) return;
+      var dy = Number(ev.deltaY) || 0;
+      if(!dy) return;
+      ev.preventDefault();
+      var r = pricingWinRange();
+      var end = pdParse(r.end), today = pdToday(), days = pricingWinDays();
+      var minEnd = pdAdd(new Date(today.getFullYear(), today.getMonth(), 1), days - 1);
+      if(minEnd > today) minEnd = today;
+      var next = pdAdd(end, dy > 0 ? 1 : -1);
+      if(next > today) next = today;
+      if(next < minEnd) next = minEnd;
+      if(pdDays(next, end) === 0) return;
+      // 用户 m30335：连着滚几格就记几格，平移距离按格数算。
+      pricingPanDays += (dy > 0 ? 1 : -1);
+      pricingAnimDir = pricingPanDays > 0 ? 1 : -1;
+      pricingWinEnd = pdFmt(next);
+      clearTimeout(pricingWinTimer);
+      pricingWinTimer = setTimeout(function(){ loadPricingTrend(pricingTrendMode, true); }, 45);
+    };
   }
 
 
@@ -8515,7 +10185,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         var el = tr.querySelector("[data-pfield='" + field + "']");
         return el && el.type === "checkbox" ? !!el.checked : String(el && el.value || "").trim();
       };
-      var a=value("in"), b=value("out"), c=value("cache");
+      var a=value("in"), b=value("out"), c=value("cache"), prov=value("provider");
       var p=pricingPeak();
       ["in","out","cache"].forEach(function(k){ var v=value("peak."+k); p[k]=v === "" ? null : Number(v); });
       p.enabled=value("peak.enabled"); p.weekends=!value("peak.weekends");
@@ -8523,8 +10193,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
       p.start=p.periods.length ? p.periods[0].start : ""; p.end=p.periods.length ? p.periods[0].end : "";
       // Keep legacy all-unset ordinary rows out of the persisted table. A peak
       // schedule/override itself is meaningful, including an explicit free 0.
-      if(a === "" && b === "" && c === "" && !p.enabled && !p.weekends && !p.periods.length && p.in === null && p.out === null && p.cache === null) return;
-      models[name]={in:a === "" ? 0 : Number(a), out:b === "" ? 0 : Number(b), cache:c === "" ? 0 : Number(c), peak:p};
+      // 用户 m23442：weekends 的默认值翻过来了（true = 周末按高峰算），所以「没改过」的判据也跟着翻。
+    if(a === "" && b === "" && c === "" && !prov && !p.enabled && p.weekends && !p.periods.length && p.in === null && p.out === null && p.cache === null) return;
+      models[name]={in:a === "" ? 0 : Number(a), out:b === "" ? 0 : Number(b), cache:c === "" ? 0 : Number(c), provider:prov, peak:p};
     });
     return models;
   }
@@ -8563,7 +10234,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       else{
         delete models[m].peak;
         // A peak-only draft must not turn an entirely unpriced row into three explicit free prices.
-        if(blankOrdinary[m] && (!old || (old.in == null && old.out == null && old.cache == null))) delete models[m];
+        if(blankOrdinary[m] && !models[m].provider && (!old || (old.in == null && old.out == null && old.cache == null))) delete models[m];
       }
     });
     names=Object.keys(models);
@@ -8578,11 +10249,12 @@ var DM_SPECIAL = { trigger_probability: 1 };
         var s=saved[r.model];
         r.in=s ? s.in : null; r.out=s ? s.out : null; r.cache=s ? s.cache : null;
         r.peak=s && s.peak ? pricingPeak(s.peak) : null;
+        r.provider=s ? String(s.provider || "") : "";
       });
       Object.keys(sentDraft).forEach(function(m){
         var current=pricingDraft[m], sent=sentDraft[m];
         if(!current || !models[m]) return;
-        ["in","out","cache"].forEach(function(k){ if(current[k] === sent[k]) delete current[k]; });
+        ["in","out","cache","provider"].forEach(function(k){ if(current[k] === sent[k]) delete current[k]; });
         if(!deferredPeak[m] && JSON.stringify(current.peak) === JSON.stringify(sent.peak)) delete current.peak;
         if(!Object.keys(current).length) delete pricingDraft[m];
       });

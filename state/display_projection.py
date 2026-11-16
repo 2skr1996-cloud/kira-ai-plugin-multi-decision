@@ -21,6 +21,9 @@ _OWNER_HEAD = re.compile(
 _REPLY_HEAD = re.compile(r"^\s*\[Reply ID:\s*([^\]\s]+)", re.I)
 _LEAF_TYPES = {"text", "at", "emoji", "notice", "poke", "record", "file", "video", "json"}
 _MAX_FILE_CARDS = 8
+# 派生图名是 mdp_<源图内容 sha1 前 32 位>_<tag>.jpg（window/manager.py 的 _derive_media），
+# 插件缓存里的原图文件名就是源图内容 sha1，所以这个摘要能精确对回原图（用户 m18926）。
+_DERIVED_DIGEST = re.compile(r"(?:^|/)derived/mdp_([0-9a-f]{16,40})_", re.I)
 
 
 def content_text(content) -> str:
@@ -205,6 +208,24 @@ def _content_refs(item):
                 return None
         return refs
     return None
+
+
+def _derived_digests(refs) -> list:
+    """逐张给出模型侧那张图对应的源图内容摘要，不是派生图的位置留空串。
+
+    派生图名里那 32 位就是源图内容 sha1 的前 32 位，插件缓存里的原图文件名正是
+    源图内容 sha1，所以拿摘要去比文件名前缀就能把原图挑出来——用户 m18926 那张
+    「并排两张一样的图」就是靠这个把压缩副本剔掉的。
+    """
+    out = []
+    for ref in refs or []:
+        if not isinstance(ref, dict):
+            out.append("")
+            continue
+        path = str(ref.get("path") or ref.get("url") or "")
+        hit = _DERIVED_DIGEST.search(path)
+        out.append(hit.group(1).lower() if hit else "")
+    return out
 
 
 def raw_forward_proof_items(messages):
@@ -680,9 +701,65 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
                            for ref in _orig if isinstance(ref, dict)]
             _ready_orig = [ref for ref in _ready_orig
                            if (ref.get("path") or ref.get("url")) and not ref.get("missing")]
-            _now = [str((ref or {}).get("path") or "") for ref in item.get("media") or []
-                    if isinstance(ref, dict)]
-            if _ready_orig and [str(ref.get("path") or "") for ref in _ready_orig] != _now:
+            # 模型侧拿到的那几张：优先 item.media，没有就退回 content 里的图引用。
+            _now_refs = [ref for ref in item.get("media") or [] if isinstance(ref, dict)]
+            _now = [str(ref.get("path") or ref.get("url") or "") for ref in _now_refs]
+            _content_now = [ref for ref in _content_refs(item) or [] if isinstance(ref, dict)]
+            if not _now:
+                _now_refs = _content_now
+                _now = [str(ref.get("path") or ref.get("url") or "") for ref in _now_refs]
+            # 模型侧那几张在插件缓存里的样子：缓存文件名是内容 sha1，索引里挑出来的
+            # 原图也是同一份文件，所以「模型侧本来就是原图」时直接比路径就够。
+            _now_pub = [str(_public_ref(ref, raw_sid, public_media).get("path") or "")
+                        for ref in _now_refs]
+            # 用户 m13767 图1 / m18926：框架把「发给模型的那份压缩图」也复制进消息目录，
+            # 按 message_id 扫索引时同一张图的原件和压缩副本都会被当成原图（996×1920 与
+            # 664×1280 是同一张），美化档就并排画两遍。逐张对回原图：模型侧是派生图就按
+            # 派生图名里的源图摘要挑，模型侧本来就是原图就按文件名挑；有一张对不上就整条
+            # 不替换，宁可显示模型侧那份也不并排画两遍。
+            _digests = []
+            for _cand in (_content_now, _now_refs):
+                _got = _derived_digests(_cand)
+                if any(_got) and len(_got) == len(_now):
+                    _digests = _got
+                    break
+            if len(_digests) != len(_now):
+                _digests = [""] * len(_now)
+            _picked = []
+            if _now:
+                for _i, _path in enumerate(_now):
+                    _digest = _digests[_i]
+                    if _digest:
+                        # 派生图名里的摘要就是原图缓存文件名的前 32 位。
+                        _hit = next((ref for ref in _ready_orig
+                                     if str(ref.get("path") or "").rsplit("/", 1)[-1]
+                                     .lower().startswith(_digest)), None)
+                    else:
+                        _want = _now_pub[_i] if _i < len(_now_pub) else _path
+                        _hit = next((ref for ref in _ready_orig
+                                     if str(ref.get("path") or "") == _want), None)
+                        if _hit is None:
+                            _base = _want.rsplit("/", 1)[-1].lower()
+                            _hit = next((ref for ref in _ready_orig
+                                         if str(ref.get("path") or "").rsplit("/", 1)[-1]
+                                         .lower() == _base), None)
+                    if _hit is None:
+                        _picked = []
+                        break
+                    _picked.append(_hit)
+            else:
+                # 老快照里模型侧一张图都没记：只能把索引里的都当原图（原来就这样）。
+                _picked = list(_ready_orig)
+            _ready_orig, _seen = [], set()
+            for _ref in _picked:
+                _key = str(_ref.get("path") or "")
+                if _key and _key not in _seen:
+                    _seen.add(_key)
+                    _ready_orig.append(_ref)
+            # 转发卡自己有一套对齐好的图（own_media 可能比模型侧配额多），
+            # 张数对不上就别替换，否则美化档会把转发里的图换少。
+            _own_n = len(display.get("own_media") or [])
+            if _ready_orig and (not _own_n or len(_ready_orig) == _own_n):
                 display["orig_media"] = _ready_orig
         # 用户 m21787 图1/图2：框架把被引用那条消息的图也挂到引用它的消息上，页面分不清
         # 归属——引用块只剩「图片」占位，外层多出一排「归属未确认的附件」。按被引用消息的
@@ -710,4 +787,56 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
         if display.get("files"):
             projected["files"] = display["files"]
         out.append(projected)
+    # 用户 m10400 图3：框架会把被引用那条消息的图也挂到引用它的消息上。上面按
+    # message_id 回索引取的是「聊天原图」，跟外层挂上来的那份（模型侧派生图）路径
+    # 对不上，剔不掉，于是引用块画一遍、正文再画一遍。这里按被引用那条在本轮里的
+    # 实际 media 路径再剔一遍；剔下来的那份在 direct_reply.media 为空时补进去，
+    # 引用块才画得出来。
+    by_mid = {}
+    for row in out:
+        if not isinstance(row, dict):
+            continue
+        _mid = message_id(row, text_of_content=text_of_content)
+        if _mid:
+            by_mid[_mid] = row
+    for row in out:
+        if not isinstance(row, dict):
+            continue
+        disp = row.get("display")
+        if not isinstance(disp, dict):
+            continue
+        quote = disp.get("direct_reply")
+        if not isinstance(quote, dict):
+            continue
+        _qid = str(quote.get("id") or "")
+        qrow = by_mid.get(_qid) if _qid else None
+        if not isinstance(qrow, dict):
+            continue
+        qdisp = qrow.get("display") if isinstance(qrow.get("display"), dict) else {}
+        qquote = qdisp.get("direct_reply")
+        qpaths = set()
+        # 只比已经投影好的公开路径：引用子树不再调 media resolver（契约测试
+        # test_quote_display_projection 的「Reply subtrees never call media resolver」）。
+        for _refs in (qdisp.get("own_media"), qdisp.get("unassigned_media"),
+                      (qquote.get("media") if isinstance(qquote, dict) else None)):
+            for _ref in _refs or []:
+                if isinstance(_ref, dict):
+                    _p = str(_ref.get("path") or _ref.get("url") or "")
+                    if _p:
+                        qpaths.add(_p)
+        if not qpaths:
+            continue
+        kept, moved = [], []
+        for _ref in disp.get("unassigned_media") or []:
+            _p = str(_ref.get("path") or _ref.get("url") or "") if isinstance(_ref, dict) else ""
+            if _p and _p in qpaths:
+                moved.append(_ref)
+            else:
+                kept.append(_ref)
+        if not moved:
+            continue
+        disp["unassigned_media"] = kept
+        if not (quote.get("media") or []):
+            _fallback = qdisp.get("orig_media") or moved
+            disp["direct_reply"] = dict(quote, media=list(_fallback))
     return out

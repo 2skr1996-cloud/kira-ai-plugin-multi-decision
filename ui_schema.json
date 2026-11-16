@@ -65,7 +65,7 @@
     "hint": "回复时最多调用几轮工具（最后写回复那一轮不算）。"
   },
   "reply_tool_calls_per_turn": {
-    "name": "单轮工具调用上限",
+    "name": "单轮工具上限",
     "type": "integer",
     "default": 5,
     "hint": "回复时一轮里最多调几个工具，多出来的不执行。"
@@ -95,16 +95,16 @@
     "hint": "主模型连续失败后切它；留空 = 不切。"
   },
   "reply_fail_switch": {
-    "name": "连续失败切换",
+    "name": "失败切换",
     "type": "switch",
     "default": true,
     "hint": "开＝主模型连错 2 次就切备用；关＝一直用主模型。"
   },
   "reply_fallback_cooldown": {
-    "name": "切回主模型等待",
+    "name": "切换模型",
     "type": "integer",
-    "default": 300,
-    "hint": "切到备用后过多少秒再试主模型。"
+    "default": 1800,
+    "hint": "切到备用后过多少分钟再试主模型。"
   },
   "reply_see_images": {
     "name": "回复看图",
@@ -125,16 +125,16 @@
     "hint": "主模型连续失败后切它；留空 = 不切。"
   },
   "decision_fail_switch": {
-    "name": "连续失败切换",
+    "name": "失败切换",
     "type": "switch",
     "default": true,
     "hint": "开＝主模型连错 2 次就切备用；关＝一直用主模型。"
   },
   "decision_fallback_cooldown": {
-    "name": "切回主模型等待",
+    "name": "切换模型",
     "type": "integer",
-    "default": 300,
-    "hint": "切到备用后过多少秒再试主模型。"
+    "default": 1800,
+    "hint": "切到备用后过多少分钟再试主模型。"
   },
   "decision_tool_loop": {
     "name": "最大代理循环次数",
@@ -143,7 +143,7 @@
     "hint": "决策时最多调用几轮工具，最后判断那一轮不算。"
   },
   "decision_tool_calls_per_turn": {
-    "name": "单轮工具调用上限",
+    "name": "单轮工具上限",
     "type": "integer",
     "default": 5,
     "hint": "决策时一轮里最多调几个工具，多出来的不执行。"
@@ -164,7 +164,7 @@
     "name": "决策看图",
     "type": "switch",
     "default": true,
-    "hint": "决策模型也看一眼这一轮消息里的图片。它本身得是能看图的模型；万一上游不认图，会自动退回纯文字再判一次。"
+    "hint": "决策模型也看一眼这一轮消息里的图片。它本身得是能看图的模型；万一上游不认图，会自动退回纯文字再判一次。JEV 判成「不确定 → 交给决策模型」时，那一次转交也看这个开关。"
   },
   "decision_fail_action": {
     "name": "决策失败时",
@@ -191,40 +191,34 @@
     "hint": "主模型连续失败后切它；留空 = 不切。它同样必须是 decision 类模型。"
   },
   "jev_fail_switch": {
-    "name": "连续失败切换",
+    "name": "失败切换",
     "type": "switch",
     "default": true,
     "hint": "开＝主模型连错 2 次就切备用；关＝一直用主模型。"
   },
   "jev_fallback_cooldown": {
-    "name": "切回主模型等待",
+    "name": "切换模型",
     "type": "integer",
-    "default": 300,
-    "hint": "切到备用后过多少秒再试主模型。"
+    "default": 1800,
+    "hint": "切到备用后过多少分钟再试主模型。"
   },
   "jev_lower": {
     "name": "不确定区间下限",
     "type": "integer",
     "default": 25,
-    "hint": "设置页用下拉选，默认 25。回复概率低于它 = 不回复，要小于等于上限。"
+    "hint": "设置页用长条拖，默认 25。回复概率低于它 = 不回复，要小于等于上限。"
   },
   "jev_upper": {
     "name": "不确定区间上限",
     "type": "integer",
     "default": 75,
-    "hint": "设置页用下拉选，默认 75。回复概率高于它 = 回复；落在上下限之间（含两端）算不确定，按「不确定时」处理。"
+    "hint": "设置页用长条拖，默认 75。回复概率高于它 = 回复；落在上下限之间（含两端）算不确定，按「不确定时」处理。"
   },
   "jev_action": {
     "name": "不确定时",
     "type": "string",
     "default": "no_reply",
     "hint": "reply = 回复，no_reply = 不回复，decision = 交给决策模型（会多一次普通决策调用）。"
-  },
-  "jev_see_images": {
-    "name": "JEV 决策看图",
-    "type": "switch",
-    "default": true,
-    "hint": "JEV 自己只看文字（decision 类模型收不了图）；打开这个，JEV 判成「不确定 → 交给决策模型」时那次普通决策会带上图。"
   },
   "jev_persona": {
     "name": "JEV 人格",

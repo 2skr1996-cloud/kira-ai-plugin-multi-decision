@@ -159,6 +159,8 @@ _MEDIA_KEEP_FN = None
 _MEDIA_KEEP_DAYS_FN = None
 _MEDIA_SEEN = {}
 _MEDIA_SEEN_LOADED = False
+#: 回收孤儿转发图时防重入：GC 里会读索引，读索引可能触发保存，保存又会调 GC。
+_MEDIA_GC_RUNNING = False
 
 
 def _media_cache_dir():
@@ -314,7 +316,7 @@ def _media_db_pop(mid, sids=None) -> None:
     _media_seen().pop(mid, None)
 
 
-def _media_db_trim() -> None:
+def _media_db_trim() -> int:
     """按会话裁转发配图索引。
 
     没注入 limit_fn 时保持老行为（全局 300 条）；注入后按每个 sid 各自的上限裁，
@@ -324,6 +326,7 @@ def _media_db_trim() -> None:
     """
     sids = _media_sids()
     seen = _media_seen()
+    removed = 0
     days_fn = _MEDIA_KEEP_DAYS_FN
     if callable(days_fn):
         now = time.time()
@@ -341,13 +344,17 @@ def _media_db_trim() -> None:
                 continue
             if now - float(ts) > days * 86400:
                 _media_db_pop(mid, sids)
+                removed += 1
     fn = _MEDIA_KEEP_FN
     if not callable(fn):
         while len(_MEDIA_DB) > _MEDIA_DB_MAX:
             _media_db_pop(next(iter(_MEDIA_DB)), sids)
-        return
+            removed += 1
+        return removed
     counts = {}
-    for mid in list(_MEDIA_DB.keys()):
+    # 用户 m14353：倒着数——索引是按写入顺序排的，正着数会把最新那几条裁掉、
+    # 留下最老的。裁掉的图会被 media_db_gc 当孤儿回收，重启后最近转发的图就没了。
+    for mid in reversed(list(_MEDIA_DB.keys())):
         sid = str(sids.get(mid) or "")
         try:
             limit = int(fn(sid) or 0)
@@ -358,9 +365,12 @@ def _media_db_trim() -> None:
         counts[sid] = counts.get(sid, 0) + 1
         if counts[sid] > limit:
             _media_db_pop(mid, sids)
+            removed += 1
     # 兜底：配置写坏 / 群特别多时别让进程内存无限长；正常不会碰到。
     while len(_MEDIA_DB) > _MEDIA_HARD_MAX:
         _media_db_pop(next(iter(_MEDIA_DB)), sids)
+        removed += 1
+    return removed
 
 
 def set_media_db_limit_fn(fn) -> None:
@@ -408,6 +418,33 @@ def _legacy_media_owners() -> dict:
     return owners
 
 
+def _media_images_size(items, folder) -> tuple:
+    """这批引用在磁盘上还剩几张图、一共多少字节（用户 m14353）。
+
+    索引里记的是 plugin_data/<插件>/media_cache/<文件名>，文件可能已经被别处删掉，
+    所以按名字去 media_cache 里 stat 一遍，数不到的跳过。
+    """
+    count = 0
+    size = 0
+    if folder is None:
+        return count, size
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("path") or "").replace("\\", "/").rsplit("/", 1)[-1]
+        if not name:
+            continue
+        target = folder / name
+        try:
+            if not target.is_file():
+                continue
+            size += int(target.stat().st_size or 0)
+        except OSError:
+            continue
+        count += 1
+    return count, size
+
+
 def media_db_stats(sid: str = "") -> dict:
     """转发配图索引的条数 / 图片数 / 磁盘占用，给缓存记录页用。
 
@@ -415,9 +452,14 @@ def media_db_stats(sid: str = "") -> dict:
     字节数算，不把整份混写索引都记到它头上。
     旧数据没有 sid 时先按原图凭证的 outer_mid / 图片路径反查；如果所有已知归属
     都指向同一个会话，就把仍无归属的旧条目算给这个会话，多个会话时不猜。
+
+    用户 m14353：再报 imgs / img_bytes——索引里那几张图在磁盘上实际还剩多少。
+    缓存记录页的「占用」改用这个数，以前报的是索引文件自己的字节数（82 KB），
+    1,163 MB 的转发图在账本上完全看不见。
     """
     import json
     db = _media_db()
+    folder = _media_cache_dir()
     sids = _media_sids()
     target = _norm_sid(str(sid or "").strip())
     legacy = _legacy_media_owners() if target else {}
@@ -457,11 +499,18 @@ def media_db_stats(sid: str = "") -> dict:
             owner = owners.get(str(mid)) or ""
             if owner == target or (not owner and only == target):
                 subset[mid] = items
+        imgs, img_bytes = _media_images_size(
+            [item for items in subset.values() for item in (items or [])], folder)
         return {"count": len(subset),
                 "refs": sum(len(items or []) for items in subset.values()),
                 "bytes": len(json.dumps(subset, ensure_ascii=False).encode("utf-8")),
+                "imgs": imgs,
+                "img_bytes": img_bytes,
                 "sids": by_sid}
-    return {"count": len(db), "refs": refs, "bytes": size, "sids": by_sid}
+    imgs, img_bytes = _media_images_size(
+        [item for items in db.values() for item in (items or [])], folder)
+    return {"count": len(db), "refs": refs, "bytes": size,
+            "imgs": imgs, "img_bytes": img_bytes, "sids": by_sid}
 
 
 def media_db_clear(cutoff=None) -> int:
@@ -485,7 +534,75 @@ def media_db_clear(cutoff=None) -> int:
         removed += 1
     if removed:
         _media_db_save()
+        media_db_gc()
     return removed
+
+
+def media_db_gc(grace: float = 600.0) -> int:
+    """删掉没人引用的转发图文件，返回删掉的张数（用户 m14353）。
+
+    以前裁索引只 pop 条目、不删文件：`_prune_media_cache` 明确跳过 fw_，
+    `media_db_clear` 也只清索引，于是每裁一次就留一批孤儿——实测 1,716 张转发图里
+    有 1,077 张（约 720 MB）没人引用，从 10-30 一直堆在 media_cache 里。
+
+    谁算「有人引用」：转发配图索引、进程内最近 64 条缓存、原图凭证里记的图。
+    三处都没有的 fw_ 文件才是孤儿。grace 是给刚写进来、索引还没落盘的图留的
+    宽限（秒），默认 10 分钟。
+    """
+    global _MEDIA_GC_RUNNING
+    if _MEDIA_GC_RUNNING:
+        return 0
+    folder = _media_cache_dir()
+    if folder is None:
+        return 0
+    _MEDIA_GC_RUNNING = True
+    try:
+        keep = set()
+        groups = list(_media_db().values()) + list(_MID_MEDIA.values())
+        try:
+            for proof in _display_proofs_read().values():
+                if not isinstance(proof, dict):
+                    continue
+                for node in (proof.get("nodes") or []):
+                    if not isinstance(node, dict):
+                        continue
+                    for media in (node.get("media") or []):
+                        if isinstance(media, dict):
+                            groups.append([media])
+        except Exception:
+            pass
+        for items in groups:
+            for item in items or []:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("path") or "").replace("\\", "/").rsplit("/", 1)[-1]
+                if name:
+                    keep.add(name)
+        try:
+            names = [p.name for p in folder.glob("fw_*")]
+        except Exception:
+            return 0
+        now = time.time()
+        removed = 0
+        for name in names:
+            if name in keep:
+                continue
+            target = folder / name
+            try:
+                if grace > 0 and now - float(target.stat().st_mtime) < grace:
+                    continue
+            except OSError:
+                continue
+            try:
+                target.unlink()
+                removed += 1
+            except OSError:
+                pass
+        if removed:
+            logger.info("[multi-decision] 回收没人引用的转发图 %d 张", removed)
+        return removed
+    finally:
+        _MEDIA_GC_RUNNING = False
 
 
 def _media_db() -> dict:
@@ -560,7 +677,9 @@ def _media_db_save() -> None:
     tmp = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        _media_db_trim()
+        # 用户 m14353：裁掉条目之后顺手回收没人引用的图，不然每裁一次就留一批孤儿。
+        if _media_db_trim():
+            media_db_gc()
         if _MEDIA_DB_LOAD_FAILED and path.is_file():
             if not _media_db_backup_broken(path):
                 return

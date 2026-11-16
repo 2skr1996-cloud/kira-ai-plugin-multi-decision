@@ -45,6 +45,15 @@ TYPE_LABELS = {"text": "自写文本", "custom": "自定义模板",
                "system_time": "时间段",
                "plugin_memory": "记忆插件注入",
                "plugin_memory_ctx": "记忆插件 · 本轮上下文"}
+# 用户 m15846：骨架名精简过（「什么时候接」→「该接」等），老布局里存的是旧名，
+# 归一化时顺手换掉，否则下拉里对不上目录、显示成「自写」。
+LEGACY_LABELS = {
+    "什么时候接": "该接",
+    "什么时候别接": "别接",
+    "什么时候给高概率": "该给高概率",
+    "什么时候给低概率": "别给高概率",
+    "是不是在跟我说": "是否对我说",
+}
 # 身份段由框架自动填好，只让看、不让改（用户图6）。
 READONLY_TYPES = {"identity", "system_dynamic", "system_memory", "system_time",
                   "plugin_memory", "plugin_memory_ctx"}
@@ -675,7 +684,8 @@ class PromptLayouts:
                 # 自定义模板：名字就是模板名；模板被删了才退回原名字。
                 m["label"] = str(names.get(key) or m.get("label") or TYPE_LABELS["custom"])[:120]
             elif typ in ("text", "dynamic") and str(m.get("label") or "").strip():
-                m["label"] = str(m.get("label")).strip()[:120]
+                label = str(m.get("label")).strip()
+                m["label"] = LEGACY_LABELS.get(label, label)[:120]
             else:
                 m["label"] = type_label(typ, key)[:120]
         return doc

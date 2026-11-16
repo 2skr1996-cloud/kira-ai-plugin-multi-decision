@@ -171,6 +171,18 @@ class AdaptiveStats:
                 return sid
         return ""
 
+    def _jsonl_paths(self):
+        """stats/ 下的用量账：热文件 + archive/ 里按月归档的老账。
+
+        用户 m20332：账本改成永久保留、往月的行挪进 archive/，所以「清空 / 按天清」
+        必须把归档一起算上，否则清完老数据还会从归档里冒回来。
+        """
+        paths = list(self.dir.glob("*.jsonl"))
+        archive = self.dir / "archive"
+        if archive.is_dir():
+            paths.extend(archive.glob("*.jsonl"))
+        return paths
+
     def clear_before(self, cutoff: float) -> int:
         """删掉早于 cutoff 的按天统计和用量账行，返回删掉的条数。
 
@@ -214,7 +226,7 @@ class AdaptiveStats:
                         self._dirty.discard(sid)
             except Exception:
                 continue
-        for path in list(self.dir.glob("*.jsonl")):
+        for path in self._jsonl_paths():
             try:
                 lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
             except Exception:
@@ -257,7 +269,7 @@ class AdaptiveStats:
                 path.unlink()
             except Exception:
                 continue
-        for path in list(self.dir.glob("*.jsonl")):
+        for path in self._jsonl_paths():
             try:
                 removed += sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
             except Exception:
