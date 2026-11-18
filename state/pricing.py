@@ -24,6 +24,25 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# 账本行走的是哪条决策链（JEV 还是普通决策）判定在 tracer 里，这里只借用，不自己造一份。
+# 老账本行没写 mode，得按 custom:<模型> 认回 JEV，所以价目表也要用同一套口径。
+# 单独加载本模块的场景（只跑价目表逻辑的脚本）没有包上下文，退回只认行里写好的 mode。
+try:
+    from .tracer import Tracer as _LedgerTracer
+except Exception:  # pragma: no cover - 只有脱离插件包单独加载时才会走到
+    _LedgerTracer = None
+
+
+def _event_mode(event: dict) -> str:
+    if _LedgerTracer is not None:
+        return _LedgerTracer._row_mode(event)
+    return str(event.get("mode") or "").strip().lower()
+
+
+# 用户 m05232：账本里「没有模型身份」的那一桶。B3.1.0 之前回复轮写账时还没记模型名，
+# 整片挂在它上面；平时跟着 hidden 一起跳过，只有调用方给了补价才参与计价。
+_UNKNOWN_NAMES = {"", "unknown", "未记录", "未记录模型"}
+
 DEFAULT_FILE = "pricing.json"
 PRICE_UNIT = "元 / 百万 token"
 _CURRENCY = "元"
@@ -307,10 +326,32 @@ class Pricing:
 
     # ------------------------------------------------------------ 算钱
 
-    def summarize(self, totals: Any) -> Dict[str, Any]:
-        """逐调用计价；业务轮汇总不再次叠加，旧记录只作近似估算。"""
-        prices = self.all()
-        gone = set(self.hidden())
+    def summarize(self, totals: Any, prices: Any = None, hidden: Any = None,
+                  fallback: Any = None) -> Dict[str, Any]:
+        """逐调用计价；业务轮汇总不再次叠加，旧记录只作近似估算。
+
+        prices / hidden 可选：调用方已经按「同一个模型只留一个 key」重排过的价目表
+        与删除名单（用户 m04493）。账本里 provider_id:model_id 与模型名是同一个
+        模型，不重排的话有量的那行查不到价、显示「未定价」。不传就照旧读盘。
+        用户 m05232：fallback 可选，形如 {"reply": {"in":..,"out":..,"cache":..}}。
+        账本里没有模型身份的行（B3.1.0 之前的回复轮）平时算不出钱，调用方把「当时
+        真正在用的回复模型」单价传进来，这里只给这一类行用，并标成 estimated；
+        账本本身不动，价目表也不会因此多出一行。
+        """
+        if isinstance(prices, dict):
+            prices = {str(k): v for k, v in prices.items() if isinstance(v, dict)}
+        else:
+            prices = self.all()
+        if isinstance(hidden, (list, tuple, set)):
+            gone = {str(k) for k in hidden}
+        else:
+            gone = set(self.hidden())
+        # 用户 m05232：补价表只收「至少填了一个价」的项，空价等于没给。
+        fb: Dict[str, dict] = {}
+        if isinstance(fallback, dict):
+            for kind, one in fallback.items():
+                if isinstance(one, dict) and (one.get("in") or one.get("out") or one.get("cache")):
+                    fb[str(kind)] = one
         stats = (totals or {}).get("models") if isinstance(totals, dict) else {}
         stats = stats if isinstance(stats, dict) else {}
         parts, unset = [], []
@@ -330,7 +371,12 @@ class Pricing:
             return by_mode.setdefault(str(mode), {
                 "cost": 0.0, "input": 0, "output": 0, "cached": 0, "calls": 0, "priced": False})
         for name, bucket in stats.items():
-            if str(name) in gone or not isinstance(bucket, dict):
+            if not isinstance(bucket, dict):
+                continue
+            # 用户 m05232：「未记录模型」这一桶平时跟着 hidden 一起跳过；只有调用方
+            # 明确给了补价（fallback）时才放进来，用当时的回复模型单价估一遍。
+            is_unknown = str(name) in _UNKNOWN_NAMES
+            if str(name) in gone and not (is_unknown and fb):
                 continue
             price = prices.get(str(name)) or {}
             pin = float(price.get("in") or 0)
@@ -344,6 +390,7 @@ class Pricing:
             inp = outp = cached = 0
             normal_cost = peak_cost = 0.0
             approximate = unknown_time = False
+            fb_used = False
             part_kinds: Dict[str, float] = {}
             for event in events:
                 if not isinstance(event, dict):
@@ -368,16 +415,28 @@ class Pricing:
                     rate_cache = pcache if pcache > 0 else rate_in
                     if peak.get("cache") is not None:
                         rate_cache = peak["cache"]
+                # 用户 m05232：这一行没有模型身份（写账时还没记），按调用方给的
+                # 「当时的回复模型」单价估算；账本不动，只影响这一次统计。
+                fb_price = fb.get(str(event.get("kind") or "reply")) if (is_unset and is_unknown) else None
+                if fb_price:
+                    rate_in = float(fb_price.get("in") or 0)
+                    rate_out = float(fb_price.get("out") or 0)
+                    rate_cache = float(fb_price.get("cache") or 0) or rate_in
+                    fb_used = True
                 cost = ((a - c) * rate_in + c * rate_cache + b * rate_out) / 1000000.0
                 kb = _kind_bucket(str(event.get("kind") or "reply"))
-                kb["priced"] = bool(kb.get("priced")) or not is_unset
+                kb["priced"] = bool(kb.get("priced")) or not is_unset or bool(fb_price)
+                if fb_price:
+                    kb["estimated"] = True
                 kb["cost"] += cost
                 kb["input"] += a
                 kb["output"] += b
                 kb["cached"] += c
                 kb["calls"] += 1
                 part_kinds[str(event.get("kind") or "reply")] = part_kinds.get(str(event.get("kind") or "reply"), 0.0) + cost
-                _mode = str(event.get("mode") or "").strip().lower()
+                # 用户 m02330：老账本行没写 mode，JEV 的花费会留在「决策」里；
+                # 判行的口径跟走势图那份一致，都走 tracer 的 _row_mode。
+                _mode = _event_mode(event)
                 if _mode:
                     mbm = _mode_bucket(_mode)
                     mbm["priced"] = bool(mbm.get("priced")) or not is_unset
@@ -398,11 +457,12 @@ class Pricing:
             peak_total += peak_cost
             any_approximate = any_approximate or approximate
             any_unknown = any_unknown or unknown_time
-            if is_unset:
+            if is_unset and not fb_used:
                 unset.append(str(name))
             parts.append({"model": str(name), "input": inp, "output": outp,
                           "cached": cached, "cost": round(cost, 4), "priced": True,
-                          "unset": is_unset, "normal_cost": round(normal_cost, 4),
+                          "unset": is_unset and not fb_used, "estimated": bool(fb_used),
+                          "normal_cost": round(normal_cost, 4),
                           "peak_cost": round(peak_cost, 4), "approximate": bool(approximate),
                           "unknown_time": bool(unknown_time),
                           "reply_cost": round(part_kinds.get("reply", 0.0), 4),
@@ -410,10 +470,12 @@ class Pricing:
         parts.sort(key=lambda x: (-x["cost"], x["model"]))
         kinds_out = {k: {"total": round(v["cost"], 4), "input": v["input"], "output": v["output"],
                         "cached": v["cached"], "calls": v["calls"],
-                        "priced": bool(v.get("priced"))} for k, v in by_kind.items()}
+                        "priced": bool(v.get("priced")),
+                        "estimated": bool(v.get("estimated"))} for k, v in by_kind.items()}
         modes_out = {k: {"total": round(v["cost"], 4), "input": v["input"], "output": v["output"],
                         "cached": v["cached"], "calls": v["calls"],
-                        "priced": bool(v.get("priced"))} for k, v in by_mode.items()}
+                        "priced": bool(v.get("priced")),
+                        "estimated": bool(v.get("estimated"))} for k, v in by_mode.items()}
         return {"total": round(total, 4), "currency": _CURRENCY, "unit": PRICE_UNIT,
                 "priced": any(p["priced"] for p in parts), "parts": parts,
                 "by_kind": kinds_out, "by_mode": modes_out,

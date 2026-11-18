@@ -2565,9 +2565,16 @@ class RequestLog:
         if cached and (self.dir / _safe_sid(sid) / cached).is_file():
             return cached
         found = self._name_index(sid).get(event_id, "")
-        if found:
+        # 2026-11-18 审查 M09：索引里留着已删文件的条目（目录被清空/轮转时不清 map），
+        # 这里真的 stat 一次，文件没了就当没找到，顺手把索引里的旧条目摘掉。
+        if found and (self.dir / _safe_sid(sid) / found).is_file():
             self._names[(sid, event_id)] = found
-        return found
+            return found
+        if found:
+            slot = self._name_idx.get(sid)
+            if isinstance(slot, dict):
+                slot.get("map", {}).pop(event_id, None)
+        return ""
 
     def _name_index(self, sid: str) -> dict:
         """事件号 → 文件名 的整目录索引（用户 m26664：记录页慢）。

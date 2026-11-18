@@ -447,16 +447,64 @@
     "hint": "休息时只按这个概率掷骰。"
   },
   "rest_silent_enabled": {
-    "name": "休息时段兜底",
+    "name": "休息静默",
     "type": "switch",
     "default": false,
-    "hint": "休息时段里也允许闲时兜底补一次。"
+    "hint": "休息时段里也允许静默兜底补一次。"
   },
   "rest_silent_minutes": {
     "name": "休息兜底等待分钟",
     "type": "integer",
     "default": 3,
     "hint": "休息时段里安静这么多分钟后补一次。"
+  },
+  "silent_skip_video_link": {
+    "name": "过滤视频卡片",
+    "type": "switch",
+    "default": true,
+    "hint": ""
+  },
+  "silent_skip_short": {
+    "name": "过滤短句字数",
+    "type": "switch",
+    "default": true,
+    "hint": ""
+  },
+  "silent_skip_short_len": {
+    "name": "短句字数",
+    "type": "integer",
+    "default": 6,
+    "hint": ""
+  },
+  "silent_skip_single_image": {
+    "name": "过滤单张图片",
+    "type": "switch",
+    "default": false,
+    "hint": ""
+  },
+  "silent_skip_single_sticker": {
+    "name": "过滤单表情包",
+    "type": "switch",
+    "default": true,
+    "hint": ""
+  },
+  "silent_skip_empty_forward": {
+    "name": "过滤无文转发",
+    "type": "switch",
+    "default": true,
+    "hint": ""
+  },
+  "silent_skip_after_decision": {
+    "name": "静默初始过滤",
+    "type": "switch",
+    "default": true,
+    "hint": ""
+  },
+  "silent_skip_after_decision_count": {
+    "name": "条数",
+    "type": "integer",
+    "default": 1,
+    "hint": ""
   },
   "quota_hour_enabled": {
     "name": "每小时配额",
@@ -700,10 +748,10 @@
     "hint": "私聊的决策记录页最多列多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
   },
   "decisions_keep_days": {
-    "name": "消息日志保留天数",
+    "name": "消息日志与统计保留天数",
     "type": "integer",
     "default": 56,
-    "hint": "最少 56 天，只能调高——自适应要用这段时间的数据。全局按整天文件清理，这一栏就是那条硬上限：给某个群/私聊设得更长，也不会超过全局天数。"
+    "hint": "最少 56 天，只能调高——自适应要用这段时间的数据。消息日志和会话统计一起按这个天数滚；用量账本不跟它走，永久保存。"
   },
   "window_show": {
     "name": "窗口快照显示条数（群聊）",
@@ -753,47 +801,23 @@
     "default": 30,
     "hint": "摘要留多久自动删，0 = 不限。"
   },
-  "stats_keep_days": {
-    "name": "会话统计保留天数",
-    "type": "integer",
-    "default": 56,
-    "hint": "最少 56 天，只能调高——自适应要用这段时间的数据。"
-  },
   "forward_media_keep": {
-    "name": "转发图片上限（群聊）",
+    "name": "转发缓存上限（群聊）",
     "type": "integer",
     "default": 120,
-    "hint": "每个群最多保留多少条转发图片记录，默认 120；0 = 不限。"
+    "hint": "每个群最多保留多少条转发缓存（图片和原图记录一起算），默认 120；0 = 不限。"
   },
   "forward_media_keep_dm": {
-    "name": "转发图片上限（私聊）",
+    "name": "转发缓存上限（私聊）",
     "type": "integer",
     "default": 30,
-    "hint": "每个私聊最多保留多少条转发图片记录，默认 30；0 = 不限。"
+    "hint": "每个私聊最多保留多少条转发缓存，默认 30；0 = 不限。"
   },
   "forward_media_keep_days": {
-    "name": "转发图片保留天数",
+    "name": "转发缓存保留天数",
     "type": "integer",
     "default": 30,
-    "hint": "超过这么多天的转发图片记录自动删掉，0 = 不限。"
-  },
-  "forward_proof_keep": {
-    "name": "转发原图记录上限（群聊）",
-    "type": "integer",
-    "default": 80,
-    "hint": "每个群最多保留多少条「图片来自哪条消息」的记录，默认 80；0 = 不限。"
-  },
-  "forward_proof_keep_dm": {
-    "name": "转发原图记录上限（私聊）",
-    "type": "integer",
-    "default": 20,
-    "hint": "每个私聊最多保留多少条「图片来自哪条消息」的记录，默认 20；0 = 不限。"
-  },
-  "forward_proof_keep_days": {
-    "name": "转发原图记录保留天数",
-    "type": "integer",
-    "default": 30,
-    "hint": "超过这么多天的转发原图记录自动删掉，0 = 不限。"
+    "hint": "超过这么多天的转发缓存自动删掉，0 = 不限。"
   },
   "retry_keep": {
     "name": "自动重试记录上限（群聊）",

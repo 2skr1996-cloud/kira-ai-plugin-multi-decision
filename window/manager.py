@@ -337,6 +337,115 @@ def _drop_media_tags(text: str) -> str:
     return re.sub(r"[|｜][ \t]*$", "", text).rstrip()
 
 
+#: 用户 m02245：待发里只有链接 / 转发 / 图片时，静默兜底不该为它们冒泡——
+#: 没有能接的话，冒泡只会把一条链接甩进群里。下面这套判定只回答一个问题：
+#: 「这批待发里有没有真正能接的正文」。口径尽量宽，拿不准就算有。
+_NO_TEXT_SPAN_OPENERS = ("[Forward", "[Reply ID:", "[Json card", "[Emoji")
+_NO_TEXT_MEDIA_RE = re.compile(
+    r"\[(?:Image|Sticker|Record|Voice|Video|File|Audio) attached\]"
+    r"|\[(?:图片|表情|动画表情|闪照)\]"
+    r"|\[(?:kira_image_ref|input_image|image_url|input_audio|input_video|input_file)\]"
+)
+#: 链接：到空白或中文 / 全角标点为止（中文正文里链接后面常常直接跟汉字）。
+_NO_TEXT_URL_RE = re.compile(
+    r"(?:https?://|www\.)[^\s<>\"'「」『』【】\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]+",
+    re.I,
+)
+
+
+def _text_without_noise(text: str) -> str:
+    """剥掉链接、转发 / 引用 / 卡片 / 表情整段、媒体占位，剩下的才算正文。"""
+    out = str(text or "")
+    if not out:
+        return ""
+    for opener in _NO_TEXT_SPAN_OPENERS:
+        while True:
+            at = out.find(opener)
+            if at < 0:
+                break
+            depth, end = 0, -1
+            for j in range(at, len(out)):
+                ch = out[j]
+                if ch == "[":
+                    depth += 1
+                elif ch == "]":
+                    depth -= 1
+                    if depth <= 0:
+                        end = j + 1
+                        break
+            if end < 0:
+                break  # 没收口，别乱删
+            out = out[:at] + " " + out[end:]
+    out = _NO_TEXT_MEDIA_RE.sub(" ", out)
+    out = _NO_TEXT_URL_RE.sub(" ", out)
+    return out.strip()
+
+
+#: 用户 m02652：静默兜底按消息类型分开过滤。这里只回答「这一条属于哪种没什么可接的
+#: 类型」，判定一律从严——认不出就不打标签，宁可多冒一次泡，也别把该接的话吞掉。
+#: 视频站链接：与前端 biliPattern（web/js/lib-3.js）认的是同一批站点，那边画成卡片。
+_VIDEO_CARD_URL_RE = re.compile(
+    r"https?://(?:[\w-]+\.)*(?:bilibili\.com|b23\.tv|mp\.weixin\.qq\.com|youtube\.com"
+    r"|youtu\.be|twitch\.tv|douyin\.com|douyu\.com|huya\.com|kuaishou\.com)"
+    r"/[^\s<>\"'「」【】\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]*",
+    re.I,
+)
+#: 视频站链接前面常贴一个【标题】（B 站分享就是这样），标题不算正文。
+_TITLE_SPAN_RE = re.compile(r"【[^【】]{0,160}】")
+#: 短句按「去掉空白与标点之后还剩几个字」算，标点不算字。
+_SHORT_STRIP_RE = re.compile(r"[\s\u3000-\u303f\uff00-\uffef!-/:-@\[-\x60{-~]+")
+
+
+def _short_len_of(text: str) -> int:
+    """短句字数：去掉空白、中英文标点与符号之后还剩几个字。"""
+    return len(_SHORT_STRIP_RE.sub("", str(text or "")))
+
+
+def _is_video_link_only(text: str) -> bool:
+    """整条只有一个视频站链接（前面可以带【标题】），没有别的正文。"""
+    src = str(text or "")
+    hit = _VIDEO_CARD_URL_RE.search(src)
+    if not hit:
+        return False
+    rest = src[:hit.start()] + " " + src[hit.end():]
+    rest = _TITLE_SPAN_RE.sub(" ", rest)
+    rest = _NO_TEXT_MEDIA_RE.sub(" ", rest)
+    rest = _NO_TEXT_URL_RE.sub(" ", rest)
+    return not _SHORT_STRIP_RE.sub("", rest)
+
+
+def pending_tags(item, short_len: int = 6) -> set:
+    """给一条待发打上「没什么可接」的类型标签，认不出就是空集合。
+
+    标签：video_link（视频卡片链接）、short（短句）、single_image（单图片）、
+    single_sticker（单表情包）、empty_forward（无正文转发）。
+    """
+    tags = set()
+    if not isinstance(item, dict):
+        return tags
+    text = str(item.get("text") or "")
+    body = _text_without_noise(text)
+    media = str(item.get("media") or "")
+    refs = [r for r in (item.get("media_refs") or []) if isinstance(r, dict)]
+    files = [f for f in (item.get("files") or []) if isinstance(f, dict)]
+    if _is_video_link_only(text):
+        # 视频卡片链接整条就是一张卡，别再按「短句」算一遍。
+        tags.add("video_link")
+        return tags
+    if not body:
+        if _is_video_link_only(text):
+            tags.add("video_link")
+        if "[Forward" in text:
+            tags.add("empty_forward")
+        if not files and len(refs) <= 1:
+            if media == "image":
+                tags.add("single_image")
+            elif media in ("sticker", "emoji"):
+                tags.add("single_sticker")
+    elif _short_len_of(body) <= max(1, int(short_len or 6)):
+        tags.add("short")
+    return tags
+
 #: 框架把图片按 message_id 落在 data/session_media/<sha256(sid)>/<sha256(mid)>/ 下。
 #: 窗口里存的是框架记忆的纯文本，图片 part 早没了，只能拿 message_id 反查（v2.85）。
 _MEDIA_ROOT = "session_media"
@@ -819,6 +928,67 @@ def original_media_for_mid(mid: str) -> list:
             continue
         out.append(ref)
     return _drop_downscaled_copies(out)
+
+
+_MEDIA_NAMES_MEMO = {}
+
+
+def _media_cache_names(cache: Path) -> list:
+    """缓存目录里的文件名（带目录 mtime 记忆：投影时每条消息都要查一次）。"""
+    try:
+        stamp = cache.stat().st_mtime_ns
+    except OSError:
+        return []
+    key = str(cache)
+    got = _MEDIA_NAMES_MEMO.get(key)
+    if got and got[0] == stamp:
+        return got[1]
+    names = []
+    try:
+        for f in cache.iterdir():
+            if f.is_file() and not f.name.startswith("_") and f.name != "media_owners.json":
+                names.append(f.name)
+    except Exception:
+        names = []
+    _MEDIA_NAMES_MEMO[key] = (stamp, names)
+    return names
+
+
+def media_cache_by_digest(digest: str) -> list:
+    """按派生图名里的源图摘要去缓存目录捞原图（用户 m12814 图3）。
+
+    老快照里这条消息的 message_id 早就不在 _index.json 里了（框架清过消息库），
+    _media_by_mid_index 一条都认不回来，美化档就退回模型侧那张九宫格拼图。可派生图
+    名 mdp_<digest>_<tag>.jpg 里的 digest 就是原图缓存文件名的前缀，按前缀扫一遍
+    缓存目录就能把动图原图找回来。
+    """
+    key = str(digest or "").strip().lower()
+    if len(key) < 16:
+        return []
+    cache = _media_cache_root()
+    root = _data_root()
+    if cache is None or root is None:
+        return []
+    out = []
+    for name in _media_cache_names(cache):
+        if not name.lower().startswith(key):
+            continue
+        path = cache / name
+        try:
+            if not path.is_file() or path.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
+        try:
+            rel = path.relative_to(root).as_posix()
+        except Exception:
+            continue
+        out.append({"path": rel, "mime": mimetypes.guess_type(name)[0] or ""})
+    if out:
+        # 刚被页面用到的副本推一下写入时间，别让裁剪把它当最老的删掉。
+        for item in out:
+            _touch_cache_file(cache / Path(item["path"]).name)
+    return out
 
 
 # 用户 m11618（2026-10-29）：群里的图显示「图片已清理」，查下来一张都没丢——
@@ -4562,7 +4732,7 @@ def forward_policy() -> tuple:
     return mode, all_images, drop_gif
 
 
-def forward_refs_plan(text: str, mid: str) -> tuple:
+def forward_refs_plan(text: str, mid: str, raw_sid: str = "") -> tuple:
     """这条转发挂哪些图：(要挂的 refs, 按设置丢掉的动图张数, 当前模式)。
 
     v4.70（用户 m01237）：转发里的动图可以整档不发——只丢动图，静态图照发，
@@ -4574,7 +4744,7 @@ def forward_refs_plan(text: str, mid: str) -> tuple:
     if mode == "off":
         return [], 0, mode
     try:
-        refs = list(_FORWARD_MEDIA_FN(mid) or [])
+        refs = list(_FORWARD_MEDIA_FN(mid, raw_sid) or [])
     except Exception:
         return [], 0, mode
     if not refs:
@@ -4595,9 +4765,9 @@ def forward_refs_plan(text: str, mid: str) -> tuple:
     return refs[:_FORWARD_IMAGE_PREVIEW], dropped, mode
 
 
-def forward_refs_for(text: str, mid: str) -> list:
+def forward_refs_for(text: str, mid: str, raw_sid: str = "") -> list:
     """这条消息是转发时，按策略取要挂进请求的图。"""
-    return forward_refs_plan(text, mid)[0]
+    return forward_refs_plan(text, mid, raw_sid)[0]
 
 
 def forward_model_refs(raw_sid: str, mid: str, refs, gif_mode: str = "grid",
@@ -5663,6 +5833,20 @@ class WindowManager:
         m = cls._BL_MID_RE.search(str(content or ""))
         return m.group(1).strip() if m else ""
 
+    @classmethod
+    def _bl_keep(cls, bl, uid, mid) -> bool:
+        """这条消息该不该进请求——用户 m06193 的口径，两处共用一套判断。
+
+        没有 message_id 的消息一律放行：宁可多留一条，也别把历史整段删掉。
+        有号的只留拉黑那一刻记下的放行名单（blacklist_keep_ids），其余算新消息，剔掉。
+        2026-11-18 审查 H04：待发分支以前把这两个条件反着用，拉黑前的历史被丢、
+        拉黑后的新消息反而进了请求，跟这里的口径正好相反。
+        """
+        if not uid or not bl or uid not in bl:
+            return True
+        mid = str(mid or "").strip()
+        return (not mid) or (mid in bl[uid])
+
     def _blacklist_drop(self, msgs, sid: str = "") -> list:
         """把黑名单用户「拉黑之后」的消息从请求上下文里剔掉。
 
@@ -5684,7 +5868,7 @@ class WindowManager:
                 out.append(m)
                 continue
             mid = self._bl_mid_of(content)
-            if not mid or mid in bl[uid]:
+            if self._bl_keep(bl, uid, mid):
                 out.append(m)
         return out
 
@@ -5734,7 +5918,7 @@ class WindowManager:
                 sender = str(it.get("sender") or "").strip()
                 if sender and sender in bl:
                     mid = str(it.get("message_id") or "").strip()
-                    if not mid or mid in bl[sender]:
+                    if not self._bl_keep(bl, sender, mid):
                         continue
             # 用户 m11091 第 5 条：bot 在「失败 / 卡住」的那一轮发出去的话，框架
             # 记忆里根本没有（它只在结算成功时才写记忆），重试轮的快照就漏了这一条。
@@ -6154,14 +6338,14 @@ class WindowManager:
             if _clean is not _raw_content:
                 _msg = _with_content(_msg, _clean)
                 msgs[_i] = _msg
-            _refs, _dropped, _fmode = forward_refs_plan(_text, _mid)
+            _refs, _dropped, _fmode = forward_refs_plan(_text, _mid, raw_sid)
             if _fmode in ("", "off", "text"):
                 # 用户 m18251：关掉 / 只给文字时，预填的整包图也不能漏进来。
                 if _fmode in ("off", "text"):
                     extra[_mid] = []
                 continue
             try:
-                _total = len(_FORWARD_MEDIA_FN(_mid) or []) if _FORWARD_MEDIA_FN else 0
+                _total = len(_FORWARD_MEDIA_FN(_mid, raw_sid) or []) if _FORWARD_MEDIA_FN else 0
             except Exception:
                 _total = 0
             # 用户 m18251：转发消息一律以策略为准，不再沿用预填的整包图。索引还没建好

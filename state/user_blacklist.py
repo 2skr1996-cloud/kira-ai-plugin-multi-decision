@@ -24,12 +24,25 @@ from pathlib import Path
 from core.plugin import logger
 
 
+def _ts_of(value) -> float:
+    """时间戳能读就读，读不出来当 0。
+
+    2026-11-18 审查 H08：以前这条转换在 _load 的 for 循环里裸着，一条坏 ts 就抛到
+    外层 except，把整份名单清空——等于所有被拉黑的人一次全放出来。
+    """
+    try:
+        return float(value or 0) or 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class UserBlacklist:
     """uid -> {name, ts, keep}。只影响请求上下文，不影响页面显示。"""
 
     def __init__(self, data_dir, filename: str = "user_blacklist.json"):
         self.path = Path(data_dir) / filename
         self._items: list[dict] = []
+        self.last_save_ok = True
         self._load()
 
     def _load(self):
@@ -49,25 +62,38 @@ class UserBlacklist:
                         out.append({
                             "uid": uid,
                             "name": str(it.get("name") or "").strip(),
-                            "ts": float(it.get("ts") or 0) or 0.0,
-                            "keep": [str(x) for x in (keep or []) if str(x).strip()],
+                            "ts": _ts_of(it.get("ts")),
+                            "keep": [str(x) for x in (keep if isinstance(keep, list) else [])
+                                     if str(x).strip()],
                         })
                     self._items = out
         except Exception:
             logger.exception("[multi-decision] 读取用户黑名单失败（忽略，用空表）")
             self._items = []
 
-    def _save(self):
+    def _write(self, items) -> bool:
+        """把这份清单写到盘上。写成功返回 True，失败只记日志。
+
+        2026-11-18 审查 M02：以前 _save 吞掉异常、调用方照样改内存并回「已拉黑」，
+        页面显示成功、重启就没了。现在先写盘，成功了调用方再提交内存。
+        """
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_name(self.path.name + ".tmp")
             tmp.write_text(
-                json.dumps({"items": self._items}, ensure_ascii=False, indent=2),
+                json.dumps({"items": items}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             tmp.replace(self.path)
+            self.last_save_ok = True
+            return True
         except Exception:
             logger.exception("[multi-decision] 保存用户黑名单失败")
+            self.last_save_ok = False
+            return False
+
+    def _save(self) -> bool:
+        return self._write(self._items)
 
     # ------------------------------------------------------------------ 读
     def items(self) -> list[dict]:
@@ -97,9 +123,7 @@ class UserBlacklist:
         cur = self.get(uid)
         if cur:
             cur["name"] = str(name or "").strip() or cur.get("name") or ""
-            merged = list(dict.fromkeys(list(cur.get("keep") or []) + keep))
-            cur["keep"] = merged
-            self._items = [cur if str(it.get("uid")) == uid else it for it in self._items]
+            items = [cur if str(it.get("uid")) == uid else it for it in self._items]
         else:
             cur = {
                 "uid": uid,
@@ -107,15 +131,18 @@ class UserBlacklist:
                 "ts": time.time(),
                 "keep": list(dict.fromkeys(keep)),
             }
-            self._items.append(cur)
-        self._save()
+            items = list(self._items) + [cur]
+        if not self._write(items):
+            return {}
+        self._items = items
         return dict(cur)
 
     def remove(self, uid: str) -> bool:
         uid = str(uid or "").strip()
-        before = len(self._items)
-        self._items = [it for it in self._items if str(it.get("uid") or "") != uid]
-        if len(self._items) == before:
+        items = [it for it in self._items if str(it.get("uid") or "") != uid]
+        if len(items) == len(self._items):
             return False
-        self._save()
+        if not self._write(items):
+            return False
+        self._items = items
         return True

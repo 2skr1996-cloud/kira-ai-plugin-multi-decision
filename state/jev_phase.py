@@ -965,8 +965,11 @@ class JevPhase:
 
     def __init__(self, plugin=None):
         self.plugin = plugin
-        self._fail_streak = 0
-        self._fallback_until = 0.0
+        # 失败计数与冷却按「主模型」分键（2026-11-18 审查 M01）：以前一份标量，
+        # 备用成功就把主模型的失败数清零，冷却攒不到 2，两个主模型之间也互相串。
+        self._fail_by_model: dict = {}
+        self._cool_by_model: dict = {}
+        self._fail_model_key = ""
         self._last_error = ""
 
     # ---------- 名字占位符 ----------
@@ -986,12 +989,26 @@ class JevPhase:
         """宿主是否支持 decision 类模型（旧宿主缺 DECISION 只挡住新模式）。"""
         return ModelType is not None and hasattr(ModelType, "DECISION")
 
+    def _streak_of(self, key: str) -> int:
+        return int(self._fail_by_model.get(key) or 0)
+
+    def _cool_of(self, key: str) -> float:
+        return float(self._cool_by_model.get(key) or 0.0)
+
+    def _note_fail(self, key: str, streak: int) -> None:
+        self._fail_by_model[key] = int(streak)
+        self._fail_model_key = key
+
+    def _note_cool(self, key: str, until: float) -> None:
+        self._cool_by_model[key] = float(until)
+        self._fail_model_key = key
+
     def status(self) -> dict:
         return {
             "available": self.available(),
             "models": len(self.models()),
             "error": self._last_error,
-            "fail_streak": self._fail_streak,
+            "fail_streak": self._streak_of(self._fail_model_key),
         }
 
     def models(self) -> list:
@@ -1261,14 +1278,19 @@ class JevPhase:
                 "via": "custom", "backend": "custom",
                 "api_base": _first_url, "api_model": str(tgt.get("model") or "")}
         tries = max(1, int(opt.retry) + 1)
+        # 2026-11-18 审查 M08：以前每次尝试的 usage 各自一份，循环里 last = got 一覆盖，
+        # 前面失败那几次的用量就丢了，账上只剩最后一次。这里按次累加。
+        usage_all = []
         for t in range(tries):
             attempts += 1
             got = await self._custom_call(opt, state_obj, tgt)
             got["attempts"] = attempts
             got["via"] = "custom"
+            usage_all.extend(got.get("usage") or [])
+            got["usage"] = list(usage_all)
             if got.get("ok"):
-                self._fail_streak = 0
-                self._fallback_until = 0.0
+                self._note_fail(str(tgt.get("id") or ""), 0)
+                self._note_cool(str(tgt.get("id") or ""), 0.0)
                 self._last_error = ""
                 return got
             last = got
@@ -1280,8 +1302,9 @@ class JevPhase:
                 break
             if t < tries - 1 and opt.retry_delay > 0:
                 await asyncio.sleep(opt.retry_delay)
-        self._fail_streak += 1
+        self._note_fail(str(tgt.get("id") or ""), self._streak_of(str(tgt.get("id") or "")) + 1)
         last["attempts"] = attempts
+        last["usage"] = list(usage_all)
         return last
 
     async def _chain(self, state_text: str, instructions: str, opt: JevOptions,
@@ -1296,15 +1319,18 @@ class JevPhase:
         legacy = opt.is_custom() and not opt.apis
         main_key = "" if legacy else opt.model
         fb_key = "" if legacy else opt.fallback
+        # 2026-11-18 审查 M01：fail_switch 关掉时不该还排备用，冷却也只看当前主模型。
+        fallback_on = bool(opt.fail_switch) and bool(fb_key)
         order = [("main", main_key)]
-        if fb_key:
+        if fallback_on:
             order.append(("fallback", fb_key))
-        if fb_key and self._fallback_until > now:
+        if fallback_on and self._cool_of(main_key) > now:
             order = [("fallback", fb_key), ("main", main_key)]
         last = {"ok": False, "error": "没有可用的 JEV 决策模型", "key": main_key,
                 "usage": [], "attempts": 0, "elapsed": 0.0, "probabilities": {},
                 "prob_reply": None, "choice": "", "confidence": None, "via": ""}
         attempts = 0
+        usage_all = []
         for kind, key in order:
             if not str(key or "").strip() and not (kind == "main" and opt.is_custom()):
                 continue
@@ -1327,9 +1353,14 @@ class JevPhase:
                                                opt.timeout)
                 got["attempts"] = attempts
                 got["via"] = kind
+                # 2026-11-18 审查 M08：重试 / 备用换手时用量也要累加，别只留最后一次。
+                usage_all.extend(got.get("usage") or [])
+                got["usage"] = list(usage_all)
                 if got.get("ok"):
-                    self._fail_streak = 0
-                    self._fallback_until = 0.0
+                    if kind == "main":
+                        # 备用答对不代表主模型恢复，只清主模型自己的账。
+                        self._note_fail(main_key, 0)
+                        self._note_cool(main_key, 0.0)
                     self._last_error = ""
                     return got
                 last = got
@@ -1342,10 +1373,12 @@ class JevPhase:
                 if t < tries - 1 and opt.retry_delay > 0:
                     await asyncio.sleep(opt.retry_delay)
             if kind == "main":
-                self._fail_streak += 1
-                if bool(opt.fail_switch) and self._fail_streak >= 2:
-                    self._fallback_until = time.time() + float(opt.cooldown)
+                streak = self._streak_of(main_key) + 1
+                self._note_fail(main_key, streak)
+                if fallback_on and streak >= 2:
+                    self._note_cool(main_key, time.time() + float(opt.cooldown))
         last["attempts"] = attempts
+        last["usage"] = list(usage_all)
         return last
 
     # ---------- 对外入口 ----------

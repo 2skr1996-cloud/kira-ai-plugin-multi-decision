@@ -238,14 +238,20 @@ DEFAULT_CHAT_RULES = """【说话语气】口语、短句，像群里一个正�
 【长度】一般一两句，最多三行。"""
 
 
-TOOL_HEAD = """需要外部信息（查资料、算数、看时间之类）时可以调工具，最多 %d 轮。
-工具结果会贴回给你，看到结果后再给最终判断。如果调用轮数到上限仍没有合适的结果，就直接回复告知。"""
+# 用户 m10866：① 工具不一定是查资料/算数这类外部信息，也可能是功能类（发图、记东西…），
+# 第一句不能只写「需要外部信息」；② 轮数不能写成「最多 N 轮」——设置里的 N 是「工具执行
+# 轮数」，之后还有最后一轮专门用来给结论/写回复，写成「最多 N 轮」会让模型以为第 N 轮就
+# 得收尾；③ 一轮能并发调几个也跟设置走。两个数都用命名占位符传。
+TOOL_HEAD = """需要用到工具才能办的事（查资料、算数、看时间，或者执行某个功能）可以调工具；一轮里可以同时调多个，最多 %(calls)d 个。
+工具结果会贴回给你，看到结果后再继续判断。工具最多执行 %(rounds)d 轮，之后还有最后一轮——那一轮不能再调工具，要直接给出结论：回还是不回。
+如果到最后一轮仍没有合适的结果，就直接回复告知。"""
 
 
 # 回复链的工具说明（用户 m13442 第 3 条）：回复这一轮最后一定要开口，所以轮数要留一轮
-# 给「看完工具结果再写回复」——%d 传的是「回复侧最大循环轮数 − 1」，不是决策那边的数。
-REPLY_TOOL_HEAD = """下面是你可以使用的工具，最多调用 %d 轮。
-工具结果会贴回给你，看到结果后再给最终判断，然后进行回复。如果调用轮数到上限仍没有合适的结果，就直接回复告知。"""
+# 给「看完工具结果再写回复」——%(rounds)d 传的是「回复侧最大循环轮数 − 1」，不是决策那边的数。
+REPLY_TOOL_HEAD = """下面是你可以使用的工具。需要用到工具才能办的事（查资料、算数、看时间，或者执行某个功能）可以调工具；一轮里可以同时调多个，最多 %(calls)d 个。
+工具结果会贴回给你，看到结果后再继续。工具最多执行 %(rounds)d 轮，之后还有最后一轮——那一轮不能再调工具，要用来写回复。
+如果到最后一轮仍没有合适的结果，就直接回复告知。"""
 
 
 # 模型回「回」的各种写法。判断句只认这些，其余一律当「不回」——宁可漏，不要硬回。
@@ -446,12 +452,15 @@ def parse_decision(text: str):
     try:
         data = json.loads(body)
     except Exception:
-        # 模型可能写成松格式，退一步只抓 reply 字段。
+        # 2026-11-18 审查 M06：以前这里用正则从任意文字里抓 "reply": true 当结论。
+        # 模型只回了半句解释、或者说明里带了 reply 字样，都会被当成「解析成功」，
+        # 于是不重试、不走备用，直接把这一轮定死。现在只认 JSON 对象；抓到字段
+        # 只记一条日志，方便回头看模型到底回了什么。
         m = re.search(r'"?reply"?\s*[:=]\s*"?([a-zA-Z\u4e00-\u9fff]+)"?', body)
         if m:
-            data = {"reply": m.group(1)}
-        else:
-            return None
+            logger.info("[multi-decision] 决策输出不是 JSON（文字里带了 reply=%s），按解析失败处理",
+                        m.group(1))
+        return None
     if not isinstance(data, dict):
         return None
     raw = data.get("reply", data.get("answer", data.get("结果")))
@@ -686,9 +695,13 @@ class DecisionPhase:
         # 身份环境（accounts / sessions / chat_env / time 四段原文）最近一次的样子。
         self._identity = ""
         self._identity_at = 0.0
-        # 失败计数与 fallback 冷却
-        self._fail_streak = 0
-        self._fallback_until = 0.0
+        # 失败计数与 fallback 冷却。
+        # 2026-11-18 审查 M01：以前是阶段实例上一份标量，两个会话用不同主模型会互相
+        # 影响；而且「成功就清零」不分主备，备用模型答一次就把主模型的失败数抹平，
+        # 冷却永远攒不到 2。现在按主模型分键记，备用成功不动主模型的账。
+        self._fail_by_model: dict = {}
+        self._cool_by_model: dict = {}
+        self._fail_model_key = ""
 
     # ---------- 工具目录 ----------
 
@@ -1038,7 +1051,9 @@ class DecisionPhase:
         req = LLMRequest(messages=messages)
         if tools:
             try:
-                from core.utils.tool_utils import ToolSet  # type: ignore
+                # 3.2.0 核对：ToolSet 从 v3.0.0 起就在 core.agent.tool，core.utils.tool_utils 里
+                # 只有 BaseTool。以前这里 ImportError 被 except 吞成 debug，配了决策工具也挂不上。
+                from core.agent.tool import ToolSet  # type: ignore
                 ts = ToolSet()
                 for t in tools:
                     ts.add(t)
@@ -1095,6 +1110,17 @@ class DecisionPhase:
             "usage": usage,
         }
 
+    @staticmethod
+    def _tool_result_cacheable(result) -> bool:
+        """工具结果能不能给后面的轮次复用。
+
+        2026-11-18 审查 M07：以前只挡「工具执行失败：」，超时那一条被当成功缓存，
+        下一轮（尤其 H07 那种降级重跑）直接把「工具执行超时（30 秒）」当工具结果
+        交给模型。超时和失败都不是结论，一律不进缓存。
+        """
+        text = str(result or "")
+        return not (text.startswith("工具执行失败：") or text.startswith("工具执行超时"))
+
     async def _run_tool(self, tool, args: dict, timeout: float = 0):
         """跑一个工具，返回 (正文, 附件 refs)。
 
@@ -1129,7 +1155,8 @@ class DecisionPhase:
             return str(got), []
 
     async def _tool_loop(self, client, messages, tools, opt: DecisionOptions, budget: dict,
-                         tool_cache: dict = None, reuse: bool = False) -> dict:
+                         tool_cache: dict = None, reuse: bool = False,
+                         reuse_media: bool = True) -> dict:
         """多轮工具循环。返回最后一次模型结果（带上累计 token）。
 
         H07：reuse=True 表示这是同一次决策的重试/降级尝试，同一件工具的同一个参数
@@ -1191,7 +1218,10 @@ class DecisionPhase:
                 if reuse and tool_cache is not None and tool is not None and key in tool_cache:
                     cached = tool_cache[key]
                     if isinstance(cached, tuple) and len(cached) == 2:
-                        result, media = cached[0], list(cached[1] or [])
+                        result = cached[0]
+                        # 2026-11-18 审查 H07：纯文字降级那一链只复用文字结果，
+                        # 别把上一次的工具配图又塞回一个「看不见图」的请求里。
+                        media = list(cached[1] or []) if reuse_media else []
                     else:
                         result = cached
                 if result is None:
@@ -1201,7 +1231,7 @@ class DecisionPhase:
                         result, media = "没有这个工具：" + name, []
                     # 只复用「真跑成功了」的；工具报错允许重试时再试一次。
                     if (tool is not None and tool_cache is not None
-                            and not result.startswith("工具执行失败：")):
+                            and self._tool_result_cacheable(result)):
                         tool_cache[key] = (result, list(media))
                 if media:
                     media_all.extend(media)
@@ -1232,31 +1262,54 @@ class DecisionPhase:
             budget["usage"].extend(last.get("usage") or [])
         return last
 
-    async def _chain(self, messages, tools, opt: DecisionOptions, tool_cache: dict = None) -> dict:
+    # ---------- 失败记账（按主模型分键） ----------
+
+    def _streak_of(self, key: str) -> int:
+        return int(self._fail_by_model.get(key) or 0)
+
+    def _cool_of(self, key: str) -> float:
+        return float(self._cool_by_model.get(key) or 0.0)
+
+    def _note_fail(self, key: str, streak: int) -> None:
+        self._fail_by_model[key] = int(streak)
+        self._fail_model_key = key
+
+    def _note_cool(self, key: str, until: float) -> None:
+        self._cool_by_model[key] = float(until)
+        self._fail_model_key = key
+
+    async def _chain(self, messages, tools, opt: DecisionOptions, tool_cache: dict = None,
+                     reuse_first: bool = False, reuse_media: bool = True) -> dict:
         """主模型 → 重试 → fallback。返回最后一次尝试的结果并附上用量。
 
         tool_cache 由 decide() 持有，跨「带图→纯文字降级」也共用，这样工具不会被
-        第二个链重新执行一遍。
+        第二个链重新执行一遍。reuse_first=True 是给降级那一链用的：它一进来就该吃
+        上一次的工具结果（2026-11-18 审查 H07——以前 attempts 每次从 0 起，降级链
+        首试 reuse=False，工具被实打实重跑了一遍，跟这段说明相反）。
         """
         if tool_cache is None:
             tool_cache = {}
         budget = {"in": 0, "out": 0, "cached": 0, "usage": []}
         now = time.time()
         # 用户 m08153：开关打开时阈值固定 2——第一次失败算 1，重试第一次失败算 2。
-        tripped = bool(opt.fail_switch) and self._fail_streak >= 2
-        cooling = self._fallback_until > 0 and now < self._fallback_until
+        # 2026-11-18 审查 M01：fail_switch 关掉时不该还排备用；账也只看当前主模型。
+        key = str(opt.model or "")
+        fallback_on = bool(opt.fail_switch) and bool(opt.fallback)
+        tripped = fallback_on and self._streak_of(key) >= 2
+        until = self._cool_of(key)
+        cooling = until > 0 and now < until
         # M17：冷却到期后放一次主模型探测。探测期间先把冷却位占住，失败不会变成探测风暴，
         # 成功则清掉冷却；只有备用一直失败、fail_streak 没被清零时才需要这条出口。
-        probe = bool(opt.fallback) and tripped and not cooling and self._fallback_until > 0
+        probe = fallback_on and tripped and not cooling and until > 0
         if probe:
-            self._fallback_until = now + opt.cooldown
-        use_fallback = bool(opt.fallback) and (cooling or (tripped and not probe))
+            self._note_cool(key, now + opt.cooldown)
+        use_fallback = fallback_on and (cooling or (tripped and not probe))
         order = []
         if use_fallback:
             order.append(("fallback", opt.fallback))
         else:
             order.append(("main", opt.model))
-        if opt.fallback and not use_fallback:
+        if fallback_on and not use_fallback:
             order.append(("fallback", opt.fallback))
 
         attempts = 0
@@ -1280,7 +1333,8 @@ class DecisionPhase:
                     msg_copy.append({"role": "user", "content": note})
                 usage_start = len(budget["usage"])
                 last = await self._tool_loop(client, msg_copy, tools, opt, budget,
-                                             tool_cache, reuse=attempts > 1)
+                                             tool_cache, reuse=reuse_first or attempts > 1,
+                                             reuse_media=reuse_media)
                 for item in budget["usage"][usage_start:]:
                     if not item.get("model"):
                         item["model"] = model or "fast"
@@ -1294,9 +1348,11 @@ class DecisionPhase:
                 if last.get("ok"):
                     parsed = parse_decision(last.get("text") or "")
                     if parsed is not None:
-                        self._fail_streak = 0
-                        if probe and kind == "main":
-                            self._fallback_until = 0.0
+                        # 只有主模型自己成功才算「通了」；备用答对不代表主模型恢复。
+                        if kind == "main":
+                            self._note_fail(key, 0)
+                            if probe:
+                                self._note_cool(key, 0.0)
                         last["parsed"] = parsed
                         last.update(budget)
                         return last
@@ -1318,9 +1374,10 @@ class DecisionPhase:
                     await asyncio.sleep(opt.retry_delay)
             # 主模型整轮（含重试）都没成，才记账；fallback 失败不再加计
             if kind == "main":
-                self._fail_streak += 1
-                if bool(opt.fail_switch) and self._fail_streak >= 2:
-                    self._fallback_until = time.time() + opt.cooldown
+                streak = self._streak_of(key) + 1
+                self._note_fail(key, streak)
+                if fallback_on and streak >= 2:
+                    self._note_cool(key, time.time() + opt.cooldown)
         last.update(budget)
         return last
 
@@ -1347,7 +1404,8 @@ class DecisionPhase:
         tools = self.pick_tools(opt.tools)
         help_text = self.tools_help(tools)
         if tools:
-            help_text = (TOOL_HEAD % max(1, opt.tool_rounds)) + "\n" + help_text
+            help_text = (TOOL_HEAD % {"rounds": max(1, opt.tool_rounds),
+                                      "calls": max(1, int(getattr(opt, "tool_calls_per_turn", 5) or 5))}) + "\n" + help_text
         layouts = getattr(self.plugin, "prompt_layouts", None)
         dyn = ""
         dyn_parts = []
@@ -1418,7 +1476,8 @@ class DecisionPhase:
                 if len(payload) < 2:
                     payload.append({"role": "user", "content": user_text})
                 chat_comparison = _comparison_snapshot(payload[1:], dyn)
-                got = await self._chain(payload, tools, opt, tool_cache)
+                got = await self._chain(payload, tools, opt, tool_cache,
+                                        reuse_first=True, reuse_media=False)
                 usage.extend(got.get("usage") or [])
                 parsed = got.get("parsed")
                 img_rows = []
@@ -1648,14 +1707,17 @@ class DecisionPhase:
         return msgs, [dict((k, v) for k, v in r.items() if k != "url") for r in used]
 
     def status(self) -> dict:
+        key = self._fail_model_key
+        until = self._cool_of(key)
         return {
-            "fail_streak": self._fail_streak,
-            "fallback_until": self._fallback_until,
-            "fallback_left": max(0, int(self._fallback_until - time.time())),
+            "fail_streak": self._streak_of(key),
+            "fallback_until": until,
+            "fallback_left": max(0, int(until - time.time())),
             "tools": len(self._catalog),
             "identity_at": self._identity_at,
         }
 
     def reset_fail(self) -> None:
-        self._fail_streak = 0
-        self._fallback_until = 0.0
+        self._fail_by_model.clear()
+        self._cool_by_model.clear()
+        self._fail_model_key = ""

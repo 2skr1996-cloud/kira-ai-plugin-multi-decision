@@ -123,6 +123,7 @@ from ..window.manager import (
     media_list,
     is_notice_shell_text,
     notice_shell_ts,
+    pending_tags,
 )
 
 logger = get_logger("multi_decision", "orange")
@@ -951,15 +952,21 @@ def _reply_parts(el, raw: str):
         bits = []
         for it in sub:
             v = ""
+            has_repr = False
             for attr in ("text", "content", "repr"):
                 try:
                     cand = getattr(it, attr, None)
                 except Exception:
                     cand = None
-                if isinstance(cand, str) and cand.strip():
-                    v = cand.strip()
-                    break
-            if not v:
+                if isinstance(cand, str):
+                    if attr == "repr":
+                        has_repr = True
+                    if cand.strip():
+                        v = cand.strip()
+                        break
+            if not v and not has_repr:
+                # 框架的元素都带 repr（Text 的 repr 就是正文本身）。空白段的 repr 是空格，
+                # 退回 str(it) 会画出「Text( )」——用户 m01849 的引用里就多出这一截。
                 try:
                     v = str(it).strip()
                 except Exception:
@@ -2928,6 +2935,7 @@ class DecisionEngine:
         st.silent_armed_ts = 0.0
         st.silent_fired_ts = 0.0
         st.rest_fired_ts = 0.0
+        st.silent_hold_ts = 0.0
         st.last_silent_ts = 0.0
 
     async def _discard_buffered_input(self, sid: str, keep_ids: set) -> None:
@@ -3281,7 +3289,7 @@ class DecisionEngine:
             logger.info("[multi-decision] 空转发补取跳过：没找到 QQ 适配器（mid=%s）" % mid)
             return 0
         try:
-            if not need and media_for_mid(mid):
+            if not need and media_for_mid(mid, raw_sid):
                 return 0
             items = await fetch_forward_items(bot, mid, raw_sid=raw_sid)
         except Exception as exc:
@@ -3550,9 +3558,10 @@ class DecisionEngine:
             return
 
         # 只有未被短语过滤的消息，才撤掉上一轮「静默 / 休兜已冒泡」标记。
-        if st.silent_fired_ts or st.rest_fired_ts:
+        if st.silent_fired_ts or st.rest_fired_ts or st.silent_hold_ts:
             st.silent_fired_ts = 0.0
             st.rest_fired_ts = 0.0
+            st.silent_hold_ts = 0.0
 
         if must:
             st.last_sender_id = sender
@@ -4833,6 +4842,71 @@ class DecisionEngine:
 
     # ------------------------------------------------------------------ 静默
 
+    def _silent_skip_types(self, sid: str) -> set:
+        """当前会话开着的那几类「没什么可接」的过滤（用户 m02652）。"""
+        out = set()
+        if self._c("silent_skip_video_link", sid):
+            out.add("video_link")
+        if self._c("silent_skip_short", sid):
+            out.add("short")
+        if self._c("silent_skip_single_image", sid):
+            out.add("single_image")
+        if self._c("silent_skip_single_sticker", sid):
+            out.add("single_sticker")
+        if self._c("silent_skip_empty_forward", sid):
+            out.add("empty_forward")
+        return out
+
+    def _silent_skip_count(self, sid: str) -> int:
+        """决策完之后的头几条受类型过滤；关掉就整批都按类型过滤。"""
+        if not self._c("silent_skip_after_decision", sid):
+            return 0  # 0 = 不限条数
+        try:
+            count = int(self._c("silent_skip_after_decision_count", sid) or 1)
+        except Exception:
+            count = 1
+        return max(1, min(50, count))
+
+    def _silent_hold(self, sid: str) -> bool:
+        """待发里没有能接的话时，兜底不冒泡（用户 m02245 / m02652 / m03197）。
+
+        用户 m03197 的口径：类型过滤只作用于决策完之后的头 X 条（默认第 1 条）。
+        这 X 条里命中已开启的过滤类型就不算「有内容」；第 X+1 条起不再看类型，
+        一律算有内容。所以「第一条是链接、第二条是正经话」照样兜底，
+        只有「攒着的全是这几类」才不冒泡。
+        拿不准的时候一律按「有正文」处理——宁可多冒一次泡，也别把该接的话吞掉。
+        """
+        win = getattr(self, "window", None)
+        if win is None:
+            return False
+        try:
+            items = win.pending_of(sid)
+        except Exception:
+            return False
+        rows = [it for it in (items or []) if isinstance(it, dict)]
+        if not rows:
+            return False
+        # 用户 m02652：老的「没正文不兜底」总开关并进这套按类型过滤——它会把单图片
+        # 一起吞掉，跟「单图片默认关」冲突，所以不再单独判一次。
+        tags_on = self._silent_skip_types(sid)
+        if not tags_on:
+            return False
+        try:
+            short_len = int(self._c("silent_skip_short_len", sid) or 6)
+        except Exception:
+            short_len = 6
+        short_len = max(1, min(50, short_len))
+        limit = self._silent_skip_count(sid)
+        kept = 0
+        for idx, it in enumerate(rows):
+            if limit and idx >= limit:
+                kept += 1  # 超出过滤范围的消息不再看类型，一律算有内容
+                continue
+            if pending_tags(it, short_len) & tags_on:
+                continue
+            kept += 1
+        return kept == 0
+
     def silent_eta(self, sid: str) -> dict:
         """静默 / 休兜 下一次会自动冒泡的绝对时刻（给左栏标签倒计时用）。
 
@@ -4871,6 +4945,9 @@ class DecisionEngine:
             st.silent_armed_ts = now
         last = max(st.last_msg_ts, st.last_trigger_ts, st.last_silent_ts,
                    st.silent_armed_ts)
+        # 用户 m02245：待发里只有链接 / 转发 / 图片时不冒泡，倒计时也别停在 0 秒。
+        if self._silent_hold(sid):
+            return {}
         return {"kind": kind, "at": float(last + need)}
 
     def start_silent_loop(self) -> None:
@@ -4949,6 +5026,17 @@ class DecisionEngine:
             last = max(st.last_msg_ts, st.last_trigger_ts, st.last_silent_ts,
                        st.silent_armed_ts)
             if now - last < need:
+                continue
+            # 用户 m02245：待发里只有链接 / 转发 / 图片时不冒泡——没有能接的话。
+            # 不写 last_silent_ts，等真有正文进来再按原节奏数。
+            if self._silent_hold(sid):
+                st.silent_hold_ts = now
+                if now - float(getattr(st, "silent_hold_log_ts", 0.0) or 0.0) >= 600:
+                    st.silent_hold_log_ts = now
+                    logger.info(
+                        f"[multi-decision] {sid} {'休息' if in_rest else '静默'} "
+                        f"{int((now - last) / 60)} 分钟，但待发里只有链接/转发/图片，不冒泡"
+                    )
                 continue
             st.last_silent_ts = now
             # 用户 m11091 第 1 条：打勾。两套兜底分开记，前端按 kind 亮对应的勾。

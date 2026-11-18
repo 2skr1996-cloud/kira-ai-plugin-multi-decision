@@ -636,6 +636,7 @@ class PromptLayouts:
             return out
         if has_static and has_ctx:
             return doc
+        out = dict(doc)
         used = {str(m.get("id") or "") for m in mods if isinstance(m, dict)}
         new_mods = list(mods)
         for typ, base_id, done in (("plugin_memory", "plugin-memory", has_static),
@@ -658,7 +659,6 @@ class PromptLayouts:
                 for i, m in enumerate(rest):
                     if str(m.get("type") or "") == "tools":
                         at = i + 1
-                new_mods = rest[:at] + added + rest[at:]
                 new_mods = rest[:at] + added + rest[at:]
         # 用户 m25796：本轮上下文补在动态段末尾（系统段前面），不再靠整份重排归位。
         if not has_ctx:
@@ -914,14 +914,14 @@ class PromptLayouts:
                  "- 管理员 QQ 号：%s" % admin_id]
         return chr(10).join(lines) + chr(10)
 
-    @staticmethod
-    def _now_text():
+    def _now_text(self):
         """框架同款时间串（Oct 29 2026 01:53 Thu），时区跟框架配置走。"""
         tz = None
         try:
             cfg = getattr(getattr(self.plugin, "ctx", None), "config", None)
             tz = cfg.get_timezone() if cfg is not None and hasattr(cfg, "get_timezone") else None
-        except Exception:
+        except Exception as exc:
+            logger.debug("[multi-decision] 读不到框架时区，时间串按系统本地时间：%s", exc)
             tz = None
         try:
             now = datetime.now(tz) if tz else datetime.now()
@@ -1414,33 +1414,6 @@ class PromptLayouts:
             return True
         return scope != "*" and all_scopes.get("*", {}).get(kind) is not None
 
-    def _looks_default(self, kind, doc):
-        """这份布局是不是「就是默认稿」——块名都在默认稿里，没有自己加的模块。
-
-        2026-11-08（J）：只有这种布局才提示「默认稿更新了」。自己加过模块的（比如回复页
-        自写的「表达风格」「信息获取与求证」）不提示——点恢复默认会把它们整份换掉。
-        正文改过也算默认稿（只是旧版本），所以只按块名认，不比正文。
-        """
-        try:
-            base = self.default_layout(kind, "", migrate=False)
-        except Exception:
-            logger.debug("[multi-decision] 取默认稿失败，按自定义布局处理", exc_info=True)
-            return False
-        names = {str(m.get("label") or "").strip() for m in (base.get("modules") or [])
-                 if isinstance(m, dict) and m.get("type") in ("text", "custom")}
-        names.add("角色设定")
-        for m in (doc or {}).get("modules") or []:
-            if not isinstance(m, dict) or not m.get("enabled", True):
-                continue
-            if m.get("type") not in ("text", "custom"):
-                continue
-            if m.get("type") == "custom":
-                return False
-            if str(m.get("label") or "").strip() not in names:
-                return False
-        return True
-
-
     def save(self, kind, sid, layout, expected_revision):
         if not isinstance(expected_revision, str) or expected_revision != self.revision():
             return {"ok": False, "code": "REVISION_CONFLICT", "error": "提示词已变更，请重新读取后再保存；当前草稿未覆盖"}
@@ -1459,10 +1432,31 @@ class PromptLayouts:
         # 2026-11-08（J）：记下这份布局是按哪一版默认稿存的。默认稿以后一改，设置页就能
         # 提示「默认提示词更新了，推荐点恢复默认」；「已关闭提示」记的也是版本号，
         # 关掉以后同一版默认稿不再提示（换一版默认稿才会再提醒一次）。
-        stamps = new.setdefault("notices", {}).setdefault(scope, {})
+        # 2026-11-18（J，用户 m11554）：提示改成按模块记——mods 是存盘那一刻每块默认稿的
+        # 指纹，以后哪一块的默认稿改了，就只提那一块：还在用旧版默认的挂在模块旁边，
+        # 自己改过正文的挂到顶上。seen_mods 记「这一版已经点掉 ✕」的模块。
+        owner = scope
+        if scope != "*" and new.get("layouts", {}).get(scope, {}).get(kind) is None:
+            owner = "*"
+        stamps = new.setdefault("notices", {}).setdefault(owner, {})
         old = stamps.get(kind) if isinstance(stamps.get(kind), dict) else {}
+        # 2026-11-18（J）：基线只跟着「正文已经和当前默认稿一致」的模块走。用户自己改过正文的
+        # 模块保留旧基线，这样默认稿以后再改它还能再提一次；否则点一次「换成新版」保存之后，
+        # 其它还没处理的模块提示会跟着一起消失。
+        cur_mods = self._mod_fps(kind)
+        prev_mods = old.get("mods") if isinstance(old.get("mods"), dict) else {}
+        mods = dict(prev_mods) if prev_mods else dict(cur_mods)
+        for m in ((clean or {}).get("modules") or []):
+            mid = str(m.get("id") or "")
+            if mid and mid in cur_mods and self._mod_fp(m) == cur_mods[mid]:
+                mods[mid] = cur_mods[mid]
+        if clean is None:
+            mods = dict(cur_mods)
+        prev_seen = old.get("seen_mods") if isinstance(old.get("seen_mods"), dict) else {}
         stamps[kind] = {"built_for": self.default_fp(kind),
-                        "seen": str((old or {}).get("seen") or "")}
+                        "seen": str((old or {}).get("seen") or ""),
+                        "mods": mods,
+                        "seen_mods": dict(prev_seen)}
         self._write(self.path, new)
         self._data = new  # 失败不修改内存，也不报告假成功。
         return {"ok": True, "revision": self.revision()}
@@ -1478,34 +1472,113 @@ class PromptLayouts:
                            str(m.get("content") or "")] for m in mods], ensure_ascii=False)
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
-    def _notice(self, kind, scope, stored, doc=None):
-        """这一作用域存过旧稿、而默认稿已经改过时，页面上挂一条提示（可关，关掉不再提）。
+    @staticmethod
+    def _mod_fp(m):
+        """单块默认稿的指纹：只认正文。改名、挪位置、停用都不算「默认稿改了」。"""
+        return hashlib.sha1(str((m or {}).get("content") or "").encode("utf-8")).hexdigest()[:12]
 
-        2026-11-08（J）：只对「看起来就是默认稿」的布局提示——自己加过模块的布局
-        点恢复默认会被整份换掉，不能劝人点。
+    def _mod_fps(self, kind):
+        """默认稿里每块模块的指纹：{模块 id: 指纹}。"""
+        try:
+            mods = self.default_layout(kind, "", migrate=False).get("modules", [])
+        except Exception:
+            logger.debug("[multi-decision] 算默认稿分块指纹失败", exc_info=True)
+            return {}
+        out = {}
+        for m in mods:
+            mid = str(m.get("id") or "")
+            if mid:
+                out[mid] = self._mod_fp(m)
+        return out
+
+    def _notice_owner(self, kind, scope):
+        """提示记在「真正持有这份布局」的作用域上。
+
+        2026-11-18（J）：会话卡片没有自己的布局、继承全局时，提示跟着全局那条走——
+        全局点一次 ✕，所有继承全局的卡片一起安静；自己存过布局的会话仍各记各的。
+        """
+        if scope != "*" and self._data.get("layouts", {}).get(scope, {}).get(kind) is None:
+            return "*"
+        return scope
+
+    def _notice(self, kind, sid, stored, doc=None):
+        """默认稿改过时给提示：还在用旧版默认的那块挂在模块旁边，自己改过的挂到顶上。
+
+        2026-11-18（J，用户 m11554）：提示按模块算，不再整份一起提。
+        - 模块旁边（mode=inline）：这一块的默认稿改了，而用户用的还是旧版默认——点一下就能换成新版。
+        - 顶上（mode=top）：这一块的默认稿改了，但用户自己改过正文，不能替他换，只报个名字。
+        - 用户删掉的模块不提；已经换成新版的不提；这一版点过 ✕ 的不提。
         """
         if kind not in KINDS:
-            return {"show": False, "fp": ""}
+            return {"show": False, "fp": "", "modules": []}
         cur = self.default_fp(kind)
+        cur_mods = self._mod_fps(kind)
         if not stored or not cur:
-            return {"show": False, "fp": cur}
-        if doc is not None and not self._looks_default(kind, doc):
-            return {"show": False, "fp": cur}
-        stamp = self._data.get("notices", {}).get(scope, {}).get(kind)
+            return {"show": False, "fp": cur, "modules": []}
+        scope = self._scope(sid)
+        stamp = self._data.get("notices", {}).get(self._notice_owner(kind, scope), {}).get(kind)
         stamp = stamp if isinstance(stamp, dict) else {}
-        if str(stamp.get("seen") or "") == cur:
-            return {"show": False, "fp": cur}
-        return {"show": str(stamp.get("built_for") or "") != cur, "fp": cur}
+        saved = stamp.get("mods") if isinstance(stamp.get("mods"), dict) else None
+        if not saved:
+            # 老记录只有整份指纹：按老规则给顶部提示，没有模块级提示。
+            if str(stamp.get("seen") or "") == cur:
+                return {"show": False, "fp": cur, "modules": []}
+            return {"show": str(stamp.get("built_for") or "") != cur, "fp": cur, "modules": []}
+        seen = stamp.get("seen_mods") if isinstance(stamp.get("seen_mods"), dict) else {}
+        if doc is None:
+            doc, _ = self.layout(kind, sid)
+        mine = {}
+        for m in (doc.get("modules") or []):
+            mid = str(m.get("id") or "")
+            if mid:
+                mine[mid] = m
+        labels = {}
+        try:
+            for m in (self.default_layout(kind, "", migrate=False).get("modules") or []):
+                labels[str(m.get("id") or "")] = str(m.get("label") or "")
+        except Exception:
+            logger.debug("[multi-decision] 取默认稿模块名失败", exc_info=True)
+        items = []
+        for mid, cfp in cur_mods.items():
+            old = saved.get(mid)
+            if old is None or old == cfp:
+                continue
+            if str(seen.get(mid) or "") == cfp:
+                continue
+            m = mine.get(mid)
+            if m is None:
+                continue
+            ufp = self._mod_fp(m)
+            if ufp == cfp:
+                continue
+            items.append({"id": mid,
+                          "label": labels.get(mid) or str(m.get("label") or ""),
+                          "mode": ("inline" if ufp == old else "top")})
+        return {"show": any(it["mode"] == "top" for it in items), "fp": cur, "modules": items}
 
-    def dismiss_notice(self, kind, sid=""):
-        """2026-11-08（J）：关掉「默认稿更新」提示——只关这一版默认稿，换一版还会再提一次。"""
+    def dismiss_notice(self, kind, sid="", module_id=""):
+        """2026-11-08（J）：关掉「默认稿更新」提示——只关这一版默认稿，换一版还会再提一次。
+
+        2026-11-18（J）：带 module_id 只关那一块（模块旁边的 ✕）；不带就整页一起关（顶上的 ✕）。
+        """
         if kind not in KINDS:
             raise ValueError("kind 必须是 decision、reply 或 jev")
         scope, cur = self._scope(sid), self.default_fp(kind)
+        cur_mods = self._mod_fps(kind)
         new = copy.deepcopy(self._data)
-        stamps = new.setdefault("notices", {}).setdefault(scope, {})
+        stamps = new.setdefault("notices", {}).setdefault(self._notice_owner(kind, scope), {})
         old = stamps.get(kind) if isinstance(stamps.get(kind), dict) else {}
-        stamps[kind] = {"built_for": str((old or {}).get("built_for") or ""), "seen": cur}
+        seen_mods = dict(old.get("seen_mods") or {}) if isinstance(old.get("seen_mods"), dict) else {}
+        mid = str(module_id or "")
+        if mid:
+            if mid in cur_mods:
+                seen_mods[mid] = cur_mods[mid]
+        else:
+            seen_mods.update(cur_mods)
+        stamps[kind] = {"built_for": str((old or {}).get("built_for") or ""),
+                        "seen": (str((old or {}).get("seen") or "") if mid else cur),
+                        "mods": old.get("mods") if isinstance(old.get("mods"), dict) else {},
+                        "seen_mods": seen_mods}
         self._write(self.path, new)
         self._data = new
         return {"ok": True, "revision": self.revision()}
@@ -1560,7 +1633,7 @@ class PromptLayouts:
         tools = self._tools_text(opt) if hasattr(opt, "tools") else ""
         return {"persona": persona, "personas": personas, "tools": tools, "opt": opt}
 
-    def _tools_text(self, opt=None, sid="", names=None, head=None, rounds=None):
+    def _tools_text(self, opt=None, sid="", names=None, head=None, rounds=None, calls=None):
         """用户 m02159 图3：勾了哪个工具就写哪个。
 
         用户 m11103：决策链与回复链各有一份名单——names 给了就按它写（回复链走这条），
@@ -1588,7 +1661,15 @@ class PromptLayouts:
                         rounds = self.plugin.decision_options(sid).tool_rounds
                     except Exception:
                         rounds = 2
-            return ((head or TOOL_HEAD) % max(1, int(rounds or 2))) + "\n" + text
+            if calls is None:
+                calls = getattr(opt, "tool_calls_per_turn", None)
+                if calls is None:
+                    try:
+                        calls = self.plugin.decision_options(sid).tool_calls_per_turn
+                    except Exception:
+                        calls = 5
+            return ((head or TOOL_HEAD) % {"rounds": max(1, int(rounds or 2)),
+                                           "calls": max(1, int(calls or 5))}) + "\n" + text
         except Exception:
             logger.exception("[multi-decision] 拼工具说明失败")
             return ""
@@ -1604,13 +1685,15 @@ class PromptLayouts:
             return ""
         from .decision_phase import REPLY_TOOL_HEAD
         rounds = 5
+        calls = 5
         try:
             limits = self.plugin.reply_tool_limits(sid) or {}
             rounds = int(limits.get("rounds") or 5)
+            calls = int(limits.get("calls_per_turn") or 5)
         except Exception:
             logger.exception("[multi-decision] 读回复工具参数失败，工具说明按框架默认 5 轮写")
         return self._tools_text(sid=sid, names=names, head=REPLY_TOOL_HEAD,
-                                rounds=max(1, rounds - 1))
+                                rounds=max(1, rounds - 1), calls=max(1, calls))
 
     def _sysseg_part(self, kind, m, source_rows, seg_name, typ):
         """系统段里按记忆 / 时间分开的一格；正文、注入、framed 的算法与旧合并段一致。"""
@@ -2316,4 +2399,4 @@ class PromptLayouts:
                 "official_reference": copy.deepcopy(self._official),
                 "tool_choices": choices, "tools_selected": picked,
                 "templates": self.templates(),
-                "default_notice": self._notice(kind, self._scope(sid), stored, doc)}
+                "default_notice": self._notice(kind, sid, stored, doc)}

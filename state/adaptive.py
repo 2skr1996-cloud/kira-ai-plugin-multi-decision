@@ -183,14 +183,15 @@ class AdaptiveStats:
             paths.extend(archive.glob("*.jsonl"))
         return paths
 
-    def clear_before(self, cutoff: float) -> int:
-        """删掉早于 cutoff 的按天统计和用量账行，返回删掉的条数。
+    def clear_stats_before(self, cutoff: float) -> int:
+        """只删按天统计（stats/*.json）里早于 cutoff 的日键，不动用量账。
 
-        只动 stats/ 下的 *.json 和 *.jsonl，不碰 tokens.backfill。
+        2026-11-18（用户 m13966）：消息日志与会话统计合成一行、用量账本单独一行，
+        所以「清统计」和「清账本」必须能分开点。
         日键按当天 23:59:59 算，整天的数据都早于 cutoff 才删。
         """
         if not cutoff:
-            return self.clear_all()
+            return self.clear_stats_all()
         self.flush()
         removed = 0
         for path in list(self.dir.glob("*.json")):
@@ -226,6 +227,31 @@ class AdaptiveStats:
                         self._dirty.discard(sid)
             except Exception:
                 continue
+        return removed
+
+    def clear_stats_all(self) -> int:
+        """只清按天统计（stats/*.json），不动用量账。"""
+        removed = 0
+        for path in list(self.dir.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    removed += len(raw)
+            except Exception:
+                pass
+            try:
+                path.unlink()
+            except Exception:
+                continue
+        self._data.clear()
+        self._dirty.clear()
+        return removed
+
+    def clear_ledger_before(self, cutoff: float) -> int:
+        """只删用量账（*.jsonl + archive/*.jsonl）里早于 cutoff 的行。"""
+        if not cutoff:
+            return self.clear_ledger_all()
+        removed = 0
         for path in self._jsonl_paths():
             try:
                 lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
@@ -255,20 +281,9 @@ class AdaptiveStats:
                 continue
         return removed
 
-    def clear_all(self) -> int:
-        """清空 stats/ 下的按天统计和用量账，返回删掉的条数。"""
+    def clear_ledger_all(self) -> int:
+        """清空用量账（*.jsonl + archive/*.jsonl），不动按天统计。"""
         removed = 0
-        for path in list(self.dir.glob("*.json")):
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    removed += len(raw)
-            except Exception:
-                pass
-            try:
-                path.unlink()
-            except Exception:
-                continue
         for path in self._jsonl_paths():
             try:
                 removed += sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
@@ -278,9 +293,15 @@ class AdaptiveStats:
                 path.unlink()
             except Exception:
                 continue
-        self._data.clear()
-        self._dirty.clear()
         return removed
+
+    def clear_before(self, cutoff: float) -> int:
+        """删掉早于 cutoff 的按天统计和用量账行（两样一起清）。"""
+        return self.clear_stats_before(cutoff) + self.clear_ledger_before(cutoff)
+
+    def clear_all(self) -> int:
+        """清空 stats/ 下的按天统计和用量账（两样一起清）。"""
+        return self.clear_stats_all() + self.clear_ledger_all()
 
     # ------------------------------------------------------------------ 记录
 

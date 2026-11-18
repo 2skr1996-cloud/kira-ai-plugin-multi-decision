@@ -186,6 +186,7 @@ def _merge_slots(*sources):
     return out
 
 
+
 def _content_refs(item):
     """Only explicit original content parts; aggregate media fields are not proof."""
     for key in ("content", "raw"):
@@ -260,6 +261,11 @@ def _unassigned_media(item, raw_sid, public_media):
     pending = _merge_slots(item.get("media_refs"), explicit)
     converted = [_public_ref(ref, raw_sid, public_media)
                  for ref in pending if isinstance(ref, dict)]
+    # 转发正文里的显式图引用是聊天里的真实顺序；聚合 media 是发给模型的那一份，
+    # 图片会被排到贴纸前面（[image, sticker, sticker]），用户 m00593 的正文卡与
+    # 引用卡因此错位一张。有显式引用时以它为准，聚合 media 只补缺。
+    if explicit is not None:
+        return _merge_slots(converted, refs)
     return _merge_slots(refs, converted)
 
 
@@ -415,6 +421,16 @@ def _native_display(chain, raw_sid: str, public_media):
     known = walk(chain)
     return known, refs, direct, None if needs_original_body else "".join(body).strip()
 
+# 昵称里可能带「]」（用户 m00456 的 [%ĀĀ␇Ö]我在未来，等你）：以前 [^\]\r\n]* 会在
+# 第一个 ] 处截断，整条正文解析失败，转发证明明明在也用不上，引用卡只剩「内容未获取」。
+_OWNER_NICK = r"(?:\[user_nickname:[^\r\n]*?\]\s*)?"
+# 转发「还有 N 张图没发」是只给模型看的提示，跟着 content 进了正文；投影时按固定文案
+# 剥掉（和 window/manager.py 的 _VIEW_HINT_RE 同一口径，那边不能反向依赖本模块）。
+_VIEW_HINT_RE = re.compile(
+    r"（这条转发还有 \d+ 张图没发(?:，需要看就调用 view_forward)?）"
+    r"|（另有 \d+ 张动图按设置没有发给模型）"
+)
+
 
 def _owner_forward_body(original, mid, raw_sid):
     if (not isinstance(original, dict) or message_id(original) != mid
@@ -433,10 +449,10 @@ def _owner_forward_body(original, mid, raw_sid):
         head = _OWNER_HEAD.match(text)
         if not head or str(head.group(1) or head.group(2) or "").strip() != mid:
             return None
-        outer = re.fullmatch(r"\s*(?:\[user_nickname:[^\]\r\n]*\]\s*)?\|\s*([\s\S]*)", text[head.end():])
+        outer = re.fullmatch(r"\s*" + _OWNER_NICK + r"\|\s*([\s\S]*)", text[head.end():])
         if not outer:
             return None
-        bodies.append(outer.group(1).strip())
+        bodies.append(_VIEW_HINT_RE.sub("", outer.group(1)).strip())
     return bodies[0] if bodies and all(body == bodies[0] for body in bodies) else None
 
 
@@ -571,7 +587,7 @@ def _forward_cache_display(original, mid, raw_sid, chain, public_media, display_
 
 def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_of_content=None,
                   forward_media_for_mid=None, forward_proof_items=None, forward_display_proof_for_mid=None,
-                  original_media_for_mid=None) -> list:
+                  original_media_for_mid=None, media_by_digest=None) -> list:
     """Copy API items and add display only; aggregate media/raw/text stay untouched.
 
     public_media is the injected (path, mime, raw_sid) callback. Unknown aggregate
@@ -679,7 +695,7 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
         # False，归属结论不变（部分 refs 不能当成完整归属）。
         if not display["own_media_known"] and mid and callable(forward_media_for_mid):
             try:
-                _all = forward_media_for_mid(mid) or []
+                _all = forward_media_for_mid(mid, raw_sid) or []
             except Exception:
                 _all = []
             _have = len(display.get("unassigned_media") or [])
@@ -725,6 +741,23 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
                     break
             if len(_digests) != len(_now):
                 _digests = [""] * len(_now)
+            # 用户 m12814 图3：老快照里这条消息的 message_id 早就不在索引里了（框架清过
+            # 消息库），_media_by_mid_index 一条都认不回来，美化档就退回模型侧那张九宫格
+            # 拼图。派生图名里的摘要就是原图缓存文件名的前缀，按摘要直接去缓存目录捞。
+            if not _ready_orig and callable(media_by_digest):
+                _by_digest = []
+                for _digest in _digests:
+                    if not _digest:
+                        continue
+                    try:
+                        _got_refs = media_by_digest(_digest) or []
+                    except Exception:
+                        _got_refs = []
+                    for _ref in _got_refs:
+                        if isinstance(_ref, dict):
+                            _by_digest.append(_public_ref(_ref, raw_sid, public_media))
+                _ready_orig = [ref for ref in _by_digest
+                               if (ref.get("path") or ref.get("url")) and not ref.get("missing")]
             _picked = []
             if _now:
                 for _i, _path in enumerate(_now):
@@ -839,4 +872,44 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
         if not (quote.get("media") or []):
             _fallback = qdisp.get("orig_media") or moved
             disp["direct_reply"] = dict(quote, media=list(_fallback))
+    # 用户 m12814 图1：被引用的那条不在本轮窗口里（更早的消息 / 别的会话），上面按
+    # message_id 回索引取不到它的图，第二轮 by_mid 也找不到它，引用块就只剩「图片」
+    # 占位；而框架挂到外层消息目录的那张图被 original_media_for_mid 当成「这条自己的
+    # 原图」写进了 orig_media，美化档就画到引用块外面去了。
+    # 这条消息自己没有图（own_media_known 且 own_media 为空——_native_display 的 walk()
+    # 遇到 Reply 就 continue，所以这是权威结论），orig_media 只可能是被引用那张：
+    # 引用块还没有图就挪进 direct_reply.media，已经有了就把重复的那份剔掉。
+    # 后一种才是常态：第一轮按 message_id 回索引、第二轮按 by_mid 都已经把图挂进
+    # direct_reply.media 了，orig_media 里那份就成了引用块外面多出来的一张。
+    for row in out:
+        if not isinstance(row, dict):
+            continue
+        disp = row.get("display")
+        if not isinstance(disp, dict):
+            continue
+        quote = disp.get("direct_reply")
+        if not isinstance(quote, dict):
+            continue
+        _orig = disp.get("orig_media")
+        if not isinstance(_orig, list) or not _orig:
+            continue
+        _ownless = (disp.get("own_media_known")
+                    and not disp.get("own_media") and not disp.get("unassigned_media"))
+        if _ownless and not quote.get("media"):
+            disp["direct_reply"] = dict(quote, media=list(_orig))
+            disp.pop("orig_media", None)
+            continue
+        _qpaths = {str(ref.get("path") or ref.get("url") or "")
+                   for ref in (quote.get("media") or []) if isinstance(ref, dict)}
+        _qpaths.discard("")
+        if not _qpaths:
+            continue
+        _kept = [ref for ref in _orig
+                 if str((ref or {}).get("path") or (ref or {}).get("url") or "") not in _qpaths]
+        if len(_kept) == len(_orig):
+            continue
+        if _kept:
+            disp["orig_media"] = _kept
+        else:
+            disp.pop("orig_media", None)
     return out

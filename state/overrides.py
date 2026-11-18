@@ -22,6 +22,7 @@ class Overrides:
     def __init__(self, data_dir, filename: str = "overrides.json"):
         self.path = Path(data_dir) / filename
         self._data: dict[str, dict[str, Any]] = {}
+        self.last_save_ok = True
         self.load()
 
     # ------------------------------------------------------------------ 读写
@@ -39,16 +40,28 @@ class Overrides:
             self._data = {}
         return self._data
 
-    def _save(self) -> None:
+    def _write(self, data) -> bool:
+        """写盘成功返回 True。失败只记日志，由调用方决定要不要提交内存。
+
+        2026-11-18 审查 M02：以前 _save 吞异常，接口照样回「已保存」，
+        页面显示成功、重启就回到旧值。
+        """
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(
-                json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8"
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             os.replace(tmp, self.path)
+            self.last_save_ok = True
+            return True
         except Exception:
             logger.exception("[multi-decision] 保存会话配置覆盖失败")
+            self.last_save_ok = False
+            return False
+
+    def _save(self) -> bool:
+        return self._write(self._data)
 
     # ------------------------------------------------------------------ 查询
 
@@ -73,17 +86,33 @@ class Overrides:
         """整份替换某个会话的覆盖；values 为空等于恢复跟随全局。"""
         sid = str(sid)
         clean = {str(k): v for k, v in (values or {}).items()}
+        data = dict(self._data)
         if clean:
-            self._data[sid] = clean
+            data[sid] = clean
         else:
-            self._data.pop(sid, None)
-        self._save()
+            data.pop(sid, None)
+        if not self._write(data):
+            return self.get(sid)
+        self._data = data
         return self.get(sid)
 
-    def clear(self, sid: str) -> None:
-        self._data.pop(str(sid), None)
-        self._save()
+    def clear(self, sid: str) -> bool:
+        sid = str(sid)
+        if sid not in self._data:
+            self.last_save_ok = True
+            return True
+        data = dict(self._data)
+        data.pop(sid, None)
+        if not self._write(data):
+            return False
+        self._data = data
+        return True
 
-    def clear_all(self) -> None:
-        self._data.clear()
-        self._save()
+    def clear_all(self) -> bool:
+        if not self._data:
+            self.last_save_ok = True
+            return True
+        if not self._write({}):
+            return False
+        self._data = {}
+        return True

@@ -531,6 +531,38 @@ def _provider_label_of(path: Any, provider_id: str = "", model_name: str = "") -
     return hits[0][:60] if len(set(hits)) == 1 else ""
 
 
+def _model_name_of(path: Any, provider_id: str, model_id: str) -> str:
+    """provider_id:model_id → 模型名（用户 m04493）。
+
+    框架有时回报 provider_id + model_id、有时只回报模型名，同一个模型在账本里
+    落成两个 key（例如 d9027599f69c:f5e6… 与 gemini-4-hydrogen-high）。价目按 key
+    精确匹配，于是有量的那行查不到价、显示「未定价」。这里只读
+    providers[pid].model_config.*[mid].model_name，绝不碰密钥等其他字段。
+    """
+    pid = str(provider_id or "").strip()
+    mid = str(model_id or "").strip()
+    if not (pid and mid):
+        return ""
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8")) or {}
+    except Exception:
+        return ""
+    provs = raw.get("providers") if isinstance(raw, dict) else None
+    prov = provs.get(pid) if isinstance(provs, dict) else None
+    mcfg = prov.get("model_config") if isinstance(prov, dict) else None
+    if not isinstance(mcfg, dict):
+        return ""
+    for group in mcfg.values():
+        if not isinstance(group, dict):
+            continue
+        item = group.get(mid)
+        if isinstance(item, dict):
+            name = str(item.get("model_name") or "").strip()
+            if name:
+                return name[:80]
+    return ""
+
+
 def content_text(content: Any) -> str:
     """把消息 content 拉成纯文本：多模态只留文字，图片记占位。"""
     if isinstance(content, str):
@@ -685,6 +717,13 @@ class Tracer:
         # 用户 m00375 第 8 条：模型名 → API 渠道显示名，按配置文件 mtime 缓存。
         self._cfg_label_mtime: Optional[float] = None
         self._cfg_label_map: Optional[Dict[str, str]] = None
+        # 用户 m04493：provider_id:model_id → 模型名，按配置文件 mtime 缓存。
+        self._cfg_name_mtime: Optional[float] = None
+        self._cfg_name_map: Dict[str, str] = {}
+        # 用户 m01317：pid:mid 与模型名同时出现过就记下来（model_names.json）。
+        # 框架有时只回报模型名、有时回报 pid:mid，价目按 key 精确匹配；等那条
+        # pid:mid 的行滚出窗口，价格就成了孤儿，有量的那行又变回「未定价」。
+        self._name_mem: Optional[Dict[str, str]] = None
         # v3.48（用户 m06761 第 1 条）：账本是这版才有的，升级当天 24 小时窗口里
         # 早先那些轮只剩 traces 还留着。第一次起来时把盘上轨迹回填进账本，
         # 「请求平均用时」「最近24小时 token」的轮数立刻能超过 keep=60 的截断。
@@ -783,6 +822,12 @@ class Tracer:
                                 identity_source="config_unique_id")
         except Exception:
             pass
+        if not identity["model"]:
+            # 用户 m01570：配置里查不到（供应商被删了）就用自己记的模型名兜底，
+            # 免得账本里落成「未记录模型」。
+            name = self.model_name_of(mid)
+            if name and name != mid:
+                identity.update(model=name, model_name=name, identity_source="name_memory")
         return identity
 
     def step(self, event: Any, llm_resp: Any) -> None:
@@ -1056,6 +1101,37 @@ class Tracer:
             return row["kind"]
         return "decision" if row.get("decision_only") or str(row.get("event_id") or row.get("key") or "").startswith("dec-") else "reply"
 
+    # 用户 m02330：JEV 决策走的是 custom:<模型> 这一条接口，可早先的账本行没写 mode，
+    # 于是 2026-11-08 那 5 次 JEV 全被算进普通「决策」柱，价目页上一直看不到紫柱。
+    # 这里按模型名把它认回来：行里自己写了 mode 就以 mode 为准，没写才按模型名推断，
+    # 这样已经落盘的老行也能重新归位。
+    _JEV_MODEL_NAMES = ("decision-model-preview", "jev-latest")
+
+    @classmethod
+    def _is_jev_row(cls, row: dict) -> bool:
+        names = [row.get("model"), row.get("model_name")]
+        usage = row.get("usage")
+        if isinstance(usage, list):
+            for item in usage:
+                if isinstance(item, dict):
+                    names.append(item.get("model"))
+        for name in names:
+            text = str(name or "").strip().lower()
+            if not text:
+                continue
+            if text.startswith("custom:") or text in cls._JEV_MODEL_NAMES:
+                return True
+        return False
+
+    @classmethod
+    def _row_mode(cls, row: dict) -> str:
+        mode = str(row.get("mode") or "").strip().lower()
+        if mode:
+            return mode
+        if cls._kind(row) != "decision":
+            return ""
+        return "jev" if cls._is_jev_row(row) else ""
+
     def _row_key(self, row: dict) -> tuple:
         event = str(row.get("event_id") or row.get("key") or "").strip()
         if not event:
@@ -1101,6 +1177,9 @@ class Tracer:
             row["usage"] = usage
         else:
             row["usage"] = [usage_event(row)]
+        for item in row.get("usage") or []:
+            if isinstance(item, dict):
+                self.remember_model_name(item.get("model"), item.get("model_name"))
         return row
 
     def _snapshot_trace_row(self, rec: dict, payload: dict) -> dict:
@@ -1627,7 +1706,13 @@ class Tracer:
         silent 是「不回报缓存命中」的模型名集合（见 _silent_cache_models）：这些模型
         的 cached 恒为 0，命中时按完整 prompt 估计反推，价目页才不会把命中部分按全价算钱。
         """
-        usage = self._valid_usage(row)
+        # 用户 m05422：_round_rows 已经规整过 usage 并打了标记，别再算一遍。
+        usage = row.get("usage") if row.get("_usage_ok") else None
+        if not isinstance(usage, list):
+            usage = self._valid_usage(row)
+        # 用户 m01570：连一步都没有的空调用（比如「模型不可用」）才跳过；有步骤但没记到
+        # token 的老数据仍算一轮，不能因为缺 token 就把真实回复抹掉。
+        empty_usage = not usage
         if usage is None:
             usage = [usage_event(row)]
         if silent:
@@ -1635,6 +1720,8 @@ class Tracer:
         inp = sum(_as_int(item.get("input")) for item in usage)
         outp = sum(_as_int(item.get("output")) for item in usage)
         cached = sum(_as_int(item.get("cached")) for item in usage)
+        if empty_usage and inp <= 0 and outp <= 0 and not any(str(item.get("model") or "").strip() for item in usage):
+            return
         out["input"] += inp
         out["output"] += outp
         out["cached"] += cached
@@ -1653,7 +1740,7 @@ class Tracer:
         kb["cached"] += cached
         # 用户 m21274：JEV 也是一种决策，kind 还是 decision，只在 modes 里另存一份，
         # 这样老口径（决策总量 = decision）不变，前端拿 decision - jev 就是普通决策。
-        mode = str(row.get("mode") or "").strip().lower()
+        mode = self._row_mode(row)
         if mode:
             modes = out.setdefault("modes", {})
             if not isinstance(modes, dict):
@@ -1683,7 +1770,8 @@ class Tracer:
                 # 用户 m21592：柱顶要按「决策 / JEV 决策 / 回复」分别写花费，
                 # 逐事件计价时得知道这次是不是 JEV，所以把 mode 也带上。
                 item["mode"] = mode
-            bucket["usage"].append(copy.deepcopy(item))
+            # 用户 m05422：item 是 usage_event 新造的扁平字典，浅拷一层就够。
+            bucket["usage"].append(dict(item))
             if name not in participating:
                 participating.add(name)
                 bucket["rounds"] += 1
@@ -1709,7 +1797,10 @@ class Tracer:
             if key in seen:
                 continue
             seen.add(key)
-            row = copy.deepcopy(original)
+            # 用户 m05422：这里以前是 copy.deepcopy(original)——一行账本深拷一遍，
+            # 三千行就是几十毫秒，价目图翻窗口时接口慢到 100ms。行里只有 usage 会被
+            # 换掉，浅拷一层就够，别把整行连同 usage 一起深拷。
+            row = dict(original)
             usage = self._valid_usage(row)
             snapshot = snapshots.get(key)
             if snapshot is not None and self._counts(row) == self._counts(snapshot):
@@ -1720,6 +1811,9 @@ class Tracer:
                 if _as_int(row.get("prompt_est")) <= 0:
                     row["prompt_est"] = _as_int(snapshot.get("prompt_est"))
             row["usage"] = usage if usage is not None else [usage_event(row)]
+            # 用户 m05422：_add_round 会再调一次 _valid_usage，把同一份 usage 重新
+            # 规整一遍（每行算两次）。这里打个标记，_add_round 直接复用。
+            row["_usage_ok"] = True
             yield row
         for key, row in snapshots.items():
             if key not in seen:
@@ -2122,6 +2216,119 @@ class Tracer:
             return _provider_label_of(path, provider_id, model_name)
         except Exception:
             return ""
+
+    def _name_mem_path(self) -> Path:
+        return self._data_dir / "model_names.json"
+
+    def _name_mem_save(self) -> None:
+        """把「pid:mid → 模型名」写盘。写失败只记日志，绝不影响业务。"""
+        try:
+            path = self._name_mem_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._name_mem or {}, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception:
+            logger.debug("[multi-decision] 记模型名失败（不影响业务）", exc_info=True)
+
+    def _name_mem_load(self) -> Dict[str, str]:
+        """读「pid:mid → 模型名」的记忆；第一次跑时从账本（含归档）里捞一遍。
+
+        用户 m01317：框架有时回报 provider_id:model_id、有时只回报模型名。价目按
+        key 精确匹配，等那条 pid:mid 的行滚出窗口，价格就成了孤儿——有量的那行
+        又变回「未定价」。账本行里两种身份都记着（usage 里 model 是 pid:mid、
+        model_name 是模型名），所以从账本捞一次就够，不用扫几百份快照。
+        """
+        if self._name_mem is not None:
+            return self._name_mem
+        data: Dict[str, str] = {}
+        try:
+            path = self._name_mem_path()
+            if path.is_file():
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    for key, name in raw.items():
+                        key, name = str(key or "").strip(), str(name or "").strip()
+                        if key and name and key != name:
+                            data[key] = name
+        except Exception:
+            data = {}
+        if not data:
+            try:
+                for row in self._ledger_rows():
+                    for item in (row.get("usage") or []):
+                        if not isinstance(item, dict):
+                            continue
+                        key = str(item.get("model") or "").strip()
+                        name = str(item.get("model_name") or "").strip()
+                        if key and name and key != name and ":" in key:
+                            data[key] = name
+                            # 用户 m01570：裸 model_id 也记一份（先到先得），供应商被删、
+                            # 账本里只剩 id 的时候还能认出名字。
+                            mid = key.partition(":")[2]
+                            if mid and mid != name:
+                                data.setdefault(mid, name)
+            except Exception:
+                data = {}
+            if data:
+                self._name_mem = data
+                self._name_mem_save()
+                return data
+        self._name_mem = data
+        return data
+
+    def remember_model_name(self, key: Any, name: Any) -> None:
+        """账本行里 pid:mid 与模型名同时出现时记下来（用户 m01317）。"""
+        raw = str(key or "").strip()
+        label = str(name or "").strip()
+        if not (raw and label) or raw == label or ":" not in raw:
+            return
+        mem = self._name_mem_load()
+        mid = raw.partition(":")[2]
+        changed = False
+        if mem.get(raw) != label:
+            mem[raw] = label
+            changed = True
+        # 用户 m01570：裸 model_id 也记一份（先到先得），供应商被删后只剩 id 时还能认出名字。
+        if mid and mid != label and mid not in mem:
+            mem[mid] = label
+            changed = True
+        if changed:
+            self._name_mem_save()
+
+    def model_name_of(self, key: str) -> str:
+        """账本里的模型 key → 模型名（用户 m04493）。
+
+        框架有时回报 provider_id:model_id、有时只回报模型名，同一个模型在账本里
+        落成两个 key。价目按 key 精确匹配，于是有量的那行查不到价、显示「未定价」。
+        这里把 pid:mid 形式解析成配置里的 model_name；配置里查不到（供应商被删了、
+        模型改名了）就查自己记下来的那份（见 _name_mem_load），再查不到才原样返回。
+        """
+        raw = str(key or "").strip()
+        pid, sep, mid = raw.partition(":")
+        if not (sep and pid and mid):
+            # 用户 m01570：裸 model_id 也查记忆（供应商被删后账本里可能只剩 id）。
+            return (self._name_mem_load().get(raw, "") if raw else "") or raw
+        name = ""
+        try:
+            path = self._config_path()
+            if path is not None:
+                mtime = path.stat().st_mtime
+                if self._cfg_name_mtime != mtime:
+                    self._cfg_name_mtime = mtime
+                    self._cfg_name_map = {}
+                cache = self._cfg_name_map
+                if raw in cache:
+                    name = cache[raw]
+                else:
+                    name = _model_name_of(path, pid, mid)
+                    cache[raw] = name
+        except Exception:
+            name = ""
+        if not name:
+            name = self._name_mem_load().get(raw, "")
+        return name or raw
 
     def provider_label_map(self) -> Dict[str, str]:
         """模型名 → API 渠道显示名，按配置文件 mtime 缓存。

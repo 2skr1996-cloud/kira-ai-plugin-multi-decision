@@ -69,6 +69,11 @@ class SessionState:
     # 只在收到新消息时清（_on_message 里），倒计时归零不算用过。
     silent_fired_ts: float = 0.0
     rest_fired_ts: float = 0.0
+    # 用户 m02245：待发里只有链接 / 转发 / 图片时兜底不冒泡。这里记「最近一次因为
+    # 没正文而跳过」的时刻，左栏标签据此显示「静默 跳过」；来新消息就清。
+    silent_hold_ts: float = 0.0
+    # 上面那个跳过的日志节流（30 秒一轮，不节流会刷屏），只做日志用。
+    silent_hold_log_ts: float = 0.0
 
     # —— 配额（按自然小时滚动）——
     hour_key: str = ""         # "2026-10-18-21"，换小时就清零
