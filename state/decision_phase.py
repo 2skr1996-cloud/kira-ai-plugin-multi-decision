@@ -1314,10 +1314,15 @@ class DecisionPhase:
 
         attempts = 0
         last = {"ok": False, "error": "没有可用的决策模型"}
+        # 用户 m07898：每个模型这一轮的真实报错都留一份。以前 last 只存最后一次
+        # 尝试的 error，切到备用并成功之后，主模型到底为什么失败就查不到了。
+        errors = []
         for idx, (kind, model) in enumerate(order):
             client = self._client_for(model)
             if client is None:
                 last = {"ok": False, "error": "模型不可用：" + (model or "快速模型")}
+                errors.append({"model": model or "", "via": kind,
+                               "error": last["error"]})
                 continue
             # 用户 m08153：开关打开时主模型最多试 2 次（第一次 + 重试一次），
             # 第三次尝试直接交给备用模型；0 次重试时就是「主模型 1 次 + 备用 1 次」。
@@ -1355,6 +1360,7 @@ class DecisionPhase:
                                 self._note_cool(key, 0.0)
                         last["parsed"] = parsed
                         last.update(budget)
+                        last["errors"] = list(errors)
                         return last
                     last["error"] = "模型没按 JSON 回（%s）" % (str(last.get("text") or "")[:80])
                     note = DECISION_RETRY_NOTE
@@ -1372,13 +1378,21 @@ class DecisionPhase:
                                        int(opt.retry_delay))
                 if t < tries - 1 and opt.retry_delay > 0:
                     await asyncio.sleep(opt.retry_delay)
+            # 用户 m07898：这一轮（含重试）到底报了什么，必须留下来。
+            err_text = str(last.get("error") or "")
+            errors.append({"model": model or "", "via": kind, "error": err_text})
             # 主模型整轮（含重试）都没成，才记账；fallback 失败不再加计
             if kind == "main":
                 streak = self._streak_of(key) + 1
                 self._note_fail(key, streak)
                 if fallback_on and streak >= 2:
                     self._note_cool(key, time.time() + opt.cooldown)
+                if fallback_on and idx + 1 < len(order):
+                    logger.warning("[multi-decision] 决策主模型 %s 连续 %d 次失败（%s），改用备用 %s",
+                                   model or "快速模型", streak, err_text[:160] or "无报错",
+                                   opt.fallback or "")
         last.update(budget)
+        last["errors"] = list(errors)
         return last
 
     # ---------- 对外入口 ----------
@@ -1445,6 +1459,9 @@ class DecisionPhase:
         chat_comparison = _comparison_snapshot(payload[1:], dyn)
         tool_cache: dict = {}
         got = await self._chain(payload, tools, opt, tool_cache)
+        # 用户 m07898：主模型这一轮的真实报错要跟着结果走，切到备用并成功之后
+        # 也不能丢——记录页 / 快照里要能看出「为什么换备用了」。
+        model_errors = list(got.get("errors") or [])
         usage = list(got.get("usage") or [])
         parsed = got.get("parsed")
         # 带图那次没成（上游不认 image_url / 图太大 / 模型没有视觉），退回纯文字再判
@@ -1478,6 +1495,7 @@ class DecisionPhase:
                 chat_comparison = _comparison_snapshot(payload[1:], dyn)
                 got = await self._chain(payload, tools, opt, tool_cache,
                                         reuse_first=True, reuse_media=False)
+                model_errors.extend(got.get("errors") or [])
                 usage.extend(got.get("usage") or [])
                 parsed = got.get("parsed")
                 img_rows = []
@@ -1513,6 +1531,7 @@ class DecisionPhase:
             "images_fallback": img_fallback,
             "images_fallback_error": img_err,
             "images_fallback_attempts": img_tries,
+            "model_errors": model_errors,
             # v4.67（用户 m02347）：这一轮是「上游临时故障」而不是「图有问题」时标出来，
             # 记录页 / 快照里能一眼分清。
             "upstream_busy": img_busy,

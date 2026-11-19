@@ -26,7 +26,7 @@ from pathlib import Path
 from core.plugin import BasePlugin, logger, on, Priority, register
 from core.agent.tool import ToolResult
 
-from .decision.engine import DecisionEngine, _norm_phrase
+from .decision.engine import DecisionEngine, _norm_phrase, _quote_body_of
 from .decision.output_guard import dedupe_reply, wrap_plain_reply
 from .state.adaptive import AdaptiveStats
 from .state.aliases import Aliases
@@ -600,8 +600,16 @@ PER_SESSION_KEYS = (
     "silent_skip_single_image",
     "silent_skip_single_sticker",
     "silent_skip_empty_forward",
-    "silent_skip_after_decision",
-    "silent_skip_after_decision_count",
+    # 用户 m04896 第 1 条：每个过滤项各自带「管前几条」。
+    "silent_skip_video_link_count",
+    "silent_skip_short_count",
+    "silent_skip_single_image_count",
+    "silent_skip_single_sticker_count",
+    "silent_skip_empty_forward_count",
+    "silent_skip_file_video",
+    "silent_skip_file_video_count",
+    # 用户 m04896 第 5 条：文件不进上下文窗口。
+    "file_skip_context",
     "rest_mode_enabled",
     "rest_start",
     "rest_end",
@@ -715,7 +723,12 @@ _BOUNDS = {
     "rest_silent_minutes": (1, 1440),
     # 用户 m02652：短句阈值与「决策后过滤条数」，引擎里也夹了同样的范围。
     "silent_skip_short_len": (1, 50),
-    "silent_skip_after_decision_count": (1, 50),
+    "silent_skip_video_link_count": (1, 50),
+    "silent_skip_short_count": (1, 50),
+    "silent_skip_single_image_count": (1, 50),
+    "silent_skip_single_sticker_count": (1, 50),
+    "silent_skip_empty_forward_count": (1, 50),
+    "silent_skip_file_video_count": (1, 50),
     "rest_probability": (0, 100),
     "band_rest_probability": (0, 100),
     # v3.72（用户 m24260 第 9 条）：回看改成「周」，最少 4 周
@@ -1408,13 +1421,28 @@ class MultiDecisionPlugin(BasePlugin):
         # 用户 m02652：按消息类型分开过滤，每个类型一个开关，默认值按用户点名的来。
         self.silent_skip_video_link = _as_bool(cfg.get("silent_skip_video_link"), True)
         self.silent_skip_short = _as_bool(cfg.get("silent_skip_short"), True)
-        self.silent_skip_short_len = max(1, _as_int(cfg.get("silent_skip_short_len"), 6))
+        # 用户 m04896 第 3 条：短句阈值默认 5 个字。
+        self.silent_skip_short_len = max(1, _as_int(cfg.get("silent_skip_short_len"), 5))
         self.silent_skip_single_image = _as_bool(cfg.get("silent_skip_single_image"), False)
         self.silent_skip_single_sticker = _as_bool(cfg.get("silent_skip_single_sticker"), True)
         self.silent_skip_empty_forward = _as_bool(cfg.get("silent_skip_empty_forward"), True)
-        self.silent_skip_after_decision = _as_bool(cfg.get("silent_skip_after_decision"), True)
-        self.silent_skip_after_decision_count = max(
-            1, _as_int(cfg.get("silent_skip_after_decision_count"), 1))
+        # 用户 m04896 第 1 条：每个过滤项各自带「管前几条」，默认都只过滤第 1 条。
+        self.silent_skip_video_link_count = max(
+            1, _as_int(cfg.get("silent_skip_video_link_count"), 1))
+        self.silent_skip_short_count = max(
+            1, _as_int(cfg.get("silent_skip_short_count"), 1))
+        self.silent_skip_single_image_count = max(
+            1, _as_int(cfg.get("silent_skip_single_image_count"), 1))
+        self.silent_skip_single_sticker_count = max(
+            1, _as_int(cfg.get("silent_skip_single_sticker_count"), 1))
+        self.silent_skip_empty_forward_count = max(
+            1, _as_int(cfg.get("silent_skip_empty_forward_count"), 1))
+        # 用户 m04896 第 4 条：文件 / 视频消息也过滤，默认开。
+        self.silent_skip_file_video = _as_bool(cfg.get("silent_skip_file_video"), True)
+        self.silent_skip_file_video_count = max(
+            1, _as_int(cfg.get("silent_skip_file_video_count"), 1))
+        # 用户 m04896 第 5 条：文件不进上下文窗口，默认开。
+        self.file_skip_context = _as_bool(cfg.get("file_skip_context"), True)
 
         # v3.52（用户 m08226 第 5 条）：配额玩法收敛成「每小时 / 每天」两个开关，
         # 两个都能单独封顶（互斥是设置页的事，后端两个都认）。旧的 quota_enabled /
@@ -2341,7 +2369,7 @@ class MultiDecisionPlugin(BasePlugin):
         if not mid:
             return "缺少 message_id"
         try:
-            raw_sid = self.window.raw_sid(event.sid) if self.window is not None else ""
+            raw_sid = self.window.raw_sid(getattr(event, "sid", "") or "") if self.window is not None else ""
         except Exception:
             raw_sid = ""
         try:
@@ -2375,6 +2403,79 @@ class MultiDecisionPlugin(BasePlugin):
                 return "这条转发的图没有发给模型：" + "".join(notes)
             return "这条转发的图片都取不到"
         text = "这条转发共 %d 张图，已全部附上。%s" % (len(live), "".join(notes))
+        return ToolResult(
+            text=text,
+            media_refs=[{"type": "kira_image_ref", "path": r["path"],
+                         "mime_type": r["mime"]} for r in live],
+        )
+
+    @register.tool(
+        "view_quote",
+        "查看一条被引用消息的原文和图片。消息里出现「[Reply ID: …]」、"
+        "提示说「引用的那条已经不在窗口里」时，调用它把被引用的那条取回来。",
+        {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "被引用消息的 message_id，就是 [Reply ID: …] 后面那个数字",
+                },
+            },
+            "required": ["message_id"],
+        },
+    )
+    async def tool_view_quote(self, event, message_id: str = ""):
+        mid = str(message_id or "").strip()
+        if not mid:
+            return "缺少 message_id"
+        try:
+            sid = normalize_sid(getattr(event, "sid", "") or "")
+        except Exception:
+            sid = str(getattr(event, "sid", "") or "")
+        try:
+            raw_sid = self.window.raw_sid(getattr(event, "sid", "") or "") if self.window is not None else ""
+        except Exception:
+            raw_sid = ""
+        try:
+            gif_mode = self.window.gif_mode(sid) if self.window is not None else "grid"
+        except Exception:
+            gif_mode = "grid"
+        try:
+            found = self.window.quote_of(sid, mid) if self.window is not None else {}
+        except Exception:
+            found = {}
+        found = found if isinstance(found, dict) else {}
+        body = str(found.get("text") or "").strip()
+        refs = list(found.get("media") or [])
+        if not body and not refs:
+            return "找不到这条引用（message_id: %s），可能已经被清理了" % mid
+        # 窗口里的原文带着 [时间] [message_id: …] [user_nickname: …] | 前缀，
+        # 压成引用里那行「时间 昵称: 正文」，免得模型把它当成一条新消息。
+        if found.get("source") == "window":
+            body = _quote_body_of(body) or body
+        elif found.get("source") == "db":
+            who = str(found.get("sender") or "").strip()
+            ts = float(found.get("ts") or 0.0)
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) if ts > 0 else ""
+            head = " ".join(x for x in (stamp, (who + ":") if who else "") if x)
+            if head:
+                body = (head + " " + body).strip()
+        if not refs:
+            return "这条引用没有图片。原文：%s" % (body or "（空）")
+        drop_gif = bool(getattr(self, "forward_drop_gif", True))
+        got = forward_model_refs(raw_sid, mid, refs, gif_mode, drop_gif)
+        live = [r for r in got if r.get("path")]
+        notes = []
+        for r in got:
+            note = str(r.get("note") or "")
+            if note and note not in notes:
+                notes.append(note)
+        if not live:
+            if notes:
+                return "这条引用的图没有发给模型：%s。原文：%s" % ("".join(notes), body or "（空）")
+            return "这条引用的图片都取不到。原文：%s" % (body or "（空）")
+        text = "这条引用共 %d 张图，已全部附上。%s原文：%s" % (
+            len(live), "".join(notes), body or "（空）")
         return ToolResult(
             text=text,
             media_refs=[{"type": "kira_image_ref", "path": r["path"],

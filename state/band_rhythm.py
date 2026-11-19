@@ -260,6 +260,38 @@ class BandRhythm:
         out.update({"chance": chance, "n": n, "need": max_wait})
         return out
 
+    # ---------------------------------------------------------------- 半步
+    def bump(self, sid: str, start, end, step: float = 0.5, now=None) -> int:
+        """只推进进度、不掷骰（用户 m04896 第 7 条）。
+
+        被静默过滤掉的消息不触发决策，但概率照攒——每 2 条推进 1 格。
+        小数部分存在 rec["f"] 里，攒够 1 才加到 n 上。
+        """
+        try:
+            step = float(step or 0.0)
+        except (TypeError, ValueError):
+            step = 0.0
+        if step <= 0:
+            return 0
+        key = self._key(start, end)
+        rec = self._rec(sid, key)
+        try:
+            frac = float(rec.get("f") or 0.0) + step
+        except (TypeError, ValueError):
+            frac = step
+        steps = int(frac)
+        rec["f"] = round(frac - steps, 3)
+        if steps > 0:
+            try:
+                n = int(rec.get("n") or 0)
+            except (TypeError, ValueError):
+                n = 0
+            rec["n"] = n + steps
+            rec["ts"] = float(now if now is not None else self.now_fn())
+        self._dirty = True
+        self._save()
+        return steps
+
     # ---------------------------------------------------------------- 清理
     def forget(self, sid: str) -> None:
         if self._data.pop(str(sid or ""), None) is not None:

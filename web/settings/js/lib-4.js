@@ -207,6 +207,47 @@
     // 左右两根轴线：只写数字看着像「干写」，补上轴线和刻度才像图（用户 m21592）。
     grid += "<line class='paxis' x1='" + padL + "' y1='" + padT + "' x2='" + padL + "' y2='" + (padT + plotH) + "'/>" +
             "<line class='paxis' x1='" + (W - padR) + "' y1='" + padT + "' x2='" + (W - padR) + "' y2='" + (padT + plotH) + "'/>";
+    // 用户 m06021：橙色花费曲线是后画的，会正好压在柱底那两行白字上（白字压在橙线上就看不见了）。
+    // 这里按「曲线在标签横向范围内的高度」判断有没有撞上：linePts 里只有前面几根柱子的点
+    // （当前这根还没 push），所以当前点和下一个点要自己补；两头没有点的时候按相邻两点的斜率
+    // 往外延一格，跟后面画曲线时补左右两端的做法一致。
+    var curveNearPts = function(i, cx, cy){
+      var cp = linePts.length ? [linePts[linePts.length - 1]] : [];
+      cp.push([cx, cy]);
+      if(i + 1 < pts.length){
+        cp.push([cx + slot, padT + plotH - plotH * (Number(pts[i + 1].cost) || 0) / costTop]);
+      }
+      if(cp.length < 2){ return cp; }
+      var c0 = cp[0], c1 = cp[1];
+      var k0 = (c1[1] - c0[1]) / ((c1[0] - c0[0]) || 1);
+      cp.unshift([cx - slot, Math.max(padT, Math.min(padT + plotH, c0[1] - k0 * slot))]);
+      // 用户 m06021：最后一天要是「今天」，曲线不往右延伸，别凭空多算一段。
+      var extR = i + 1 < pts.length ||
+        String((pts[pts.length - 1] || {}).label || "") !== pdShort(pdFmt(pdToday()));
+      if(extR){
+        var cn = cp[cp.length - 1], cm = cp[cp.length - 2];
+        var kn = (cn[1] - cm[1]) / ((cn[0] - cm[0]) || 1);
+        cp.push([cx + slot * 2, Math.max(padT, Math.min(padT + plotH, cn[1] + kn * slot))]);
+      }
+      return cp;
+    };
+    var curveHitBox = function(i, cx, cy, box){
+      var cp = curveNearPts(i, cx, cy);
+      if(cp.length < 2){ return false; }
+      var mn = Infinity, mx = -Infinity;
+      for(var q = 0; q < cp.length - 1; q++){
+        var a = cp[q], b = cp[q + 1];
+        if(b[0] < box.l || a[0] > box.r){ continue; }
+        var x1 = Math.max(box.l, a[0]), x2 = Math.min(box.r, b[0]);
+        if(x2 < x1){ continue; }
+        var dy = (b[1] - a[1]) / ((b[0] - a[0]) || 1);
+        var y1 = a[1] + dy * (x1 - a[0]), y2 = a[1] + dy * (x2 - a[0]);
+        mn = Math.min(mn, y1, y2);
+        mx = Math.max(mx, y1, y2);
+      }
+      // 用户 m06021：曲线有 2px 描边，Catmull-Rom 转贝塞尔还会稍微鼓出去一点，留 3px 余量。
+      return mx >= box.t - 3 && mn <= box.b + 3;
+    };
     var step = Math.max(1, Math.ceil(pts.length / 16));
     pts.forEach(function(p, i){
       var cx = padL + slot * (i + 0.5);
@@ -272,13 +313,17 @@
           // 所以矮柱子换成 10.5 / 9.5px 的紧凑版，整块字仍然落在柱子里面。
           var pinSm = h < 30;
           var pCx = x + bw / 2;
+          // 用户 m06021：柱内标签被曲线压住时改走柱顶那套（pinTop），pinCurve 记一下是从曲线挪上来的。
+          var pinTop = false, pinCurve = false;
           if(pW <= bw - 1 && h >= (pinSm ? 22 : 25)){
             var pY = padT + plotH - (pinSm ? 16 : 18);
             var pGap = pinSm ? 10 : 12;
             var pBox = { l: pCx - pW / 2 - 1, r: pCx + pW / 2 + 1, t: pY - (pinSm ? 9 : 11), b: pY + (pinSm ? 13 : 14) };
             var pClash = cost > 0 && pBox.r > cx - costLabW / 2 - 2 && pBox.l < cx + costLabW / 2 + 2 &&
                          pBox.b > costLabTop - 2 && pBox.t < costLabBot + 2;
-            if(!pClash){
+            // 用户 m06021：曲线从标签框里穿过去就当作碰撞，不在柱里写了，改浮到柱顶上方。
+            var pCurve = !pClash && curveHitBox(i, cx, cy, pBox);
+            if(!pClash && !pCurve){
               pinRects.push(pBox);
               var pinCls = pinSm ? " pinlab-sm" : "";
               pinHtml += "<text class='pinlab" + pinCls + numCls + "' x='" + pCx.toFixed(1) + "' y='" + pY.toFixed(1) +
@@ -287,18 +332,35 @@
                          "<text class='pinlab pinlab2" + pinCls + numCls + "' x='" + pCx.toFixed(1) + "' y='" + (pY + pGap).toFixed(1) +
                          "' style='" + numDelay(i * 14 + j * 26 + 40) + "' text-anchor='middle'>" +
                          esc(pL2) + "</text>";
+            }else if(pCurve){
+              pinTop = true;
+              pinCurve = true;
             }
           }else if(pW <= bw - 1){
+            pinTop = true;
+          }
+          if(pinTop){
             // 用户 m02330：柱子矮到两行字塞不进去（JEV 那根常常只有一两像素高），以前的处理是
             // 干脆不写，于是那根柱子上永远没有数字。现在挪到柱子顶上写，字换成正文色
             // （柱子外面是卡片底色，白字贴上去看不见）。
             // 用户 m02722：顶出去以后按「价格 / 用量 / 命中」从上往下排，钱在最上面。
             // 用户 m03497：整摞贴着柱顶，跟常规价格标签一样只留 4px 空隙，不再悬在半空。
-            var pYo = y - 15;
             var pGapO = 11;
             var kLabO = barCostLabel(kb);
             var moneyO = (!dense || k === tallestK) && kLabO !== costLabTxt;
             var pBoxW = Math.max(pW, moneyO ? labTextWidth(kLabO) * 0.95 : 0);
+            var pYo = y - 15;
+            // 用户 m06021：被曲线压下来的时候，柱顶上方常常正好是总价标签——把这两行再抬到总价标签
+            // 上面去，别把字藏掉（pBoxO 底边是 pYo + 13，这里留 2px 空隙）；抬完要是顶到绘图区上边，
+            // 就贴着 padT 放，不画到轴外面。
+            if(pinCurve){
+              var pBoxT = { l: pCx - pBoxW / 2 - 1, r: pCx + pBoxW / 2 + 1, t: moneyO ? pYo - 22 : pYo - 10, b: pYo + pGapO + 2 };
+              if(cost > 0 && pBoxT.r > cx - costLabW / 2 - 2 && pBoxT.l < cx + costLabW / 2 + 2 &&
+                 pBoxT.b > costLabTop - 2 && pBoxT.t < costLabBot + 2){
+                pYo = costLabTop - 17;
+              }
+              pYo = Math.max(pYo, padT + (moneyO ? 24 : 12));
+            }
             var pBoxO = { l: pCx - pBoxW / 2 - 1, r: pCx + pBoxW / 2 + 1, t: moneyO ? pYo - 22 : pYo - 10, b: pYo + pGapO + 2 };
             var pClashO = cost > 0 && pBoxO.r > cx - costLabW / 2 - 2 && pBoxO.l < cx + costLabW / 2 + 2 &&
                           pBoxO.b > costLabTop - 2 && pBoxO.t < costLabBot + 2;

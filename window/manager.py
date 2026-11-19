@@ -353,8 +353,11 @@ _NO_TEXT_URL_RE = re.compile(
 )
 
 
-def _text_without_noise(text: str) -> str:
-    """剥掉链接、转发 / 引用 / 卡片 / 表情整段、媒体占位，剩下的才算正文。"""
+def _text_without_noise(text: str, keep_links: bool = False) -> str:
+    """剥掉链接、转发 / 引用 / 卡片 / 表情整段、媒体占位，剩下的才算正文。
+
+    keep_links=True 时链接留着，只剥整段与占位——判断「这条里有没有链接」用。
+    """
     out = str(text or "")
     if not out:
         return ""
@@ -377,72 +380,86 @@ def _text_without_noise(text: str) -> str:
                 break  # 没收口，别乱删
             out = out[:at] + " " + out[end:]
     out = _NO_TEXT_MEDIA_RE.sub(" ", out)
-    out = _NO_TEXT_URL_RE.sub(" ", out)
+    if not keep_links:
+        out = _NO_TEXT_URL_RE.sub(" ", out)
     return out.strip()
 
 
 #: 用户 m02652：静默兜底按消息类型分开过滤。这里只回答「这一条属于哪种没什么可接的
 #: 类型」，判定一律从严——认不出就不打标签，宁可多冒一次泡，也别把该接的话吞掉。
-#: 视频站链接：与前端 biliPattern（web/js/lib-3.js）认的是同一批站点，那边画成卡片。
-_VIDEO_CARD_URL_RE = re.compile(
-    r"https?://(?:[\w-]+\.)*(?:bilibili\.com|b23\.tv|mp\.weixin\.qq\.com|youtube\.com"
-    r"|youtu\.be|twitch\.tv|douyin\.com|douyu\.com|huya\.com|kuaishou\.com)"
-    r"/[^\s<>\"'「」【】\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]*",
-    re.I,
-)
-#: 视频站链接前面常贴一个【标题】（B 站分享就是这样），标题不算正文。
-_TITLE_SPAN_RE = re.compile(r"【[^【】]{0,160}】")
 #: 短句按「去掉空白与标点之后还剩几个字」算，标点不算字。
 _SHORT_STRIP_RE = re.compile(r"[\s\u3000-\u303f\uff00-\uffef!-/:-@\[-\x60{-~]+")
+#: 用户 m05861：@ 昵称是元数据，不是他说的话。昵称里可能带空格
+#: （「@Mcp_management service 好吧」），所以先整段吃掉「@ + 最多两个英文词」，
+#: 再兜底吃「@ + 一个不含空格的昵称」。最多吃两个词——昵称里可能带空格，
+#: 再多就可能把真话一起吞掉。
+_AT_MENTION_RE = re.compile(
+    r"@[A-Za-z0-9_\-]{1,32}(?:[ \t]+[A-Za-z0-9_\-]{1,32})?"
+    r"|@[\u4e00-\u9fa5A-Za-z0-9_\-]{1,16}"
+)
 
 
 def _short_len_of(text: str) -> int:
-    """短句字数：去掉空白、中英文标点与符号之后还剩几个字。"""
-    return len(_SHORT_STRIP_RE.sub("", str(text or "")))
+    """短句字数：去掉空白、中英文标点、符号与 @ 昵称之后还剩几个字。"""
+    out = _AT_MENTION_RE.sub(" ", str(text or ""))
+    return len(_SHORT_STRIP_RE.sub("", out))
 
 
-def _is_video_link_only(text: str) -> bool:
-    """整条只有一个视频站链接（前面可以带【标题】），没有别的正文。"""
-    src = str(text or "")
-    hit = _VIDEO_CARD_URL_RE.search(src)
-    if not hit:
-        return False
-    rest = src[:hit.start()] + " " + src[hit.end():]
-    rest = _TITLE_SPAN_RE.sub(" ", rest)
-    rest = _NO_TEXT_MEDIA_RE.sub(" ", rest)
-    rest = _NO_TEXT_URL_RE.sub(" ", rest)
-    return not _SHORT_STRIP_RE.sub("", rest)
+def _has_link(text: str) -> bool:
+    """整条里只要出现链接就算（用户 m04605：带链接就跳过，不管前后还有没有别的话）。"""
+    return bool(_NO_TEXT_URL_RE.search(_text_without_noise(text, keep_links=True)))
 
 
-def pending_tags(item, short_len: int = 6) -> set:
+
+#: 用户 m04896 第 5 条：「文件不进上下文」开着时，带文字的文件消息只留文字，
+#: 把 [File xxx] / [Video xxx] 这类占位从正文与原文里摘掉。
+_FILE_PLACEHOLDER_RE = re.compile(r"\[(?:File|Video|文件|视频)(?:\s[^\[\]]{0,120})?\]")
+
+
+def strip_file_placeholders(text: str) -> str:
+    """摘掉文件 / 视频占位，其余原样保留（用户 m04896 第 5 条）。"""
+    out = str(text or "")
+    if not out or "[" not in out:
+        return out
+    out = _FILE_PLACEHOLDER_RE.sub(" ", out)
+    return re.sub(r"[ \t]{2,}", " ", out).strip()
+
+
+def has_text_body(text: str) -> bool:
+    """这条待发里有没有真正能接的正文（链接 / 占位 / 转发整段都不算）。"""
+    return bool(_text_without_noise(strip_file_placeholders(text)))
+
+
+def pending_tags(item, short_len: int = 5) -> set:
     """给一条待发打上「没什么可接」的类型标签，认不出就是空集合。
 
-    标签：video_link（视频卡片链接）、short（短句）、single_image（单图片）、
-    single_sticker（单表情包）、empty_forward（无正文转发）。
+    标签：link（带链接）、short（短句）、single_image（单图片）、
+    single_sticker（单表情包）、forward（合并转发）、file_video（文件 / 视频）。
     """
     tags = set()
     if not isinstance(item, dict):
         return tags
     text = str(item.get("text") or "")
-    body = _text_without_noise(text)
+    body = _text_without_noise(strip_file_placeholders(text))
     media = str(item.get("media") or "")
     refs = [r for r in (item.get("media_refs") or []) if isinstance(r, dict)]
     files = [f for f in (item.get("files") or []) if isinstance(f, dict)]
-    if _is_video_link_only(text):
-        # 视频卡片链接整条就是一张卡，别再按「短句」算一遍。
-        tags.add("video_link")
-        return tags
+    if _has_link(text):
+        # 用户 m04605：只要带链接就跳过，前后有没有别的话都一样。
+        tags.add("link")
+    # 用户 m04896 第 8 条：合并转发改成「任意转发」——带不带正文都算。
+    if "[Forward" in text:
+        tags.add("forward")
+    # 用户 m04896 第 4 条：文件 / 视频（.mp4 这类附件，不是链接）。
+    if media in ("file", "video") or files:
+        tags.add("file_video")
     if not body:
-        if _is_video_link_only(text):
-            tags.add("video_link")
-        if "[Forward" in text:
-            tags.add("empty_forward")
         if not files and len(refs) <= 1:
             if media == "image":
                 tags.add("single_image")
             elif media in ("sticker", "emoji"):
                 tags.add("single_sticker")
-    elif _short_len_of(body) <= max(1, int(short_len or 6)):
+    elif _short_len_of(body) <= max(1, int(short_len or 5)):
         tags.add("short")
     return tags
 
@@ -1259,6 +1276,114 @@ def _media_from_db(mid: str) -> list:
             _MEDIA_DB_CACHE.clear()
         _MEDIA_DB_CACHE[mid] = out
     return out
+
+
+def _chain_text(items) -> str:
+    """把框架消息库里的 chain 拼成一句正文（图片只留 [图片] 占位）。
+
+    用户 m08415：引用块里的正文是消息到达时就固化下来的，被引消息被裁出窗口后
+    文字还在；这里只给「窗口里也找不到」的那条兜底，形状跟窗口里的 raw 对齐。
+    """
+    bits = []
+    for el in items or []:
+        if not isinstance(el, dict):
+            continue
+        typ = str(el.get("type") or "")
+        if typ == "text":
+            text = str(el.get("text") or "").strip()
+            if text:
+                bits.append(text)
+        elif typ in ("image", "sticker"):
+            bits.append("[图片]")
+        elif typ == "emoji":
+            bits.append("[表情]")
+        elif typ == "forward":
+            bits.append("[Forward]")
+        elif typ == "at":
+            nick = str(el.get("nickname") or "").strip()
+            bits.append("@" + nick if nick else "@")
+        elif typ in ("record", "video", "file"):
+            bits.append({"record": "[语音]", "video": "[视频]", "file": "[文件]"}[typ])
+        # reply 壳不重复带出来：被引内容在后面的 text 段里
+    return " ".join(bits).strip()
+
+
+def _sid_tail(sid: str) -> str:
+    """把「樱井桃华:gm:1145141974」和「gm:1145141974」看成同一个会话。
+
+    用户 m08991：取回来的内容必须是对的。老库里 session_id 有的带 bot 名前缀、
+    有的不带，精确匹配会漏；但只按消息号兜又可能撞到别的会话，所以先归一化再比。
+    """
+    parts = str(sid or "").split(":")
+    return ":".join(parts[1:]) if len(parts) >= 3 else str(sid or "")
+
+
+def _quote_row_from_db(mid: str, raw_sid: str = "") -> dict:
+    """按 message_id 从框架消息库取一条消息的正文与图（只读，查一条就关）。
+
+    用户 m08415：窗口裁切只动插件自己的内存，框架的 messages 表是全量历史，
+    被引消息滚出窗口后只能从这里回源。会话对得上优先，对不上再按 id 兜一次
+    ——老库里 session_id 可能带 bot 名前缀，插件手里的 raw_sid 不一定一致。
+    """
+    mid = str(mid or "").strip()
+    if not mid:
+        return {}
+    root = _data_root()
+    if root is None:
+        return {}
+    db = root / "data.db"
+    try:
+        if not db.is_file():
+            return {}
+        import sqlite3
+
+        con = sqlite3.connect("file:%s?mode=ro" % db.as_posix(), uri=True, timeout=1.0)
+        try:
+            row = None
+            if raw_sid:
+                row = con.execute(
+                    "SELECT chain, sender_name, timestamp FROM messages "
+                    "WHERE platform_message_id=? AND session_id=? LIMIT 1",
+                    (mid, raw_sid),
+                ).fetchone()
+            if row is None:
+                # 老库里 session_id 可能带 bot 名前缀，精确匹配不到就按 id 兜；
+                # 但同号跨会话时不能猜——只有唯一一条、或能按会话尾巴认出来才用。
+                rows = con.execute(
+                    "SELECT chain, sender_name, timestamp, session_id FROM messages "
+                    "WHERE platform_message_id=? LIMIT 5",
+                    (mid,),
+                ).fetchall()
+                if len(rows) == 1:
+                    row = rows[0][:3]
+                elif rows:
+                    tail = _sid_tail(raw_sid)
+                    same = [r for r in rows if _sid_tail(r[3]) == tail]
+                    if len(same) == 1:
+                        row = same[0][:3]
+                    else:
+                        logger.debug(
+                            "[multi-decision] 消息号 %s 在 %d 个会话里都有，认不出是哪一个，不猜",
+                            mid, len(rows),
+                        )
+        finally:
+            con.close()
+    except Exception:
+        logger.debug("[multi-decision] 读消息库找引用失败（已忽略）", exc_info=True)
+        return {}
+    if not row:
+        return {}
+    chain = row[0]
+    try:
+        items = json.loads(chain) if isinstance(chain, (str, bytes, bytearray)) else chain
+    except Exception:
+        items = []
+    return {
+        "text": _chain_text(items),
+        "media": _refs_from_chain(items, root),
+        "sender": str(row[1] or ""),
+        "ts": float(row[2] or 0.0),
+    }
 
 
 #: v4.46（用户 m22856）：一条消息一条消息地查库太贵——真机上一张「文字＋动图」
@@ -3317,14 +3442,28 @@ def strip_note_decl(text: str) -> str:
 _VIEW_HINT_RE = re.compile(
     r"（这条转发还有 \d+ 张图没发(?:，需要看就调用 view_forward)?）"
     r"|（另有 \d+ 张动图按设置没有发给模型）"
+    r"|（引用的那条已经不在窗口里(?:，需要看就调用 view_quote)?）"
+    r"|（引用的那条是转发(?:，需要看就调用 view_forward)?）"
 )
+
+# 用户 m08415：引用块里只剩 [Image N] 占位，被引消息又被裁出窗口时，模型看不到图。
+# 这里只认「[Reply ID: xxx」和引用块里的图片占位，判断都在 prepare_messages 里做。
+_QUOTE_ID_RE = re.compile(r"\[Reply ID:\s*(-?\d+)")
+_QUOTE_IMG_RE = re.compile(r"\[Image(?:\s*\d+| attached)?\]")
+
+
+def _quote_id_of(text: str) -> str:
+    """从一行消息原文里取被引用那条的 message_id（没有就空串）。"""
+    m = _QUOTE_ID_RE.search(str(text or ""))
+    return m.group(1) if m else ""
 
 
 def _strip_view_hint(text: str) -> str:
     """去掉只给模型看的转发提示（页面/快照投影专用）。"""
     if not text:
         return text
-    if "（这条转发还有" not in text and "（另有" not in text:
+    if ("（这条转发还有" not in text and "（另有" not in text
+            and "（引用的那条" not in text):
         return text
     return _VIEW_HINT_RE.sub("", text)
 
@@ -4098,6 +4237,25 @@ def _part_type(part):
         return part.get("type")
     return getattr(part, "type", None)
 
+
+_IMG_HASH_NAME = re.compile(r"^(?:mdp_)?([0-9a-f]{32,40})(?:_[A-Za-z0-9]+)*\.[A-Za-z0-9]+$")
+
+
+def _img_content_key(path: str) -> str:
+    """一张图的内容键：认得出内容哈希就用哈希，认不出退回完整路径。
+
+    插件存图时文件名就是内容哈希（media_cache/<sha1>.jpg，实测 sha1(文件) 与
+    文件名一致），派生图是 mdp_<源图 sha>_s1280_95.jpg。所以同名＝同一张图，
+    可以放心合并；名字不像哈希的（用户原始文件名之类）只按完整路径算，
+    宁可不去重也不误合并（用户 m07898）。
+    """
+    rel = str(path or "").replace("\\", "/").strip()
+    if not rel:
+        return ""
+    name = rel.rsplit("/", 1)[-1]
+    if _IMG_HASH_NAME.match(name):
+        return name
+    return rel
 
 def _has_image(content) -> bool:
     if not isinstance(content, (list, tuple)):
@@ -6295,8 +6453,42 @@ class WindowManager:
         self.settle_decision_notes(sid)
         return len(out) + _tools
 
+    def quote_of(self, sid: str, mid: str) -> dict:
+        """按 message_id 找回一条消息：窗口里还在就用窗口的，被裁掉了就查框架消息库。
+
+        用户 m08415：引用块里只剩 [Image N] 占位，被引消息又被裁出窗口时，模型
+        看不到图。view_quote 工具靠这里把原消息（正文 + 图）取回来。
+        返回 {"text", "media", "sender", "ts", "source"}；source 是 window/db/空。
+        """
+        mid = str(mid or "").strip()
+        out = {"text": "", "media": [], "sender": "", "ts": 0.0, "source": ""}
+        if not mid:
+            return out
+        raw_sid = self.raw_sid(sid)
+        st = self._states.get(sid)
+        keys = ("[message_id: %s]" % mid, 'message_id="%s"' % mid)
+        for bucket in (getattr(st, "pending", None), getattr(st, "messages", None)):
+            for item in list(bucket or []):
+                if isinstance(item, dict):
+                    raw = str(item.get("raw") or item.get("text") or "")
+                    content = item.get("content")
+                else:
+                    raw = str(getattr(item, "raw", "") or "")
+                    content = getattr(item, "content", None)
+                if not raw or not any(k in raw for k in keys):
+                    continue
+                out["text"] = raw
+                out["media"] = media_list(content, raw_sid) or media_list(raw, raw_sid)
+                out["source"] = "window"
+                return out
+        row = _quote_row_from_db(mid, raw_sid)
+        if row:
+            out.update(row)
+            out["source"] = "db"
+        return out
+
     def prepare_messages(self, sid: str, messages, keep=None, media_by_id=None,
-                         hint_tools: bool = True) -> List[Any]:
+                         hint_tools: bool = True, hint_quote=None) -> List[Any]:
         """只读的模型媒体出口，供决策/历史/本轮回复共用。
 
         不清理正文/时间戳，不改原状态；无媒体的 str 保持 str。keep=None 读取
@@ -6380,6 +6572,62 @@ class WindowManager:
             elif isinstance(_content, str) and _content.strip():
                 # 一条图都没挂上（比如整条转发都是动图、按设置全丢了）时正文还是纯字符串，
                 # 这里也要能补一句，否则模型完全不知道原处有图。
+                _parts = [{"type": "text", "text": _content}]
+            else:
+                continue
+            msgs[_i] = _with_content(_msg, _parts + [{"type": "text", "text": _note}])
+        # 用户 m08415：引用块里只剩 [Image N] 占位，被引消息又被裁出窗口时，模型
+        # 看不到图。这时补一句提示，让它调 view_quote 把原消息取回来；被引消息
+        # 还在窗口里就不提——图本来就跟着那条挂着。
+        _hint_quote = hint_tools if hint_quote is None else bool(hint_quote)
+        for _i, _msg in enumerate(msgs):
+            _text = text_of_content(_get(_msg, "content"))
+            _pos = _text.find("[Reply ID:")
+            if _pos < 0:
+                continue
+            _raw_content = _get(_msg, "content")
+            _clean = _strip_view_hint_content(_raw_content)
+            if _clean is not _raw_content:
+                _msg = _with_content(_msg, _clean)
+                msgs[_i] = _msg
+                _text = text_of_content(_clean)
+            _qid = _quote_id_of(_text)
+            if not _qid or _qid in active:
+                continue
+            # 用户 m08816：引用的是转发时，引用块里只有 [Forward]，没有 [Image N]。
+            # 转发被裁出窗口后模型既看不到图、也没人告诉它去调 view_forward，
+            # 只能当这条引用没图处理。
+            _span = ""
+            for _s, _e in _protected_quote_spans(_text):
+                if _s <= _pos < _e:
+                    _span = _text[_s:_e]
+                    break
+            if "[Forward" in _span:
+                # 转发缓存里还有图才提：缓存被裁掉时调 view_forward 也拿不到东西。
+                _fwd_refs = []
+                if _FORWARD_MEDIA_FN is not None:
+                    try:
+                        _fwd_refs = list(_FORWARD_MEDIA_FN(_qid, raw_sid) or [])
+                    except Exception:
+                        _fwd_refs = []
+                if not _fwd_refs:
+                    continue
+                if _hint_quote:
+                    _note = "（引用的那条是转发，需要看就调用 view_forward）"
+                else:
+                    _note = "（引用的那条是转发）"
+            elif _QUOTE_IMG_RE.search(_text, _pos):
+                # 只有引用块里真有图片占位才提：纯文字引用被裁掉也不缺东西。
+                if _hint_quote:
+                    _note = "（引用的那条已经不在窗口里，需要看就调用 view_quote）"
+                else:
+                    _note = "（引用的那条已经不在窗口里）"
+            else:
+                continue
+            _content = _get(_msg, "content")
+            if isinstance(_content, list):
+                _parts = list(_content)
+            elif isinstance(_content, str) and _content.strip():
                 _parts = [{"type": "text", "text": _content}]
             else:
                 continue
@@ -6504,14 +6752,16 @@ class WindowManager:
             return base
         hint = self._decision_hint_tools()
         if not pend:
-            return self.prepare_messages(sid, base, hint_tools=hint)
+            return self.prepare_messages(sid, base, hint_tools=hint,
+                                         hint_quote=self._decision_hint_quote_tools())
         pend = shrink_timestamps(pend)
         pend = self._prefix_assistant(pend, sid)
         pend = stamp_assistant_time(pend)
         out = list(base)
         for m in pend:
             out.append(self._as_openai(m))
-        return self.prepare_messages(sid, out, hint_tools=hint)
+        return self.prepare_messages(sid, out, hint_tools=hint,
+                                     hint_quote=self._decision_hint_quote_tools())
 
     def _decision_hint_tools(self) -> bool:
         """决策链这一轮到底挂没挂 view_forward（用户 m11103：工具由提示词页勾选决定）。
@@ -6528,6 +6778,22 @@ class WindowManager:
             logger.debug("[multi-decision] 读决策工具勾选失败，转发提示按没挂工具写", exc_info=True)
             return False
         return "view_forward" in [str(x).strip() for x in (picked or [])]
+
+    def _decision_hint_quote_tools(self) -> bool:
+        """决策链这一轮到底挂没挂 view_quote（跟 _decision_hint_tools 同一套口径）。
+
+        引用提示和转发提示是两个工具，不能共用一个判断：勾了 view_forward 没勾
+        view_quote 时，叫模型去调 view_quote 只会白费一轮。
+        """
+        try:
+            layouts = getattr(self.plugin, "prompt_layouts", None)
+            if layouts is None:
+                return False
+            picked = layouts.selected_tools()
+        except Exception:
+            logger.debug("[multi-decision] 读决策工具勾选失败，引用提示按没挂工具写", exc_info=True)
+            return False
+        return "view_quote" in [str(x).strip() for x in (picked or [])]
 
     def decision_incoming(self, sid: str) -> list:
         """决策这一轮真正新来的那批：还挂在「待发」里的消息（v3.97，用户 m09615 图9）。
@@ -6590,7 +6856,11 @@ class WindowManager:
         return out
 
     def decision_images(self, sid: str, limit=None, messages=None) -> list:
-        """按消息/part 正序提取实际模型图；绝不反查原图或跨消息按路径去重。
+        """按消息/part 正序提取实际模型图；不反查原图。
+
+        跨消息只按图片内容去重：一条转发被好几条消息引用时（引用元素会把被引
+        消息的图再挂一遍），同一批图以前会被重复发好几份，主模型那边直接超限
+        失败（用户 m07898）。不同图各自保留，顺序按首次出现。
 
         messages 可传 engine 已准备的 decision_snapshot，避免重复投影/读盘。
         skip、限图、关闭后的图不会被原始 media_list 再补回。
@@ -6618,7 +6888,16 @@ class WindowManager:
                                 "mime": str(part.get("mime_type") or part.get("mime") or ""),
                                 "detail": str(part.get("detail") or "high"),
                                 "ts": ts, "who": who, "mid": mid})
-        return out if want < 0 else out[-want:]
+        seen = set()
+        uniq = []
+        for it in out:
+            key = _img_content_key(it.get("path") or "")
+            if key:
+                if key in seen:
+                    continue
+                seen.add(key)
+            uniq.append(it)
+        return uniq if want < 0 else uniq[-want:]
 
 
     @staticmethod

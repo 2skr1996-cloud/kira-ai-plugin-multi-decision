@@ -543,7 +543,7 @@
       ppModuleAction(s,action,Number(button.getAttribute("data-pm-index")),add ? add.value : undefined,
         zone ? zone.value : "");
     });
-    window.addEventListener("resize",function(){ if(curPage === "prompt") ppLayout(); });
+    window.addEventListener("resize",function(){ if(curPage === "prompt") ppLayout(); silentFitNotes(document.getElementById("settings")); });
   }
 
   // 用户 2026-11-06：转发消息处理是左右格式的分段按钮，说明跟着选中项走。
@@ -650,7 +650,13 @@
         });
         // 用户 m18050：小节标题右侧也能挂一枚琥珀提醒（进阶模式那句「多一次调用」）。
         var sectWarn = warnPills(g.warn);
-        var sectSub = "<div class='sub sect'><h3><span class='gt'>" + esc(g.t) + "</span>" + sectWarn + "</h3>" +
+        // 用户 m06021：小节标题右侧也能挂一句说明（进阶模式那句「开启产生额外调用」）——
+        // 以前 sect 分支只画 warn 胶囊，note 写了也不显示。
+        // 用户 m06705：带 noteGo 的说明画成高亮气泡，点一下切到对应页签。
+        var sectNote = g.note ? ("<span class='gnt" + (g.noteGo ? " tip" : "") + "'" +
+          (g.noteGo ? (" data-goto='" + esc(g.noteGo) + "'") : "") + ">" + esc(g.note) +
+          (g.noteGo ? "<i class='arw'>›</i>" : "") + "</span>") : "";
+        var sectSub = "<div class='sub sect'><h3><span class='gt'>" + esc(g.t) + "</span>" + sectWarn + sectNote + "</h3>" +
                       (sectRows ? ("<div class='rows'>" + sectRows + "</div>") : "") + "</div>";
         if(g.split){
           var sn0 = g.split, sCol0 = g.col || "";
@@ -686,9 +692,8 @@
         if(g.sub && SUBROW_MODE[k]){ rows += paramRowHtml(k, f, SUBROW_MODE[k]); return; }
         // v3.70（用户 m21533 第 1 条）：休息时段是「起止两个下拉 + 开关」，单独画
         if(k === "rest_mode_enabled"){ used["rest_start"] = 1; used["rest_end"] = 1; rows += restPairHtml(); return; }
-        // 用户 m03059：两个开关并成一排（视频卡片链接 ↔ 无正文转发、单图片 ↔ 单表情包）
-        // 用户 m03262：带数字框的两对也走这里（静默兜底 ↔ 休息静默、静默初始过滤 ↔ 过滤短句字数），
-        // 值改成数组 [右边那项的键, 左边数字键, 右边数字键]，数字键也要标 used。
+        // 用户 m03059：两个开关并成一排（静默兜底 ↔ 休息静默），值改成数组
+        // [右边那项的键, 左边数字键, 右边数字键]，数字键也要标 used。
         if(SW_PAIR[k]){
           var sp = SW_PAIR[k];
           used[sp[0]] = 1;
@@ -698,6 +703,18 @@
           return;
         }
         // v3.44（用户 m04471 第 5 条）：开关 + 数值并成一行；数值键标 used 交给下一轮跳过
+        // 用户 m06372：静默过滤三行两格（SILENT_ROWS / SILENT_NUMS 在 lib-2.js），
+        // 每格自带数字框；这一行涉及的开关键与数字键全部标 used，免得再渲染出重复行。
+        if(Object.prototype.hasOwnProperty.call(SILENT_ROWS, k)){
+          var sr = SILENT_ROWS[k];
+          for(var si = 0; si < sr.length; si++){
+            used[sr[si]] = 1;
+            var sn = SILENT_NUMS[sr[si]] || [];
+            for(var sj = 0; sj < sn.length; sj++) used[sn[sj]] = 1;
+          }
+          rows += silentRowHtml(sr[0], sr[1]);
+          return;
+        }
         if(PAIR_NUM[k]){ used[PAIR_NUM[k]] = 1; rows += pairRowHtml(k, PAIR_NUM[k]); return; }
         rows += rowHtml(k, f);
       });
@@ -834,6 +851,7 @@
     // 老键（observe_* / quota_* / trace_enabled 等）早就从 schema 删了，这一手只会凭空长出第五个页签。
     // 上面那一串 used 标记照旧留着：同一个键被两个分组画两遍才是真问题。
     box.innerHTML = html;
+    silentFitNotes(box);
     // v3.92（用户 m06951 第 5 条）：提示词页的预览自动跑，不用点按钮。
     bindDecisionPage();
     setTimeout(ppAutoPreview, 0);
@@ -973,6 +991,7 @@
     // 用户 m10962：这三页的悬浮提示在渲染后统一摘掉（见上面的 NOTIP_PAGES）。
     watchNoTip();
     stripNoTipPages();
+    silentFitNotes(document.getElementById("settings"));
   }
 
   // 用户 m01874：把「模型没配」的红点画到三处——页签、提示词页的子页签、具体那一行。
@@ -1289,6 +1308,13 @@
 
   // 用户 m08123：JEV 自定义接口的密钥——单独一个接口存，不走配置自动保存。
   document.getElementById("settings").addEventListener("click", function(e){
+    // 用户 m06705：设置页里的引导气泡（data-goto）点一下切到对应页签。
+    var go = (e.target && e.target.closest) ? e.target.closest("[data-goto]") : null;
+    if(go){
+      var gtb = document.querySelector("#set-tabs button[data-page='" + go.getAttribute("data-goto") + "']");
+      if(gtb) gtb.click();
+      return;
+    }
     var getter = (e.target && e.target.closest) ? e.target.closest("[data-jev-get]") : null;
     if(getter){ jevFetchModels(); return; }
     // 用户 m09981：往右那一列的小页签 1 2 3 … +，以及删除当前页。
@@ -1724,8 +1750,12 @@
     }
     if(dk0 === "advanced_enabled") refreshDimRows();
     // v3.44：成对行的开关一动，数值框的明暗跟着变
+    // 用户 m04896 第 6 条：文件不进上下文一动，「过滤文件视频」那行的明暗跟着变。
+    // 用户 m06021：静默过滤两两并排的开关一动，自己那格条数框的明暗也跟着变。
     if(dk0 && (Object.prototype.hasOwnProperty.call(PAIR_NUM, dk0) ||
-               Object.prototype.hasOwnProperty.call(SW_PAIR, dk0))) refreshDimRows();
+               Object.prototype.hasOwnProperty.call(SW_PAIR, dk0) ||
+               Object.prototype.hasOwnProperty.call(SILENT_ROWS, dk0) ||
+               dk0 === "file_skip_context")) refreshDimRows();
     // v3.53（用户本轮第 3 条）：配额两个开关互斥，逻辑在 quotaMutex 里（单测能直接调）
     if(dk0 === "quota_hour_enabled" || dk0 === "quota_day_enabled"){
       quotaMutex(dk0, !!e.target.checked);

@@ -110,7 +110,7 @@
     "name": "回复看图",
     "type": "switch",
     "default": true,
-    "hint": "回复模型也看一眼历史与本轮消息里的图片。关掉后只发文字，图片位置留 [图片] 占位。"
+    "hint": "回复模型也看一眼图片，关掉只发文字。"
   },
   "decision_model": {
     "name": "决策模型",
@@ -164,7 +164,7 @@
     "name": "决策看图",
     "type": "switch",
     "default": true,
-    "hint": "决策模型也看一眼这一轮消息里的图片。它本身得是能看图的模型；万一上游不认图，会自动退回纯文字再判一次。JEV 判成「不确定 → 交给决策模型」时，那一次转交也看这个开关。"
+    "hint": "决策模型也看一眼图片；上游不认图会自动退回纯文字。"
   },
   "decision_fail_action": {
     "name": "决策失败时",
@@ -370,13 +370,13 @@
     "name": "防抖上限轮次",
     "type": "integer",
     "default": 3,
-    "hint": "最多叠几次；3 就是最多 7+7+7 秒，到顶不再拖。"
+    "hint": "最多叠几次，到顶不再拖"
   },
   "jitter_skip_must_go": {
     "name": "必回不等防抖",
     "type": "switch",
     "default": true,
-    "hint": "被 @ 或叫名字直接开跑，不等防抖；关掉＝点名也等。"
+    "hint": "点名也直接开跑"
   },
   "burst_merge_enabled": {
     "name": "连发合并",
@@ -444,7 +444,7 @@
     "name": "休息时段回复概率",
     "type": "integer",
     "default": 2,
-    "hint": "休息时只按这个概率掷骰。"
+    "hint": "只按这个概率掷骰"
   },
   "rest_silent_enabled": {
     "name": "休息静默",
@@ -459,13 +459,19 @@
     "hint": "休息时段里安静这么多分钟后补一次。"
   },
   "silent_skip_video_link": {
-    "name": "过滤视频卡片",
+    "name": "任意链接",
     "type": "switch",
     "default": true,
     "hint": ""
   },
+  "silent_skip_video_link_count": {
+    "name": "条数",
+    "type": "integer",
+    "default": 1,
+    "hint": ""
+  },
   "silent_skip_short": {
-    "name": "过滤短句字数",
+    "name": "短句字数",
     "type": "switch",
     "default": true,
     "hint": ""
@@ -473,34 +479,58 @@
   "silent_skip_short_len": {
     "name": "短句字数",
     "type": "integer",
-    "default": 6,
+    "default": 5,
+    "hint": ""
+  },
+  "silent_skip_short_count": {
+    "name": "条数",
+    "type": "integer",
+    "default": 1,
     "hint": ""
   },
   "silent_skip_single_image": {
-    "name": "过滤单张图片",
+    "name": "单张图片",
     "type": "switch",
     "default": false,
     "hint": ""
   },
+  "silent_skip_single_image_count": {
+    "name": "条数",
+    "type": "integer",
+    "default": 1,
+    "hint": ""
+  },
   "silent_skip_single_sticker": {
-    "name": "过滤单表情包",
+    "name": "单表情包",
     "type": "switch",
     "default": true,
+    "hint": ""
+  },
+  "silent_skip_single_sticker_count": {
+    "name": "条数",
+    "type": "integer",
+    "default": 1,
     "hint": ""
   },
   "silent_skip_empty_forward": {
-    "name": "过滤无文转发",
+    "name": "任意转发",
     "type": "switch",
     "default": true,
     "hint": ""
   },
-  "silent_skip_after_decision": {
-    "name": "静默初始过滤",
+  "silent_skip_empty_forward_count": {
+    "name": "条数",
+    "type": "integer",
+    "default": 1,
+    "hint": ""
+  },
+  "silent_skip_file_video": {
+    "name": "文件视频",
     "type": "switch",
     "default": true,
     "hint": ""
   },
-  "silent_skip_after_decision_count": {
+  "silent_skip_file_video_count": {
     "name": "条数",
     "type": "integer",
     "default": 1,
@@ -534,19 +564,19 @@
     "name": "连续不回后退避",
     "type": "switch",
     "default": false,
-    "hint": "连续不回就拉长下次阈值，避免硬凑（灰度中，暂不可用）。"
+    "hint": "连续不回就拉长阈值"
   },
   "backoff_start_rejects": {
     "name": "退避起始次数",
     "type": "integer",
     "default": 2,
-    "hint": "连续多少次不回后开始退避。"
+    "hint": "连续多少次不回后开始退避"
   },
   "backoff_base_seconds": {
     "name": "退避基准秒数",
     "type": "integer",
     "default": 15,
-    "hint": "首次退避秒数，之后指数增长。"
+    "hint": "首次退避秒数，之后翻倍"
   },
   "backoff_max_seconds": {
     "name": "退避封顶秒数",
@@ -558,98 +588,104 @@
     "name": "积压绕过条数",
     "type": "integer",
     "default": 6,
-    "hint": "积压到这么多条时无视退避立即触发。"
+    "hint": "积压这么多条就无视退避"
   },
   "window_keep": {
     "name": "裁切后保留条数",
     "type": "integer",
     "default": 30,
-    "hint": "裁切后窗口里最多留多少条消息，你和 bot 的都算，工具往返不算；待发也占名额，裁到一半就不再裁。"
+    "hint": "窗口里最多留多少条，你和 bot 的都算。"
   },
   "window_buffer": {
     "name": "裁切缓冲条数",
     "type": "integer",
     "default": 10,
-    "hint": "没人说话、或者不是发请求前那种顺手裁，要再多攒这么多条用户消息才动刀（默认 60 + 10 = 70 条）。"
+    "hint": "再多攒这么多条用户消息才强制裁一次。"
   },
   "history_images": {
     "name": "历史最多带几张原图",
     "type": "integer",
     "default": 128,
-    "hint": "回复和决策共用：最近这么多张图原样带给模型，更早只留 [图片]；调大更贵，0 = 都不带。"
+    "hint": "最近这么多张图原样带给模型，更早只留 [图片]。"
   },
   "history_gif_first": {
     "name": "只读首帧",
     "type": "switch",
     "default": false,
-    "hint": "动图只发第 1 帧，压成一张静图。最省，但后面那些帧的动作模型看不到。"
+    "hint": "只发第 1 帧，最省，动作看不到。"
   },
   "history_gif_original": {
     "name": "原图发送",
     "type": "switch",
     "default": false,
-    "hint": "动图原样发出去，一帧不少。看得最全，也最贵——几 MB 的动图会原封不动进请求。"
+    "hint": "原样发，看得最全也最贵。"
   },
   "history_gif_grid": {
     "name": "九帧模式",
     "type": "switch",
     "default": true,
-    "hint": "等距抽最多 9 帧拼成一张九宫格，后面跟一句说明（第几张是从哪抽的）。默认这档，体积和内容最平衡。"
+    "hint": "抽 9 帧拼成九宫格，体积和内容最平衡。"
   },
   "forward_mode": {
     "name": "转发消息处理",
     "type": "enum",
     "options": ["off", "text", "on_demand"],
     "default": "on_demand",
-    "hint": "默认按需查看：只挂前 3 张图，模型需要时自己调工具看完整内容。"
+    "hint": "只挂前 3 张图，需要时调工具看全部。"
   },
   "forward_images_all": {
     "name": "转发图片全部请求",
     "type": "switch",
     "default": false,
-    "hint": "打开后转发里的图全部发给模型。一条几十张的转发可能让请求涨到十几 MB，只在确实需要时开。"
+    "hint": "转发里的图全部发给模型，请求会变大。"
   },
   "forward_drop_gif": {
     "name": "转发里的动图一律不发",
     "type": "switch",
     "default": true,
-    "hint": "转发里的动图（表情包居多）完全不发给模型，正文留 [图片] 占位；静态图照常。实时窗照旧显示原图。"
+    "hint": "转发里的动图不发，正文留 [图片]。"
+  },
+  "file_skip_context": {
+    "name": "文件不进上下文",
+    "type": "switch",
+    "default": true,
+    "hint": "纯文件整条不进，带文字的文件只留文字。"
   },
   "window_trim_threshold": {
     "name": "裁切触发阈值",
     "type": "integer",
     "default": 60,
-    "hint": "窗口里的用户消息 + 还没发出去的待发，合计到这么多条就裁一次。攒够一倍再动刀更省缓存。"
+    "hint": "用户消息 + 待发合计到这么多条就裁一次。"
   },
   "protect_tool_groups": {
     "name": "保护工具调用组",
     "type": "switch",
     "default": true,
-    "hint": "裁切点避开工具调用配对，建议保持开启。"
+    "hint": "裁切点避开工具调用配对。"
   },
   "window_drop_tools": {
     "name": "工具结果不进实时窗",
     "type": "switch",
     "default": false,
-    "hint": "bot 调过工具之后，框架记忆里会留下成对的调用和结果。默认原样进实时窗，决策也能看到上一轮查到了什么；打开则整段不进窗口——一条工具结果动辄几万字符，每轮请求都要重背一遍。工具结果还没优化好，先按默认关着。"
+    "hint": "打开后工具调用和结果整段不进窗口，省上下文。"
   },
   "summary_enabled": {
     "name": "启用中期摘要",
     "type": "switch",
     "default": false,
-    "hint": "把裁掉的消息压成摘要放窗口顶部，纯机械，默认关。"
+    "hint": "把裁掉的消息压成摘要放窗口顶部。"
   },
   "summary_max_chars": {
     "name": "中期摘要字数上限",
     "type": "integer",
     "default": 300,
-    "hint": "摘要总字数上限，超了从最旧丢起。"
+    "hint": "超了从最旧丢起。"
   },
   "summary_line_chars": {
     "name": "摘要每条压多少字",
     "type": "integer",
     "default": 40,
-    "hint": "每条消息压成摘要行保留多少字。"
+    "hint": ""
   },
   "media_cache_limit": {
     "name": "图片缓存上限（每个群组）",
@@ -721,13 +757,13 @@
     "name": "回复记录显示条数（群聊）",
     "type": "integer",
     "default": 100,
-    "hint": "回复记录页最多列多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
+    "hint": ""
   },
   "trace_keep_dm": {
     "name": "回复记录显示条数（私聊）",
     "type": "integer",
     "default": 100,
-    "hint": "私聊的回复记录页最多列多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
+    "hint": ""
   },
   "requests_keep_days": {
     "name": "快照保留天数",
@@ -739,13 +775,13 @@
     "name": "决策记录显示条数（群聊）",
     "type": "integer",
     "default": 100,
-    "hint": "决策记录页最多列多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
+    "hint": ""
   },
   "decision_keep_dm": {
     "name": "决策记录显示条数（私聊）",
     "type": "integer",
     "default": 100,
-    "hint": "私聊的决策记录页最多列多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
+    "hint": ""
   },
   "decisions_keep_days": {
     "name": "消息日志与统计保留天数",
@@ -757,13 +793,13 @@
     "name": "窗口快照显示条数（群聊）",
     "type": "integer",
     "default": 200,
-    "hint": "走势图和快照列表最多画多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
+    "hint": ""
   },
   "window_show_dm": {
     "name": "窗口快照显示条数（私聊）",
     "type": "integer",
     "default": 200,
-    "hint": "私聊的走势图和快照列表最多画多少条。只影响页面显示，磁盘上留多少份由「窗口快照上限」决定。"
+    "hint": ""
   },
   "windows_keep_days": {
     "name": "窗口快照保留天数",

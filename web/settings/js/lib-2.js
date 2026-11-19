@@ -874,9 +874,9 @@
   var ppPane = "decision";
 
   var FWD_MODES = [
-    { v: "off", t: "不展开", d: "只留「[合并转发]」，正文和图片都不给模型。" },
-    { v: "text", t: "只给文字", d: "展开文字，图片全部换成占位，不请求图片。" },
-    { v: "on_demand", t: "按需查看", d: "默认只挂前 3 张图，模型需要时自己调工具看完整内容。" }
+    { v: "off", t: "不展开", d: "只给占位，不展开" },
+    { v: "text", t: "只给文字", d: "展开文字，图片占位" },
+    { v: "on_demand", t: "按需查看", d: "前 3 张图，其余调工具看" }
   ];
   function fwdModeDesc(v){
     for(var i = 0; i < FWD_MODES.length; i++) if(FWD_MODES[i].v === v) return FWD_MODES[i].d;
@@ -890,7 +890,7 @@
       "<div class='ds' data-fwddesc='1'>" + esc(fwdModeDesc(cur)) + "</div>" +
       "<div class='ctl'><span class='seg'>" + FWD_MODES.map(function(o){
         return "<button type='button' class='segbtn" + (o.v === cur ? " on" : "") +
-          "' data-fwdmode='" + esc(o.v) + "' title='" + esc(o.d) + "'>" + esc(o.t) + "</button>";
+          "' data-fwdmode='" + esc(o.v) + "'>" + esc(o.t) + "</button>";
       }).join("") + "</span></div></div>";
   }
   function rowHtml(k, f){
@@ -928,8 +928,24 @@
     // v3.81（用户 m03060）：「节奏」开关与「节奏松紧」并成一行——它们讲的是同一件事
     // （隔几条回一次），各占一行像两个独立功能。数字框在左、开关压最右，与上面几对一致。
     prob_pseudo: "adaptive_rhythm_sigma",
-    // 用户 m03262：静默兜底 / 休息静默 / 静默初始过滤 / 过滤短句字数这四对也带数字框，
-    // 但它们要两两并成一排，改由 SW_PAIR 登记（见下），这里不再重复。
+    // 用户 m06021：静默过滤 6 项改成两两并排（见 SILENT_PAIR / silentPairRowHtml），
+    // 条数框由那一行自己画，这里不再登记。
+  };
+  // 用户 m06372：静默过滤重排成三行——任意链接 / 任意转发、单表情包 / 单张图片、
+  // 短句字数 / 文件视频。每格自带数字框（见 SILENT_NUMS），默认值收进名字的 title。
+  var SILENT_ROWS = {
+    silent_skip_video_link: ["silent_skip_video_link", "silent_skip_empty_forward"],
+    silent_skip_single_sticker: ["silent_skip_single_sticker", "silent_skip_single_image"],
+    silent_skip_short: ["silent_skip_short", "silent_skip_file_video"]
+  };
+  // 每项的数字框：短句那一格两个（几个字算短句 + 管前几条），其余一格一个条数。
+  var SILENT_NUMS = {
+    silent_skip_video_link: ["silent_skip_video_link_count"],
+    silent_skip_empty_forward: ["silent_skip_empty_forward_count"],
+    silent_skip_single_sticker: ["silent_skip_single_sticker_count"],
+    silent_skip_single_image: ["silent_skip_single_image_count"],
+    silent_skip_short: ["silent_skip_short_len", "silent_skip_short_count"],
+    silent_skip_file_video: ["silent_skip_file_video_count"]
   };
   // 用户 m03059：两个开关并成一排——描述清空后一行一个，右边空一大片。
   // 用户 m03262：带数字框的也并进来（静默兜底 ↔ 休息静默、静默初始过滤 ↔ 过滤短句字数），
@@ -937,9 +953,6 @@
   // 语义相近的配一对：视频卡片链接 ↔ 无正文转发（都是转发类），单图片 ↔ 单表情包（都是媒体类）。
   var SW_PAIR = {
     silent_trigger_enabled: ["rest_silent_enabled", "silent_trigger_minutes", "rest_silent_minutes"],
-    silent_skip_after_decision: ["silent_skip_short", "silent_skip_after_decision_count", "silent_skip_short_len"],
-    silent_skip_video_link: ["silent_skip_empty_forward", "", ""],
-    silent_skip_single_image: ["silent_skip_single_sticker", "", ""],
   };
   // v3.70（用户 m21533 第 1 条）：休息时段是普通模式自己的设置，跟曲线无关，
   // 所以这一行仍是「休息时段 [23:00] → [08:00] [开关]」，说明回到「这段时间回复概率大幅降低」。
@@ -984,7 +997,7 @@
     if(/_seconds$/.test(k)) return "秒";
     if(/_minutes$/.test(k)) return "分钟";
     if(k === "silent_skip_short_len") return "字";
-    if(k === "silent_skip_after_decision_count") return "条";
+    if(/_count$/.test(k)) return "条";
     // 概率键不加单位：PCT_KEYS 那些键由 fieldControl 自己塞 <b class='pct'>%</b>，
     // 这里再加一个 % 会变成「%%」。
     return "";
@@ -1063,6 +1076,96 @@
       "</div></div>";
   }
 
+  // 用户 m06021：静默过滤每格的默认值提示——原来那枚可见角标（「默认 开启 · 1 条」）的内容，
+  // 现在只挂在名字的 title 上，鼠标悬浮才显示。
+  // 用户 m06372：短句那一格有两个数字框，提示里两个都写（「默认 开启 · 5 字 · 1 条」）。
+  // 用户 m06856：角标只留「默认 开启 / 默认 关闭」，条数在数字框里已经写着，不再重复。
+  function silentStateTip(k){
+    var f = (schemaCache && schemaCache[k]) || {};
+    return "默认 " + defaultText(f, k);
+  }
+  function silentCellTip(k){
+    var f = (schemaCache && schemaCache[k]) || {};
+    var nums = SILENT_NUMS[k] || [];
+    var tip = "默认 " + defaultText(f, k);
+    for(var i = 0; i < nums.length; i++){
+      var nf = (schemaCache && schemaCache[nums[i]]) || {};
+      var nd = defaultText(nf, nums[i]);
+      var unit = pairUnitOf(nums[i]);
+      if(nd && nd !== "无") tip += " · " + nd + (unit ? " " + unit : "");
+    }
+    return tip;
+  }
+  // 用户 m06021：静默过滤两两并排——一行两格，每格「名字（title 带默认值）+ 数字框 + 开关」。
+  // 用户 m06372：配对与顺序由 SILENT_ROWS 决定（三行六项），短句那格两个数字框。
+  // 用户 m07182：角标分两截——「默认 开启」+「· 1 条」。放不下时先只藏后一截。
+  function silentCountTip(k){
+    var nums = SILENT_NUMS[k] || [];
+    if(!nums.length) return "";
+    var nf = (schemaCache && schemaCache[nums[0]]) || {};
+    var nd = defaultText(nf, nums[0]);
+    if(!nd || nd === "无") return "";
+    var unit = pairUnitOf(nums[0]);
+    return nd + (unit ? " " + unit : "");
+  }
+  function silentRowHtml(k1, k2){
+    function cell(k){
+      var f = (schemaCache && schemaCache[k]) || {};
+      var nums = SILENT_NUMS[k] || [];
+      var on = !!(configCache && configCache[k]);
+      var boxes = "";
+      for(var i = 0; i < nums.length; i++){
+        var nf = (schemaCache && schemaCache[nums[i]]) || {};
+        boxes += "<span class='nspan'>" +
+          fieldControl(nums[i], nf, configCache[nums[i]], pairUnitOf(nums[i])) + "</span>";
+      }
+      // 用户 m06021：.swcell 上不挂 data-k——lib-3.js 的 collectSettings / pageValOf 用
+      // 「#settings [data-k=键]」单数查询，祖先 div 会抢先命中，读到的 checked 恒为 false，
+      // 保存时会把开关写成关闭。开关本身仍带 data-k，格子靠 .swcell 类定位。
+      // 用户 m06372：两个数字框的那格加 swshort，CSS 放宽并显示「字」「条」单位。
+      return "<div class='swcell" + (nums.length > 1 ? " swshort" : "") + "' title='" + esc(silentCellTip(k)) + "'>" +
+        "<div class='nm'>" + esc(nameOf(k, f)) + "</div>" +
+        "<div class='ctl pair'>" + boxes +
+          swPill(k, on, "开启", "关闭") +
+        "</div>" +
+        // 用户 m06705：默认值从 title 里搬出来，做成名字右边的小角标（跟其他项一个样式）。
+        // 用户 m07097：普通格把条数也写进角标（「默认 开启 · 1 条」）；短句那格两个数字框，
+        // 角标只留开关默认值，不然一行放不下。
+        "<div class='dfv2'><span class='dfv2s'>" + esc(silentStateTip(k)) + "</span>" +
+          (nums.length > 1 ? "" : "<span class='dfv2c'> · " + esc(silentCountTip(k)) + "</span>") + "</div></div>";
+    }
+    return "<div class='setrow inline silentpair' data-row='" + esc(k1) + "'>" +
+      cell(k1) + (k2 ? cell(k2) : "") + "</div>";
+  }
+  // 用户 m07111：角标该不该藏，按「名字有没有被挤成省略号」实测决定，不再按行宽写死断点。
+  // 先让角标显示，量一次名字的 scrollWidth；被挤到省略号就说明这格放不下，加 .narrow 藏掉。
+  // 窗口变宽时反过来：先摘 .narrow 再量，放得下就留着。
+  // 用户 m07176：scrollWidth / clientWidth 都是整数，差 0.4px 时两边都读成 52，判不出来却已经出省略号。
+  // 改成临时让名字不收缩（.measuring），看控件有没有被挤出格子右边界——带小数，准。
+  function silentOverflow(c){
+    var ctl = c.querySelector(".ctl");
+    if(!ctl) return false;
+    c.classList.add("measuring");
+    var over = ctl.getBoundingClientRect().right > c.getBoundingClientRect().right + 0.5;
+    c.classList.remove("measuring");
+    return over;
+  }
+  function silentFitNotes(root){
+    var box = root || document;
+    var cells = box.querySelectorAll(".setrow.inline.silentpair .swcell");
+    for(var i = 0; i < cells.length; i++){
+      var c = cells[i];
+      var nm = c.querySelector(".nm");
+      if(!nm) continue;
+      c.classList.remove("narrow");
+      c.classList.remove("tight");
+      if(silentOverflow(c)){
+        c.classList.add("tight");
+        if(silentOverflow(c)) c.classList.add("narrow");
+      }
+    }
+  }
+
   // 用户 m03059：两个开关并成一排，各占一半宽度，名字在左、开关在右。
   // 用户 m03262：带数字框的也走这里——数字框在开关左边，跟 pairRowHtml 一个排法。
   function swPairHtml(k1, k2, n1, n2){
@@ -1084,6 +1187,7 @@
     return "<div class='setrow inline swpair' data-row='" + esc(k1) + "'>" +
       cell(k1, n1) + cell(k2, n2) + "</div>";
   }
+
 
   // v3.54（用户本轮第 3 条）：配额四行合成两行——每行「名称 + 一句说明 | 数字框 + 单位 + 开关」，
   // 跟聊天决策页里概率 / 计数那几行的紧凑排法一致。数字框仍走 fieldControl（同一个 .ipt 尺寸），
@@ -1517,10 +1621,11 @@
       // v4.08（用户 m16927 第 2 条）：用户嫌这三句太长（真机上被省略号截断），各压到 30 字上下。
       // v4.35（用户 m02105）：1920 分辨率下这一格只有 248px（≈19 个字），三句都在截断，
       // 各压到 19 字以内，含义保留「越等越容易中 / 右边那格管松紧」。
+      // 用户 m05488：三列窄格里这一行只剩 75px（≈6 个字），再压到 6 字以内。
       var pHint = dynOn
-        ? "动态调整接管，右边那格越大越能等。"
-        : (onNow ? "越等越容易中；右边那格越大越能等。"
-                 : "每条单独掷一次，不攒也不保底。");
+        ? "动态调整接管"
+        : (onNow ? "越等越容易中"
+                 : "每条单独掷骰");
       if(pNm){
         pNm.textContent = pName;
         var pNmBox = pNm.parentNode;
@@ -1559,9 +1664,35 @@
         ns.classList.toggle("dimv", !sw.checked);
       });
     });
+    // 用户 m06021：静默过滤两两并排后同理——每格开关关着就把自己那格的条数框压暗。
+    Array.prototype.forEach.call(document.querySelectorAll("#settings [data-row].silentpair"), function(row){
+      Array.prototype.forEach.call(row.querySelectorAll(".swcell"), function(cell){
+        var sw = cell.querySelector(".sw2 input[data-k]");
+        var ns = cell.querySelector(".nspan");
+        if(!sw || !ns) return;
+        ns.classList.toggle("dimv", !sw.checked);
+      });
+    });
     // 用户 m01445：决策模式（advanced_enabled）一开一关，唤醒那几行的「必回」跟着亮 / 灰。
     Array.prototype.forEach.call(document.querySelectorAll("#settings .sw3"), function(box){
       box.classList.toggle("no-must", !advOn);
+    });
+    // 用户 m04896 第 6 条：「文件不进上下文」开着时，「过滤文件视频」这一项失效——
+    // 整行压暗、开关禁用，悬浮说明为什么（文件压根进不了窗口，也就没什么可过滤的）。
+    var fsSw = document.querySelector("#settings [data-k='file_skip_context']");
+    var fsOn = fsSw ? !!fsSw.checked : false;
+    var fsTip = fsOn ? "开启 文件不进上下文功能时，此选项失效" : "";
+    // 用户 m06021：静默过滤改成两两并排后，data-row 在整行上、开关在 .swcell 里，
+    // 所以按开关的 data-k 找它，再用 closest(".swcell") 拿那一格压暗。
+    Array.prototype.forEach.call(document.querySelectorAll("#settings input[data-k='silent_skip_file_video']"), function(sw){
+      var cell = sw.closest(".swcell") || sw.closest("[data-row]");
+      if(cell) cell.classList.toggle("dim", fsOn);
+      sw.disabled = fsOn;
+      var lab = sw.closest(".sw2");
+      if(lab) lab.setAttribute("title", fsTip);
+      // 用户 m06021：压暗时 title 换成失效原因；恢复时把默认值提示放回去（角标已经收进 title）。
+      var nm = cell ? cell.querySelector(".nm") : null;
+      if(nm) nm.setAttribute("title", fsOn ? fsTip : silentCellTip("silent_skip_file_video"));
     });
     // 用户 m10749 第 1 条：配额两档的灰化跟着一起刷（刷新 / 切页后状态不能丢）
     paintQuotaMutex();

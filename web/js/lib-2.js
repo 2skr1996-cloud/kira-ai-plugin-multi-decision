@@ -452,7 +452,8 @@
       .replace(/\[Image attached\]/gi, "[图片]")
       // 用户 m27528 图2/图3：框架在 Reply 原话、转发条目里写的是短占位 [Image]（没有 attached），
       // 上面那几行都认不出来，引用块里就只剩一行英文方括号。
-      .replace(/\[Image\]/g, "[图片]")
+      // 用户 m08286：引用块里的图片占位符现在带序号（[Image 1]），这里一并认。
+      .replace(/\[Image(?:\s*\d+)?\]/g, "[图片]")
       .replace(/\[Sticker\]/g, "[表情]")
       .replace(/\[Sticker attached\]/gi, "[表情]")
       .replace(/\[Voice attached\]/gi, "[语音]")
@@ -496,6 +497,9 @@
     return out.replace(sharePattern(), "")
       .replace(/点击链接直接打开[。.!！]?/g, "")
       // @昵称是元数据，不是他说的话（用户 m51324 图6：「@Mcp_management service …」多算 15 字）
+      // 用户 m05861：昵称里可能带空格，先整段吃掉「@ + 最多两个英文词」，
+      // 再兜底吃「@ + 一个不含空格的昵称」；最多吃两个词，再多就可能把真话一起吞掉。
+      .replace(/(^|[\s。，,、；;：:])@[A-Za-z0-9_\-]{1,32}(?:[ \t]+[A-Za-z0-9_\-]{1,32})?/g, "$1")
       .replace(/(^|[\s。，,、；;：:])@[\u4e00-\u9fa5A-Za-z0-9_\-]{1,16}/g, "$1")
       .replace(/(?:https?:\/\/|www\.)[^\s<>"「」]+/gi, "")
       .replace(/<\/?[A-Za-z_][^>]*>/g, "")
@@ -611,7 +615,7 @@
       // v4.90（用户 m02939 图5）：老快照里「（这条转发还有 N 张图没发…）」被追加过两遍
       // （回复链上 prepare_messages 被调了两次）。后端已改成幂等，但历史记录还是两份，
       // 显示时把连续重复的那句收成一句——不动落盘数据，只影响页面。
-      var _hintRe = /^（(?:这条转发还有 \d+ 张图没发(?:，需要看就调用 view_forward)?|另有 \d+ 张动图按设置没有发给模型)）$/;
+      var _hintRe = /^（(?:这条转发还有 \d+ 张图没发(?:，需要看就调用 view_forward)?|另有 \d+ 张动图按设置没有发给模型|引用的那条已经不在窗口里(?:，需要看就调用 view_quote)?|引用的那条是转发(?:，需要看就调用 view_forward)?)）$/;
       var _uniq = [];
       out.forEach(function(x){
         var t = String(x == null ? "" : x).trim();
@@ -1132,15 +1136,19 @@
     // 用户 m21787 图1/图2：被引用那条消息自己的图由后端按 message_id 认回来了（direct_reply.media），
     // 优先用它——框架会把被引用的图也挂到外层消息上，光看外层 media 分不清归属。
     var qown = Array.isArray(q.media) ? q.media : null;
-    var qsrc = (qown && qown.length) ? qown
-      : (d.known ? d.own : ((qIsFwd && d.all && d.all.length) ? d.all : (d.unassigned || [])));
+    // 用户 m07367：被引用的是转发时，q.media 只是「发给模型的那几张」（默认 3 张），
+    // 原转发卡用的是 display.forward_media_all（整条转发的全部图）。以前 qown 优先，
+    // 引用里就只剩 3 张、还挂着「（已发 3）」，跟上面那张原转发卡对不上。
+    var qsrc = (qIsFwd && d.all && d.all.length) ? d.all
+      : ((qown && qown.length) ? qown
+        : (d.known ? d.own : (d.unassigned || [])));
     // 用户 m21787 图4：引用里既然换成聊天里原本那张图，正文里「（动图 · 共 N 帧…）」这句
     // 派生说明也得一起去掉，否则原图旁边还挂着一句「上面是等距抽的 9 帧拼图」。
     if(qown && qown.length) body = stripDeriveNote(body);
     var qm = qIsFwd ? "" : thumbsHtml(qsrc);
     // known [] 是确定无图；图文并存时不因没有 Image 占位而清掉图或文字。
     if(qm || (d.known && !qsrc.length)) body = tidyBody(body)
-      .replace(/\[(?:Image attached|图片|表情|image)\]/gi, " ").replace(/^[\s\u00a0]+|[\s\u00a0]+$/g, "");
+      .replace(/\[(?:Image attached|Image(?:\s*\d+)?|图片|表情|image)\]/gi, " ").replace(/^[\s\u00a0]+|[\s\u00a0]+$/g, "");
     var mark = (!d.known && id && !qsrc.length) ? " data-qpic='" + esc(id) + "'" : "";
     var qh = "<span class='qwho'>" + (who ? esc(who) : "引用") +
       (when ? "<span class='dim'> · " + esc(when) + "</span>" : "") + "</span>";
@@ -1150,8 +1158,8 @@
     // 图倒是认回来了（qsrc 有 9 张），可没有条目就画不出卡，只能落成「内容未获取」。
     // 挂上标记交给 fillQuoteMiss：后端按 message_id 能补回正文，补到就整块重画。
     if(qIsFwd && id && !mark) mark = " data-qpic='" + esc(id) + "'";
-    var phOnly = body.trim(), phN = (phOnly.match(/\[(?:Image attached|图片|表情|image)\]/gi) || []).length;
-    if(!qm && phN && /^(?:\s*\[(?:Image attached|图片|表情|image)\])+\s*$/i.test(phOnly)){
+    var phOnly = body.trim(), phN = (phOnly.match(/\[(?:Image attached|Image(?:\s*\d+)?|图片|表情|image)\]/gi) || []).length;
+    if(!qm && phN && /^(?:\s*\[(?:Image attached|Image(?:\s*\d+)?|图片|表情|image)\])+\s*$/i.test(phOnly)){
       var phRow = "";
       for(var pi = 0; pi < Math.min(phN, 9); pi++) phRow += "<div class='qpic-ph'>图片</div>";
       return "<div class='quote'" + mark + jump + ">" + qh + phRow + "</div>";

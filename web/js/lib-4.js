@@ -9,6 +9,22 @@
       (n ? "（带图试了 " + n + " 次）" : "") + (why ? "：" + why : "");
   }
 
+  // 用户 m07898：主模型失败切备用时，主模型那条真实报错以前会被备用成功的结果盖掉，
+  // 记录页只剩一个「备用」徽标，看不出为什么换。这里把它挂到徽标和理由的 tooltip 上。
+  function decModelErrTip(r){
+    var list = Array.isArray(r.model_errors) ? r.model_errors : [];
+    var parts = [];
+    list.forEach(function(it){
+      if(!it) return;
+      var err = String(it.error || "").trim();
+      if(!err) return;
+      var who = String(it.model || "").trim() ||
+        (String(it.via || "") === "fallback" ? "备用模型" : "主模型");
+      parts.push(who + "：" + err.slice(0, 200));
+    });
+    return parts.join("；");
+  }
+
   function decisionFailTip(r){
     var err = String(r.error || "").trim().slice(0, 300);
     var tip = "决策没有走通" +
@@ -157,7 +173,9 @@
     dShown.forEach(function(r){
       var why = String(r.decision_reason || "").replace(/\s+/g, " ").trim();
       // m01209 图3：决策词不再引导角色说什么，记录页也不再把「打算说」当结论展示。
-      var tip = (why || "（模型没给理由）");
+      // 用户 m07898：切了备用就把主模型的真实报错一起挂在 tooltip 上。
+      var fbWhy = decModelErrTip(r);
+      var tip = (why || "（模型没给理由）") + (fbWhy ? "；" + fbWhy : "");
       var body = (why || "—");
       // 用户 m17519：理由列改成单行省略（跟回复正文列同一套 .ell），不再按字数硬截。
       // 后端 _requests_payload 把 provider:内部 ID 翻成了真名（model_label）；
@@ -199,7 +217,8 @@
       html += "<td class='chc'>" + (mch ? esc(mch) : "<span class='dim'>—</span>") + "</td>";
       html += "<td class='mdl' title='" + esc("模型：" + mlabFull) + "'>" +
               "<span class='mn'><span class='mnt'>" + esc(mlabFull) + "</span>" +
-              (r.decision_via === "fallback" ? "<span class='tag pend'>备用</span>" : "") + "</span></td>";
+              (r.decision_via === "fallback" ? "<span class='tag pend'" +
+                (fbWhy ? " title='" + esc(fbWhy) + "'" : "") + ">备用</span>" : "") + "</span></td>";
       // 用户 m13212：防抖单独占一列，用时列只写判定本身，读起来就是「防抖 7s + 3s」。
       html += "<td class='num'>" + (del ? fmtDur(del) : "<span class='dim'>—</span>") + "</td>";
       html += "<td class='num'>" + (el ? fmtDur(el) : "<span class='dim'>—</span>") + "</td>";

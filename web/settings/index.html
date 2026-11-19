@@ -379,15 +379,18 @@ html[data-theme="dark"] .scard.on{background:rgba(96,165,250,.16);}
 /* 行高统一到 34px，左右两列的每一行在同一条水平线上（右列开关行也照样居中） */
 /* 用户 m18041：行高统一到 36px（原来 34 只是下限，32px 输入框 + 4px 内边距实际撑到 41）。 */
 .setgrp[data-page="basic"][data-split="2"] .setrow.inline{min-height:38px;align-items:center;}
-/* v3.61（用户 m17581 第 11 条）：基础页控件列统一 200px 并贴右。
+/* v3.61（用户 m17581 第 11 条）：基础页控件列统一贴右。
    之前 .ctl 一会被 :294 拉满、一会又被 .setrow.inline .ctl{width:auto} 拉回 auto，
    同一列里昵称框 183、外号胶囊 103、数字框 96 三种宽度，右列「唤醒」那三行的开关
    又因为行里只有两个格子、控件落到第 2 格，右边缘比别的行短 12px。
-   现在：控件列固定 200 贴右，文本框/下拉占满 200，胶囊与开关在 200 内右对齐，
-   数字框仍 96（贴右）；成对行（唤醒 / 配额）的 .ctl.pair 显式放到第 3 格。 */
-.setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl{width:200px;min-width:200px;justify-self:end;justify-content:flex-end;}
+   现在：控件列按内容宽度贴右，文本框/下拉固定 200，胶囊与开关按自身宽度右对齐，
+   数字框仍 96（贴右）；成对行（唤醒 / 配额）的 .ctl.pair 显式放到第 3 格。
+   用户 m04763：原来控件列写死 200px，开关只占 58px、数字框只占 56px，
+   多出来的 140px 全从描述列里扣，描述明明还有地方却被挤成两行；
+   改成按内容宽度后描述列多出 100–140px，基础页所有描述都回到单行。 */
+.setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl{width:auto;min-width:0;justify-self:end;justify-content:flex-end;}
 .setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl > input[type=text],
-.setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl > select{width:100%;height:32px;box-sizing:border-box;}
+.setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl > select{width:200px;height:32px;box-sizing:border-box;}
 .setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl.list{max-width:200px;}
 .setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl.list .chips{justify-content:flex-end;}
 .setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl.pair{grid-column:3;grid-row:1;}
@@ -395,7 +398,7 @@ html[data-theme="dark"] .scard.on{background:rgba(96,165,250,.16);}
    昵称框右边缘离卡片内边缘差一截、看着没贴右；这里整列一起挪（不是只挪一行），同列仍然完全对齐。
    昵称行再显式写一条，避免以后行 class 变动时掉回 auto 宽度。 */
 .setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl{margin-right:-8px;}
-.setgrp[data-page="basic"][data-split="2"] .setrow.inline[data-row="bot_name"] .ctl{width:200px;min-width:200px;}
+.setgrp[data-page="basic"][data-split="2"] .setrow.inline[data-row="bot_name"] .ctl{width:auto;min-width:0;}
 .setgrp[data-page="basic"][data-split="2"] .setrow.inline .nm{font-size:13px;line-height:1.45;}
 .setgrp[data-page="basic"][data-split="2"] .chips{padding:0;}
 .setgrp[data-page="basic"][data-split="2"] .chip{padding:2px 10px;}
@@ -412,6 +415,59 @@ html[data-theme="dark"] .setgrp[data-page="basic"][data-split="2"] .col{backgrou
   border-color:rgba(255,255,255,.11);box-shadow:none;}
 html[data-theme="dark"] .setgrp[data-page="basic"][data-split="2"] .setrow{border-bottom-color:rgba(255,255,255,.075);}
 html[data-theme="dark"] .setgrp[data-page="basic"][data-split="2"] .setrow:hover{background:rgba(255,255,255,.055);}
+/* 用户 m04287：窗口页也做成卡片——三行两列，每列一张卡，跟基础页 / 聊天决策页同一套外观。
+   只借卡片、标题竖条、行悬停这几条；控件宽度仍按窗口页自己的（数字框 96、成对行自适应）。
+   用户 m04656：改成整列一张卡（像基础设置页那样），两列拉平，中间不再空出来。 */
+.setgrp[data-page="window"][data-split="2"] .split2{gap:22px;align-items:stretch;}
+.setgrp[data-page="window"][data-split="2"] .col{display:flex;flex-direction:column;background:var(--card);
+  border:1px solid var(--line);border-radius:14px;padding:12px 14px 14px;box-shadow:0 1px 2px rgba(16, 24, 40, .04);}
+.setgrp[data-page="window"][data-split="2"] .col > .sub{display:flex;flex-direction:column;flex:0 0 auto;min-width:0;}
+.setgrp[data-page="window"][data-split="2"] .col .sub + .sub{margin-top:8px;padding-top:6px;}
+.setgrp[data-page="window"][data-split="2"] .col h3{display:flex;align-items:center;gap:8px;font-size:12.5px;
+  font-weight:600;padding:0 0 9px;margin:0 0 10px;border-radius:0;background:transparent;
+  border-bottom:1px solid var(--line);color:var(--text);letter-spacing:.2px;}
+.setgrp[data-page="window"][data-split="2"] .col h3::before{content:"";flex:0 0 auto;width:3px;height:12px;
+  border-radius:2px;background:var(--accent);opacity:.6;}
+.setgrp[data-page="window"][data-split="2"] .col h3::after{content:"";flex:1 1 auto;height:1px;
+  background:linear-gradient(90deg,var(--line),transparent);}
+.setgrp[data-page="window"][data-split="2"] .setrow{padding:4px 8px;border-radius:8px;
+  border-bottom-color:rgba(16, 24, 40, .07);}
+.setgrp[data-page="window"][data-split="2"] .setrow:hover{background:var(--soft);}
+.setgrp[data-page="window"][data-split="2"] .setrow.inline{padding:2px 8px;column-gap:12px;min-height:38px;align-items:center;}
+.setgrp[data-page="window"][data-split="2"] .sub .rows [data-row]:last-child{border-bottom:none;}
+html[data-theme="dark"] .setgrp[data-page="window"][data-split="2"] .col{background:rgba(255,255,255,.05);
+  border-color:rgba(255,255,255,.11);box-shadow:none;}
+html[data-theme="dark"] .setgrp[data-page="window"][data-split="2"] .setrow{border-bottom-color:rgba(255,255,255,.075);}
+html[data-theme="dark"] .setgrp[data-page="window"][data-split="2"] .setrow:hover{background:rgba(255,255,255,.055);}
+/* 用户 m06021：进阶模式搬到普通模式那一列，但独立成一张卡——列本身不再当卡片，
+   改成每个小节一张卡；普通模式 / 到点休息时照常灰着，进阶模式是能用的，不灰。
+   标题栏一律不灰（用户原话：普通模式那个卡片照常灰着，但标题栏不要灰）。 */
+.setgrp[data-split="3"] .col[data-col="normal"]{background:none;border:none;box-shadow:none;padding:0;gap:0;}
+.setgrp[data-split="3"] .col[data-col="normal"] > .sub{background:var(--card);border:1px solid var(--line);
+  border-radius:0;padding:12px 14px 14px;box-shadow:none;}
+/* 用户 m06372：普通模式与到点休息时并成一张卡（不再各一张）。
+   用户 m06705：两节之间那条线是上一节的 border-bottom（下一节只去了 border-top），一并去掉。 */
+/* 用户 m06719：普通模式和到点休息时是同一张卡的两节，中间不能有线；连 1px 的投影也不行。 */
+.setgrp[data-split="3"] .col[data-col="normal"] > .sub:first-child{border-radius:14px 14px 0 0;border-bottom:0;
+  box-shadow:none;}
+.setgrp[data-split="3"] .col[data-col="normal"] > .sub:nth-child(2){border-top:0;border-radius:0 0 14px 14px;
+  padding-top:2px;}
+.setgrp[data-split="3"] .col[data-col="normal"] > .sub:nth-child(2) h3{padding-top:0;margin-top:0;}
+.setgrp[data-split="3"] .col[data-col="normal"] > .sub.sect{border-radius:14px;margin-top:14px;
+  box-shadow:0 1px 2px rgba(16,24,40,.04);}
+/* 用户 m06578：这条只负责把「到点休息时」贴到「普通模式」下面；进阶模式是独立卡片，
+   要留 14px 间隙，所以排除 .sect（否则它把上面 .sub.sect 的 margin-top 覆盖成 0）。 */
+.setgrp[data-split="3"] .col[data-col="normal"] > .sub + .sub:not(.sect){margin-top:0;padding-top:6px;}
+.setgrp[data-split="3"] .col[data-col="normal"].off{background:none;border-color:transparent;}
+.setgrp[data-split="3"] .col[data-col="normal"].off > .sub{background:var(--soft);opacity:1;}
+.setgrp[data-split="3"] .col[data-col="normal"].off > .sub.sect{background:var(--card);}
+.setgrp[data-split="3"] .col[data-col="normal"].off > .sub:not(.sect) .rows{opacity:.42;pointer-events:none;}
+.setgrp[data-split="3"] .col[data-col="normal"].off > .sub.sect .rows{opacity:1;pointer-events:auto;}
+.setgrp[data-split="3"] .col[data-col="normal"].off h3{color:var(--text);}
+html[data-theme="dark"] .setgrp[data-split="3"] .col[data-col="normal"] > .sub{background:rgba(255,255,255,.05);
+  border-color:rgba(255,255,255,.11);box-shadow:none;}
+html[data-theme="dark"] .setgrp[data-split="3"] .col[data-col="normal"].off > .sub{background:rgba(255,255,255,.055);}
+html[data-theme="dark"] .setgrp[data-split="3"] .col[data-col="normal"].off > .sub.sect{background:rgba(255,255,255,.05);}
 
 
 /* v3.17（用户 m40932）：「触发」页整体美化——三档从三栏文字改成三张卡片：
@@ -458,7 +514,7 @@ html[data-theme="dark"] .setgrp[data-split="3"] .col.off{background:rgba(255,255
    组内自己排两列——十二项六行高，不再各占半屏。 */
 /* v3.37（用户本轮）：每项名称右侧标出默认值，改过之后也能一眼看出原来是多少 */
 .setrow .dfv{display:inline-block;margin-left:7px;padding:0 6px;border-radius:6px;background:var(--soft);
-  color:var(--muted);font-size:11px;font-weight:400;line-height:17px;vertical-align:1px;white-space:nowrap;}
+  color:var(--muted);font-size:11px;font-weight:400;font-style:normal;line-height:17px;vertical-align:1px;white-space:nowrap;}
 /* v3.42（用户 m03616 第 5 条）：百分比的键要带上 %，光看「20」不知道是 20 条还是 20%。
    v3.43（用户本轮第 3 条 / 图 8）：% 不再挂到框外，改成绝对定位在输入框里（见上面 .ipt 那段），
    这里只留字号颜色，margin 那套不再需要。 */
@@ -510,11 +566,63 @@ html[data-theme="dark"] .setgrp[data-split="3"] .col.off{background:rgba(255,255
 .setrow.inline.swpair .swcell .nm{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .setrow.inline.swpair .swcell .ctl{flex:0 0 auto;width:auto;}
 @media (max-width:760px){.setgrp[data-split="3"] .setrow.inline.swpair{grid-template-columns:1fr;row-gap:6px;}}
-/* 用户 m03262：并排的两格各自带数字框后，一格至少要 244px（名字 + 96px 数字框 + 开关）。
-   三列窄格（<=1600px）里一格只剩 220–246px，名字会被压成省略号；这个宽度下改成上下两行。 */
-@media (max-width:1600px){.setgrp[data-split="3"] .setrow.inline.swpair{grid-template-columns:1fr;row-gap:6px;}}
+/* 用户 m06604：数字框改成按内容宽之后，一格只要 ~190px（名字 56 + 数字框 56 + 开关 58），
+   宽屏完全放得下两格，所以不再按 1600px 一刀切；改成 auto-fit，
+   节奏列窄到两格放不下（约 1340px 以下）才退回上下两行，免得名字被省略号截掉。 */
+.setgrp[data-split="3"] .setrow.inline.swpair{grid-template-columns:repeat(auto-fit,minmax(190px,1fr));}
 /* 三列窄格（<=1600px）里两个开关并排会挤掉名字：默认角标先让位，名字保住。 */
 @media (max-width:1600px){.setrow.inline.swpair .swcell .dfv{display:none;}.setrow.inline.swpair .swcell{gap:8px;}}
+/* 用户 m06021：静默过滤去掉可见的默认角标（改成名字上的悬浮），腾出的宽度两两并排。
+   一格 = 名字(13px × 6 字 = 78) + 条数框(30) + 开关(58) + 两个 4px 间距 = 174；
+   节奏列宽 361 时两格 356，放得下；再窄就自动退回一行一个（auto-fit）。 */
+/* 用户 m06856：两两并排（跟上面「静默兜底 / 休息静默」一样），默认值做成名字右边的小角标。 */
+/* 用户 m06997：一行固定两个（最高优先级，不再按宽度退回一行一项）。
+   放不下就在当前宽度隐藏默认角标，鼠标悬浮整格时用 title 显示；
+   两格中间加一条竖分割线。 */
+.setgrp[data-split="3"] .setrow.inline.silentpair{grid-template-columns:1fr 1fr;
+  column-gap:18px;padding:2px 0;align-items:stretch;container-type:inline-size;}
+.setrow.inline.silentpair .swcell + .swcell{position:relative;}
+.setrow.inline.silentpair .swcell + .swcell::before{content:"";position:absolute;left:-9px;top:0;bottom:0;
+  width:1px;background:var(--line);}
+/* 用户 m07111：角标放不下才藏。渲染完由 silentFitNotes() 实测一次——名字被挤成省略号
+   才给这格加 .narrow；不再按行宽写死断点（以前 1568 宽明明还有空位，短句那格也被藏了）。 */
+.setrow.inline.silentpair .swcell.narrow .dfv2{display:none;}
+/* 用户 m07182：放不下时先只藏「· 1 条」这一截（.tight），还放不下才整块藏（.narrow）。 */
+.setrow.inline.silentpair .swcell.tight .dfv2c{display:none;}
+/* 量宽度时让名字不许收缩，控件被挤出格子右边界就说明放不下（比 scrollWidth 的整数取整准）。 */
+.setrow.inline.silentpair .swcell.measuring .nm{flex:0 0 auto;}
+/* 用户 m06705：每格改成两行——第一行「名字 + 数字框 + 开关」，第二行整格宽的默认值说明
+   （「默认 开启 · 1 条」）。以前默认值只挂在名字的 title 上，不悬浮就看不见。 */
+.setrow.inline.silentpair .swcell{display:flex;align-items:center;gap:3px;min-width:0;}
+/* 用户 m06705：默认值做成名字右边的小角标，跟其他项的 .dfv 一个样式，同一行。 */
+.setrow.inline.silentpair .swcell .nm{flex:0 1 auto;min-width:0;font-size:13px;line-height:1.45;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.setrow.inline.silentpair .swcell .dfv2{order:1;flex:0 0 auto;padding:0 2px;border-radius:6px;background:var(--soft);
+  color:var(--muted);font-size:11px;font-style:normal;line-height:17px;white-space:nowrap;}
+/* 用户 m06021：.setrow.inline .ctl.pair 那条通用规则给了 width:100%，会把整格占满、
+   把名字挤成 0 宽；这里显式收回 auto。 */
+.setrow.inline.silentpair .swcell .ctl{order:2;flex:0 0 auto;width:auto;display:flex;align-items:center;gap:2px;margin-left:auto;}
+.setrow.inline.silentpair .swcell .nspan{flex:0 0 auto;}
+/* 用户 m06705：条数框以前把「条」藏了，只剩一个光秃秃的 1；现在单位进框（跟 .ipt.has-unit 一套做法），
+   框放宽到 40px。窄屏（<=1519px）两格只有 177~215px，「短句字数」那格放不下两个带单位的框，
+   退回 34px 无单位，名字才不会被省略号截掉。 */
+.setrow.inline.silentpair .swcell .nspan .ipt{width:auto;max-width:28px;}
+.setrow.inline.silentpair .swcell .nspan .ipt > .unit{display:inline;right:2px;font-size:10px;}
+.setrow.inline.silentpair .swcell .nspan .ipt > input[type=number]{width:auto;min-width:24px;max-width:28px;
+  padding-left:2px;padding-right:13px;text-align:right;}
+
+/* 用户 m06372：短句那一格两个数字框（5 字 / 1 条），第一个框要显示「字」单位，放宽到 48px；
+   第二个框仍是 34px 的纯数字（单位在名字悬浮里写着）。 */
+.setrow.inline.silentpair .swcell.swshort .nspan:first-child .ipt{max-width:30px;}
+.setrow.inline.silentpair .swcell.swshort .nspan:first-child .ipt > .unit{display:inline;}
+.setrow.inline.silentpair .swcell.swshort .nspan:first-child .ipt > input[type=number]{min-width:26px;max-width:30px;
+  padding-right:13px;text-align:right;}
+/* 用户 m06372：窄屏（节奏列不到 408px，两格各不足 200px）时「短句字数」那格放不下 48px 的字数框，
+   把「字」单位藏掉、框收窄到 34px，两格仍能并排；宽屏保持 48px 带单位。 */
+/* 用户 m06856：一行一项之后「短句字数」那格也放得下两个带单位的框，不再窄屏收窄。 */
+.setrow.inline.silentpair .swcell:only-child{grid-column:1/-1;}
+.setrow.inline.silentpair .swcell.dim{opacity:.42;}
+.setrow.inline.silentpair .swcell.dim .nm{color:var(--muted);}
 /* 三列窄格（<=1439px）放不下说明：成对行只留名称 + 角标 + 控件，说明留在 title 里，
    否则说明被压成「多…」还把数字框挤扁，两头都不好看。 */
 @media (max-width:1439px){
@@ -882,6 +990,14 @@ html.booting .msw .tr,html.booting .msw .tr:after{transition:none;}
    改成标题占自己那一份、说明拿剩余宽度换行。 */
 .setgrp:not([data-split]) > h3 .gt{flex:0 0 auto;white-space:nowrap;}
 .setgrp:not([data-split]) > h3 .gnt{flex:1 1 auto;min-width:0;white-space:normal;overflow-wrap:anywhere;}
+/* 用户 m06705：进阶模式那句说明改成高亮气泡——点一下直接跳到「提示词」页，不用自己找页签。 */
+.setgrp h3 .gnt.tip{flex:0 0 auto;display:inline-flex;align-items:center;gap:3px;padding:1px 9px;
+  border-radius:999px;font-size:11.5px;color:var(--accent);background:rgba(59,130,246,.10);
+  border:1px solid rgba(59,130,246,.35);cursor:pointer;transition:background .15s,border-color .15s;}
+.setgrp h3 .gnt.tip:hover{background:rgba(59,130,246,.18);border-color:rgba(59,130,246,.55);}
+.setgrp h3 .gnt.tip .arw{font-style:normal;opacity:.75;}
+html[data-theme="dark"] .setgrp h3 .gnt.tip{color:#93c5fd;background:rgba(96,165,250,.14);
+  border-color:rgba(96,165,250,.38);}
 /* v3.28（用户 m47321）：时段曲线。触发页「高级模式」列里一块迷你预览，
    点开是页内大编辑器；拖动竖线切段、点段顶数字改概率。 */
 .bandbox{display:flex;flex-direction:column;gap:9px;}

@@ -42,9 +42,9 @@
     // 用户 m00347：必回三个开关正式启用（不再灰着）——触发＝叫到算一次触发，
     // 必回＝跳过模型判断直接回。
     // v3.40（用户本轮第 5 条）：艾特 / 外号 / 昵称三条都归到「唤醒」一组，每行两个开关，
-    // 「主要开关」只留 decision_enabled（custom 挪到唤醒组）。
+    // 「插件开关」只留 decision_enabled（custom 挪到唤醒组）。
     // 用户 m00363：组里再加一行「休息时段」，同样两个开关（触发 / 必回）。
-    { p: "basic", t: "主要开关", split: 2, col: "right", keys: ["decision_enabled"] },
+    { p: "basic", t: "插件开关", split: 2, col: "right", keys: ["decision_enabled"] },
     { p: "basic", t: "唤醒", split: 2, col: "right", custom: "wake",
       // v3.41（用户本轮第 4 条）：必回那条说明从标题下面整行（gnote）挪到标题右侧（note → h3 里的 .gnt），
       // 跟其它组一个样子：一行内联小字，超长省略，全文留在 title 里。
@@ -87,6 +87,31 @@
     { p: "trigger", t: "到点休息时", col: "normal", split: 3,
       note: "计数 / 概率模式生效；曲线模式下点那段右上角的月亮",
       keys: ["rest_mode_enabled", "rest_start", "rest_end", "rest_probability"] },
+    // 用户 m06021：进阶模式整组（含「决策模式」「JEV 决策」两条 rowline）从 dev 列搬到普通模式列，
+    // 排在「到点休息时」后面——mergeSectRows 靠相邻把两条 rowline 并进这个 sect 组，三条必须连着。
+    // 标题与这一行同处一个 .sub（v4.09 的 sect 合并），不会多出两层虚线内边距。
+    { p: "trigger", t: "进阶模式", col: "normal", split: 3, sect: 1,
+      // 用户 m06705：这句说明改成高亮气泡，点一下跳到「提示词」页（noteGo 由 app.js 画成可点）。
+      note: "开启产生额外调用，去「提示词」页设置", noteGo: "prompt" },
+    // v3.92（用户 m06951 第 4 条）：进阶模式改名「决策模式」，开关从提示词页搬回设置页，
+    // 跟节奏模式一样「标题 + 开关」一行——这两行说的都是「这一轮怎么决定回不回」。
+    // 提示词页只留人格 / 判断提示词 / 模型 / 工具那些设置（见那页顶上的两个子页签）。
+    // 描述按用户原话改写：「开启后单独调用模型决定是否回复」。
+    { p: "trigger", t: "决策模式", col: "normal", split: 3, rowline: 1,
+      // v3.93（用户 m07570 图1 第 2 条）：用户要在描述后面补一句提醒——
+      // 开它等于每轮多一次模型调用，而且判定用的提示词在「提示词」页那半边。
+      // v4.36（用户 m02314）：说明和胶囊都压到一行装得下——「使用快速模型进行决策」+「多一次调用，「提示词」页设置」。
+      // v4.67（用户 m02347）：把「使用模型」补成「使用快速模型」，默认就是快速模型，写明更直观。
+      note: "使用快速模型进行决策",
+      // 用户 m06021：进阶模式标题右侧那枚胶囊已撤，提醒并进「进阶模式」的 note。
+      keys: ["advanced_enabled"] },
+    // 用户 m06706：JEV 决策——用接入的专用决策模型（如 Jev）走 choice() 判要不要开口，
+    // 不让它写正文。与上面那条「决策模式」互斥：开一个当场关另一个（saveNow 成对存），
+    // 但两边各自的模型 / 提示词 / 区间都留着，来回切不用重配。
+    { p: "trigger", t: "JEV 决策", col: "normal", split: 3, rowline: 1,
+      note: "用专用决策模型判断是否回复",
+      // 用户 m06021：提醒并进「进阶模式」的 note，这里不再重复。
+      keys: ["jev_enabled"] },
     // v3.31（用户 m48323 第 6 条）：高级模式原来的位置（三列中间）给节奏。
     // v3.33（用户 m51046 第 6/10 条）：静默与休息单独成一组（同一列，靠分隔线隔开）——
     // 「群安静多久兜底」「休息时段那几分钟兜底」各自能开关、各自能填分钟数；
@@ -123,15 +148,17 @@
       note: "聊天静默时或休息静默时补一次扫尾请求",
       keys: ["silent_trigger_enabled", "silent_trigger_minutes",
         "rest_silent_enabled", "rest_silent_minutes"] },
-    // 用户 m03262：过滤项单独一组——上面两行管「多久补一次」，这里管「哪些消息不值得补」，
-    // 混在一组里读起来像同一套参数。6 个开关两两并排（见 lib-2.js 的 SW_PAIR）。
+    // 用户 m03262：过滤项单独一组——上面两行管「多久补一次」，这里管「哪些消息不值得补」。
     // 用户 m03450：这组是双刃剑——过滤配多了会漏掉该补的那一轮，标题右边挂个胶囊提醒。
+    // 用户 m05488：整组回到节奏那一列，一行一个（每项自带「条数」框）。
     { p: "trigger", t: "静默过滤", col: "rhythm", split: 3, warn: ["双刃剑"],
-      note: "这些类型的消息不触发静默兜底",
-      keys: ["silent_skip_after_decision", "silent_skip_after_decision_count",
-        "silent_skip_short", "silent_skip_short_len",
-        "silent_skip_video_link", "silent_skip_empty_forward",
-        "silent_skip_single_image", "silent_skip_single_sticker"] },
+      note: "不触发静默兜底，过滤条数按设置",
+      keys: ["silent_skip_video_link", "silent_skip_video_link_count",
+        "silent_skip_empty_forward", "silent_skip_empty_forward_count",
+        "silent_skip_single_sticker", "silent_skip_single_sticker_count",
+        "silent_skip_single_image", "silent_skip_single_image_count",
+        "silent_skip_short", "silent_skip_short_len", "silent_skip_short_count",
+        "silent_skip_file_video", "silent_skip_file_video_count"] },
     // v3.93（用户 m07570 图1 第 1 条）：节奏模式与决策模式说的都是「这一轮怎么决定
     // 回不回」，用户要在这两行上面加一条「高级设置」小标题把它们归进去。
     // 用户 m01961：决策模式搬去右列，这一节只剩节奏模式一行。
@@ -149,32 +176,6 @@
       // 计数模式不掷骰，这一组要整块压暗。
       grp: "rhythm",
       keys: ["prob_pseudo", "adaptive_rhythm_sigma"] },
-    // 用户 m01961：左边那行「决策模式」搬到右边来，右边补一条「进阶模式」小标题——
-    // 退避模式本来就排在进阶模式那一列下面（v3.53），这次把标题补回去。
-    // 标题与这一行同处一个 .sub（v4.09 的 sect 合并），不会多出两层虚线内边距。
-    { p: "trigger", t: "进阶模式", col: "dev", split: 3, sect: 1,
-      // 用户 m18050：原来两行行尾各挂一枚「多一次调用，「提示词」页设置」胶囊，重复又占宽；
-      // 现在整句搬到这个小节标题右侧，逗号去掉。
-      warn: "多一次调用「提示词」页设置" },
-    // v3.92（用户 m06951 第 4 条）：进阶模式改名「决策模式」，开关从提示词页搬回设置页，
-    // 跟节奏模式一样「标题 + 开关」一行——这两行说的都是「这一轮怎么决定回不回」。
-    // 提示词页只留人格 / 判断提示词 / 模型 / 工具那些设置（见那页顶上的两个子页签）。
-    // 描述按用户原话改写：「开启后单独调用模型决定是否回复」。
-    { p: "trigger", t: "决策模式", col: "dev", split: 3, rowline: 1,
-      // v3.93（用户 m07570 图1 第 2 条）：用户要在描述后面补一句提醒——
-      // 开它等于每轮多一次模型调用，而且判定用的提示词在「提示词」页那半边。
-      // v4.36（用户 m02314）：说明和胶囊都压到一行装得下——「使用快速模型进行决策」+「多一次调用，「提示词」页设置」。
-      // v4.67（用户 m02347）：把「使用模型」补成「使用快速模型」，默认就是快速模型，写明更直观。
-      note: "使用快速模型进行决策",
-      // 用户 m18050：这句提醒已搬到「进阶模式」小节标题右侧，行尾不再重复。
-      keys: ["advanced_enabled"] },
-    // 用户 m06706：JEV 决策——用接入的专用决策模型（如 Jev）走 choice() 判要不要开口，
-    // 不让它写正文。与上面那条「决策模式」互斥：开一个当场关另一个（saveNow 成对存），
-    // 但两边各自的模型 / 提示词 / 区间都留着，来回切不用重配。
-    { p: "trigger", t: "JEV 决策", col: "dev", split: 3, rowline: 1,
-      note: "用专用决策模型判断是否回复",
-      // 用户 m18050：提醒已搬到「进阶模式」标题右侧。
-      keys: ["jev_enabled"] },
     // v3.36：进阶模式还是占位块，等真做出来再补内容。
     // v3.37：节奏不再跨栏，它回到第三列（三列等宽）。
     // v3.53（用户本轮第 4 条）：退避并进进阶模式那一列，排在它下面。没开进阶模式时整组灰掉，
@@ -182,6 +183,7 @@
     // v3.92（用户 m06951 第 3 条）：组名「拒绝退避」→「退避模式」，并像摘要组那样挂上
     // 「还没做完」徽标——功能本身用户还要自己想清楚，这一轮只改名 + 标记，
     // 行为一个字节不动。
+    // 用户 m06021：进阶模式整组搬去普通模式列后，dev 列只剩这一组。
     { p: "trigger", t: "退避模式", split: 3, col: "dev", grp: "backoff", todo: "还没做完",
       note: "这一组还没做完，先整组灰着；开关值会照存，等做完了才生效。",
       keys: ["backoff_enabled", "backoff_start_rejects", "backoff_base_seconds",
@@ -208,32 +210,42 @@
     // v3.86（用户 m04644）：三个裁切参数排左列——裁切后保留条数 / 裁切触发阈值 / 裁切缓冲条数。
     // 两列网格是「按顺序从左到右填」：偶数位落左列、奇数位落右列，所以要隔一个插一个杂项，
     // 右列才是「历史里保留几张原图 / 保护工具调用组 / 裁切点选择方式」。
-    { p: "window", t: "窗口", keys: ["window_keep", "history_images", "window_trim_threshold",
-        "protect_tool_groups", "window_buffer", "window_drop_tools"] },
-    // 用户 m05550：基础设置页那组「窗口显示」挪到这一页——它管的就是窗口列多少条。
-    // 用户 m17752：它管的是页面上列多少条，跟磁盘上留多少份不是一回事，别和「窗口快照上限」混着看。
-    { p: "window", t: "窗口显示", custom: "show",
-      note: "只影响窗口显示条数，磁盘上留多少份由「窗口快照上限」决定",
-      keys: ["trace_keep", "trace_keep_dm", "decision_keep", "decision_keep_dm",
-             "window_show", "window_show_dm"] },
+    // 用户 m04115：窗口页改成两栏，不再六个组各占一整行。
+    // 用户 m04287：改成三行两列——第一行 窗口 / 窗口显示，第二行 图片 / 动图设置，
+    // 第三行 转发消息 / 摘要。
+    // 用户 m04656：像基础设置页那样，左右两列各套一张卡片，中间不再空出来。
+    // 渲染器只把「相邻且同 col」的组并进同一张卡，所以同栏的组必须连着写：
+    // 左栏 win = 窗口 / 图片（两个大块），右栏 media = 窗口显示 / 动图设置 / 转发消息 / 摘要（四个小块），
+    // 这样两栏高度基本齐平；按原来的三行两列分，右栏会比左栏矮一大截，卡片底下空出一片。
+    { p: "window", t: "窗口", split: 2, col: "win",
+      keys: ["window_keep", "history_images", "window_trim_threshold",
+             "protect_tool_groups", "window_buffer", "window_drop_tools",
+             "file_skip_context"] },
     // 用户 m09851：两个「看图」开关从提示词页的模型卡搬到这里，跟图片压缩摆一块——
     // 它们管的都是「图片怎么进请求」，跟选哪个模型不是一回事。
-    { p: "window", t: "图片", custom: "img",
+    { p: "window", t: "图片", custom: "img", split: 2, col: "win",
       keys: ["decision_see_images", "reply_see_images"] },
+    // 用户 m05550：基础设置页那组「窗口显示」挪到这一页——它管的就是窗口列多少条。
+    // 用户 m17752：它管的是页面上列多少条，跟磁盘上留多少份不是一回事，别和「窗口快照上限」混着看。
+    { p: "window", t: "窗口显示", custom: "show", split: 2, col: "media",
+      note: "只影响显示条数，不影响磁盘留存",
+      keys: ["trace_keep", "trace_keep_dm", "decision_keep", "decision_keep_dm",
+             "window_show", "window_show_dm"] },
     // v4.45（用户 m22611）：历史里的动图怎么发给模型，三档互斥、默认九帧拼图；
     // 三个都不开＝跳过（图上不来，正文只留 [图片]）。判定在后端 _gif_mode。
-    { p: "window", t: "动图设置",
-      note: "三档互斥（开一个关另两个）；全关＝跳过",
+    { p: "window", t: "动图设置", split: 2, col: "media",
+      note: "三档互斥，全关＝跳过",
       keys: ["history_gif_first", "history_gif_original", "history_gif_grid"] },   // 用户 m10096：trim_strategy 已从设置里撤下（只剩机械裁切一种）
     // 用户 2026-11-06：转发消息怎么进请求——三档 + 一个风险开关。
-    { p: "window", t: "转发消息",
-      note: "默认按需查看：只挂前 3 张图，模型需要时自己调工具看完整内容",
+    // 用户 m04115：组说明去掉——「转发消息处理」那一行本来就把当前档位的说明写在行里。
+    { p: "window", t: "转发消息", split: 2, col: "media",
       keys: ["forward_mode", "forward_drop_gif", "forward_images_all"] },
     // v3.67（用户 m20117 第 1 条）：中期摘要的保留份数 / 天数原本也归到这一组。
     // v4.84：这三项（私聊上限 / 群聊上限 / 保留天数）挪去「缓存记录」页——它们管的是留存，
     // 跟缓存占用摆在一起更顺；这一页只留「启用 / 字数上限 / 每条压多少字」三个压缩参数。
     // v3.86（用户 m04620）：这一组功能还没接进引擎，标题右边挂「功能未实现」，做完再去掉。
-    { p: "window", t: "摘要", todo: "功能未实现", keys: ["summary_enabled", "summary_max_chars", "summary_line_chars"] },
+    { p: "window", t: "摘要", todo: "功能未实现", split: 2, col: "media",
+      keys: ["summary_enabled", "summary_max_chars", "summary_line_chars"] },
     // v3.57（用户 m16357 图 3）：撤掉窗口页最后一组「实验功能」——它只剩 dynamic_to_tail
     // 一项，本来就锁定不可改，环境信息也已并入系统提示词，不该再摆给用户看。
     // （原来的「实验设置」整页在 m10749 第 4 条就撤了，PAGES 里没有 lab。）
@@ -348,11 +360,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
   }
   // 用户 m06007：组标题右边可以挂多枚提醒胶囊（双刃剑 / 未经充分测试），
   // 传字符串或数组都行，返回拼好的 HTML。
+  // 用户 m04864：胶囊上的字太短，悬浮补一句人话，别把标签原样再弹一遍。
+  var WARN_TIPS = { "双刃剑": "有利有弊的选项", "未经充分测试": "作者没怎么测试过的选项" };
   function warnPills(w){
     if(!w) return "";
     var arr = Object.prototype.toString.call(w) === "[object Array]" ? w : [w];
     return arr.map(function(t){
-      return "<span class='warnpill' title='" + esc(t) + "'>" + esc(t) + "</span>";
+      return "<span class='warnpill' title='" + esc(WARN_TIPS[t] || t) + "'>" + esc(t) + "</span>";
     }).join("");
   }
   function get(url){ return fetch(url, {credentials:"same-origin"}).then(function(r){ if(!r.ok) throw new Error("HTTP "+r.status); return r.json(); }); }
@@ -564,7 +578,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
   var ICON_PENCIL = "<svg viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 20h9'/><path d='M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z'/></svg>";
   // v3.92（用户 m00697 第 10 条）：开关统一成「字写在轨道里」的胶囊——轨道里直接写状态，
   // 白色滑块滑到对应一侧。onTxt / offTxt 是轨道里那两个字，默认「开启 / 关闭」；
-  // 主要开关写「接管 / 关闭」，其余写「开启 / 关闭」。真实 input 仍在标签里，collectSettings 照旧读 checked。
+  // 用户 m04656：全部写「开启 / 关闭」，插件开关也不再单独写「接管」。真实 input 仍在标签里，collectSettings 照旧读 checked。
   function swPill(k, on, onTxt, offTxt, title, cls){
     return "<label class='sw2" + (cls ? " " + cls : "") + "'" + (title ? " title='" + esc(title) + "'" : "") + ">" +
       "<input type='checkbox' data-k='" + esc(k) + "'" + (on ? " checked" : "") + ">" +
@@ -589,17 +603,15 @@ var DM_SPECIAL = { trigger_probability: 1 };
     watchdog_seconds: "秒", retry_max: "次", retry_delay: "秒",
     trace_keep: "条", trace_keep_dm: "条", decision_keep: "条", decision_keep_dm: "条",
     window_show: "条", window_show_dm: "条" };
-  // v3.92（用户 m00697 第 11 条）：主要开关轨道里写「接管 / 关闭」，其余写「开启 / 关闭」。
-  var SW_TEXT = { decision_enabled: ["接管", "关闭"] };
+  // 用户 m04656：插件开关也写「开启 / 关闭」，不再单独写「接管」。
   // v3.72（用户第 7 / 9 条）：第 5 个参数是调用方给的 [下限, 上限]，用来兜 schema 里没写
   // min/max、后端 /config 也没下发 bounds 的键（数据使用 / 回看周数）。
   function fieldControl(k, f, v, unit, minmax){
     var t = f.type || "string";
-    var swTx = SW_TEXT[k] || ["开启", "关闭"];
     if(t === "switch" || t === "boolean" || t === "bool"){
       // v3.49（用户 m06348 第 7 条）：开关上的小字先统一成「开关」；v3.50（用户 m06761 第 4 条）
       // 又改回随状态显示「开 / 关」——名字仍在左边 .nm 里，小字只报状态。
-      return swPill(k, v, swTx[0], swTx[1]);
+      return swPill(k, v, "开启", "关闭");
     }
     // 单群模式：只显示本群写过的值，没写过就空着 + 占位提示全局值，
     // 这样「留空 = 跟随全局」在界面上看得见，不用去记白名单。

@@ -1002,11 +1002,13 @@
 
   var MARK_LABEL = {
     counted: "计入", burst: "连发", short: "太短", direct: "直达",
-    rest: "休息", backoff: "退避", quota: "配额", private: "私聊", bot: "我"
+    rest: "休息", backoff: "退避", quota: "配额", private: "私聊", bot: "我",
+    filtered: "过滤", file: "文件"
   };
   var MARK_CLASS = {
     counted: "ok", direct: "ok", private: "ok", bot: "ok",
-    burst: "no", short: "no", rest: "no", backoff: "no", quota: "no"
+    burst: "no", short: "no", rest: "no", backoff: "no", quota: "no",
+    filtered: "no", file: "no"
   };
   // ---- 按发言人分组（v2.80）----
   // 之前按 role 分组：连续几条 assistant 并一块没问题，但 user 那边一条消息里

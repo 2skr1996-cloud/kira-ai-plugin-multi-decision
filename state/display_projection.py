@@ -429,6 +429,8 @@ _OWNER_NICK = r"(?:\[user_nickname:[^\r\n]*?\]\s*)?"
 _VIEW_HINT_RE = re.compile(
     r"（这条转发还有 \d+ 张图没发(?:，需要看就调用 view_forward)?）"
     r"|（另有 \d+ 张动图按设置没有发给模型）"
+    r"|（引用的那条已经不在窗口里(?:，需要看就调用 view_quote)?）"
+    r"|（引用的那条是转发(?:，需要看就调用 view_forward)?）"
 )
 
 

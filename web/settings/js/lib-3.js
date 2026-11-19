@@ -921,9 +921,9 @@
     "forward_media_keep_days", "retry_keep_days"];
   // 「窗口设置」页那一组：回复记录 / 决策记录 / 窗口快照，每行「群聊 + 私聊」两个数字框。
   var SHOW_ROWS = [
-    {t: "回复记录", k: "trace_keep", kd: "trace_keep_dm", d: "回复记录页最多列多少条"},
-    {t: "决策记录", k: "decision_keep", kd: "decision_keep_dm", d: "决策记录页最多列多少条"},
-    {t: "窗口快照", k: "window_show", kd: "window_show_dm", d: "走势图和快照列表最多画多少条"}
+    {t: "回复记录", k: "trace_keep", kd: "trace_keep_dm", d: "最多列多少条"},
+    {t: "决策记录", k: "decision_keep", kd: "decision_keep_dm", d: "最多列多少条"},
+    {t: "窗口快照", k: "window_show", kd: "window_show_dm", d: "最多画多少条"}
   ];
   // 用户 m17752：原来缓存记录页右边那张卡片，现在是一组普通行——三行，
   // 名称 + 说明 + 右侧「群聊 / 私聊」两个数字框，跟「配额」那两行同一套写法。
@@ -944,13 +944,13 @@
   // （bot_config.image_compression），不在插件配置里，所以不带 data-k，走 data-core 单独保存。
   var CORE_IMG_FIELDS = [
     { k: "core_img_enabled", f: "enabled", t: "图片压缩", type: "switch",
-      d: "在 VLM 识图和原生多模态请求前压缩大图或高分辨率图片。" },
+      d: "请求前把大图压小，省 token。" },
     { k: "core_img_max", f: "max_size", t: "图片最长边", type: "integer", unit: "像素",
-      d: "压缩后的最长边，单位为像素。", min: 1, max: 8192 },
+      d: "压缩后的最长边。", min: 1, max: 8192 },
     { k: "core_img_quality", f: "quality", t: "JPEG 质量", type: "integer", unit: "",
-      d: "JPEG 输出质量，范围为 1 到 100。", min: 1, max: 100 },
+      d: "输出质量，1 到 100。", min: 1, max: 100 },
     { k: "core_img_minmb", f: "min_file_size_mb", t: "压缩阈值", type: "integer", unit: "MB",
-      d: "仅在图片超过该 MB 大小或最长边超限时压缩。", min: 0 }
+      d: "超过这个大小才压。", min: 0 }
   ];
   var coreImgCache = null;   // 框架 bot_config.image_compression 的当前值，loadSettings 里拉
   function coreImgVal(field, dft){
@@ -995,7 +995,7 @@
     // 这一项固定开启，开关只用来告诉用户有这个功能，所以不带 data-k / data-core，点不动。
     h += "<div class='setrow inline' data-row='image_pixel_guard'>" +
       "<div class='nm'>长图自动缩小</div>" +
-      "<div class='ds'>超过 600 万像素先缩小再发，固定开启。</div>" +
+      "<div class='ds'>超过 600 万像素先缩小再发。</div>" +
       "<div class='ctl'><label class='sw2 lock'><input type='checkbox' checked disabled>" +
       "<span class='tr' data-on='开启' data-off='关闭'></span></label></div></div>";
     h += CORE_IMG_FIELDS.map(coreImgRow).join("");

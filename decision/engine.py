@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import hashlib
 from html import unescape as _html_unescape
@@ -124,6 +125,8 @@ from ..window.manager import (
     is_notice_shell_text,
     notice_shell_ts,
     pending_tags,
+    has_text_body,
+    strip_file_placeholders,
 )
 
 logger = get_logger("multi_decision", "orange")
@@ -430,6 +433,41 @@ def _fw_items(element) -> list:
         if isinstance(val, (list, tuple)) and val and _fw_is_message(val[0]):
             return list(val)
     return []
+
+
+_MEDIA_FETCH_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def _url_host(url: str) -> str:
+    """只取域名，日志里别把带 rkey 的整条链接写出去。"""
+    try:
+        return str(url or "").split("://", 1)[-1].split("/", 1)[0][:80]
+    except Exception:
+        return ""
+
+
+async def _fetch_media_bytes(url: str, timeout: float = 12.0) -> bytes:
+    """带浏览器头把图下回来。
+
+    用户 m05619：QQ 表情包（商城表情）的图是 image 元素 + 一段 [名字] 文字，
+    框架归档和 store_session_media 都用 httpx 默认头去下，QQ 的 CDN 有时直接
+    回 403（日志里是 Unable to archive message media (HTTPStatusError)），
+    图就丢了，页面上只剩 [名字]。这里补一次带 UA / Referer 的下载。
+    """
+    import httpx
+
+    headers = {
+        "User-Agent": _MEDIA_FETCH_UA,
+        "Referer": "https://qq.com/",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    }
+    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout, headers=headers) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.content
 
 
 def _media_targets(chain) -> Optional[list]:
@@ -907,6 +945,25 @@ def _reply_element(message):
     return None
 
 
+# 用户 m08286：引用块里每张图都是同一个 [Image]，模型分不出「第几张」。
+# 按出现顺序编号，模型就能对上原消息里第 N 张图。
+_QUOTE_IMAGE_RE = re.compile(r"\[Image(?: attached)?\]")
+
+
+def _number_quote_images(text: str) -> str:
+    """给引用里的图片占位符编号：`[Image]` → `[Image 1]`、`[Image 2]`…"""
+    if not text or "[Image" not in text:
+        return text
+    n = 0
+
+    def _sub(m):
+        nonlocal n
+        n += 1
+        return "[Image %d]" % n
+
+    return _QUOTE_IMAGE_RE.sub(_sub, text)
+
+
 def _reply_parts(el, raw: str):
     rid = ""
     for attr in ("id", "target_id", "reply_id", "message_id", "msg_id", "seq"):
@@ -974,7 +1031,7 @@ def _reply_parts(el, raw: str):
             if v:
                 bits.append(v)
         txt = re.sub(r"\s+", " ", " ".join(bits)).strip()
-    return rid, txt
+    return rid, _number_quote_images(txt)
 
 
 def _quote_body_of(raw: str) -> str:
@@ -3508,14 +3565,28 @@ class DecisionEngine:
                 file_refs = file_refs_of(message)
             except Exception:
                 logger.debug("[multi-decision] 取待发文件信息失败（已忽略）", exc_info=True)
+        media = media_kind(message)
+        # 用户 m04896 第 5 条：文件不进上下文窗口（默认开）。
+        # 纯文件 / 视频消息整条不进；带文字的文件消息只留文字，把文件占位摘掉。
+        skip_file = bool(self._c("file_skip_context", sid)) and media in ("file", "video")
+        if skip_file and not has_text_body(text):
+            flow.admitting = None
+            self._mark(sid, None, "file")
+            _log_msg("file_skip")
+            return
+        if skip_file:
+            text = strip_file_placeholders(text)
         if self.window is not None:
             try:
+                raw_line = raw_line_of(message, text, sender, sender_name_of(message), now,
+                                       lookup=lambda mid: _quoted_text(self.window, sid, mid))
+                if skip_file:
+                    raw_line = strip_file_placeholders(raw_line)
                 pend = self.window.push_pending(
-                    sid, sender, sender_name_of(message), text, media_kind(message), now,
+                    sid, sender, sender_name_of(message), text, media, now,
                     # 框架格式化好的原文：下一轮采集直接拿它当窗口消息，
                     # 格式与框架记忆一致，去重和缓存前缀都对得上
-                    raw_line_of(message, text, sender, sender_name_of(message), now,
-                                 lookup=lambda mid: _quoted_text(self.window, sid, mid)),
+                    raw_line,
                     media_refs=media_refs,
                     files=file_refs,
                 )
@@ -3551,7 +3622,7 @@ class DecisionEngine:
 
         # 普通纯文字整句命中拉黑短语时，各触发模式统一早退；上下文和收到量已保留。
         # 媒体、必回和主动唤醒仍按原优先级处理，不消费概率、节奏或休息掷骰。
-        media = media_kind(message)
+        # media 在上面「文件不进上下文」那段已经算过了。
         if not (must or direct or media) and self._phrase_hit(text, sid):
             self._mark(sid, pend, "short")
             _log_msg("phrase_skip")
@@ -3583,6 +3654,20 @@ class DecisionEngine:
             self._mark(sid, pend, "direct")
             _log_msg("direct")
             self._trigger(sid, "wake", st, msg_ts=msg_ts)
+            return
+
+        # 用户 m04896 第 7 条：被静默过滤掉的消息不触发静默、也不触发决策，
+        # 但概率照攒——只是效率减半（计数 +0.5，节奏器每 2 条推进 1 格）。
+        if pend and self._silent_filtered_now(sid):
+            st.last_sender_id = sender
+            st.last_msg_ts = now
+            st.roll_hour(now)
+            st.counter += 0.5
+            st.total_messages += 1
+            st.hour_messages += 1
+            self._rhythm_bump_half(sid)
+            self._mark(sid, pend, "filtered")
+            _log_msg("silent_filtered")
             return
 
         # 休息时段：这段时间只按「休息回复概率」掷骰——不看曲线、不走动态调整、
@@ -3701,6 +3786,13 @@ class DecisionEngine:
                 logger.debug("[multi-decision] 图片落盘失败（已忽略）", exc_info=True)
                 ref = None
             if not (isinstance(ref, dict) and ref.get("path")):
+                # 用户 m05619：QQ 表情包（商城表情）的图是 image 元素 + 一段 [名字]，
+                # 框架归档和 store_session_media 都用 httpx 默认头去下，QQ 的 CDN
+                # 有时直接回 403（日志里是 Unable to archive message media
+                # (HTTPStatusError)），图就丢了，页面上只剩 [名字]。这里带浏览器头
+                # 再下一次，下到了就照常落盘。
+                ref = await self._retry_media(el, sid, mid)
+            if not (isinstance(ref, dict) and ref.get("path")):
                 # v4.38（用户 m20312）：框架可能在入库那一刻就把图归档了
                 # （session_media/archive/<哈希>），这时元素自带的 file 就是
                 # data 下的相对路径，直接拿来用，别再让它去重新下载一次。
@@ -3721,6 +3813,38 @@ class DecisionEngine:
                 out.append(dict(ref, mime=_mime))
         return out
 
+    async def _retry_media(self, el, sid: str, mid: str):
+        """store_session_media 失败后再试一次：带浏览器头自己下，转成 base64 走同一条落盘路径。
+
+        用户 m05619：QQ 表情包（商城表情）的图是 image 元素 + 一段 [名字] 文字，
+        框架归档和 store_session_media 都用 httpx 默认头去下，QQ 的 CDN 有时直接
+        回 403（日志里是 Unable to archive message media (HTTPStatusError)），
+        图就丢了，页面上只剩 [名字]。这里补一次带 UA / Referer 的下载。
+        """
+        try:
+            url = str(getattr(el, "file", "") or "")
+        except Exception:
+            url = ""
+        if not url.startswith(("http://", "https://")):
+            return None
+        try:
+            from core.utils.media_refs import store_session_media
+
+            data = await _fetch_media_bytes(url)
+            if not data:
+                return None
+            wrapped = Image(
+                image=base64.b64encode(data).decode("ascii"),
+                mime=str(getattr(el, "mime", "") or "") or None,
+            )
+            return await store_session_media(wrapped, self._raw_sids.get(sid) or sid, mid)
+        except Exception as exc:
+            logger.info(
+                "[multi-decision] 图片下载失败（%s）：%s",
+                _url_host(url),
+                type(exc).__name__,
+            )
+            return None
     def _mark(self, sid: str, item, mark: str) -> None:
         """给待发列表里这一条打标（计入 / 连发 / 太短…），页面逐条显示用。"""
         # 同时记到会话状态上：左栏要显示「攒数中 8/10」「太短跳过」这类
@@ -4698,6 +4822,33 @@ class DecisionEngine:
     def _rhythm_on(self, sid: str) -> bool:
         """节奏模式开没开（prob_pseudo）。动态调整不看它，那是强制开。"""
         return bool(self._c("prob_pseudo", sid))
+    def _rhythm_slot(self, sid: str):
+        """当前该记到节奏器的哪一段：曲线 / 动态调整按当前时段，概率模式固定 0-48。"""
+        mode = self._c("trigger_mode", sid)
+        if mode in ("bands", "adaptive"):
+            info = self._band_info(sid)
+            if info is not None:
+                return (info[0], info[1])
+        return (0, 48)
+
+    def _rhythm_bump_half(self, sid: str) -> None:
+        """被过滤掉的消息也攒节奏进度，但只算半步（用户 m04896 第 7 条）。
+
+        节奏器每 2 条过滤消息推进 1 格，所以「攒着的全是链接」时概率涨得比正常慢一半，
+        但不会原地不动。
+        """
+        if self.band_rhythm is None:
+            return
+        mode = self._c("trigger_mode", sid)
+        if mode == "adaptive" and self._bands_on(sid):
+            pass
+        elif not self._rhythm_on(sid):
+            return
+        try:
+            slot = self._rhythm_slot(sid)
+            self.band_rhythm.bump(sid, slot[0], slot[1], 0.5)
+        except Exception:
+            logger.debug("[multi-decision] 记节奏半步失败（已忽略）", exc_info=True)
 
     def _rhythm_roll(self, sid: str, start: int, end: int, probability: float, force: bool = False):
         """节奏模式：按节奏器掷一次（state/band_rhythm.py）。
@@ -4842,38 +4993,66 @@ class DecisionEngine:
 
     # ------------------------------------------------------------------ 静默
 
-    def _silent_skip_types(self, sid: str) -> set:
-        """当前会话开着的那几类「没什么可接」的过滤（用户 m02652）。"""
-        out = set()
-        if self._c("silent_skip_video_link", sid):
-            out.add("video_link")
-        if self._c("silent_skip_short", sid):
-            out.add("short")
-        if self._c("silent_skip_single_image", sid):
-            out.add("single_image")
-        if self._c("silent_skip_single_sticker", sid):
-            out.add("single_sticker")
-        if self._c("silent_skip_empty_forward", sid):
-            out.add("empty_forward")
+    #: 用户 m04896 第 1 条：每个过滤项各自带「管前几条」。
+    #: (开关键, 条数键, 标签)
+    _SILENT_SKIP_RULES = (
+        ("silent_skip_video_link", "silent_skip_video_link_count", "link"),
+        ("silent_skip_short", "silent_skip_short_count", "short"),
+        ("silent_skip_single_image", "silent_skip_single_image_count", "single_image"),
+        ("silent_skip_single_sticker", "silent_skip_single_sticker_count", "single_sticker"),
+        ("silent_skip_empty_forward", "silent_skip_empty_forward_count", "forward"),
+        ("silent_skip_file_video", "silent_skip_file_video_count", "file_video"),
+    )
+
+    def _silent_skip_rules(self, sid: str) -> list:
+        """当前会话开着的过滤项，每项带「管前几条」（用户 m04896 第 1 条）。
+
+        返回 [(标签, 条数)]；条数 0 表示不限条数（整批都按这个类型过滤）。
+        """
+        out = []
+        # 用户 m04896 第 6 条：「文件不进上下文」开着时「文件视频」这一项失效——
+        # 设置页那边整行压暗、开关禁用、悬浮写「此选项失效」，这里也必须真跳过，
+        # 否则带文字的文件消息照样进待发、照样被这条规则过滤掉，跟设置页说的对不上。
+        skip_file_ctx = bool(self._c("file_skip_context", sid))
+        for on_key, num_key, tag in self._SILENT_SKIP_RULES:
+            if tag == "file_video" and skip_file_ctx:
+                continue
+            if not self._c(on_key, sid):
+                continue
+            try:
+                raw = self._c(num_key, sid)
+                count = 1 if raw is None or raw == "" else int(raw)
+            except Exception:
+                count = 1
+            out.append((tag, max(0, min(50, count))))
         return out
 
-    def _silent_skip_count(self, sid: str) -> int:
-        """决策完之后的头几条受类型过滤；关掉就整批都按类型过滤。"""
-        if not self._c("silent_skip_after_decision", sid):
-            return 0  # 0 = 不限条数
+    def _silent_short_len(self, sid: str) -> int:
+        """短句算几个字以内（用户 m04896 第 3 条：默认 5）。"""
         try:
-            count = int(self._c("silent_skip_after_decision_count", sid) or 1)
+            raw = self._c("silent_skip_short_len", sid)
+            short_len = 5 if raw is None or raw == "" else int(raw)
         except Exception:
-            count = 1
-        return max(1, min(50, count))
+            short_len = 5
+        return max(1, min(50, short_len))
+
+    @staticmethod
+    def _silent_filtered(rules, tags: set, idx: int) -> bool:
+        """待发里第 idx 条算不算被过滤掉：命中任一项、且还在那一项管的条数内。"""
+        for tag, limit in rules:
+            if tag not in tags:
+                continue
+            if limit <= 0 or idx < limit:
+                return True
+        return False
 
     def _silent_hold(self, sid: str) -> bool:
-        """待发里没有能接的话时，兜底不冒泡（用户 m02245 / m02652 / m03197）。
+        """待发里没有能接的话时，兜底不冒泡（用户 m02245 / m02652 / m03197 / m04896）。
 
-        用户 m03197 的口径：类型过滤只作用于决策完之后的头 X 条（默认第 1 条）。
-        这 X 条里命中已开启的过滤类型就不算「有内容」；第 X+1 条起不再看类型，
-        一律算有内容。所以「第一条是链接、第二条是正经话」照样兜底，
-        只有「攒着的全是这几类」才不冒泡。
+        用户 m03197 的口径：类型过滤只作用于决策完之后的头几条；用户 m04896 第 1 条
+        又把「头几条」拆成每项各管各的。这几条里命中已开启的过滤类型就不算「有内容」，
+        超出条数的不再看类型、一律算有内容。所以「第一条是链接、第二条是正经话」
+        照样兜底，只有「攒着的全是这几类」才不冒泡。
         拿不准的时候一律按「有正文」处理——宁可多冒一次泡，也别把该接的话吞掉。
         """
         win = getattr(self, "window", None)
@@ -4886,26 +5065,38 @@ class DecisionEngine:
         rows = [it for it in (items or []) if isinstance(it, dict)]
         if not rows:
             return False
-        # 用户 m02652：老的「没正文不兜底」总开关并进这套按类型过滤——它会把单图片
-        # 一起吞掉，跟「单图片默认关」冲突，所以不再单独判一次。
-        tags_on = self._silent_skip_types(sid)
-        if not tags_on:
+        rules = self._silent_skip_rules(sid)
+        if not rules:
             return False
-        try:
-            short_len = int(self._c("silent_skip_short_len", sid) or 6)
-        except Exception:
-            short_len = 6
-        short_len = max(1, min(50, short_len))
-        limit = self._silent_skip_count(sid)
+        short_len = self._silent_short_len(sid)
         kept = 0
         for idx, it in enumerate(rows):
-            if limit and idx >= limit:
-                kept += 1  # 超出过滤范围的消息不再看类型，一律算有内容
-                continue
-            if pending_tags(it, short_len) & tags_on:
+            if self._silent_filtered(rules, pending_tags(it, short_len), idx):
                 continue
             kept += 1
         return kept == 0
+
+    def _silent_filtered_now(self, sid: str) -> bool:
+        """刚进来的这一条是不是被静默过滤掉了（用户 m04896 第 7 条）。
+
+        只看待发里的最后一条：前面几条的条数已经数过了，这里只回答「这一条本身
+        算不算被过滤」——被过滤的消息不触发静默、也不触发决策。
+        """
+        win = getattr(self, "window", None)
+        if win is None:
+            return False
+        try:
+            items = win.pending_of(sid)
+        except Exception:
+            return False
+        rows = [it for it in (items or []) if isinstance(it, dict)]
+        if not rows:
+            return False
+        rules = self._silent_skip_rules(sid)
+        if not rules:
+            return False
+        idx = len(rows) - 1
+        return self._silent_filtered(rules, pending_tags(rows[-1], self._silent_short_len(sid)), idx)
 
     def silent_eta(self, sid: str) -> dict:
         """静默 / 休兜 下一次会自动冒泡的绝对时刻（给左栏标签倒计时用）。
@@ -6255,6 +6446,9 @@ class DecisionEngine:
             # v4.65（用户 m36234）：带图那次的报错与尝试次数，页面 tooltip 直接显示。
             "images_fallback_error": str(got.get("images_fallback_error") or "")[:300],
             "images_fallback_attempts": int(got.get("images_fallback_attempts") or 0),
+            # 用户 m07898：每个模型这一轮的真实报错（主模型失败切备用时，主模型那条
+            # 以前会被备用成功的结果盖掉，事后查不到为什么换备用）。
+            "model_errors": copy.deepcopy(got.get("model_errors") or []),
             # v4.67（用户 m02347）：失败原因是不是上游临时过载（5xx/429/超时），
             # 记录页据此区分「图有问题」和「上游太忙」。
             "upstream_busy": bool(got.get("upstream_busy")),
