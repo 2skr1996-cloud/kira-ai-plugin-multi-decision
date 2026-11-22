@@ -332,7 +332,10 @@
                          "<text class='pinlab pinlab2" + pinCls + numCls + "' x='" + pCx.toFixed(1) + "' y='" + (pY + pGap).toFixed(1) +
                          "' style='" + numDelay(i * 14 + j * 26 + 40) + "' text-anchor='middle'>" +
                          esc(pL2) + "</text>";
-            }else if(pCurve){
+            }else if(pCurve || pClash){
+              // 用户 m11919：撞上总价标签时以前什么都不画——11-18 那天花费只有 0.01，
+              // 总价标签正好落在柱底，两根柱子的 token 和命中率全被吞掉，图上只剩钱。
+              // 撞总价和撞曲线一样，都抬到柱顶去写（pinCurve 让它在柱顶再躲一次总价）。
               pinTop = true;
               pinCurve = true;
             }

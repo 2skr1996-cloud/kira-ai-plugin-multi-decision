@@ -106,11 +106,23 @@
     "default": 1800,
     "hint": "切到备用后过多少分钟再试主模型。"
   },
+  "reply_reasoning_effort": {
+    "name": "思考等级",
+    "type": "string",
+    "default": "",
+    "hint": "留空 = 跟随模型自己的设置；可选 off / low / medium / high / xhigh / max。"
+  },
+  "reply_fallback_reasoning_effort": {
+    "name": "思考等级",
+    "type": "string",
+    "default": "",
+    "hint": "备用模型的思考等级，留空 = 跟随模型自己的设置；可选 off / low / medium / high / xhigh / max。"
+  },
   "reply_see_images": {
     "name": "回复看图",
     "type": "switch",
     "default": true,
-    "hint": "回复模型也看一眼图片，关掉只发文字。"
+    "hint": "回复模型请求带图，关掉能省token。"
   },
   "decision_model": {
     "name": "决策模型",
@@ -135,6 +147,18 @@
     "type": "integer",
     "default": 1800,
     "hint": "切到备用后过多少分钟再试主模型。"
+  },
+  "decision_reasoning_effort": {
+    "name": "思考等级",
+    "type": "string",
+    "default": "",
+    "hint": "留空 = 跟随模型自己的设置；可选 off / low / medium / high / xhigh / max。"
+  },
+  "decision_fallback_reasoning_effort": {
+    "name": "思考等级",
+    "type": "string",
+    "default": "",
+    "hint": "备用模型的思考等级，留空 = 跟随模型自己的设置；可选 off / low / medium / high / xhigh / max。"
   },
   "decision_tool_loop": {
     "name": "最大代理循环次数",
@@ -164,7 +188,7 @@
     "name": "决策看图",
     "type": "switch",
     "default": true,
-    "hint": "决策模型也看一眼图片；上游不认图会自动退回纯文字。"
+    "hint": "决策模型请求带图，关掉能省token。"
   },
   "decision_fail_action": {
     "name": "决策失败时",
@@ -358,7 +382,7 @@
     "name": "抖动",
     "type": "switch",
     "default": false,
-    "hint": "新消息先等几秒，把这几秒的话攒一起。"
+    "hint": "新消息先等几秒再一起回。"
   },
   "jitter_seconds": {
     "name": "抖动等待秒数",
@@ -382,7 +406,7 @@
     "name": "连发合并",
     "type": "switch",
     "default": false,
-    "hint": "同一个人连着发好几条时只算一条消息。"
+    "hint": "同一人连发几条只算一条。"
   },
   "burst_merge_seconds": {
     "name": "连发合并秒数",
@@ -467,7 +491,7 @@
   "silent_skip_video_link_count": {
     "name": "条数",
     "type": "integer",
-    "default": 1,
+    "default": 9,
     "hint": ""
   },
   "silent_skip_short": {
@@ -485,7 +509,7 @@
   "silent_skip_short_count": {
     "name": "条数",
     "type": "integer",
-    "default": 1,
+    "default": 3,
     "hint": ""
   },
   "silent_skip_single_image": {
@@ -497,7 +521,7 @@
   "silent_skip_single_image_count": {
     "name": "条数",
     "type": "integer",
-    "default": 1,
+    "default": 3,
     "hint": ""
   },
   "silent_skip_single_sticker": {
@@ -509,7 +533,7 @@
   "silent_skip_single_sticker_count": {
     "name": "条数",
     "type": "integer",
-    "default": 1,
+    "default": 3,
     "hint": ""
   },
   "silent_skip_empty_forward": {
@@ -521,7 +545,7 @@
   "silent_skip_empty_forward_count": {
     "name": "条数",
     "type": "integer",
-    "default": 1,
+    "default": 3,
     "hint": ""
   },
   "silent_skip_file_video": {
@@ -533,7 +557,19 @@
   "silent_skip_file_video_count": {
     "name": "条数",
     "type": "integer",
-    "default": 1,
+    "default": 9,
+    "hint": ""
+  },
+  "silent_skip_at_other": {
+    "name": "艾特别人",
+    "type": "switch",
+    "default": true,
+    "hint": "正文里 @ 了别人（不是机器人自己）就算没什么可接；引用里 @ 谁不算。"
+  },
+  "silent_skip_at_other_count": {
+    "name": "条数",
+    "type": "integer",
+    "default": 3,
     "hint": ""
   },
   "quota_hour_enabled": {
@@ -591,40 +627,58 @@
     "hint": "积压这么多条就无视退避"
   },
   "window_keep": {
-    "name": "裁切后保留条数",
+    "name": "裁切保留",
     "type": "integer",
     "default": 30,
-    "hint": "窗口里最多留多少条，你和 bot 的都算。"
+    "hint": "裁切后窗口里最多留几条。"
   },
   "window_buffer": {
-    "name": "裁切缓冲条数",
+    "name": "裁切缓存",
     "type": "integer",
     "default": 10,
-    "hint": "再多攒这么多条用户消息才强制裁一次。"
+    "hint": "再多攒这么多条就强制裁一次。"
   },
   "history_images": {
-    "name": "历史最多带几张原图",
+    "name": "保留图片",
     "type": "integer",
     "default": 128,
-    "hint": "最近这么多张图原样带给模型，更早只留 [图片]。"
+    "hint": "窗口里最多留几张原图，后来的图直接变 [图片]。"
   },
   "history_gif_first": {
-    "name": "只读首帧",
+    "name": "首帧模式",
     "type": "switch",
     "default": false,
-    "hint": "只发第 1 帧，最省，动作看不到。"
+    "hint": "只发第 1 帧，丢失全部动作，最省 token。"
   },
   "history_gif_original": {
     "name": "原图发送",
     "type": "switch",
     "default": false,
-    "hint": "原样发，看得最全也最贵。"
+    "hint": "原样发整段动图，不丢精度，最费 token。"
   },
   "history_gif_grid": {
-    "name": "九帧模式",
+    "name": "拼图模式",
     "type": "switch",
     "default": true,
-    "hint": "抽 9 帧拼成九宫格，体积和内容最平衡。"
+    "hint": "抽多帧拼成一张图，丢失一部分精度，能省 token。"
+  },
+  "gif_tile": {
+    "name": "单帧边长",
+    "type": "integer",
+    "default": 384,
+    "hint": "拼图里每帧最长边，超了才缩，不放大；首帧模式也按它缩。"
+  },
+  "gif_quality": {
+    "name": "动图质量",
+    "type": "integer",
+    "default": 90,
+    "hint": "动图转 JPEG 的质量，越低越省 token。"
+  },
+  "gif_frames": {
+    "name": "拼图帧数",
+    "type": "integer",
+    "default": 9,
+    "hint": "拼图抽几帧，越多越看得清动作，也越费 token；四档都先去重，固定档从关键帧里挑变化大的（首尾保留），「自动」按关键帧数决定拼几格。"
   },
   "forward_mode": {
     "name": "转发消息处理",
@@ -646,28 +700,28 @@
     "hint": "转发里的动图不发，正文留 [图片]。"
   },
   "file_skip_context": {
-    "name": "文件不进上下文",
+    "name": "丢弃文件视频",
     "type": "switch",
     "default": true,
-    "hint": "纯文件整条不进，带文字的文件只留文字。"
+    "hint": "文件&视频不进入上下文，通常无影响，有插件需求可关闭。"
   },
   "window_trim_threshold": {
-    "name": "裁切触发阈值",
+    "name": "裁切阈值",
     "type": "integer",
     "default": 60,
-    "hint": "用户消息 + 待发合计到这么多条就裁一次。"
+    "hint": "攒到这么多条就裁一次。"
   },
   "protect_tool_groups": {
-    "name": "保护工具调用组",
+    "name": "保护工具",
     "type": "switch",
     "default": true,
-    "hint": "裁切点避开工具调用配对。"
+    "hint": "裁切时不拆开工具调用和结果。"
   },
   "window_drop_tools": {
-    "name": "工具结果不进实时窗",
+    "name": "丢弃工具结果",
     "type": "switch",
     "default": false,
-    "hint": "打开后工具调用和结果整段不进窗口，省上下文。"
+    "hint": "工具调用和结果整段不进窗口，开启能省 token。"
   },
   "summary_enabled": {
     "name": "启用中期摘要",

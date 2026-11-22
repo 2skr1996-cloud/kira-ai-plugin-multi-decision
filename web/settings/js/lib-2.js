@@ -2,25 +2,31 @@
     if(value === null || value === undefined) return "";
     return typeof value === "string" ? value : JSON.stringify(value,null,2);
   }
-  function ppEditorInner(s){
+  // 用户 m1337：工具条单独抽出来，直接画进卡头（pp-left-head）。以前是先画进卡片、再整块搬到卡头，
+  // 卡片里那版按钮是 26px、卡头里是 22px，慢一点的机器上中间那一帧会被画出来，看着就是「刷新一瞬间按钮放大」。
+  function ppToolbarHtml(s){
+    if(!s.loaded) return "";
+    return "<div class='pm-toolbar'>" +
+      // 用户 m05093：撤掉「编辑方式」下拉，提示词一律按模块编排；老稿子（mode=text）仍按单段文本显示，见下面的 textMode 分支。
+      // 2026-11-08（J）：底下那排按钮只留一个「恢复默认」，放在工具条最左边。
+      ppButton(s,"inherit",s.sid ? "恢复跟随全局" : "恢复默认",undefined,s.saving) +
+      // 用户 m3096 追加：模型卡的折叠开关放这儿，卡片顶上不再单独占一行。
+      mcToggleBtn(s.kind) +
+      "<span class='pm-state' id='pp-state-" + s.kind + "' role='status' aria-live='polite'></span>" +
+      ppButton(s,"save",s.saving ? "保存中…" : "保存此提示词",undefined,s.saving || !s.dirty) + "</div>";
+  }
+  function ppEditorInner(s, noBar){
     if(!s.loaded){
       return "<div class='pm-note'>" + (s.error ? esc(s.error) : "读取默认模板与引用原文中…") + "</div>" +
         ppButton(s,"reload","重新读取",undefined,!!s.loading);
     }
-    var layout = s.layout, textMode = layout.mode === "text";
+    var layout = s.layout;
+    // 用户 m05093：编辑方式下拉已撤，新稿子一律模块编排；这里只给已发布版本存过的 mode=text 老稿子兜底，
+    // 免得它们打开后显示「没有模块」、一保存就把正文清空。
+    var textMode = layout.mode === "text";
     // 用户 m13212 图1：新增模块加进哪一段，用两个标签记着（重渲染后不回弹）。
     var zonePick = s.zonePick === "dynamic" ? "dynamic" : "system";
-    return "<div class='pm-toolbar'>" +
-      // v4.85（用户 m10425 第 2 条）：标题按卡头写（和右边「提示词预览」同一个字号与字重），
-      // 下拉紧跟在标题后面，不再用「小灰字 + 表单」那套。
-      "<label class='pm-tb-h' for='pp-mode-" + s.kind + "'>编辑方式</label>" +
-      "<select class='dipt' id='pp-mode-" + s.kind + "' data-pm-field='mode'>" +
-      "<option value='modules'" + (!textMode ? " selected" : "") + ">模块编排</option>" +
-      "<option value='text'" + (textMode ? " selected" : "") + ">单段文本</option></select>" +
-      // 2026-11-08（J）：底下那排按钮只留一个「恢复默认」，挪到「编辑方式」下拉右边。
-      ppButton(s,"inherit",s.sid ? "恢复跟随全局" : "恢复默认",undefined,s.saving) +
-      "<span class='pm-state' id='pp-state-" + s.kind + "' role='status' aria-live='polite'></span>" +
-      ppButton(s,"save",s.saving ? "保存中…" : "保存此提示词",undefined,s.saving || !s.dirty) + "</div>" +
+    return (noBar ? "" : ppToolbarHtml(s)) +
       // 2026-11-18（J，用户 m11554）：顶部只报「自己改过、不能替你换」的那几段名字；
       // 还在用旧版默认的段，提示挂在模块旁边（见 lib-1.js 的 ppModNoticeHtml）。
       (s.defNotice && s.defNotice.show ?
@@ -54,18 +60,7 @@
     var s = ppState(kind);
     // 用户 m18454：提示词还没读回来时这块只有一行「读取中」，下面的设置卡就会顶到最上面，
     // 等正文到了再被挤下去，看着像闪一下。加载态挂 pm-loading，CSS 让它先占满整栏高度。
-    return "<div class='dcard pp-compact pm-editor" + (s.loaded ? "" : " pm-loading") + "' id='pp-edit-" + kind + "' data-pp-editor='" + kind + "'>" + ppEditorInner(s) + "</div>";
-  }
-  // 用户 m03247：工具条要当卡头用——它要是留在滚动层里，滚动条滑块就会跟它并排露在右上角。
-  // 每次重画编辑器都是一套新 DOM，所以画完把新工具条搬进卡头，卡头里旧的整块丢掉。
-  function ppHoistToolbar(s){
-    var card = document.getElementById("pp-edit-" + s.kind);
-    var head = document.getElementById("pp-head-" + s.kind);
-    if(!card || !head) return;
-    var bar = card.querySelector(".pm-toolbar");
-    if(!bar) return;
-    while(head.firstChild) head.removeChild(head.firstChild);
-    head.appendChild(bar);
+    return "<div class='dcard pp-compact pm-editor" + (s.loaded ? "" : " pm-loading") + "' id='pp-edit-" + kind + "' data-pp-editor='" + kind + "'>" + ppEditorInner(s, true) + "</div>";
   }
   function ppRenderEditor(s){
     if(!ppCurrent(s)) return;
@@ -80,10 +75,12 @@
         focus = {field:field,index:index,start:active.selectionStart,end:active.selectionEnd};
       }
     }
-    root.innerHTML = ppEditorInner(s);
+    // 用户 m1337：工具条直接画进卡头，卡片里不再出现它（以前先画进卡片再搬，慢一点的机器上会闪一帧大按钮）。
+    var head = document.getElementById("pp-head-" + s.kind);
+    if(head) head.innerHTML = ppToolbarHtml(s);
+    root.innerHTML = ppEditorInner(s, true);
     // 用户 m18454：读回来之后去掉加载态，占位高度让给真正的正文。
     root.classList.toggle("pm-loading", !s.loaded);
-    ppHoistToolbar(s);
     // 用户 m09506：JEV 卡整块重画完要把「实际请求地址」补上，
     // 否则刚打开页面那会儿这处是空的，要等动一下输入框才出现。
     // 用户 m09981：协议按当前这一页取，不再读全局的那个旧键。
@@ -319,21 +316,8 @@
     return true;
   }
 
-  function ppSetMode(s, mode){
-    var token = ++s.modeSeq, edit = s.editSeq;
-    if(!s.loaded || (mode !== "modules" && mode !== "text") || s.layout.mode === mode) return Promise.resolve(false);
-    if(mode === "text" && s.layout.text === ""){
-      // Flatten the CURRENT server assembly, not a stale preview and not default text.
-      return ppPreview(s).then(function(d){
-        if(!d || token !== s.modeSeq || edit !== s.editSeq){ ppRenderEditor(s); return false; }
-        s.layout.text = String(d.system || ""); s.layout.mode = "text"; ppChanged(s,true); return true;
-      });
-    }
-    s.layout.mode = mode; ppChanged(s,true); return Promise.resolve(true);
-  }
   function ppUpdateField(s, field, index, value){
     if(!s.loaded) return;
-    if(field === "mode") return ppSetMode(s,value);
     if(field === "text"){ s.layout.text = String(value); ppChanged(s,false); return; }
     var module = s.layout.modules[index];
     if(!module) return;
@@ -584,16 +568,22 @@
       "<button type='button' class='pp-tab" + (pane === "reply" ? " on" : "") + "' data-pp='reply'>回复提示词<span class='pp-sub'>真正开口说话</span></button>" +
       "<button type='button' class='pp-tab" + (pane === "templates" ? " on" : "") + "' data-pp='templates'>自定义<span class='pp-sub'>改过的和自写的</span></button>" +
       "</div><div class='pp-pane' data-pane='decision'" + (pane === "decision" ? "" : " hidden") + "><div class='pp-left'>" +
-      "<div class='pp-left-head' id='pp-head-decision' data-pp-editor='decision'></div><div class='pp-left-body'>" +
-      promptEditorBlockHtml("decision") + dmodelBlockHtml() + "</div></div><div class='pp-right'>" + promptPrevBlockHtml("decision") + "</div></div>" +
+      "<div class='pp-left-head' id='pp-head-decision' data-pp-editor='decision'>" + ppToolbarHtml(ppState("decision")) + "</div>" +
+      // 用户 m3096：模型卡回到提示词页，放在每个子页签左栏最上面（编辑器之上），默认折叠。
+      // 用户 m10255：卡片挪出滚动容器，做成左栏的固定头——内容不再从它下面穿过，滚动条也从卡片下方才开始。
+      "<div class='pp-left-mc'>" + dmodelBlockHtml() + "</div><div class='pp-left-body'>" +
+      promptEditorBlockHtml("decision") + "</div></div><div class='pp-right'>" + promptPrevBlockHtml("decision") + "</div></div>" +
       "<div class='pp-pane' data-pane='jev'" + (pane === "jev" ? "" : " hidden") + "><div class='pp-left'>" +
-      "<div class='pp-left-head' id='pp-head-jev' data-pp-editor='jev'></div><div class='pp-left-body'>" +
-      promptEditorBlockHtml("jev") + jevBlockHtml() + "</div></div><div class='pp-right'>" + promptPrevBlockHtml("jev") + "</div></div>" +
+      "<div class='pp-left-head' id='pp-head-jev' data-pp-editor='jev'>" + ppToolbarHtml(ppState("jev")) + "</div>" +
+      "<div class='pp-left-mc'>" + jevBlockHtml() + "</div><div class='pp-left-body'>" +
+      promptEditorBlockHtml("jev") + "</div></div><div class='pp-right'>" + promptPrevBlockHtml("jev") + "</div></div>" +
       "<div class='pp-pane' data-pane='reply'" + (pane === "reply" ? "" : " hidden") + "><div class='pp-left'>" +
-      "<div class='pp-left-head' id='pp-head-reply' data-pp-editor='reply'></div><div class='pp-left-body'>" +
-      promptEditorBlockHtml("reply") + replyToolBlockHtml() + "</div></div><div class='pp-right'>" + promptPrevBlockHtml("reply") + "</div></div>" +
+      "<div class='pp-left-head' id='pp-head-reply' data-pp-editor='reply'>" + ppToolbarHtml(ppState("reply")) + "</div>" +
+      "<div class='pp-left-mc'>" + replyToolBlockHtml() + "</div><div class='pp-left-body'>" +
+      promptEditorBlockHtml("reply") + "</div></div><div class='pp-right'>" + promptPrevBlockHtml("reply") + "</div></div>" +
       "<div class='pp-pane pp-pane-wide' data-pane='templates'" + (pane === "templates" ? "" : " hidden") + ">" +
-      ppTplPageHtml() + "</div></div>";
+      ppTplPageHtml() + "</div>" +
+      "</div>";
   }
   // Switching panes/scope keeps canonical drafts in PP_STATES, never serializes them to storage.
   // 用户 m27528 第 5 条：自定义页要同时列出各提示词页里的自写模块（v4.84 起是决策 / JEV / 回复三页）。
@@ -903,7 +893,9 @@
     // 所以单独包一层 span（defaultBadge 的角标不要被一起改掉）。
     var nmTxt = esc(nameOf(k, f));
     if(k === "prob_pseudo") nmTxt = "<span id='pseudo-nm'>" + nmTxt + "</span>";
-    return "<div class='setrow inline" + (isList ? " wide" : "") + "' data-row='" + esc(k) + "'>" +
+    // 用户 m25921：锁定项整行灰掉（开关本身在 fieldControl 里画成 .sw2.lock）。
+    var locked = !!LOCKED_ON[k];
+    return "<div class='setrow inline" + (isList ? " wide" : "") + (locked ? " locked" : "") + "' data-row='" + esc(k) + "'>" +
       "<div class='nm'>" + nmTxt + defaultBadge(f, k) + "</div>" +
       "<div class='ds'>" + esc(tip) + "</div>" +
       "<div class='ctl" + (isList ? " list" : "") + "'>" + fieldControl(k, f, configCache[k], UNIT_TEXT[k]) + "</div>" +
@@ -933,10 +925,12 @@
   };
   // 用户 m06372：静默过滤重排成三行——任意链接 / 任意转发、单表情包 / 单张图片、
   // 短句字数 / 文件视频。每格自带数字框（见 SILENT_NUMS），默认值收进名字的 title。
+  // 用户 m22683：新增「艾特别人」，第七项配不成对，单占一行。
   var SILENT_ROWS = {
     silent_skip_video_link: ["silent_skip_video_link", "silent_skip_empty_forward"],
     silent_skip_single_sticker: ["silent_skip_single_sticker", "silent_skip_single_image"],
-    silent_skip_short: ["silent_skip_short", "silent_skip_file_video"]
+    silent_skip_short: ["silent_skip_short", "silent_skip_file_video"],
+    silent_skip_at_other: ["silent_skip_at_other", ""]
   };
   // 每项的数字框：短句那一格两个（几个字算短句 + 管前几条），其余一格一个条数。
   var SILENT_NUMS = {
@@ -945,7 +939,8 @@
     silent_skip_single_sticker: ["silent_skip_single_sticker_count"],
     silent_skip_single_image: ["silent_skip_single_image_count"],
     silent_skip_short: ["silent_skip_short_len", "silent_skip_short_count"],
-    silent_skip_file_video: ["silent_skip_file_video_count"]
+    silent_skip_file_video: ["silent_skip_file_video_count"],
+    silent_skip_at_other: ["silent_skip_at_other_count"]
   };
   // 用户 m03059：两个开关并成一排——描述清空后一行一个，右边空一大片。
   // 用户 m03262：带数字框的也并进来（静默兜底 ↔ 休息静默、静默初始过滤 ↔ 过滤短句字数），
@@ -1099,14 +1094,21 @@
   // 用户 m06021：静默过滤两两并排——一行两格，每格「名字（title 带默认值）+ 数字框 + 开关」。
   // 用户 m06372：配对与顺序由 SILENT_ROWS 决定（三行六项），短句那格两个数字框。
   // 用户 m07182：角标分两截——「默认 开启」+「· 1 条」。放不下时先只藏后一截。
-  function silentCountTip(k){
+  // 用户 m12591：条数拆成一段一段，放不下时能从后往前一截一截藏（「· 3 条」→「· 5 字」）。
+  function silentCountParts(k){
     var nums = SILENT_NUMS[k] || [];
-    if(!nums.length) return "";
-    var nf = (schemaCache && schemaCache[nums[0]]) || {};
-    var nd = defaultText(nf, nums[0]);
-    if(!nd || nd === "无") return "";
-    var unit = pairUnitOf(nums[0]);
-    return nd + (unit ? " " + unit : "");
+    var parts = [];
+    for(var i = 0; i < nums.length; i++){
+      var nf = (schemaCache && schemaCache[nums[i]]) || {};
+      var nd = defaultText(nf, nums[i]);
+      if(!nd || nd === "无") continue;
+      var unit = pairUnitOf(nums[i]);
+      parts.push(nd + (unit ? " " + unit : ""));
+    }
+    return parts;
+  }
+  function silentCountTip(k){
+    return silentCountParts(k).join(" · ");
   }
   function silentRowHtml(k1, k2){
     function cell(k){
@@ -1132,40 +1134,69 @@
         // 用户 m07097：普通格把条数也写进角标（「默认 开启 · 1 条」）；短句那格两个数字框，
         // 角标只留开关默认值，不然一行放不下。
         "<div class='dfv2'><span class='dfv2s'>" + esc(silentStateTip(k)) + "</span>" +
-          (nums.length > 1 ? "" : "<span class='dfv2c'> · " + esc(silentCountTip(k)) + "</span>") + "</div></div>";
+          silentCountParts(k).map(function(p){
+            return "<span class='dfv2c'> · " + esc(p) + "</span>";
+          }).join("") + "</div></div>";
     }
     return "<div class='setrow inline silentpair' data-row='" + esc(k1) + "'>" +
       cell(k1) + (k2 ? cell(k2) : "") + "</div>";
   }
   // 用户 m07111：角标该不该藏，按「名字有没有被挤成省略号」实测决定，不再按行宽写死断点。
-  // 先让角标显示，量一次名字的 scrollWidth；被挤到省略号就说明这格放不下，加 .narrow 藏掉。
-  // 窗口变宽时反过来：先摘 .narrow 再量，放得下就留着。
+  // 先让角标显示，量一次名字的 scrollWidth；被挤到省略号就说明这格放不下，加 .h1／.h2／.h3 一截一截藏。
+  // 窗口变宽时反过来：先摘掉这些类再量，放得下就留着。
   // 用户 m07176：scrollWidth / clientWidth 都是整数，差 0.4px 时两边都读成 52，判不出来却已经出省略号。
   // 改成临时让名字不收缩（.measuring），看控件有没有被挤出格子右边界——带小数，准。
-  function silentOverflow(c){
-    var ctl = c.querySelector(".ctl");
-    if(!ctl) return false;
-    c.classList.add("measuring");
-    var over = ctl.getBoundingClientRect().right > c.getBoundingClientRect().right + 0.5;
-    c.classList.remove("measuring");
-    return over;
-  }
+  // 用户 m10685：判定线从「挤出去」改成「还剩不到 3px」——只要还有 3px 空隙就不许换行 / 隐藏；
+  // 「静默兜底 / 休息静默」那两格也走同一套（原来按 1600px 一刀切把角标藏了）。
+  // 用户 m04119：放不下就直接藏角标，不再折到第二行——折行会把整行撑高，比藏掉更难看。
+  // 用户 m04998：数字框改成连续自适应（22px 下限、100px 上限），不再有「收窄」这一档；
+  // 角标只在「框已经收到下限、还差不到 3px」时才一截一截藏。
+  var SILENT_STAGES = ["h1", "h2", "h3"];
   function silentFitNotes(root){
-    var box = root || document;
-    var cells = box.querySelectorAll(".setrow.inline.silentpair .swcell");
-    for(var i = 0; i < cells.length; i++){
-      var c = cells[i];
-      var nm = c.querySelector(".nm");
-      if(!nm) continue;
-      c.classList.remove("narrow");
-      c.classList.remove("tight");
-      if(silentOverflow(c)){
-        c.classList.add("tight");
-        if(silentOverflow(c)) c.classList.add("narrow");
-      }
+    var cells = [];
+    (root || document).querySelectorAll(".setrow.inline.silentpair .swcell, .setrow.inline.swpair .swcell").forEach(function(cell){
+      var ctl = cell.querySelector(".ctl");
+      if(ctl && cell.querySelector(".nm")) cells.push([cell, ctl]);
+    });
+    function over(pair){
+      // 量的时候控件不再被 margin-left:auto 顶到右边，剩下的空隙就是真实余量。
+      return pair[0].getBoundingClientRect().right - pair[1].getBoundingClientRect().right < 3;
     }
+    // 先写整组样式，再统一读几何，避免每个控件都强制重排一次整页。
+    // 用户 m12591：退让分档——一截一截藏角标：.h1 藏最后一个「· 3 条」，
+    // .h2 藏掉全部条数，.h3 才藏整块「默认 开启」。
+    function clearStages(cell){
+      cell.classList.remove("shrink", "h1", "h2", "h3", "narrow", "narrow2", "tight");
+    }
+    // 返回 0..3：0 = 角标全显示，1 = 藏最后一截，2 = 藏全部条数，3 = 藏整块。
+    function fitStage(pair){
+      if(!over(pair)) return 0;
+      for(var i = 0; i < SILENT_STAGES.length; i++){
+        pair[0].classList.add(SILENT_STAGES[i]);
+        if(!over(pair)) return i + 1;
+      }
+      return SILENT_STAGES.length;
+    }
+    cells.forEach(function(pair){
+      clearStages(pair[0]);
+      pair[0].classList.add("measuring");
+    });
+    cells.forEach(function(pair){ fitStage(pair); });
+    cells.forEach(function(pair){ pair[0].classList.remove("measuring"); });
   }
 
+  // 用户 m10685：静默兜底 / 休息静默那两格的角标也要带上等待分钟（「默认 开启 · 3 分钟」），
+  // 原来只写开关默认值，分钟数得点开才知道。
+  function swPairBadge(f, k, nk){
+    if(!nk) return defaultBadge(f, k);
+    var nf = (schemaCache && schemaCache[nk]) || {};
+    var nd = defaultText(nf, nk);
+    if(!nd || nd === "无") return defaultBadge(f, k);
+    var u = pairUnitOf(nk);
+    // 用户 m04313：拆成两截，放不下时先只藏「· 3 分钟」那截，留「默认 开启」。
+    return "<i class='dfv'><span class='dfvs'>" + esc("默认 " + defaultText(f, k)) + "</span>" +
+      "<span class='dfvc'>" + esc(" · " + nd + (u ? " " + u : "")) + "</span></i>";
+  }
   // 用户 m03059：两个开关并成一排，各占一半宽度，名字在左、开关在右。
   // 用户 m03262：带数字框的也走这里——数字框在开关左边，跟 pairRowHtml 一个排法。
   function swPairHtml(k1, k2, n1, n2){
@@ -1180,7 +1211,7 @@
       }
       ctl += swPill(k, on, "开启", "关闭");
       return "<div class='swcell'>" +
-        "<div class='nm'>" + esc(nameOf(k, f)) + defaultBadge(f, k) + "</div>" +
+        "<div class='nm'>" + esc(nameOf(k, f)) + swPairBadge(f, k, nk) + "</div>" +
         "<div class='ctl pair'>" + ctl + "</div>" +
         "</div>";
     }
@@ -1279,20 +1310,6 @@
     if(configCache) configCache[twin] = false;
     var el = document.querySelector("#settings [data-k=" + JSON.stringify(twin) + "]");
     if(el) el.checked = false;
-    return true;
-  }
-  // v4.45（用户 m22611）：历史里的动图三档互斥——只读首帧 / 原图发送 / 九帧模式。
-  // 开一个就把另外两个关掉；三个都不开＝跳过，历史里的动图不发给模型。
-  var GIF_TRIO = ["history_gif_first", "history_gif_original", "history_gif_grid"];
-  function gifMutex(k, on){
-    if(GIF_TRIO.indexOf(k) < 0) return false;
-    if(!on) return true;              // 关掉当前这档 → 三个全关＝跳过
-    GIF_TRIO.forEach(function(twin){
-      if(twin === k) return;
-      if(configCache) configCache[twin] = false;
-      var el = document.querySelector("#settings [data-k=" + JSON.stringify(twin) + "]");
-      if(el) el.checked = false;
-    });
     return true;
   }
   // 老配置里两个都开着（行为上等于只开必回）：渲染时把「触发」显示成关的，
@@ -1677,11 +1694,11 @@
     Array.prototype.forEach.call(document.querySelectorAll("#settings .sw3"), function(box){
       box.classList.toggle("no-must", !advOn);
     });
-    // 用户 m04896 第 6 条：「文件不进上下文」开着时，「过滤文件视频」这一项失效——
+    // 用户 m04896 第 6 条：「丢弃文件视频」开着时，「过滤文件视频」这一项失效——
     // 整行压暗、开关禁用，悬浮说明为什么（文件压根进不了窗口，也就没什么可过滤的）。
     var fsSw = document.querySelector("#settings [data-k='file_skip_context']");
     var fsOn = fsSw ? !!fsSw.checked : false;
-    var fsTip = fsOn ? "开启 文件不进上下文功能时，此选项失效" : "";
+    var fsTip = fsOn ? "开启 丢弃文件视频 功能时，此选项失效" : "";
     // 用户 m06021：静默过滤改成两两并排后，data-row 在整行上、开关在 .swcell 里，
     // 所以按开关的 data-k 找它，再用 closest(".swcell") 拿那一格压暗。
     Array.prototype.forEach.call(document.querySelectorAll("#settings input[data-k='silent_skip_file_video']"), function(sw){
@@ -1747,7 +1764,7 @@
     }).catch(function(){ /* 静默：没登录 / 接口报错就保持「读取中」 */ });
   }
   function ublackBlockHtml(){
-    setTimeout(ublkLoad, 0);
+    // 用户 m04756：名单改成进黑名单页才拉（loadPageData），不再跟着整页渲染一起发请求。
     // 用户 m07157：整块加个总开关。用户 m07715：开关的说明改成「被拉黑的人…」那段，
     // 原来那句「关掉后名单还在…」删掉，说明直接挂在开关这一行右边。
     var uOn = !!(configCache && configCache.user_blacklist_enabled);

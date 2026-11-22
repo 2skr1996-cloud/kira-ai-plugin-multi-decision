@@ -1256,6 +1256,7 @@ class RequestLog:
         incoming_rows: Optional[list] = None,
         decision_passed: bool = False,
         notice_only: bool = False,
+        skipped_rows: Optional[list] = None,
     ) -> None:
         """ON_LLM_REQUEST 时暂存，等结算时补上 replied 再落盘。
 
@@ -1624,6 +1625,9 @@ class RequestLog:
             # 列表里就不用拿「条数/阈值」硬套概率模式了。
             "trigger_prob": float(trigger_prob or 0.0),
             "messages": messages,
+            # 用户 m32048 第 1 条：这一轮被挡在上下文之外的消息（虚线卡）也要落进快照，
+            # 事后翻记录还能看到「这条收到了但没给模型看」。at 在读取时按锚点算。
+            "skipped": [dict(r) for r in (skipped_rows or []) if isinstance(r, dict)],
             "system_prompt_names": names,
             "system_prompt_count": len(names),
             "system_prompt_errors": system_errors,
@@ -2214,6 +2218,8 @@ class RequestLog:
             "display_messages": disp,
             "incoming_messages": inc,
             "incoming_display_messages": inc_disp,
+            # 用户 m32048 第 1 条：决策快照也带上这一轮没进上下文的消息（虚线卡）。
+            "skipped": [dict(r) for r in (data.get("skipped") or []) if isinstance(r, dict)],
             **({"history_messages": hist_msgs} if dec_split else {}),
             **({"history_display_messages": hist_disp} if dec_split else {}),
             **dec_prefix,

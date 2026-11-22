@@ -262,7 +262,7 @@ def drop_tool_rounds(messages):
     和「tool 结果」。以前这两条照原样进窗口：一条工具结果动辄几万字符（一次
     search 就是整页 JSON），下一轮决策、回复都要重新背一遍，缓存也跟着重算。
 
-    用户 m13535 要求在窗口这层收住，设置项是「工具结果不进实时窗」，默认关；
+    用户 m13535 要求在窗口这层收住，设置项是「丢弃工具结果」，默认关；
     打开才整段摘掉，关着就按原样进窗，但发请求时 tool_calls / tool_call_id 必须
     成对（见 state/decision_phase.py 的 chat_payload）。所以这里只做整段摘除：
     - role=tool 的行直接丢；
@@ -309,6 +309,9 @@ class WindowState:
     # 进阶决策（v3.91，用户 m05834）：回与不回都记一条，下一轮判断与下一轮回复
     # 都要能看到「上一轮是怎么想的」。它不是窗口消息，不进条数统计、也不参与裁切。
     decisions: List[dict] = field(default_factory=list)
+    # 用户 m5411：被「文件/视频不进上下文」挡下来的消息。只给页面画「未进入上下文」
+    # 那一组用，不进窗口、不进待发、不参与裁切和条数统计。
+    skipped: List[dict] = field(default_factory=list)
     # 已见过的框架消息身份独立于可裁切正文，热重载后也不能把旧回复当新消息。
     framework_seen_ids: List[str] = field(default_factory=list)
 
@@ -322,6 +325,7 @@ class WindowState:
             "trimmed": self.trimmed,
             "pending": len(self.pending),
             "decisions": len(self.decisions),
+            "skipped": len(self.skipped),
         }
 
     def to_dict(self) -> dict:
@@ -334,6 +338,8 @@ class WindowState:
             "pending": [p for p in self.pending if isinstance(p, dict)],
             # 决策记录同理：热重载后接着用，不然模型会「忘了上一轮怎么判的」
             "decisions": [d for d in self.decisions if isinstance(d, dict)],
+            # 跳过记录也留着：热重载后页面那一组不能凭空消失
+            "skipped": [s for s in self.skipped if isinstance(s, dict)],
             "framework_seen_ids": list(self.framework_seen_ids[-4096:]),
         }
 
@@ -346,6 +352,7 @@ class WindowState:
             trimmed=int(data.get("trimmed") or 0),
             pending=[p for p in (data.get("pending") or []) if isinstance(p, dict)],
             decisions=[d for d in (data.get("decisions") or []) if isinstance(d, dict)],
+            skipped=[s for s in (data.get("skipped") or []) if isinstance(s, dict)],
             framework_seen_ids=[str(mid) for mid in (data.get("framework_seen_ids") or [])][-4096:],
         )
 

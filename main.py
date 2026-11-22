@@ -507,6 +507,10 @@ PER_SESSION_KEYS = (
     "decision_tools",
     "decision_model",
     "decision_fallback_model",
+    # 用户 m01994：思考等级（reasoning_effort）也按群走，留空 = 跟随模型自己的设置。
+    "decision_reasoning_effort",
+    # 用户 m7217：主模型和备用模型各有一套思考等级，不共用。
+    "decision_fallback_reasoning_effort",
     # 用户 m08678：决策页保留自己的一套次数 / 时间设置，默认值与回复一致，可各自调整。
     "decision_fail_switch",
     "decision_fallback_cooldown",
@@ -524,6 +528,8 @@ PER_SESSION_KEYS = (
     # （少「决策失败时」——回复没有「跳过决策」这回事）。
     "reply_model",
     "reply_fallback_model",
+    "reply_reasoning_effort",
+    "reply_fallback_reasoning_effort",
     "reply_fail_switch",
     "reply_fallback_cooldown",
     "reply_see_images",
@@ -608,7 +614,7 @@ PER_SESSION_KEYS = (
     "silent_skip_empty_forward_count",
     "silent_skip_file_video",
     "silent_skip_file_video_count",
-    # 用户 m04896 第 5 条：文件不进上下文窗口。
+    # 用户 m04896 第 5 条：丢弃文件视频。
     "file_skip_context",
     "rest_mode_enabled",
     "rest_start",
@@ -641,6 +647,12 @@ PER_SESSION_KEYS = (
     "history_gif_grid",
     "history_gif_original",
     "history_gif_first",
+    # 用户 m10267：动图派生的参数也按会话独立——单帧边长、JPEG 质量。
+    # 用户 m30656：拼图抽几帧（9 / 16 / 25）同样按会话独立。
+    # 用户 m30982：首帧边长撤掉，只读首帧那一档也按单帧边长缩。
+    "gif_tile",
+    "gif_quality",
+    "gif_frames",
     "window_trim_threshold",
     "protect_tool_groups",
     # v4.92（用户 m13535）：工具往返默认不进实时窗，窗口那边照这个开关整段摘。
@@ -746,6 +758,12 @@ _BOUNDS = {
     "watchdog_seconds": (30, 600),
     "window_keep": (1, None),
     "history_images": (0, 500),
+    # 用户 m10267：动图参数的范围跟 ui_schema 的 min/max 对齐。
+    "gif_tile": (128, 512),
+    "gif_quality": (1, 100),
+    # 用户 m30656：拼图抽几帧，界面上只有 9 / 16 / 25 三档，范围放宽到 4–36 兜底。
+    # 用户 m13967：多一个 0 = 自动，所以下限放到 0。
+    "gif_frames": (0, 36),
     "window_trim_threshold": (1, None),
     # v3.52（用户 m08226 第 7 条）：裁切缓冲，0 = 关掉强制裁切
     "window_buffer": (0, None),
@@ -797,6 +815,11 @@ _ENUMS = {
     "trigger_mode": ("count", "probability", "adaptive"),
     # 用户 m08755：自定义接口的协议，只收这两个值。
     "jev_api_protocol": ("systemone", "openai"),
+    # 用户 m01994：思考等级只收这几档，留空 = 跟随模型自己的设置。
+    "decision_reasoning_effort": ("", "off", "low", "medium", "high", "xhigh", "max"),
+    "decision_fallback_reasoning_effort": ("", "off", "low", "medium", "high", "xhigh", "max"),
+    "reply_reasoning_effort": ("", "off", "low", "medium", "high", "xhigh", "max"),
+    "reply_fallback_reasoning_effort": ("", "off", "low", "medium", "high", "xhigh", "max"),
 }
 
 
@@ -1170,9 +1193,10 @@ def _as_price(value) -> float:
 # - window_enabled：接管上下文窗口是本插件的核心功能，关掉它等于插件不存在；
 # - dynamic_to_tail：动态段挪到本轮消息之后是缓存命中的关键优化（实测 37.5% → 98%），
 #   关掉会让每轮前缀从中间断开。
-# 前端已把这两项从表单撤下 / 标为「已锁定」，这里再兜一层，防止旧配置文件、
+# - protect_tool_groups：裁切时拆开工具调用和结果，模型会看到半截配对（用户 m25921）。
+# 前端已把这几项从表单撤下 / 标为「已锁定」，这里再兜一层，防止旧配置文件、
 # 单群 overrides 或直接调接口把它关掉。
-_LOCKED_ON = frozenset({"window_enabled", "dynamic_to_tail"})
+_LOCKED_ON = frozenset({"window_enabled", "dynamic_to_tail", "protect_tool_groups"})
 
 
 def _as_bool(value, default: bool) -> bool:
@@ -1258,6 +1282,32 @@ def _bound_provider(store, keys, provider_id: str = "") -> str:
         return store.lookup(keys, provider_id=provider_id)
     except Exception:
         return ""
+
+
+def _skip_ts_of(item) -> float:
+    """取一条消息 / 一条虚线记录的时间戳，取不到给 0。"""
+    try:
+        if isinstance(item, dict):
+            return float(item.get("ts") or 0.0)
+        return float(getattr(item, "ts", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _skip_at_by_ts(rts: float, stamps) -> int:
+    """虚线卡按时间找插入位置（用户 m13127）：第一个比它晚的下标，都比它早就放末尾。
+
+    返回 -1 表示这条没有可用时间，调用方退回锚点。
+    """
+    if rts <= 0:
+        return -1
+    seen = False
+    for i, st in enumerate(stamps):
+        if st > 0:
+            seen = True
+            if st > rts:
+                return i
+    return len(stamps) if seen else -1
 
 
 class MultiDecisionPlugin(BasePlugin):
@@ -1389,6 +1439,11 @@ class MultiDecisionPlugin(BasePlugin):
         # 少「决策失败时」）。模型留空 = 跟随框架默认；看图默认开。
         self.reply_model = str(cfg.get("reply_model") or "")
         self.reply_fallback_model = str(cfg.get("reply_fallback_model") or "")
+        # 用户 m01994：思考等级留空 = 跟随模型自己的设置（不传 reasoning_effort）。
+        self.reply_reasoning_effort = str(cfg.get("reply_reasoning_effort") or "").strip().lower()
+        self.reply_fallback_reasoning_effort = str(cfg.get("reply_fallback_reasoning_effort") or "").strip().lower()
+        self.decision_reasoning_effort = str(cfg.get("decision_reasoning_effort") or "").strip().lower()
+        self.decision_fallback_reasoning_effort = str(cfg.get("decision_fallback_reasoning_effort") or "").strip().lower()
         # 用户 m08153：连续失败切换改成开关（阈值固定 2），默认开。
         self.reply_fail_switch = _as_bool(cfg.get("reply_fail_switch"), True)
         # 用户 m10202：冷却默认 30 分钟（存盘按秒，1800）。
@@ -1426,22 +1481,27 @@ class MultiDecisionPlugin(BasePlugin):
         self.silent_skip_single_image = _as_bool(cfg.get("silent_skip_single_image"), False)
         self.silent_skip_single_sticker = _as_bool(cfg.get("silent_skip_single_sticker"), True)
         self.silent_skip_empty_forward = _as_bool(cfg.get("silent_skip_empty_forward"), True)
-        # 用户 m04896 第 1 条：每个过滤项各自带「管前几条」，默认都只过滤第 1 条。
+        # 用户 m04896 第 1 条：每个过滤项各自带「管前几条」。用户 m10685 把默认值调成
+        # 链接 / 文件视频 9 条，转发 / 表情包 / 图片 / 短句 3 条（原来一律 1 条）。
         self.silent_skip_video_link_count = max(
-            1, _as_int(cfg.get("silent_skip_video_link_count"), 1))
+            1, _as_int(cfg.get("silent_skip_video_link_count"), 9))
         self.silent_skip_short_count = max(
-            1, _as_int(cfg.get("silent_skip_short_count"), 1))
+            1, _as_int(cfg.get("silent_skip_short_count"), 3))
         self.silent_skip_single_image_count = max(
-            1, _as_int(cfg.get("silent_skip_single_image_count"), 1))
+            1, _as_int(cfg.get("silent_skip_single_image_count"), 3))
         self.silent_skip_single_sticker_count = max(
-            1, _as_int(cfg.get("silent_skip_single_sticker_count"), 1))
+            1, _as_int(cfg.get("silent_skip_single_sticker_count"), 3))
         self.silent_skip_empty_forward_count = max(
-            1, _as_int(cfg.get("silent_skip_empty_forward_count"), 1))
+            1, _as_int(cfg.get("silent_skip_empty_forward_count"), 3))
         # 用户 m04896 第 4 条：文件 / 视频消息也过滤，默认开。
         self.silent_skip_file_video = _as_bool(cfg.get("silent_skip_file_video"), True)
         self.silent_skip_file_video_count = max(
-            1, _as_int(cfg.get("silent_skip_file_video_count"), 1))
-        # 用户 m04896 第 5 条：文件不进上下文窗口，默认开。
+            1, _as_int(cfg.get("silent_skip_file_video_count"), 9))
+        # 用户 m22683：正文里 @ 了别人（不是机器人）也算没什么可接，默认开、管前 3 条。
+        self.silent_skip_at_other = _as_bool(cfg.get("silent_skip_at_other"), True)
+        self.silent_skip_at_other_count = max(
+            1, _as_int(cfg.get("silent_skip_at_other_count"), 3))
+        # 用户 m04896 第 5 条：丢弃文件视频，默认开。
         self.file_skip_context = _as_bool(cfg.get("file_skip_context"), True)
 
         # v3.52（用户 m08226 第 5 条）：配额玩法收敛成「每小时 / 每天」两个开关，
@@ -1565,7 +1625,8 @@ class MultiDecisionPlugin(BasePlugin):
         # v3.85（用户 m04418 第 2 条）：撤掉「重启后回填条数」这条设置——群聊窗口
         # 热重载由寄存处接回、私聊另有 window_dm.json 存档，都不需要从框架记忆里回填。
         # 冷启动一律不灌历史，见 window/manager.py 的 collect()。
-        self.protect_tool_groups = _as_bool(cfg.get("protect_tool_groups"), True)
+        # 用户 m25921：保护工具锁死开启（见 _LOCKED_ON），配置里的旧值不再读取。
+        self.protect_tool_groups = True
         # v4.92（用户 m13535、m13870）：工具结果默认照旧进实时窗——现在还不能一刀切，
         # 有些工具结果对后续判断有用。开关打开才整段摘掉，请求那边补全配对。
         self.window_drop_tools = _as_bool(cfg.get("window_drop_tools"), False)
@@ -2187,6 +2248,12 @@ class MultiDecisionPlugin(BasePlugin):
         layouts = getattr(self, "prompt_layouts", None)
         if layouts is not None:
             layouts.capture_native(request, self._sid_of(event))
+            # 用户 m00998 第 3 条：框架在 assemble 阶段才填 format 段的标签清单，那时插件已装配完；
+            # 这里趁 tag_set 已含内置标签先抄一份，设置页预览就能显示真内容。
+            try:
+                layouts.remember_tag_set(tag_set)
+            except Exception:
+                logger.debug("[multi-decision] 记标签清单失败（已吞掉）", exc_info=True)
         await self.engine.handle_llm_request(event, request, tag_set)
         # 放在 engine 之后：这时 messages 已经换成窗口快照、system 已修好、
         # 群标识也剥过了，记下来的才是模型真正收到的样子。
@@ -2381,6 +2448,10 @@ class MultiDecisionPlugin(BasePlugin):
         except Exception:
             gif_mode = "grid"
         try:
+            gif_opts = self.window.gif_opts(sid) if self.window is not None else None
+        except Exception:
+            gif_opts = None
+        try:
             refs = list(forward_media_for_mid(mid, raw_sid) or [])
         except Exception:
             refs = []
@@ -2391,7 +2462,7 @@ class MultiDecisionPlugin(BasePlugin):
         # v4.70（用户 m01237）：开了「转发里的动图一律不发」就整张跳过动图，
         # 只在返回文字里说一声；静态图照旧走九宫格/压小那一套。
         drop_gif = bool(getattr(self, "forward_drop_gif", True))
-        got = forward_model_refs(raw_sid, mid, refs, gif_mode, drop_gif)
+        got = forward_model_refs(raw_sid, mid, refs, gif_mode, drop_gif, gif_opts)
         live = [r for r in got if r.get("path")]
         notes = []
         for r in got:
@@ -2441,6 +2512,10 @@ class MultiDecisionPlugin(BasePlugin):
         except Exception:
             gif_mode = "grid"
         try:
+            gif_opts = self.window.gif_opts(sid) if self.window is not None else None
+        except Exception:
+            gif_opts = None
+        try:
             found = self.window.quote_of(sid, mid) if self.window is not None else {}
         except Exception:
             found = {}
@@ -2463,7 +2538,7 @@ class MultiDecisionPlugin(BasePlugin):
         if not refs:
             return "这条引用没有图片。原文：%s" % (body or "（空）")
         drop_gif = bool(getattr(self, "forward_drop_gif", True))
-        got = forward_model_refs(raw_sid, mid, refs, gif_mode, drop_gif)
+        got = forward_model_refs(raw_sid, mid, refs, gif_mode, drop_gif, gif_opts)
         live = [r for r in got if r.get("path")]
         notes = []
         for r in got:
@@ -4703,10 +4778,16 @@ class MultiDecisionPlugin(BasePlugin):
             if len(attempts) >= 128:
                 break
             attempts[key] = None
+            timed_out = False
             try:
                 await asyncio.wait_for(fetch_forward_items(
                     bot, mid, timeout=remaining, raw_sid=raw_sid, refresh_display_proof=True,
                 ), timeout=remaining)
+            except (asyncio.TimeoutError, TimeoutError):
+                # 用户 m10643：预算用完不等于「取不到」。以前这里和真失败一样记 30 秒冷却，
+                # 而 /quote-lookup 只给 0.6 秒——一次刷新就把这条消息锁死半分钟，
+                # 后台续跑和 /window 都被同一把锁挡住，卡片只能一直挂着「（已发 N）」。
+                timed_out = True
             except Exception:
                 pass
             finally:
@@ -4716,14 +4797,22 @@ class MultiDecisionPlugin(BasePlugin):
                     succeeded = False
                 if succeeded:
                     attempts.pop(key, None)
+                elif timed_out:
+                    # 交给后台续跑，不记冷却。
+                    attempts.pop(key, None)
+                    pending = True
                 else:
                     attempts[key] = time.monotonic() + 30.0
         return pending
 
     def _spawn_forward_proof_refresh(self, raw_sid, owner_rows) -> None:
-        """后台把这次没抓完的转发内容补上，下一次读这条快照自然就有。"""
+        """后台把这次没抓完的转发内容补上，下一次读这条快照自然就有。
+
+        用户 m10643：后台不再受请求预算限制——0.6 秒 / 3 秒都短于一次真实取转发
+        （框架自己补取一条 14 条目的转发要 3 秒左右），给足 30 秒才抓得完。
+        """
         try:
-            task = asyncio.create_task(self._refresh_forward_display_proofs(raw_sid, owner_rows))
+            task = asyncio.create_task(self._refresh_forward_display_proofs(raw_sid, owner_rows, budget=30.0))
         except RuntimeError:
             return
         tasks = getattr(self, "_proof_tasks", None)
@@ -4855,6 +4944,9 @@ class MultiDecisionPlugin(BasePlugin):
                     [fallback], raw_sid, native_rows, public_media=quote_public_media,
                     text_of_content=content_text, forward_display_proof_for_mid=forward_display_proof_for_mid,
                     forward_proof_items=[item],
+                    # 用户 m09904：引用里的转发卡要画全所有图，快照兜底这条路径也得给完整图集，
+                    # 否则只有模型侧那几张，卡片上会挂「（已发 N）」。
+                    forward_media_for_mid=forward_media_for_mid,
                 )[0]["display"]
                 # Without native proof these aggregate refs are neutral attachments only.
                 ts = tm.group(1) if tm else ""
@@ -4878,6 +4970,7 @@ class MultiDecisionPlugin(BasePlugin):
                     display = project_items(
                         [shell], raw_sid, native_rows, public_media=quote_public_media,
                         text_of_content=content_text, forward_display_proof_for_mid=forward_display_proof_for_mid,
+                        forward_media_for_mid=forward_media_for_mid,
                     )[0]["display"]
                 out[mid] = {"who": who, "ts": ts, "body": display.get("own_body", ""),
                             "media": display["own_media"] if display["own_media_known"] else [],
@@ -5047,7 +5140,8 @@ class MultiDecisionPlugin(BasePlugin):
             if len(mids) >= 900:
                 break
         native_rows = await asyncio.to_thread(read_native_rows, raw_sid, mids)
-        await self._refresh_forward_display_proofs(raw_sid, native_rows)
+        if await self._refresh_forward_display_proofs(raw_sid, native_rows):
+            self._spawn_forward_proof_refresh(raw_sid, native_rows)
         # 用户 m10400 图4：实时窗口也要能换回聊天里原本那张图（动图/原分辨率），
         # 跟请求快照同一个口径——按 message_id 回插件索引取 orig_media。
         messages = project_items(messages, raw_sid, native_rows, public_media=public_media,
@@ -5064,6 +5158,25 @@ class MultiDecisionPlugin(BasePlugin):
                                 forward_media_for_mid=forward_media_for_mid,
                                 original_media_for_mid=original_media_for_mid,
                                 media_by_digest=media_cache_by_digest)
+        # 用户 m17018 图2：跳过记录不随窗口裁切清理，窗口早就翻过去的老消息会一直挂在
+        # 页面底部（用户看到「未进入上下文」里躺着两条早就不在窗口里的视频）。
+        # 只留还在窗口时间范围内的那些——窗口裁掉之后它们也该跟着消失。
+        skipped = self.window.skipped_of(sid)
+        oldest_ts = 0.0
+        for _m in messages:
+            try:
+                _t = float(_m.get("ts") or 0.0)
+            except Exception:
+                _t = 0.0
+            if _t > 0 and (oldest_ts <= 0 or _t < oldest_ts):
+                oldest_ts = _t
+        if oldest_ts > 0:
+            skipped = [s for s in skipped if float(s.get("ts") or 0.0) >= oldest_ts]
+        # 用户 m32048 / m13127：虚线卡按它自己的时间插回原位——在 messages + pending 的
+        # 时间序列里找第一个比它晚的位置。以前按 after_mid（挡下那一刻窗口的最后一条），
+        # 文件到达时对应消息还在待发，锚点就落到更早的历史消息后面（用户 m13127 图1/图3）。
+        # 被拉黑的消息本体也在这里标成虚线，跟快照走同一套（用户 m32048 第 4 条）。
+        skipped = self._apply_skips(skipped, [*messages, *pending], time.time())
         return {
             "ok": True,
             "sid": sid,
@@ -5081,6 +5194,9 @@ class MultiDecisionPlugin(BasePlugin):
             "last_ts": last_ts,
             "pending": pending,
             "summary": self.window.summary_info(sid),
+            # 用户 m5411：被「文件/视频不进上下文」挡下来的消息，页面单独一组画虚线框，
+            # 只给界面看，不进窗口、不进待发、不参与条数统计。
+            "skipped": skipped,
             "bot_qq": self.bot_qq,
             # v3.91（用户 m05749）：当前窗口顶上那条「最近一次判定」直接吃这个，
             # 不用再单独拉一次决策列表（异步拉容易赶不上本次绘制）。
@@ -5090,6 +5206,8 @@ class MultiDecisionPlugin(BasePlugin):
             "decision_note": (
                 self.window.decision_note_of(sid) if self.window is not None else {}
             ),
+            # 用户 m13254：窗口页要按黑名单折叠，名单跟着窗口一起回来，别等第二个接口。
+            "ublk": self._window_ublk(sid),
         }
 
     def _last_decision_of(self, sid: str) -> dict:
@@ -5312,47 +5430,47 @@ class MultiDecisionPlugin(BasePlugin):
                 + list(drop.get("legacy_sids") or [])
             )
             merged[key] = keep
-        items = sorted(merged.values(), key=lambda r: r.get("last_ts") or 0, reverse=True)
-        # v3.66（用户 m19536 第 9 条）：「最近活跃」= 消息日志里最后一次收到消息的时间。
-        # 静音的会话不写日志行，所以静音不算活跃；跟请求时间取大的那个来排。
+        items = list(merged.values())
+        # 轻量轮询只按 sid 更新状态点，不消费侧栏排序或最近 24 小时统计。
         act = {}
-        try:
-            if self._log is not None:
-                act = self._log.last_seen(7) or {}
-        except Exception:
-            act = {}
-        # v3.23（用户 m45332 第5条）：会话卡上的「实际概率 / 攒到第几条」要用
-        # 最近 24 小时的回复次数与用户消息数（stats_recent 的 by_session，
-        # messages 只算收到的消息行、不含 trigger/round_end 事件行）。
         by_r24 = {}
-        try:
-            by_r24 = (self._recent24() or {}).get("by_session") or {}
-        except Exception:
-            by_r24 = {}
+        if not light:
+            # 最近活跃取消息日志时间与请求时间的较大值，完整列表仍按原口径排序。
+            items.sort(key=lambda r: r.get("last_ts") or 0, reverse=True)
+            try:
+                if self._log is not None:
+                    act = self._log.last_seen(7) or {}
+            except Exception:
+                act = {}
+            try:
+                by_r24 = (self._recent24() or {}).get("by_session") or {}
+            except Exception:
+                by_r24 = {}
         for it in items:
             sid = it.get("sid") or ""
-            # 热重载/重启会清空内存里的窗口状态，左栏就会显示「窗口 0 条」、右栏却有内容。
-            # 这里用最近一轮请求发出去的历史顶上，两边数字才对得上。
+            session_enabled = self.eff("session_enabled", sid)
+            # 完整列表要回显上轮窗口条数；轻量状态拍仅在请求索引没有时间时回查。
             if (not it.get("window") and self.request_log is not None
-                    and self.eff("session_enabled", sid) is not False):
+                    and session_enabled is not False and (not light or not it.get("last_ts"))):
                 try:
                     last = self.request_log.last_snapshot(sid)
                 except Exception:
                     last = None
                 if last:
-                    it["snapshot_counted"] = count_messages(last.get("messages") or [])
-                    it["stale"] = True
+                    if not light:
+                        it["snapshot_counted"] = count_messages(last.get("messages") or [])
+                        it["stale"] = True
                     if not it.get("last_ts"):
                         it["last_ts"] = last.get("ts") or 0
-            # 配置胶囊「决策开 · 窗口 30/60 · 模式 count · 阈值 10」就显示在这，
-            # 每项带上自己的有效配置，前端不再需要另拉 overview
-            it["eff"] = self._eff_summary(sid)
-            # v3.53（用户 m08226 第 2 条）：左栏「静默 / 休兜」标签要倒计时，这里也给一份
-            # 下一次自动冒泡的绝对时刻，前端每秒减就行（和 /overview 同一个口径）。
-            try:
-                it["silent_eta"] = self.engine.silent_eta(sid) if self.engine else {}
-            except Exception:
-                it["silent_eta"] = {}
+            if light:
+                it["eff"] = {"session_enabled": session_enabled}
+            else:
+                # 完整配置摘要和绝对倒计时供会话卡使用。
+                it["eff"] = self._eff_summary(sid)
+                try:
+                    it["silent_eta"] = self.engine.silent_eta(sid) if self.engine else {}
+                except Exception:
+                    it["silent_eta"] = {}
             # agent 是否在跑、跑了多久。卡住时插件侧没人看得见，
             # 只能靠重启 —— 用户 m25454 要的状态指示器就是这个。
             st = None
@@ -5390,7 +5508,7 @@ class MultiDecisionPlugin(BasePlugin):
                 it["retry_count"] = 0
                 it["retry_in"] = 0
             # 「为什么没回」的实时原因（v2.82）：静音 / 攒数中 / 太短 / 退避 / 配额
-            it["muted"] = self.eff("session_enabled", sid) is False
+            it["muted"] = session_enabled is False
             it["muted_skipped"] = 0
             try:
                 it["muted_skipped"] = int(
@@ -5406,16 +5524,16 @@ class MultiDecisionPlugin(BasePlugin):
             it["counter"] = int(getattr(st, "counter", 0) or 0) if st is not None else 0
             it["threshold"] = int(self.eff("trigger_threshold", sid) or 0)
             it["trigger_mode"] = str(self.eff("trigger_mode", sid) or "")
-            agg = by_r24.get(sid) or {}
-            it["r24_messages"] = int(agg.get("messages") or 0)
-            it["r24_replied"] = int(agg.get("replied") or 0)
-            it["last_active"] = max(
-                float(it.get("last_ts") or 0.0),
-                float(act.get(_merge_sid_key(sid)) or 0.0),
-            )
-        # v3.66（用户 m19536 第 9 条）：左栏按谁最近活跃谁排第一；前端本来就按
-        # 「群聊 / 私聊」分两段渲染，排好序后两段各自有序，不用前端再排。
-        items.sort(key=lambda r: r.get("last_active") or 0, reverse=True)
+            if not light:
+                agg = by_r24.get(sid) or {}
+                it["r24_messages"] = int(agg.get("messages") or 0)
+                it["r24_replied"] = int(agg.get("replied") or 0)
+                it["last_active"] = max(
+                    float(it.get("last_ts") or 0.0),
+                    float(act.get(_merge_sid_key(sid)) or 0.0),
+                )
+        if not light:
+            items.sort(key=lambda r: r.get("last_active") or 0, reverse=True)
         # light=1：每秒的状态轮询只要运行状态那几个字段，
         # 不要 eff 全量、silent_eta、r24 统计、窗口条数这些。
         # 一份 11KB 的响应能压到 2KB 左右，1 秒一拍省很多。
@@ -5430,8 +5548,6 @@ class MultiDecisionPlugin(BasePlugin):
                 "rounds", "last_ts",
             }
             for it in items:
-                eff = it.get("eff") or {}
-                it["eff"] = {"session_enabled": eff.get("session_enabled")}
                 for key in list(it.keys()):
                     if key not in keep and key != "eff":
                         it.pop(key, None)
@@ -7517,6 +7633,25 @@ class MultiDecisionPlugin(BasePlugin):
             logger.exception("[multi-decision] 保存本会话解除名单失败")
             return False
 
+    def _window_ublk(self, sid: str) -> dict:
+        """窗口页折叠用的用户黑名单。
+
+        用户 m13254：名单以前是另一个接口，比消息晚到，刷新那一瞬间会先按
+        「谁都没拉黑」画一遍再折起来，看着像内容露了一下。跟着窗口一起返回，
+        首屏（含 sessionStorage 直出）就是折好的。出错就当没有，别把窗口接口带崩。
+        窗口每 5 秒拉一次，所以只回折叠要用的字段，不带名字和保留消息号。
+        """
+        try:
+            full = self._blacklist_payload(sid)
+        except Exception:
+            logger.exception("[multi-decision] 取用户黑名单失败（窗口页按不折叠处理）")
+            return {}
+        return {
+            "ok": True,
+            "enabled": bool(full.get("enabled")),
+            "items": [{"uid": u} for u in (full.get("uids") or [])],
+        }
+
     def _blacklist_payload(self, sid: str = "") -> dict:
         """当前生效的用户黑名单。
 
@@ -9177,6 +9312,77 @@ class MultiDecisionPlugin(BasePlugin):
                 "owner_proofs": owner_proofs, "owner_ids": owner_ids,
                 "history": history, "new_msgs": new_msgs}
 
+    @staticmethod
+    def _skip_rows_at(rows, items, ts: float = 0.0) -> list:
+        """把「没进上下文」的记录按时间算成快照里的插入位置（用户 m32048 第 1 条、m13127）。
+
+        at = 插到 items 的第几条之前。优先按记录自己的 ts 找位置——挡下来那一刻对应
+        消息可能还在待发，after_mid 只指向当时窗口的最后一条，会把它插到更早的地方
+        （用户 m13127 图1/图3）。没有 ts 才退回 after_mid。
+        锚点已经不在这一份里就整条丢掉——那是别的轮次挡下来的，画到这一轮只会让人
+        以为这轮又丢了一条。
+        """
+        if not rows:
+            return []
+        items = list(items or [])
+        stamps = [_skip_ts_of(it) for it in items]
+        pos = {}
+        for i, it in enumerate(items):
+            mid = display_message_id(it, text_of_content=content_text)
+            if mid and mid not in pos:
+                pos[mid] = i
+        first_ts = min([s for s in stamps if s > 0], default=0.0)
+        out = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            rts = _skip_ts_of(r)
+            at = _skip_at_by_ts(rts, stamps)
+            if at < 0:
+                am = str(r.get("after_mid") or "")
+                if am:
+                    if am not in pos:
+                        continue
+                    at = pos[am] + 1
+                else:
+                    # 没有锚点（挡下来时窗口还是空的）：只在它确实属于这一轮时才算进来。
+                    if not ts or not rts or ts - rts > 3600:
+                        continue
+                    at = 0
+            elif first_ts > 0 and rts < first_ts - 60:
+                # 比这一份里最早的消息还早一分钟以上：窗口已经翻过去了，画在最前面
+                # 会让人以为这一轮又丢了一条（用户 m13127 图4）。
+                continue
+            row = dict(r)
+            row["at"] = at
+            out.append(row)
+        return out
+
+    def _apply_skips(self, rows, items, ts: float = 0.0) -> list:
+        """虚线行算成插入位置，并把被拉黑的消息本体标成虚线（用户 m32048 第 4 条）。
+
+        实时窗里拉黑消息是本体画虚线、不再单独出一张卡；快照要跟它一致，否则同一条
+        消息会画两遍（一张正常卡 + 一张虚线卡）。用行自己的 mid 对，不看当前窗口——
+        翻几天前的快照时窗口早就翻过去了。
+        """
+        out = self._skip_rows_at(rows, items, ts)
+        bl_mids = {str(r.get("mid") or "") for r in out
+                   if str(r.get("reason") or "") == "blacklist"}
+        bl_mids.discard("")
+        marked = set()
+        if bl_mids:
+            for it in items or []:
+                if not isinstance(it, dict):
+                    continue
+                mid = display_message_id(it, text_of_content=content_text)
+                if mid and mid in bl_mids:
+                    it["skip"] = True
+                    it["skip_reason"] = "blacklist"
+                    marked.add(mid)
+        return [r for r in out
+                if str(r.get("reason") or "") != "blacklist"
+                or str(r.get("mid") or "") not in marked]
+
     def _request_detail_tail(self, stage: dict, owner_rows) -> dict:
         """原生消息到手后，把快照 / 窗口 / 回复一起投影出来。"""
         media_render_resume(stage.get("render_memo"))
@@ -9221,6 +9427,13 @@ class MultiDecisionPlugin(BasePlugin):
             # bot 条数 = counted - user_counted，前端不用自己猜。
             "user_counted": count_user_messages(snapshot_msgs),
             "history_counted": count_messages(history), "incoming_counted": count_messages(new_msgs),
+            # 用户 m32048 第 1 条：这一轮没进上下文的消息（虚线卡）跟着快照一起存，
+            # 只是不进上下文；at 按锚点算，页面据此插回原位。
+            "skipped": self._apply_skips(
+                rec.get("skipped"),
+                rec["history_display_messages"] + rec["incoming_display_messages"],
+                float(rec.get("ts") or 0.0),
+            ),
         }
         eid = str(rec.get("event_id") or "")
         verified = bool(eid and trace and str(trace.get("event_id") or "") == eid
@@ -9293,6 +9506,12 @@ class MultiDecisionPlugin(BasePlugin):
             size=len(_ws_raw) + len(sent_msgs), counted=count_messages(_ws_raw + sent_msgs),
             user_counted=count_user_messages(_ws_raw + sent_msgs),
             sent_counted=count_messages(sent_msgs), sent_identity_verified=verified)
+        # 用户 m32048 第 1 条：窗口快照也带一份虚线卡，位置按这一份的编号序列重算。
+        rec["window_snapshot"]["skipped"] = self._apply_skips(
+            rec.get("skipped"),
+            rec["window_snapshot"]["messages"],
+            float(rec.get("ts") or 0.0),
+        )
         # v4.01（用户 m11166 图4）：这一轮的判定本身也得落进快照。平时那条注记只由
         # window/manager.py 的 _with_decision_notes 在出口拼，不写盘、不进快照，
         # 于是点紫柱看这一轮的窗口时，「凭什么这么判」的理由完全看不到。

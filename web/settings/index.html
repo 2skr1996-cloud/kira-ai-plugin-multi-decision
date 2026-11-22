@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="icon" href="data:," />
 <title>多样决策 · 设置</title>
+<script defer src="js/lib-1.js"></script>
+<script defer src="js/lib-2.js"></script>
+<script defer src="js/lib-3.js"></script>
+<script defer src="js/lib-4.js"></script>
+<script defer src="js/app.js"></script>
 <script>
 /* 首帧引导（v3.08）
    ① 主题：先从父页面或上次缓存取主题，深色模式下不白闪；
@@ -58,7 +63,9 @@ body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system
 /* v3.67（用户 m20117 第 6 条）：整页收一点边距，一屏能多看两行。 */
 /* 用户 m19542 第 3 条：跟首页对齐——首页 .wrap 是 18px 22px 40px，
    原来这里 14/20 会让「首页 / 设置」两个胶囊切换时左移 2px、上移 4px。 */
-.wrap{padding:14px 14px 32px;max-width:none;margin:0;}
+/* 用户 m12008：上面那条只改了注释、值还是 14/14/32，切页时整页左移 8px、上移 4px，
+   看着像抖一下。现在真的跟首页一致。 */
+.wrap{padding:18px 22px 40px;max-width:none;margin:0;}
 header{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;}
 /* header 里的控件统一 26px 高，整条 header 正好 32px —— 和首页一样高，切页不跳（用户 m33994 图5） */
 header > button,header > select{height:26px;padding:0 12px;line-height:1;border-radius:8px;font-size:13px;}
@@ -91,7 +98,8 @@ button.mini{padding:2px 8px;font-size:12px;border-radius:6px;}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}
 .saved{color:var(--ok);font-size:12px;}
 .empty{padding:36px;text-align:center;color:var(--muted);}
-select,input[type=text],input[type=number],input[type=time]{font:inherit;padding:5px 9px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);}
+/* 用户 m29293：所有输入框统一用页面底色（--bg），不再混用 --card / --soft / --bg 三种。 */
+select,input[type=text],input[type=number],input[type=time]{font:inherit;padding:5px 9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text);}
 /* 用户 m00153：时间框在深色主题下别再是白底白字，连带原生钟表图标一起跟随主题。 */
 html[data-theme="dark"] input[type=time]{color-scheme:dark;}
 input[type=number]{width:var(--ipt-w);} /* v3.49：兜底宽度也走同一套变量，见下面 .ipt 那段 */
@@ -128,7 +136,7 @@ input[type=number]{width:var(--ipt-w);} /* v3.49：兜底宽度也走同一套�
 /* 数字框自带的上下箭头会盖住框里的 %；设置项都是键进去的，箭头收掉 */
 .setrow .ctl .ipt > input[type=number]::-webkit-inner-spin-button,
 .setrow .ctl .ipt > input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
-.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--line);}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:2px;padding-bottom:4px;}
 .tabs button{padding:5px 15px;border-radius:8px;font-size:13px;}
 .tabs button.on{background:var(--accent);border-color:var(--accent);color:#fff;}
 /* 用户 m10201：页签按钮拿到焦点时，浏览器会画一圈黑色焦点环（黑边）——刷新恢复焦点、
@@ -146,9 +154,10 @@ input[type=number]{width:var(--ipt-w);} /* v3.49：兜底宽度也走同一套�
       给 html 预留滚动条槽位，位置就不再跳。
    ② 页签吸顶，滚到页面下半部也能直接换页；换页内容淡入 120ms，不再「啪」一下换掉。 */
 html{scrollbar-gutter:stable;}
-.tabs{position:sticky;top:0;z-index:30;background:var(--bg);margin:0 -14px 10px;padding:8px 14px;
-  border-bottom:1px solid var(--line);}
-@media (max-width:860px){.tabs{margin-left:-12px;margin-right:-12px;padding-left:12px;padding-right:12px;}}
+.tabs{position:sticky;top:0;z-index:30;background:var(--bg);margin:0 -22px 2px;padding:8px 22px 4px;}
+/* 用户 m12008：窄屏跟首页同一档——首页 ≤1000px 时 .wrap 是 10px 10px 26px，
+   页签栏的负边距要跟着走，否则会往左溢出。 */
+@media (max-width:1000px){.tabs{margin-left:-10px;margin-right:-10px;padding-left:10px;padding-right:10px;}}
 @keyframes mdPageIn{from{opacity:.35;}to{opacity:1;}}
 .setgrp.pgin{animation:mdPageIn .12s ease-out both;}
 html.booting .setgrp.pgin{animation:none;}
@@ -159,14 +168,14 @@ html.booting .setgrp.pgin{animation:none;}
 .dlg h3{margin:0 0 8px;font-size:14px;}
 .dlg p{margin:0;font-size:13px;line-height:1.8;color:var(--text);}
 .dlg .dlg-input{width:100%;box-sizing:border-box;height:34px;margin-top:10px;padding:0 10px;border-radius:9px;
-  border:1px solid var(--line);background:var(--soft);color:var(--text);font-size:13px;outline:none;}
+  border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:13px;outline:none;}
 .dlg .dlg-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.16);}
 .dlg-btns{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;}
 .dlg-btns button{padding:6px 16px;border-radius:8px;border:1px solid var(--line);background:var(--soft);color:var(--text);font-size:13px;}
 .dlg-btns button.pri,.dlg-btns button:hover{border-color:var(--accent);color:var(--accent);}
 .dlg-btns button.danger{background:var(--bad);border-color:var(--bad);color:#fff;}
 .dlg textarea{width:100%;box-sizing:border-box;min-height:158px;margin-top:10px;padding:10px 12px;border-radius:10px;
-  border:1px solid var(--line);background:var(--soft);color:var(--text);font-size:13px;line-height:1.75;
+  border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:13px;line-height:1.75;
   font-family:inherit;resize:vertical;outline:none;}
 .dlg textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.16);}
 .phbtn{height:30px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:var(--soft);
@@ -208,8 +217,9 @@ html[data-theme="dark"] .setrow:hover{background:rgba(255,255,255,.055);}
 .setrow.wide .ctl{justify-self:stretch;}
 /* 用户 2026-11-06：转发消息处理是左右格式的分段按钮，说明跟着选中项走。 */
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;}
-.segbtn{border:0;background:transparent;color:var(--muted);font:inherit;font-size:12.5px;
-  padding:6px 10px;cursor:pointer;white-space:nowrap;line-height:1.2;}
+/* 用户 m15110：分段按钮只有最左最右的外侧是圆角（靠容器 9px + overflow:hidden 裁出来），
+   内部一律直角——以前每个按钮各自吃全局 button 的 8px 圆角，看着像一排药丸。 */
+.segbtn{border:0;border-radius:0;background:transparent;color:var(--muted);font:inherit;font-size:12.5px;padding:6px 10px;cursor:pointer;white-space:nowrap;line-height:1.2;}
 .segbtn+.segbtn{border-left:1px solid var(--line);}
 .segbtn:hover{color:var(--text);}
 .segbtn.on{background:var(--accent);color:#fff;font-weight:600;}
@@ -221,9 +231,9 @@ html[data-theme="dark"] .setrow:hover{background:rgba(255,255,255,.055);}
 .setrow{grid-template-columns:minmax(0,1fr) 200px;}
 .setrow .ctl{width:100%;justify-content:flex-end;}
 .setrow .ctl > input[type=text],.setrow .ctl > select{width:100%;min-width:0;}
-/* v3.12：填昵称、外号的两处控件单独美化（用户 m39759 ⑤）：软底 + 圆角，
+/* v3.12：填昵称、外号的两处控件单独美化（用户 m39759 ⑤）：页面底色 + 圆角，
    悬停浮起来一点，聚焦时描边发光，跟首页卡片的质感统一。 */
-.setrow .ctl > input[type=text]{border-radius:10px;background:var(--soft);border-color:transparent;padding:8px 12px;transition:background .15s,border-color .15s,box-shadow .15s;}
+.setrow .ctl > input[type=text]{border-radius:10px;background:var(--bg);border-color:transparent;padding:8px 12px;transition:background .15s,border-color .15s,box-shadow .15s;}
 .setrow .ctl > input[type=text]:hover{background:var(--card);border-color:var(--line);}
 .setrow .ctl > input[type=text]:focus{outline:none;background:var(--card);border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.16);}
 
@@ -297,7 +307,9 @@ th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);}
 th{color:var(--muted);font-weight:500;background:var(--soft);white-space:nowrap;}
 tr:last-child td{border-bottom:none;}
 .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px;}
-@media (max-width:860px){.wrap{padding:12px;}}
+/* 用户 m12008：原来这里 ≤860px 才收到 12px，首页是 ≤1000px 收到 10px，
+   861~1000px 这一段两边差 12px。现在跟首页同一断点、同一数值。 */
+@media (max-width:1000px){.wrap{padding:10px 10px 26px;}}
 /* v3.14：单群模式下「不在白名单里的全局项」用 .ro 置灰，与 v3.13 的锁定项 .locked
    （控件禁用 + 「已锁定」标签）分开。以前两者共用 .locked，这两条写在后面把 v3.13 的样式
    整个盖掉，实验页那行显示成 42% 透明 + 错写成「（全局项）」。 */
@@ -328,6 +340,27 @@ html[data-theme="dark"] .scard.on{background:rgba(96,165,250,.16);}
   justify-content:center;background:var(--soft);color:var(--muted);font-size:12px;line-height:1;}
 /* 名字按最长宽固定住：不同长度名字也能对齐，且切换选中时不变宽。 */
 .scard .sc-nm{max-width:104px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* 2026-11-20（J）：群组一多，卡片条后面的就看不见了。
+   ① 滚轮上下 = 左右滚（向后滚往右、向前滚往左），滚动条本身仍然藏起来；
+   ② 「全局」右边一个折叠按钮，折叠后群组只留头像，全局那张保留文字。 */
+.sc-fold{flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+  width:22px;height:30px;padding:0;border-radius:9px;border:1px solid var(--line);
+  background:var(--card);color:var(--muted);font-family:inherit;line-height:1;cursor:pointer;
+  transition:border-color .15s,background .15s,color .15s;}
+.sc-fold:hover{border-color:var(--accent);color:var(--text);}
+.sc-fold.on{border-color:var(--accent);background:rgba(59,130,246,.10);color:var(--text);}
+html[data-theme="dark"] .sc-fold.on{background:rgba(96,165,250,.16);}
+.sc-fold svg{width:13px;height:13px;display:block;}
+.scards.fold .scard{height:34px;}
+/* 用户 m10685：折叠后只剩头像，30px 的圈太小认不出是谁——整排抬到 34px，头像 30px。 */
+.scards.fold .scard:not(.all){padding:0;gap:0;width:34px;justify-content:center;border-radius:50%;
+  border-color:transparent;background:transparent;box-shadow:none;}
+.scards.fold .scard:not(.all) .sc-av{width:30px;height:30px;font-size:13px;}
+.scards.fold .sc-fold{height:34px;}
+.scards.fold .scard:not(.all):hover{border-color:transparent;background:transparent;}
+.scards.fold .scard:not(.all):hover .sc-av{opacity:.82;}
+.scards.fold .scard:not(.all).on .sc-av{box-shadow:0 0 0 2px var(--accent);}
+.scards.fold .scard:not(.all) .sc-nm{display:none;}
 
 /* v3.14（用户 m40145）：基础页左右两半——左半只填昵称、外号（外号用「+」添加），
    右半放 4 个开关。说明文字从「名称下方」挪到「名称右侧」，一项一行。 */
@@ -338,7 +371,7 @@ html[data-theme="dark"] .scard.on{background:rgba(96,165,250,.16);}
 /* v3.15：三列时每列约 430px，行内控件收窄，说明用省略号兜住 */
 /* v3.42（用户 m03616 第 3 条）：第三列不再写死 96px —— 改成按内容宽，行高统一 38px、
    控件统一 32px 高。开关行和数字框行的右边缘仍然对齐成一条竖线，也不会有的行下面空一截。 */
-.setgrp[data-split="3"] .setrow.inline{grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px;padding:2px 12px;min-height:38px;align-items:center;}
+.setgrp[data-split="3"] .setrow.inline{grid-template-columns:auto minmax(0,1fr) auto;column-gap:3px;padding:2px 12px;min-height:38px;align-items:center;}
 .setgrp[data-split="3"] .setrow.inline .ctl > input[type=text],
 .setgrp[data-split="3"] .setrow.inline .ctl > select{width:108px;min-width:0;height:var(--ipt-h);padding:4px 10px;font-size:var(--ipt-fs);}
 /* v3.17（用户 m40932）：一列里可以放两组（基础页左列 = 身份 + 重试）。
@@ -366,7 +399,7 @@ html[data-theme="dark"] .scard.on{background:rgba(96,165,250,.16);}
 .setgrp[data-page="basic"][data-split="2"] .setrow{padding:4px 8px;border-radius:8px;
   border-bottom-color:rgba(16, 24, 40, .07);}
 .setgrp[data-page="basic"][data-split="2"] .setrow:hover{background:var(--soft);}
-.setgrp[data-page="basic"][data-split="2"] .setrow.inline{padding:2px 8px;column-gap:12px;}
+.setgrp[data-page="basic"][data-split="2"] .setrow.inline{padding:2px 8px;column-gap:3px;}
 .setgrp[data-page="basic"][data-split="2"] .setrow.inline .ctl > input[type=text]{height:32px;padding:4px 11px;}
 /* v3.45（用户 m05552 第 4 条）：基础页控件统一——右列固定 200px，
    文本框与下拉框占满这一列、数字框统一 96px，三者同为 32px 高、右边缘对齐；
@@ -433,7 +466,7 @@ html[data-theme="dark"] .setgrp[data-page="basic"][data-split="2"] .setrow:hover
 .setgrp[data-page="window"][data-split="2"] .setrow{padding:4px 8px;border-radius:8px;
   border-bottom-color:rgba(16, 24, 40, .07);}
 .setgrp[data-page="window"][data-split="2"] .setrow:hover{background:var(--soft);}
-.setgrp[data-page="window"][data-split="2"] .setrow.inline{padding:2px 8px;column-gap:12px;min-height:38px;align-items:center;}
+.setgrp[data-page="window"][data-split="2"] .setrow.inline{padding:2px 8px;column-gap:3px;min-height:38px;align-items:center;}
 .setgrp[data-page="window"][data-split="2"] .sub .rows [data-row]:last-child{border-bottom:none;}
 html[data-theme="dark"] .setgrp[data-page="window"][data-split="2"] .col{background:rgba(255,255,255,.05);
   border-color:rgba(255,255,255,.11);box-shadow:none;}
@@ -442,6 +475,9 @@ html[data-theme="dark"] .setgrp[data-page="window"][data-split="2"] .setrow:hove
 /* 用户 m06021：进阶模式搬到普通模式那一列，但独立成一张卡——列本身不再当卡片，
    改成每个小节一张卡；普通模式 / 到点休息时照常灰着，进阶模式是能用的，不灰。
    标题栏一律不灰（用户原话：普通模式那个卡片照常灰着，但标题栏不要灰）。 */
+/* 用户 m05858：进阶模式那张卡要往下延，和另外两列的大卡片底部齐平。
+   用户 m17018 图3：以前补了 15px 下内边距，卡片离列底还差一截，浅色主题下看不出「到底」；
+   现在不留内边距，卡片直接吃到列底。 */
 .setgrp[data-split="3"] .col[data-col="normal"]{background:none;border:none;box-shadow:none;padding:0;gap:0;}
 .setgrp[data-split="3"] .col[data-col="normal"] > .sub{background:var(--card);border:1px solid var(--line);
   border-radius:0;padding:12px 14px 14px;box-shadow:none;}
@@ -453,7 +489,7 @@ html[data-theme="dark"] .setgrp[data-page="window"][data-split="2"] .setrow:hove
 .setgrp[data-split="3"] .col[data-col="normal"] > .sub:nth-child(2){border-top:0;border-radius:0 0 14px 14px;
   padding-top:2px;}
 .setgrp[data-split="3"] .col[data-col="normal"] > .sub:nth-child(2) h3{padding-top:0;margin-top:0;}
-.setgrp[data-split="3"] .col[data-col="normal"] > .sub.sect{border-radius:14px;margin-top:14px;
+.setgrp[data-split="3"] .col[data-col="normal"] > .sub.sect{border-radius:14px;margin-top:14px;flex:1 0 auto;
   box-shadow:0 1px 2px rgba(16,24,40,.04);}
 /* 用户 m06578：这条只负责把「到点休息时」贴到「普通模式」下面；进阶模式是独立卡片，
    要留 14px 间隙，所以排除 .sect（否则它把上面 .sub.sect 的 margin-top 覆盖成 0）。 */
@@ -464,10 +500,11 @@ html[data-theme="dark"] .setgrp[data-page="window"][data-split="2"] .setrow:hove
 .setgrp[data-split="3"] .col[data-col="normal"].off > .sub:not(.sect) .rows{opacity:.42;pointer-events:none;}
 .setgrp[data-split="3"] .col[data-col="normal"].off > .sub.sect .rows{opacity:1;pointer-events:auto;}
 .setgrp[data-split="3"] .col[data-col="normal"].off h3{color:var(--text);}
-html[data-theme="dark"] .setgrp[data-split="3"] .col[data-col="normal"] > .sub{background:rgba(255,255,255,.05);
+/* 用户 m17018 图3：深色下不再单独给这张卡铺一层半透明白灰——那层灰看着像「到底的是灰底」，
+   现在跟浅色一样用 var(--card)，两种主题一个长相。上面两张「未使用」的卡仍保留灰底（:not(.sect)）。 */
+html[data-theme="dark"] .setgrp[data-split="3"] .col[data-col="normal"] > .sub{
   border-color:rgba(255,255,255,.11);box-shadow:none;}
-html[data-theme="dark"] .setgrp[data-split="3"] .col[data-col="normal"].off > .sub{background:rgba(255,255,255,.055);}
-html[data-theme="dark"] .setgrp[data-split="3"] .col[data-col="normal"].off > .sub.sect{background:rgba(255,255,255,.05);}
+html[data-theme="dark"] .setgrp[data-split="3"] .col[data-col="normal"].off > .sub:not(.sect){background:rgba(255,255,255,.055);}
 
 
 /* v3.17（用户 m40932）：「触发」页整体美化——三档从三栏文字改成三张卡片：
@@ -490,14 +527,14 @@ html[data-theme="dark"] .setgrp[data-split="3"] .col[data-col="normal"].off > .s
    名称与控件不让位。休息时段是「开关 + 两个下拉」的合并行，说明仍单独占一条
    （见下面 .restpair 那条），否则两个下拉和说明挤不进一行。
    v3.42（用户 m03616 第 3 条）：控件列改成按内容宽 + 行高 38px，跟同列其它行齐平。 */
-.setgrp[data-split="3"] .setrow.inline:not(.restpair){grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px;padding:2px 0;min-height:38px;align-items:center;}
+.setgrp[data-split="3"] .setrow.inline:not(.restpair){grid-template-columns:auto minmax(0,1fr) auto;column-gap:3px;padding:2px 0;min-height:38px;align-items:center;}
 .setgrp[data-split="3"] .setrow.inline:not(.restpair) .nm{grid-column:1;grid-row:1;white-space:nowrap;line-height:1.45;}
 .setgrp[data-split="3"] .setrow.inline:not(.restpair) .ds{grid-column:2;grid-row:1;font-size:12px;line-height:1.5;}
 .setgrp[data-split="3"] .setrow.inline:not(.restpair) .ctl{grid-column:3;grid-row:1;}
 .setgrp[data-split="3"] .setrow:last-child{border-bottom:none;}
-/* 输入框在卡片里换成软底：浅色下柔和，深色下才看得出是一个控件 */
+/* 输入框在卡片里用页面底色：深色下才看得出是一个控件 */
 .setgrp[data-split="3"] .setrow .ctl > .ipt > input[type=number],
-.setgrp[data-split="3"] .setrow .ctl > select{background:var(--soft);border-color:transparent;}
+.setgrp[data-split="3"] .setrow .ctl > select{background:var(--bg);border-color:transparent;}
 /* v3.41（用户本轮第 6 条）：原来那条 .subsw（计数 / 概率两个子开关）已并进参数行，
    这些样式随渲染分支一起删掉；并进去之后的开关样式见文件末尾 .subrow 那一段。 */
 /* 没生效的两档：浅灰底 + 内容半透明，文字仍看得清（原来整块 42% 透明像被擦掉） */
@@ -513,7 +550,7 @@ html[data-theme="dark"] .setgrp[data-split="3"] .col.off{background:rgba(255,255
 /* v3.36（用户 m00613）：兜底回复、休息时段两组收进「节奏」，那一列横跨两栏、
    组内自己排两列——十二项六行高，不再各占半屏。 */
 /* v3.37（用户本轮）：每项名称右侧标出默认值，改过之后也能一眼看出原来是多少 */
-.setrow .dfv{display:inline-block;margin-left:7px;padding:0 6px;border-radius:6px;background:var(--soft);
+.setrow .dfv{display:inline-block;margin-left:3px;padding:0 6px;border-radius:6px;background:var(--soft);
   color:var(--muted);font-size:11px;font-weight:400;font-style:normal;line-height:17px;vertical-align:1px;white-space:nowrap;}
 /* v3.42（用户 m03616 第 5 条）：百分比的键要带上 %，光看「20」不知道是 20 条还是 20%。
    v3.43（用户本轮第 3 条 / 图 8）：% 不再挂到框外，改成绝对定位在输入框里（见上面 .ipt 那段），
@@ -525,14 +562,14 @@ html[data-theme="dark"] .setgrp[data-split="3"] .col.off{background:rgba(255,255
 .setgrp[data-split="3"] .setrow.inline.restpair{grid-template-columns:auto minmax(0,1fr) auto;
   /* 左右内边距归零：同列的其它行是 padding:7px 0（见上面 :not(.restpair) 那条），
      这行原来吃的是通用规则的 12px，右边的「08:00」比上下两行的开关/数字框缩进 12px，对不齐。 */
-  column-gap:10px;padding:2px 0;align-items:center;}
+  column-gap:3px;padding:2px 0;align-items:center;}
 .setgrp[data-split="3"] .setrow.inline.restpair .nm{grid-column:1;grid-row:1;white-space:nowrap;line-height:1.45;}
 .setgrp[data-split="3"] .setrow.inline.restpair .ds{grid-column:2;grid-row:1;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis;font-size:12px;line-height:1.5;}
 .setgrp[data-split="3"] .setrow.inline.restpair .ctl.pair{grid-column:3;grid-row:1;
-  justify-self:end;width:auto;gap:10px;}
+  justify-self:end;width:auto;gap:3px;}
 .setrow.restpair .tspan{display:inline-flex;align-items:center;gap:5px;}
-.setrow.restpair .tspan select{width:auto;min-width:76px;background:var(--soft);border-color:transparent;}
+.setrow.restpair .tspan select{width:auto;min-width:76px;background:var(--bg);border-color:transparent;}
 .setrow.restpair .tspan b{color:var(--muted);font-weight:400;}
 /* 开关不再套灰底胶囊：这行跟同列其它开关长得一样（用户 m04471 第 4 条：统一风格，不要灰底） */
 .setrow.inline.restpair .ctl.pair .sw2{background:transparent;padding:0;}
@@ -545,7 +582,7 @@ html[data-theme="dark"] .setgrp[data-split="3"] .col.off{background:rgba(255,255
 /* v3.44（用户 m04471 第 5 条）：开关 + 数字框并成一行的通用行（抖动 / 连发合并 / 两处闲时兜底）。
    排列跟普通模式的参数行一致：名称 + 说明在左，数字框与开关在右，开关永远最右。 */
 .setgrp[data-split="3"] .setrow.inline.pairrow{grid-template-columns:auto minmax(0,1fr) auto;
-  column-gap:10px;padding:2px 0;align-items:center;}
+  column-gap:3px;padding:2px 0;align-items:center;}
 .setgrp[data-split="3"] .setrow.inline.pairrow .nm{grid-column:1;grid-row:1;white-space:nowrap;line-height:1.45;}
 .setgrp[data-split="3"] .setrow.inline.pairrow .ds{grid-column:2;grid-row:1;font-size:12px;line-height:1.5;}
 .setgrp[data-split="3"] .setrow.inline.pairrow .ctl{grid-column:3;grid-row:1;}
@@ -562,16 +599,27 @@ html[data-theme="dark"] .setgrp[data-split="3"] .col.off{background:rgba(255,255
 /* 用户 m03059：纯开关两两一排，别一行一个把右边空着。名字在左、开关在右，各占一半。 */
 .setrow.inline.swpair{grid-template-columns:1fr 1fr;column-gap:18px;}
 .setgrp[data-split="3"] .setrow.inline.swpair{grid-template-columns:1fr 1fr;column-gap:18px;}
-.setrow.inline.swpair .swcell{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;}
+/* 用户 m05433：名字→角标、角标→数字框、数字框→开关一律 3px，挤完还不够才藏角标。 */
+.setrow.inline.swpair .swcell{display:flex;align-items:center;justify-content:space-between;gap:3px;min-width:0;}
+.setrow.inline.swpair .swcell .dfv{margin-left:3px;}
 .setrow.inline.swpair .swcell .nm{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.setrow.inline.swpair .swcell .ctl{flex:0 0 auto;width:auto;}
+/* 用户 m04998：数字框连续自适应——吃掉角标和开关之间的余量，40px 下限、50px 上限（m05149 从 100 收到 50）。 */
+.setrow.inline.swpair .swcell .ctl{flex:1 1 auto;min-width:0;width:auto;justify-content:flex-end;gap:3px;}
+.setrow.inline.swpair .swcell .nspan{flex:1 1 0;min-width:0;max-width:50px;}
+/* 用户 m05433：角标被截时数字框吃掉余量，间隙恒为 3px；上限放到 64px，免得框被撑太宽。 */
+.setrow.inline.swpair .swcell.h1 .nspan,.setrow.inline.swpair .swcell.h2 .nspan,.setrow.inline.swpair .swcell.h3 .nspan{max-width:64px;}
+.setrow.inline.swpair .swcell .nspan .ipt{flex:1 1 0;width:auto;min-width:40px;max-width:none;}
+/* 用户 m05144：数字和单位贴死了，单位往里挪 1px、右侧内边距留出 4px 空隙。 */
+.setrow.inline.swpair .swcell .nspan .ipt > .unit{right:4px;font-size:10px;}
+.setrow.inline.swpair .swcell .nspan .ipt > input[type=number]{width:100%;min-width:0;max-width:none;
+  padding-left:3px;padding-right:28px;text-align:right;}
 @media (max-width:760px){.setgrp[data-split="3"] .setrow.inline.swpair{grid-template-columns:1fr;row-gap:6px;}}
 /* 用户 m06604：数字框改成按内容宽之后，一格只要 ~190px（名字 56 + 数字框 56 + 开关 58），
    宽屏完全放得下两格，所以不再按 1600px 一刀切；改成 auto-fit，
    节奏列窄到两格放不下（约 1340px 以下）才退回上下两行，免得名字被省略号截掉。 */
 .setgrp[data-split="3"] .setrow.inline.swpair{grid-template-columns:repeat(auto-fit,minmax(190px,1fr));}
-/* 三列窄格（<=1600px）里两个开关并排会挤掉名字：默认角标先让位，名字保住。 */
-@media (max-width:1600px){.setrow.inline.swpair .swcell .dfv{display:none;}.setrow.inline.swpair .swcell{gap:8px;}}
+/* 用户 m10685：三列窄格里两个开关并排会挤掉名字——不再按 1600px 一刀切藏角标，
+   改成跟静默过滤一样实测：还有 3px 空隙就留着，放不下先换行、再不行才藏（见 silentFitNotes）。 */
 /* 用户 m06021：静默过滤去掉可见的默认角标（改成名字上的悬浮），腾出的宽度两两并排。
    一格 = 名字(13px × 6 字 = 78) + 条数框(30) + 开关(58) + 两个 4px 间距 = 174；
    节奏列宽 361 时两格 356，放得下；再窄就自动退回一行一个（auto-fit）。 */
@@ -585,12 +633,29 @@ html[data-theme="dark"] .setgrp[data-split="3"] .col.off{background:rgba(255,255
 .setrow.inline.silentpair .swcell + .swcell::before{content:"";position:absolute;left:-9px;top:0;bottom:0;
   width:1px;background:var(--line);}
 /* 用户 m07111：角标放不下才藏。渲染完由 silentFitNotes() 实测一次——名字被挤成省略号
-   才给这格加 .narrow；不再按行宽写死断点（以前 1568 宽明明还有空位，短句那格也被藏了）。 */
-.setrow.inline.silentpair .swcell.narrow .dfv2{display:none;}
-/* 用户 m07182：放不下时先只藏「· 1 条」这一截（.tight），还放不下才整块藏（.narrow）。 */
-.setrow.inline.silentpair .swcell.tight .dfv2c{display:none;}
+   才给这格加 .h1／.h2／.h3；不再按行宽写死断点（以前 1568 宽明明还有空位，短句那格也被藏了）。 */
+/* 用户 m12591：退让分五档——先收窄数字框（只收窄拥挤的那格），再一截一截藏角标：
+   .h1 藏最后一个「· 3 条」，.h2 藏掉全部条数，.h3 才藏整块「默认 开启」。 */
+.setrow.inline.silentpair .swcell.h1 .dfv2c:last-of-type{display:none;}
+.setrow.inline.silentpair .swcell.h2 .dfv2c{display:none;}
+.setrow.inline.silentpair .swcell.h3 .dfv2{display:none;}
+/* 用户 m04119：放不下就直接藏角标，不再折到第二行——折行会把整行撑高，比藏掉更难看。 */
+/* 用户 m10685：「静默兜底 / 休息静默」两格的角标也按 3px 空隙实测。 */
+.setrow.inline.swpair .swcell.measuring{justify-content:flex-start;}
+.setrow.inline.swpair .swcell.measuring .nm{flex:0 0 auto;}
+/* 用户 m04998：量宽时数字框钉在下限、控件不参与拉伸，量出来的才是「框收到最窄还差多少」。 */
+.setrow.inline.swpair .swcell.measuring .ctl{flex:0 0 auto;}
+.setrow.inline.swpair .swcell.measuring .nspan .ipt{flex:0 0 auto;width:40px;}
+/* 用户 m12591：同样先收窄数字框，再藏「· 3 分钟」，最后才藏整块「默认 开启」。 */
+.setrow.inline.swpair .swcell.h1 .dfvc{display:none;}
+.setrow.inline.swpair .swcell.h2 .dfv{display:none;}
+.setrow.inline.swpair .swcell.h3 .dfv{display:none;}
 /* 量宽度时让名字不许收缩，控件被挤出格子右边界就说明放不下（比 scrollWidth 的整数取整准）。 */
 .setrow.inline.silentpair .swcell.measuring .nm{flex:0 0 auto;}
+/* 用户 m10685：量的时候控件不再被 margin-left:auto 顶到右边，剩下的空隙才是真实余量。 */
+/* 用户 m04998：量宽时数字框钉在下限、控件不参与拉伸，量出来的才是「框收到最窄还差多少」。 */
+.setrow.inline.silentpair .swcell.measuring .ctl{flex:0 0 auto;margin-left:0;}
+.setrow.inline.silentpair .swcell.measuring .nspan .ipt{flex:0 0 auto;width:28px;}
 /* 用户 m06705：每格改成两行——第一行「名字 + 数字框 + 开关」，第二行整格宽的默认值说明
    （「默认 开启 · 1 条」）。以前默认值只挂在名字的 title 上，不悬浮就看不见。 */
 .setrow.inline.silentpair .swcell{display:flex;align-items:center;gap:3px;min-width:0;}
@@ -601,22 +666,28 @@ html[data-theme="dark"] .setgrp[data-split="3"] .col.off{background:rgba(255,255
   color:var(--muted);font-size:11px;font-style:normal;line-height:17px;white-space:nowrap;}
 /* 用户 m06021：.setrow.inline .ctl.pair 那条通用规则给了 width:100%，会把整格占满、
    把名字挤成 0 宽；这里显式收回 auto。 */
-.setrow.inline.silentpair .swcell .ctl{order:2;flex:0 0 auto;width:auto;display:flex;align-items:center;gap:2px;margin-left:auto;}
-.setrow.inline.silentpair .swcell .nspan{flex:0 0 auto;}
+/* 用户 m04998：数字框连续自适应——吃掉角标和开关之间的全部余量，窗口窄 1px 框就窄 1px，
+   28px 下限、50px 上限（m05149 从 100 收到 50）；不再按分辨率在「收窄 / 宽框」两档之间硬切。 */
+.setrow.inline.silentpair .swcell .ctl{order:2;flex:1 1 auto;min-width:0;width:auto;display:flex;align-items:center;gap:2px;margin-left:auto;justify-content:flex-end;}
+.setrow.inline.silentpair .swcell .nspan{flex:1 1 0;min-width:0;max-width:50px;}
 /* 用户 m06705：条数框以前把「条」藏了，只剩一个光秃秃的 1；现在单位进框（跟 .ipt.has-unit 一套做法），
    框放宽到 40px。窄屏（<=1519px）两格只有 177~215px，「短句字数」那格放不下两个带单位的框，
    退回 34px 无单位，名字才不会被省略号截掉。 */
-.setrow.inline.silentpair .swcell .nspan .ipt{width:auto;max-width:28px;}
-.setrow.inline.silentpair .swcell .nspan .ipt > .unit{display:inline;right:2px;font-size:10px;}
-.setrow.inline.silentpair .swcell .nspan .ipt > input[type=number]{width:auto;min-width:24px;max-width:28px;
-  padding-left:2px;padding-right:13px;text-align:right;}
+/* 用户 m10685：数字框改成按内容自适应，上限 50px（m05149 从 100 收到 50）——
+   原来写死 28px，一位数加单位挤成一团，看着像坏掉了。 */
+.setrow.inline.silentpair .swcell .nspan .ipt{flex:1 1 0;width:auto;min-width:28px;max-width:none;}
+/* 用户 m05144：数字和单位贴死了，单位往里挪 1px、右侧内边距留出 4px 空隙。 */
+.setrow.inline.silentpair .swcell .nspan .ipt > .unit{display:inline;right:3px;font-size:9px;}
+.setrow.inline.silentpair .swcell .nspan .ipt > input[type=number]{width:100%;min-width:0;max-width:none;
+  padding-left:3px;padding-right:16px;text-align:right;}
+/* 用户 m12591：放不下时一截一截藏角标，数字框本身始终连续自适应。
+   静默兜底那两格下限 40px，静默过滤那六格下限 28px。 */
+/* 用户 m04807：收窄只动数字框本身，不再改 gap / 角标内边距——那两处会让「默认」比别的行左移 1px。 */
+/* 用户 m04998：不再有「收窄」这一档——数字框本身就是连续自适应的，下限写在上面那条 min-width 里。 */
 
 /* 用户 m06372：短句那一格两个数字框（5 字 / 1 条），第一个框要显示「字」单位，放宽到 48px；
    第二个框仍是 34px 的纯数字（单位在名字悬浮里写着）。 */
-.setrow.inline.silentpair .swcell.swshort .nspan:first-child .ipt{max-width:30px;}
-.setrow.inline.silentpair .swcell.swshort .nspan:first-child .ipt > .unit{display:inline;}
-.setrow.inline.silentpair .swcell.swshort .nspan:first-child .ipt > input[type=number]{min-width:26px;max-width:30px;
-  padding-right:13px;text-align:right;}
+/* 用户 m10685：短句那格的两个框跟别格同一套自适应宽度，不再单独写死 30px。 */
 /* 用户 m06372：窄屏（节奏列不到 408px，两格各不足 200px）时「短句字数」那格放不下 48px 的字数框，
    把「字」单位藏掉、框收窄到 34px，两格仍能并排；宽屏保持 48px 带单位。 */
 /* 用户 m06856：一行一项之后「短句字数」那格也放得下两个带单位的框，不再窄屏收窄。 */
@@ -666,14 +737,14 @@ html[data-theme="dark"] .setgrp[data-split="3"] .col.off{background:rgba(255,255
   border:1px solid var(--line);border-radius:14px;padding:13px 15px 15px;}
 .setgrp[data-split="band"] .col > .sub{display:flex;flex-direction:column;flex:1;min-width:0;}
 /* v3.41（用户本轮第 7 条）：动态调整那一列也改回「说明在名称右侧」，说明自己省略 */
-.setgrp[data-split="band"] .setrow.inline{grid-template-columns:auto minmax(0,1fr) 96px;column-gap:9px;
+.setgrp[data-split="band"] .setrow.inline{grid-template-columns:auto minmax(0,1fr) 96px;column-gap:3px;
   padding:8px 0;}
 .setgrp[data-split="band"] .setrow.inline .nm{grid-column:1;grid-row:1;white-space:nowrap;line-height:1.45;}
 .setgrp[data-split="band"] .setrow.inline .ds{grid-column:2;grid-row:1;font-size:12px;line-height:1.5;}
 .setgrp[data-split="band"] .setrow.inline .ctl{grid-column:3;grid-row:1;}
 .setgrp[data-split="band"] .setrow:last-child{border-bottom:none;}
 .setgrp[data-split="band"] .setrow .ctl > .ipt > input[type=number],
-.setgrp[data-split="band"] .setrow .ctl > select{background:var(--soft);border-color:transparent;}
+.setgrp[data-split="band"] .setrow .ctl > select{background:var(--bg);border-color:transparent;}
 .setgrp[data-split="band"] .col.off{background:var(--soft);border-color:transparent;}
 .setgrp[data-split="band"] .col.off > .sub{opacity:.8;}
 .setgrp[data-split="band"] .col.off h3{color:var(--muted);}
@@ -717,6 +788,65 @@ html[data-theme="dark"] .setgrp:not([data-split]) .setrow{border-bottom-color:rg
 html[data-theme="dark"] .h3use.todo{background:rgba(251,191,36,.15);color:#fbbf24;border-color:rgba(251,191,36,.4);}
   /* v3.91（用户 m05749）：提示词页——每块一张卡，标签在左、控件在右，长文本独占一行。 */
   .dcard{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:0 0 10px;background:var(--bg,#fff);}
+  /* 用户 m3096 追加：折叠开关挪到左栏工具条「恢复默认」右边，卡片顶上不再单独占一行。 */
+  .pp-mc{display:inline-flex;align-items:center;gap:5px;}
+  .pp-mc .pp-mc-chev{flex:0 0 auto;width:0;height:0;
+    border-left:4px solid transparent;border-right:4px solid transparent;
+    border-top:5px solid currentColor;transition:transform .15s;}
+  .pp-mc[aria-expanded="false"] .pp-mc-chev{transform:rotate(-90deg);}
+  /* 用户 m01754：折叠态做成一张浅色卡片，跟下面的模块列表区分开。 */
+  /* 用户 m01754：模型卡做成一张浅色卡片，跟下面的模块列表区分开；m02888 展开态也铺同一层底色。 */
+  .pp-left-mc>.dcard.mcard{background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.28);
+    border-radius:10px;padding:7px 10px;margin:0;}
+  html[data-theme="dark"] .pp-left-mc>.dcard.mcard{background:rgba(96,165,250,.13);
+    border-color:rgba(96,165,250,.34);}
+  /* 用户 m3284 第 1 条：模型卡不跟着模块列表一起滚。
+     用户 m10255：改成真正的固定头——卡片挪出 .pp-left-body（见 lib-2.js 的 .pp-left-mc），
+     内容不再从它下面穿过，滚动条轨道也从卡片下方才开始，所以 sticky、同色补底、下沿阴影全都不需要了。 */
+  .pp-left-mc{flex:none;padding:10px 12px 0;}
+  .pp-left-mc>.dcard.mcard{
+    background:linear-gradient(rgba(59,130,246,.08),rgba(59,130,246,.08)),var(--bg);}
+  html[data-theme="dark"] .pp-left-mc>.dcard.mcard{
+    background:linear-gradient(rgba(96,165,250,.13),rgba(96,165,250,.13)),var(--bg);}
+
+  /* 用户 m01754：折叠开关高亮成强调色，按钮上直接写「折叠 / 展开」。 */
+  .pp-left .pp-left-head .pm-toolbar .dmini.pp-mc{color:var(--accent);border-color:rgba(59,130,246,.38);
+    background:rgba(59,130,246,.10);}
+  .pp-left .pp-left-head .pm-toolbar .dmini.pp-mc:hover{color:var(--accent);
+    border-color:rgba(59,130,246,.55);background:rgba(59,130,246,.18);}
+  .pp-mc .pp-mc-st{font-size:10px;opacity:.72;}
+  .dcard.mc-collapsed .jev-cols>.jev-col:nth-child(2){display:none;}
+  .dcard.mc-collapsed .jev-cols>.jev-col:first-child{border:0;padding:0;background:none;}
+  .dcard.mc-collapsed .jev-cols .drow:not(.mc-keep){display:none;}
+  /* 用户 m3096：折叠后主模型和备用模型并排一行，一左一右，不再各占一行。 */
+  .dcard.mc-collapsed .jev-cols{grid-template-columns:1fr;}
+  .dcard.mc-collapsed .jev-cols .drows{display:grid;grid-template-columns:1fr 1fr;column-gap:8px;row-gap:0;}
+  .dcard.mc-collapsed .jev-cols .drow.mc-keep{display:flex;align-items:center;gap:8px;padding:0;min-width:0;}
+  .dcard.mc-collapsed .jev-cols .drow.mc-keep>.dlb{flex:0 0 56px;white-space:nowrap;}
+  .dcard.mc-collapsed .jev-cols .drow.mc-keep>.dipt{flex:1 1 auto;min-width:0;}
+  /* 用户 m7217：模型行独占整卡宽度——左边模型、右边它自己的思考等级，两行对齐。
+     左栏只有 265px 宽，塞四列每列只剩 60 多像素，所以模型行挪到 .jev-cols 外面。 */
+  /* 用户 m03412：模型行的标签列以前是 max-content（实测 50px），跟下面两列的标签列对不上，
+     模型下拉比别的控件左偏 34px；这里固定 76px，跟下面两列的标签列同宽（用户 m13066：模型和思考等级的下拉要跟其他框同步拉伸）。 */
+  .drows.mtop{display:grid;grid-template-columns:76px minmax(0,1fr) 76px minmax(0,1fr);
+    column-gap:8px;row-gap:8px;align-items:center;margin:0 0 8px;}
+  .drows.mtop>.drow.mrow{display:contents;}
+  .drows.mtop>.drow.mrow>.dlb{white-space:nowrap;}
+  .drows.mtop>.drow.mrow>.dlb.eff{color:var(--muted);font-weight:500;}
+  .drows.mtop>.drow.mrow>.dipt{min-width:0;}
+  #dec-card.mc-collapsed .jev-cols,#rep-card.mc-collapsed .jev-cols{display:none;}
+  .dcard.mc-collapsed .drows.mtop{margin:0;}
+  /* 用户 m02969：JEV 卡折叠后 .jev-cols 还留着 4px 上边距，比决策/回复卡高 4px，这里抹平。 */
+  .dcard.mc-collapsed .jev-cols{margin:0;}
+  /* 用户 m02825：思考等级收在折叠里——折叠时只露主模型和备用模型，跟以前一样一行两个。 */
+  /* 用户 m03412：折叠态的下拉框以前跟着标签宽度走（48–50px），比展开态左偏 27px；
+     标签列固定 76px、间距 8px，折叠和展开的下拉落在同一条竖线上。 */
+  .dcard.mc-collapsed .drows.mtop{grid-template-columns:1fr 1fr;column-gap:8px;row-gap:0;}
+  .dcard.mc-collapsed .drows.mtop>.drow.mrow{display:flex;align-items:center;gap:8px;padding:0;min-width:0;}
+  .dcard.mc-collapsed .drows.mtop>.drow.mrow>.dlb{flex:0 0 76px;white-space:nowrap;}
+  .dcard.mc-collapsed .drows.mtop>.drow.mrow>.dipt{flex:1 1 auto;min-width:0;}
+  .dcard.mc-collapsed .drows.mtop>.drow.mrow>.dlb.eff,
+  .dcard.mc-collapsed .drows.mtop>.drow.mrow>.dipt.eff{display:none;}
   .drow{display:flex;align-items:center;gap:10px;padding:7px 0;}
   .drow + .dtip{margin:-2px 0 8px;}
   .drow.col{display:block;}
@@ -741,7 +871,8 @@ html[data-theme="dark"] .h3use.todo{background:rgba(251,191,36,.15);color:#fbbf2
   .pm-rtinfo{white-space:nowrap;}
   /* 用户 m08755：JEV 卡别只做一列——左边选模型、右边填接口，两列并排。
      用户 m09981：不再用「生效中 / 未使用」和点卡片选路，徽标与选中态一并撤掉。 */
-  .jev-cols{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:4px 0 0;}
+  /* 用户 m03412：JEV 卡没有模型行，上边距 4px 让它比另外两张低 4px，这里去掉。 */
+  .jev-cols{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0;}
   @media (max-width:1100px){.jev-cols{grid-template-columns:1fr;}}
   .jev-col{border:1px solid var(--line);border-radius:10px;padding:6px 8px 4px;min-width:0;position:relative;}
   .jev-col-h{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:2px;}
@@ -763,6 +894,50 @@ html[data-theme="dark"] .h3use.todo{background:rgba(251,191,36,.15);color:#fbbf2
   .jev-col.dcol .drow.pair2 > .p2{gap:8px;}
   .jev-col.dcol .drow.pair2 > .p2:first-child .dlb{flex:0 0 auto;min-width:var(--dlbw,5em);}
   .jev-col.dcol .drow > .dlb{flex:0 0 auto;min-width:0;}
+  /* 用户 m02969：展开后不再套左右两张小卡——去掉边框/内边距，一张卡里左右两列，标签列等宽 84px，左右对称。 */
+  /* 用户 m03412：两列间距从 16px 收到 8px，右列起点 273 才跟模型行第三列 273 重合。 */
+  .jev-cols.flat-cols{column-gap:8px;}
+  .jev-col.flat{border:0;padding:0;background:none;}
+  .jev-col.flat.dcol .drows{grid-template-columns:76px minmax(0,1fr);}
+  .jev-col.flat.dcol .drow > .dlb{white-space:nowrap;}
+  /* 用户 m03627：失败切换那行有开关药丸（31px），普通行只有 27px，左右两列各算各的行高，
+     第二三行就差 4px；让两列共用同一套行（subgrid），窄的时候失败切换折成两行，右边第一行也跟着变高。 */
+  .jev-cols.flat-cols:has(.jev-col.dcol){grid-template-rows:repeat(3,auto);}
+  .jev-col.flat.dcol{display:grid;grid-template-columns:76px minmax(0,1fr);grid-template-rows:subgrid;grid-row:1/4;column-gap:8px;row-gap:8px;align-items:center;}
+  .jev-col.flat.dcol > .drows{display:contents;}
+  /* 用户 m04084：宽卡片下右列第一行原来在 31px 整行里居中（左列 pair2 有 4px 下内边距），标签比「失败切换」低 2px；
+     这一行也留 4px 下内边距，内容盒跟左边一样是 27px，标签和输入框都在这条线上居中。 */
+  .jev-col.flat.dcol:last-child > .drows > .drow:first-child{
+    display:grid;grid-template-columns:subgrid;grid-column:1/-1;column-gap:8px;align-items:center;padding-bottom:4px;}
+  /* 用户 m03907：窄卡片下「失败切换 + 切换模型」折成两行，右列第一行原来在整行里居中、浮在两行中间；
+     卡片窄到会折行时让它贴顶，跟「失败切换」那一行对齐（容器查询量的是内容盒，496 = 折行点 244×2+8）。 */
+  /* 用户 m13066：JEV 卡也要当容器，否则它里面的 @container (min-width:821px) 找不到容器、30 分钟框收不窄。 */
+  #dec-card,#rep-card,#jev-card{container-type:inline-size;}
+  @container (max-width:496px){
+    /* 用户 m04084：只贴顶还不够——右列第一行标签比「失败切换」高 2px、输入框比药丸高 3px。
+       把这一行做成 24px 高（药丸高度）的子网格：标签居中、输入框贴顶，标签和框的上沿都跟左边齐。 */
+    .jev-col.flat.dcol:last-child > .drows > .drow:first-child{
+      display:grid;grid-template-columns:subgrid;grid-template-rows:24px;grid-column:1/-1;
+      column-gap:8px;align-items:center;align-self:start;height:24px;padding:0;}
+    .jev-col.flat.dcol:last-child > .drows > .drow:first-child > .ipt{align-self:start;}
+  }
+  /* 用户 m04321：窄卡片下「失败切换 + 切换模型」要挤在一行——标签列收到 76px（改名后最长标签 75px），
+     这一行两个标签都按文字宽度、第二格吃掉剩下的宽度；输入框压到 72px 也不裁字，再窄就折行。 */
+  @container (max-width:820px){
+    .jev-col.flat.dcol .drow.pair2{gap:8px;}
+    .jev-col.flat.dcol .drow.pair2 > .p2:first-child .dlb{min-width:0;}
+    .jev-col.flat.dcol .drow.pair2 > .p2:last-child{flex:1 1 120px;}
+    .jev-col.flat.dcol .drow.pair2 > .p2:last-child .dlb{flex:0 0 auto;}
+  }
+  /* 用户 m13066：宽卡片下「30 分钟」那个框跟着列宽拉满（决策卡 1920 下 203.8px、JEV 卡 227.8px），
+     数字和单位隔着一大截；这里给它固定宽度，够 4 位数 + 单位就行，窄卡片仍由上面那条容器查询吃掉剩余宽度。
+     JEV 卡的左列是 .jev-col.flat（没有 .dcol），所以选择器只写到 .flat，三张卡一起收窄。 */
+  @container (min-width:821px){
+    .jev-col.flat .drow.pair2 > .p2:last-child{flex:0 0 auto;}
+    .jev-col.flat .drow.pair2 > .p2:last-child .ipt.has-unit{flex:0 0 auto;width:110px;}
+  }
+  /* 用户 m03412：JEV 每行有 4px 上内边距，第一行再叠 4px 就比决策卡低 8px，首行去掉上内边距。 */
+  .jev-col .drows > .drow:first-child{padding-top:0;}
   /* 用户 m01978 第 1/2 条：两项并一行——每格「短标签 + 控件」，控件自己撑开。 */
   /* 用户 m15201：窗口窄到一格放不下「标签 + 框 + 单位」时（实测 1256 宽下每格只有 118px，「分钟」被挤成竖排），
      两格自动落成一格；宽屏仍是并排两格。
@@ -929,9 +1104,18 @@ html.booting .msw .tr,html.booting .msw .tr:after{transition:none;}
 /* v3.83（用户 m03849 图3）：计数模式下整组用不上的（节奏模式）连内容和标题一起淡下去，
    不只是标题变灰——用户要的是「灰的，代表不生效」。 */
 .setgrp .sub.dim > h3 .gt,.setgrp.dim > h3 .gt{color:var(--muted);}
-.setrow.inline{grid-template-columns:auto minmax(0,1fr) auto;column-gap:12px;padding:9px 14px;}
+.setrow.inline{grid-template-columns:auto minmax(0,1fr) auto;column-gap:3px;padding:9px 14px;}
 .setrow.inline .nm{white-space:nowrap;}
 .setrow.inline .ds{font-size:12.5px;color:var(--muted);line-height:1.5;min-width:0;white-space:normal;overflow:visible;text-overflow:clip;}
+/* 用户 m05570：卡片里的说明一律单行，放不下就省略号，不再把行撑成两行高。 */
+.setgrp[data-split="3"] .setrow.inline .ds:not(.dsw),
+.setgrp[data-split="band"] .setrow.inline .ds:not(.dsw){white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* 用户 m15473：拼图帧数的说明最长（格数 + 像素 + token），右栏窄的时候会折成两行；
+   让它独占第二行、按整行宽度排，任何窗口宽度都保持一行。 */
+.setrow.inline.ds2{grid-template-columns:auto minmax(0,1fr) auto;row-gap:1px;}
+.setrow.inline.ds2 .nm{grid-column:1;grid-row:1;}
+.setrow.inline.ds2 .ctl{grid-column:3;grid-row:1;}
+.setrow.inline.ds2 .ds{grid-column:1/-1;grid-row:2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .setrow.inline .ctl{width:auto;justify-self:end;}
 .setrow.inline .ctl > input[type=text]{width:200px;}
 /* 外号这类列表：控件列限宽、靠右，空的时候只有一个「+」，行高和别的行一样高 */
@@ -955,7 +1139,7 @@ html.booting .msw .tr,html.booting .msw .tr:after{transition:none;}
 .chip.off .aq{color:var(--warn,var(--muted));}
 .chips .adform[hidden]{display:none;}
 .chips .adform input{width:104px;height:28px;min-width:0;padding:0 9px;border-radius:9px;
-  border:1px solid var(--line);background:var(--soft);font-size:13px;}
+  border:1px solid var(--line);background:var(--bg);font-size:13px;}
 .chips .adform input:focus{outline:none;border-color:var(--accent);background:var(--card);}
 .chips .adform .ado{height:28px;padding:0 12px;border-radius:9px;font-size:12.5px;
   flex:0 0 auto;white-space:nowrap;}
@@ -1029,7 +1213,7 @@ html[data-theme="dark"] .setgrp h3 .gnt.tip{color:#93c5fd;background:rgba(96,165
 html[data-theme="dark"] .bp-line .larea{fill:rgba(255,255,255,.10);}
 html[data-theme="dark"] .bp-line .lline{stroke:rgba(255,255,255,.32);}
 /* v3.30：艾特一行两个开关（触发 / 必回），必回是进阶模式的占位，灰着不可点 */
-.setrow.inline .ctl.pair{display:flex;align-items:center;justify-content:flex-end;gap:10px;width:100%;}
+.setrow.inline .ctl.pair{display:flex;align-items:center;justify-content:flex-end;gap:3px;width:100%;}
 /* v3.33（用户 m51046 第 5 条）：配对开关的名字放在轨道左边，原来文字在右，
    两个开关一宽一窄时文字位置看着歪。
    v3.45（用户 m05552 第 4 条）：不再套灰底胶囊——同一页里普通开关是「名字 + 轨道」，
@@ -1041,8 +1225,12 @@ html[data-theme="dark"] .bp-line .lline{stroke:rgba(255,255,255,.32);}
 .msw.soon{opacity:.45;cursor:not-allowed;}
 .sw2.soon{opacity:.5;cursor:not-allowed;}
 .sw2.soon input,.sw2.soon .tr{cursor:not-allowed;}
-/* 用户 m13535：长图自动缩小是锁死的开关——只用来告诉用户有这个功能，点不动。 */
-.sw2.lock{opacity:.75;cursor:default;}
+/* 用户 m13535：图片保护是锁死的开关——只用来告诉用户有这个功能，点不动。 */
+/* 用户 m26550：只降透明度变灰，不去色——去色后开关看着像坏了。 */
+.sw2.lock{opacity:.55;cursor:default;}
+/* 用户 m25921：锁定项整行也灰掉，一眼看出这项改不了。 */
+.setrow.locked .nm{color:var(--muted);}
+.setrow.locked .ds{opacity:.8;}
 .sw2.lock input,.sw2.lock .tr{cursor:default;}
 .bandfoot button{height:28px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);font-size:12.5px;cursor:pointer;}
 .bandfoot button:hover{border-color:var(--accent);color:var(--accent);}
@@ -1241,14 +1429,14 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .bd-pop .bp-one{display:flex;align-items:baseline;justify-content:center;gap:5px;margin-bottom:8px;}
   .bd-pop .bp-one input{width:88px;height:40px;text-align:center;font-size:22px;font-weight:600;
     font-variant-numeric:tabular-nums;border:1px solid var(--line);border-radius:10px;
-    background:var(--soft);color:var(--text);padding:0 4px;outline:none;}
+    background:var(--bg);color:var(--text);padding:0 4px;outline:none;}
   .bd-pop .bp-one input:focus{border-color:var(--accent);}
   .bd-pop .bp-one b{font-weight:600;color:var(--muted);}
   .bd-pop.one .bp-note{text-align:center;margin-bottom:0;}
   .bd-pop .bp-t{font-size:13px;font-weight:600;margin-bottom:9px;}
   .bd-pop .bp-num{display:flex;align-items:baseline;gap:5px;margin-bottom:6px;color:var(--muted);}
   .bd-pop .bp-num input{width:64px;height:30px;text-align:right;font-size:15px;font-weight:600;
-    border:1px solid var(--line);border-radius:8px;background:var(--soft);color:var(--text);padding:0 7px;}
+    border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);padding:0 7px;}
   .bd-pop .bp-kv{display:grid;grid-template-columns:1fr auto;gap:3px 10px;margin-bottom:9px;}
   .bd-pop .bp-kv i{font-style:normal;color:var(--muted);}
   .bd-pop .bp-kv b{font-weight:600;font-variant-numeric:tabular-nums;}
@@ -1256,7 +1444,7 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .bd-pop .bp-gl{color:var(--muted);}
   .bd-pop .bp-gl b{display:block;font-weight:400;font-size:11.5px;opacity:.75;}
   .bd-pop .bp-goal input{height:28px;width:100%;text-align:right;border:1px solid var(--line);border-radius:8px;
-    background:var(--soft);color:var(--text);padding:0 7px;}
+    background:var(--bg);color:var(--text);padding:0 7px;}
   /* v3.81（用户 m02645 图3）：开了「使用星期数据」时的目标块——一行一天（星期 / 次数 / 概率），
      面板跟着变宽；今天那一行的星期名用强调色，免得改错天。 */
   .bd-pop.wk{width:474px;}
@@ -1620,7 +1808,7 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .blk-form{display:flex;align-items:center;gap:6px;padding:10px 0 0;}
   .blk-form[hidden]{display:none;}
   .blk-form input{height:30px;min-width:0;padding:0 10px;border-radius:9px;border:1px solid var(--line);
-    background:var(--soft);font-size:13px;color:var(--text);}
+    background:var(--bg);font-size:13px;color:var(--text);}
   .blk-form input:focus{outline:none;border-color:var(--accent);background:var(--card);}
   .blk-form .ub-name{width:150px;}
   .blk-form .ub-qq{width:130px;}
@@ -1670,7 +1858,7 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .cachebox .ctable td.cact{text-align:right;white-space:nowrap;}
   .cachebox .ctable td.cact .cclr + .cclr{margin-left:6px;}
   .cachebox .ctable input[type=number]{width:66px;height:26px;padding:0 7px;border-radius:7px;
-    border:1px solid var(--line);background:var(--card);color:var(--text);font-size:12.5px;
+    border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:12.5px;
     text-align:right;font-variant-numeric:tabular-nums;}
   .cachebox .ctable input[type=number]:focus{outline:0;border-color:var(--accent);}
   .cachebox .ctable input[type=number]::-webkit-inner-spin-button,
@@ -1714,7 +1902,7 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .cachebox .cscope{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 8px;}
   .cachebox .cscope .cslab{color:var(--muted);font-size:12px;white-space:nowrap;}
   .cachebox .cscope select.csel{height:28px;padding:0 8px;border-radius:8px;border:1px solid var(--line);
-    background:var(--soft);color:var(--text);font-size:12.5px;max-width:260px;}
+    background:var(--bg);color:var(--text);font-size:12.5px;max-width:260px;}
   .cachebox .cscope select.csel:focus{outline:0;border-color:var(--accent);}
   .cachebox .cscope .cshint{color:var(--muted);font-size:11.5px;line-height:1.5;}
   /* 这一格是这个会话单独设过的：挂个小胶囊 + ×（点 × 删掉这条覆盖，恢复跟随全局） */
@@ -1772,7 +1960,7 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
 /* v4.08：min-height 必须带上 .setrow.inline 才压得过 .setgrp[data-split="3"] .setrow.inline
    那条 38px（特异性 0,4,0）——否则决策模式那行只有开关、会矮成 38px。
    用户 m18041：同页其它行已经压到 38px，这里跟着降到 38，整页行高一致。 */
-.sub.sect .setrow.inline.rowline{grid-template-columns:auto minmax(0,1fr) auto;column-gap:10px;min-height:38px;}
+.sub.sect .setrow.inline.rowline{grid-template-columns:auto minmax(0,1fr) auto;column-gap:3px;min-height:38px;}
 .sub.sect .rowline #pseudo-nm{display:none;}
 /* v4.08（用户 m16927 第 1 条）：这两行原来是「13px/600 小标题 + 状态词」，跟上面的普通行
    （14.5px 常规字 + 默认角标）不是一个格式，用户要「统一」。名字现在走普通行那套：.gt 那层
@@ -1800,7 +1988,7 @@ html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
 /* v3.92（用户 m06951 第 5~7 条）：提示词页——左设置、右预览，右栏吸顶。
    v4.10（本轮美化）：整页收紧。基线这条 .pp-tabs 保留（测试拿它当锚点），紧跟着覆盖成分段控件：
    两个 54px 蓝块 → 一条 34px 的胶囊条，标题与副标题同行。 */
-.pp-tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0 0 12px;}
+.pp-tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0 0 2px;}
 .pp-tabs{grid-template-columns:auto auto;justify-content:flex-start;gap:2px;width:max-content;max-width:100%;
   padding:3px;background:var(--soft);border:1px solid var(--line);border-radius:10px;}
 .pp-tab{display:flex;flex-direction:row;align-items:center;justify-content:center;gap:7px;height:28px;
@@ -1810,6 +1998,9 @@ html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
 .pp-tab:hover{color:var(--text);}
 .pp-tab.on{background:var(--accent);color:#fff;box-shadow:0 1px 3px rgba(0,0,0,.08);}
 .pp-tab.on .pp-sub{color:inherit;opacity:.85;}
+/* 用户 m00328：提示词页顶部再收紧——子页签到工具条的空隙 20px→10px（margin 12→2，.pp 的 gap 8 保留），
+   卡片上内边距 12px→8px，只命中提示词页那张 .setgrp。 */
+.setgrp:has(> .rows > .pp){padding-top:8px;}
 .pp-pane{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;align-items:start;}
 .pp-pane[hidden]{display:none;}
 .pp-left,.pp-right{min-width:0;display:flex;flex-direction:column;gap:8px;}
@@ -1953,7 +2144,7 @@ html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
    右栏限高后可自己滚，页签两等分不横铺。 */
 html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{color-scheme:dark;}
 .pp-tabs{grid-template-columns:auto auto auto auto;width:max-content;max-width:100%;}
-.pp-tab{padding:0 10px;}
+.pp-tab{padding:0 9px;}
 .pp-left .dlb{flex:0 0 108px;white-space:nowrap;}
 /* 2026-11-09（J 图1）：只认 .drow 的直接子元素。不确定区间的两个下拉现在嵌在 .jev-unit 里，
      被这条按 96px 定死会把 % 挤出框外（框 80px、下拉 96px）。 */
@@ -2072,15 +2263,15 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
 .pp-prev .pp-prev-box.sys.folded{flex:0 0 auto;min-height:28px;}
 .pp-prev .psegbox{flex:0 0 auto;}
 .pp-prev .pm-dyn{flex:0 0 auto;}
-/* v4.85（用户 m10425 第 2 条）：左边「编辑方式」那排改成和右边「提示词预览」一样的卡头——
+/* v4.85（用户 m10425 第 2 条）：左边工具条那排改成和右边「提示词预览」一样的卡头——
    一样的内边距、一样的标题字号、一样的下边框，两栏不再一个像表单、一个像卡头。
    m07137：再把高度、底色、按钮样式也对齐：控件 22px、底色跟卡片一致、按钮无边框。 */
 .pp-left .pp-left-head .pm-toolbar{position:sticky;top:0;z-index:3;background:var(--bg);
-  margin:0 -12px;padding:8px 12px;border-bottom:1px solid var(--line);}
-.pp-left .pp-left-head .pm-toolbar .pm-tb-h{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;
-  margin:0;display:flex;align-items:center;}
-.pp-left .pp-left-head .pm-toolbar .dipt{height:22px;font-size:11.5px;}
-.pp-left .pp-left-head .pm-toolbar .dmini{height:22px;padding:0 7px;font-size:11px;
+  margin:0 -12px;padding:4px 12px;border-bottom:1px solid var(--line);}
+  .pp-left .pp-left-head .pm-toolbar .dipt{height:26px;font-size:12px;}
+  /* 用户 m1337：这排按钮和字都再大一点（22px/11px → 26px/12px），上下留白同时收窄（8px → 4px）。 */
+  .pp-left .pp-left-head .pm-toolbar .pm-state{font-size:12px;}
+  .pp-left .pp-left-head .pm-toolbar .dmini{height:26px;padding:0 9px;font-size:12px;
   border-color:transparent;background:transparent;}
 .pp-left .pp-left-head .pm-toolbar .dmini:hover{border-color:var(--line);background:var(--card);color:var(--accent);}
 /* 2026-11-18（J，用户 m12620）：提示词各页的「恢复默认」是这一页唯一能把正文换回默认稿的入口，
@@ -2159,6 +2350,10 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
   .pm-tool.on{background:var(--soft);}
   .pm-tool input{flex:none;margin:1px 0 0;}
   .pm-tool-name{flex:none;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;}
+  /* 用户 m2450：身份 / 人格 / 工具 / 记忆 / 时间这几段是插件自己填的，卡片里只显示占位符。 */
+  .pm-token{display:inline-block;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;line-height:1.5;color:var(--accent);background:rgba(59,130,246,.10);border-radius:5px;padding:0 5px;white-space:nowrap;vertical-align:baseline;}
+  html[data-theme="dark"] .pm-token{background:rgba(96,165,250,.16);}
+
   /* 用户 m02105：工具说明以前一行省略号截断，1920 下也有三条看不全——改成整段折行。 */
   .pm-tool-desc{flex:1 1 auto;min-width:0;color:var(--muted);font-size:11px;line-height:1.45;white-space:normal;overflow:visible;text-overflow:clip;}
   .pm-module-head .pm-lock{flex:none;margin-left:1px;}
@@ -2235,6 +2430,11 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
   .pm-body-row{display:flex;gap:8px;align-items:stretch;}
   .pm-body-row>textarea{flex:1 1 auto;min-width:0;margin:0;}
   .pm-body-row>.pm-side{flex:0 0 128px;font-size:11px;color:var(--muted);line-height:1.45;padding-top:3px;}
+  /* 用户 m2618 第 2 条：输出格式段只读，正文换成 pre 才能把两个占位符高亮出来。 */
+  .pm-pre{flex:1 1 auto;min-width:0;margin:0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;
+    background:var(--bg);color:var(--text);font:inherit;font-size:12px;line-height:1.6;white-space:pre-wrap;
+    word-break:break-word;max-height:320px;overflow:auto;}
+  .pm-pre .pm-token{margin:0 1px;}
   @media (max-width:640px){
     .pm-body-row{flex-wrap:wrap;}
     .pm-body-row>.pm-side{flex:1 1 100%;padding-top:0;}
@@ -2309,6 +2509,10 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
   .pm-module-head .pm-head-main,
   .pm-module-head .pm-pick,
   .pm-module-head .pm-end{min-width:0;}
+  /* 用户 m01754：自写模块的标题输入框按固有宽度撑到 285px，把「N 字 + ↑↓」挤到第二行。
+     标题列改成只吃剩余空间（basis 0），超长在框内省略，右侧那一列永远留在同一行。 */
+  .pm-module-head .pm-head-main{flex:1 1 0;min-width:60px;}
+  .pm-module-head .pm-head-main .pm-label{flex:1 1 auto;min-width:0;width:100%;text-overflow:ellipsis;}
   @container (max-width:430px){
     .pm-module-head .pm-head-main{flex:1 1 110px;order:1;}
     .pm-module-head .pm-pick{flex:1 1 100%;width:auto;order:2;}
@@ -2371,6 +2575,8 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
     .tabs button{flex:0 0 auto;white-space:nowrap;padding:0 16px;}
     .scards{gap:8px;white-space:nowrap;-webkit-overflow-scrolling:touch;}
     .scard{height:40px;white-space:nowrap;}
+    .sc-fold{height:40px;}
+    .scards.fold .scard:not(.all){width:40px;}
     .scard .sc-nm{max-width:150px;}
     .pp-tabs{display:flex;flex-wrap:nowrap;width:100%;max-width:100%;justify-content:flex-start;
       gap:8px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-overflow-scrolling:touch;}
@@ -2545,11 +2751,6 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
   </div>
 </div>
 
-<script src="js/lib-1.js"></script>
-<script src="js/lib-2.js"></script>
-<script src="js/lib-3.js"></script>
-<script src="js/lib-4.js"></script>
-<script src="js/app.js"></script>
 
 </body>
 </html>

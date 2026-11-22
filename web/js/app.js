@@ -211,6 +211,10 @@
     });
     paintBlockBtns();
     fitForwardCards();
+    // 用户 m12637：折没折准要量完高度才知道，而 settleFolds 以前只在 80ms 后的
+    // mutation 定时器里跑 —— 那一帧已经画出去了，本来不该折的卡片会先闪一下
+    // 「展开（N 字）」再消失。这里在同一个任务里量一次，浏览器还没绘制，闪不出来。
+    if(typeof settleFolds === "function") settleFolds();
   }
 
   // 转发卡折叠：默认只露前 3 条，第 3 条只留半截，剩下的用底部渐变盖住
@@ -475,7 +479,7 @@
     // toggleRequestRow 反倒把本来就摊开的行又收了回去——切个档位，展开的详情就没了。
     // 决策页单独走一遍：整表重建（内容按新档位重画）再把它展开回去。
     if(ctxPane === "decisions"){
-      if(ctxRounds && ctxRounds.length) renderCtxDecisions(ctxDecisions, true);
+      renderCtxDecisions(ctxDecisions, true);
       // preserveDetails 会把老的那一行原样搬回来（还摊开着、还带着 data-loaded），
       // 所以得先统一收起来再清空——否则下面那遍 toggle 会把「已经打开的行」又关掉。
       Array.prototype.forEach.call(document.querySelectorAll("#ctx-rounds tr.round-detail"), function(tr){
@@ -493,7 +497,7 @@
     }
     // 请求表整张重建，再按名字把刚才展开的行重新展开——比逐行 removeAttribute
     // 稳，逐行改的时候异步回调回来的顺序会把档位又搅混
-    if(ctxRounds && ctxRounds.length && (ctxPane !== "rounds" || ctxRoundsFull)) renderCtxRounds(ctxRounds);
+    if(ctxPane === "rounds" && ctxRoundsFull) renderCtxRounds(ctxRounds);
     opened.forEach(function(nm){ toggleRequestRow(nm); });
     if(ctxPane === "window") fadeWinIn();
   }
@@ -687,7 +691,7 @@
     if(isScrolling()){ deferTimer = setTimeout(drainWinDefer, 240); return; }
     var q = deferWin;
     deferWin = null;
-    if(q){ try{ renderCtxWindow(q.d, q.force); }catch(e){} }
+    if(q && q.d === ctxWin){ try{ renderCtxWindow(q.d, q.force); }catch(e){} }
   }
   window.addEventListener("scroll", function(){
     scrollingUntil = Date.now() + 220;
@@ -697,23 +701,44 @@
   // v4.01（用户 m11166 图1）：快照态里的决策注记是普通 assistant 消息——后端存的是
   // name=对当前聊天消息的决策建议、正文带「[决策记录] HH:MM」前缀，没有 decnote 标记。
   // 不认出来就会画成 bot 自己的话（名字是 bot 名、正文留着前缀、也没有注记那条样式）。
+  var winPaintInputs = null;
+  function syncCtxPaneVisibility(){
+    var windowBox = document.getElementById("ctx-window");
+    var roundsBox = document.getElementById("ctx-rounds");
+    var record = ctxPane !== "window";
+    windowBox.classList.toggle("linked", record);
+    windowBox.classList.toggle("win-off", record);
+    roundsBox.classList.toggle("linked", record);
+    roundsBox.style.display = record ? "" : "none";
+  }
+
+  // 用户 m11651：页签点击靠 #ctx-window 上的 onclick 委托，但 renderCtxWindow 在
+  // ctxPane !== "window" 时提前返回，委托就永远挂不上——页面以「回复记录 / 决策记录」
+  // 打开时三个页签全点不动。这里抽一个幂等挂载：初始化时无条件挂一次，
+  // renderCtxWindow 里也走它；onclick 是覆盖赋值，先判已有绑定，避免重复挂。
+  function bindWinClick(){
+    var box = document.getElementById("ctx-window");
+    if(!box) return;
+    if(box.onclick !== winClick) box.onclick = winClick;
+  }
+
   function renderCtxWindow(d, force){
     var box = document.getElementById("ctx-window");
-    var roundsBox = document.getElementById("ctx-rounds");
-    if(roundsBox) roundsBox.style.display = (ctxPane === "rounds" || ctxPane === "decisions") ? "" : "none";
-    // 请求页把上面那张卡和下面的表格贴成一块：两块各自圆角会留一道缝，
-    // 看起来像两个不相干的盒子（用户 m30252 图1）
-    // v3.94（用户 m08398 图10）：决策记录页也是「标题行 + 表格」一整块，跟 setCtxPane 一样
-    // 用 ctxPane !== "window" 判断；以前只认 rounds，切到决策页时表格自己一个圆角，
-    // 看着像两块分离的面板。
-    if(box) box.classList.toggle("linked", ctxPane !== "window");
-    // 用户 m14026 第 4 条：窗口主体的显隐跟着页签走，放在入口处——下面几条早退（没数据 /
-    // 数据没变）都不会再把它漏掉，记录页也不会被一条「选一个会话」的占位顶下去。
-    if(box) box.classList.toggle("win-off", ctxPane !== "window");
-    if(roundsBox) roundsBox.classList.toggle("linked", ctxPane !== "window");
-    if(!d || !d.ok){ swapWinBody("<div class='empty'>选一个会话</div>"); lastWinSig = ""; return; }
-    // bot 自己的头像要用设置里填的 QQ 号（框架不提供），请求页/窗口页共用这一个全局值
-    window.__BOT_QQ = String(d.bot_qq || "");
+    syncCtxPaneVisibility();
+    // 记录与窗口的 bot 头像共用这个值；隐藏窗口无需投影消息、算指纹或读布局。
+    if(d && d.ok) window.__BOT_QQ = String(d.bot_qq || "");
+    // 用户 m13254：名单跟着窗口一起回来，首屏就折叠，不会先露一下内容。
+    if(d && d.ok && d.ublk) ublkApply(d.ublk, d.sid || "");
+    if(ctxPane !== "window") return;
+    if(!d || !d.ok){
+      swapWinBody("<div class='empty'>选一个会话</div>");
+      lastWinSig = "";
+      winPaintInputs = null;
+      return;
+    }
+    var inputs = [d, VIEW, ctxSnap, ctxTrendReq, ctxTrendDec, ctxTrendRounds, ctxTrims,
+                  ctxDecTrend, ctxDecFolded, ctxSnapKeep, ctxSnapTotal, ctxTrimKeep, ctxDecisions[0]];
+    if(!force && winPaintInputs && inputs.every(function(x, i){ return x === winPaintInputs[i]; })) return;
     var msgs = (d.messages || []).map(normDecNote);
     var pend = d.pending || [];
     var sm = d.summary || {};
@@ -769,16 +794,7 @@
                : (echo ? "" : (fromLast ? " · 取自最近一轮请求" : ""));
     var cntTip = (!ctxSnap && segCount && realCount && realCount !== segCount)
       ? "（" + segCount + " 段）" : "";
-    // v3.93（用户 m07570 图6）：非窗口页（回复记录 / 决策记录）一律把窗口主体清掉，
-    // 只留上面那行标题（页签 + 三档还要在这儿点）。以前只判 rounds，切到决策记录
-    // 页时整块走势图 + 判定横幅 + 消息列表还铺在上面，把表格挤到了最底下。
-    var atRounds = (ctxPane !== "window");
-    // 用户 m14026 第 4 条：切到记录页时不再清空窗口主体，只加一个 class 藏起来；
-    // 切回来时数据没变就直接显示，省掉整块重建（300+ 根柱子 + 几十条消息）。
-    // （入口处已经按页签切过 win-off，这里不再重复。）
-    // 数据没变就别重画——每 5 秒自动刷新一次，一重画滚动位置和「展开全文」全回原点
-    // 用户 m14026 第 4 条：指纹里不再放 ctxPane——窗口主体跟当前页签无关（页签只决定显示/隐藏），
-    // 放进指纹会让每次切页都判成「数据变了」，切回窗口就得整块重画。
+    // 指纹与当前页签无关；隐藏时不计算，切回仍可复用最后一次实际绘制的 DOM。
     var sig = JSON.stringify([VIEW, d.sid, d.size, d.keep, d.threshold, d.enabled,
                               (ctxDecisions[0] || {}).name || "",
                               (d.last_decision || {}).ts || 0,
@@ -787,14 +803,19 @@
     // v3.99（用户 m10577）：指纹要带上决策轮。窗口消息没变时这个函数会早返回，
     // 而决策记录是另一次请求（比窗口晚一点点到），不写进指纹就永远是「还没到」的那一版。
     var trendSig = JSON.stringify([ctxTrendReq, ctxTrendDec, ctxTrendRounds, ctxTrims,
-                                   ctxDecTrend.map(function(r){ return r.name; })]);
+                                   ctxDecTrend, ctxDecFolded, ctxSnapKeep, ctxSnapTotal, ctxTrimKeep]);
     // 每次窗口 GET 都重新给 unknown 有限回查机会，指纹不变也不能永久丢图。
     QUOTE_PIC_TRIED = Object.create(null);
-    if(!force && sig === lastWinSig && trendSig === lastTrendSig){ fillQuoteMiss(); return; }
+    if(!force && sig === lastWinSig && trendSig === lastTrendSig){
+      winPaintInputs = inputs;
+      fillQuoteMiss();
+      return;
+    }
     // 用户 m11091 第 8 条：正在滚动就先别重画。5 秒轮询一落地就整块 innerHTML
     // 重建（70 条消息几百个节点），恰好压在滚轮/拖动滚动条那一帧上就会卡一下；
     // 数据不丢，等滚动停下再画。
     if(!force && isScrolling()){ deferWin = { d: d, force: false }; return; }
+    winPaintInputs = inputs;
     var bodyUnchanged = !force && sig === lastWinSig;
     // 用户 m02993 图10：引用只有 id 时要回查窗口，索引跟着这批消息一起换。
     if(!bodyUnchanged) QUOTE_IDX = buildQuoteIdx(msgs, pend);
@@ -806,7 +827,6 @@
     }
     QUOTE_SID = _newSid;
     // 用户 m14026 第 4 条：记下这一版之前画进 DOM 的是哪一版，记录页那边据此判断要不要作废。
-    var prevWinSig = lastWinSig, prevTrendSig = lastTrendSig;
     lastWinSig = sig;
     lastTrendSig = trendSig;
     var oldScroll = box.querySelector(".scroll");
@@ -847,7 +867,7 @@
     // 用户 m00942 第 4 条：这排文字只留「本轮快照 N 条 [用户…· bot…]」和编号，
     // 后面那串「· 历史 68 · 本轮输入 3 · 实际回复 0 · 空回复」全删——数字对不上账时
     // 反而更糊涂。编号点一下复制，方便贴到别处对账。
-    var winInfo = atRounds ? "" : ctxSnap ?
+    var winInfo = ctxSnap ?
       "<span class='hint'>本轮快照 " + histCount + " 条 " + snapTag +
         (ctxSnap.snap_id
           ? " <span class='snap-id' data-snap-id='" + esc(ctxSnap.snap_id) + "' title='点击复制快照编号'>" + esc(ctxSnap.snap_id) + "</span>"
@@ -862,15 +882,6 @@
             : ("保留 " + d.keep + " · 阈值 " + d.threshold + " · 当前 " + winTotal + " 条 " + cntTag)) +
       "</span>";
     var html = "";
-    if(atRounds){
-      // 主体已经由 .win-off 藏起来，这里不能再清空——清了切回来就得整块重画。
-      // 指纹只在「这版数据确实没画进 DOM」时作废——数据没变就留着，切回来只显示、不重画。
-      if(prevWinSig !== sig) lastWinSig = "";
-      if(prevTrendSig !== trendSig) lastTrendSig = "";
-      box.onclick = winClick;
-      restoreWinScroll(keepWinY);
-      return;
-    }
     // v3.99（用户 m10577）：决策轮也画进走势图。它和请求轮共用一条时间轴，
     // 只是柱子颜色不同、点开看到的是那一轮的决策快照。
     var trendRows = ctxTrendRounds;
@@ -924,7 +935,7 @@
       swapWinBody(html + "<div class='waitbox'><div class='wbi'>◌</div>" +
         "<div class='wbt'>等待新消息进入</div>" +
         "<div class='wbs'>" + esc(why) + "<br>群里有人说话就会出现在这里，下一轮触发后转成正式上下文。</div></div>");
-      box.onclick = winClick;
+      bindWinClick();
       restoreWinScroll(keepWinY);
       return;
     }
@@ -989,7 +1000,7 @@
       // 连续同一个发言人并成一块（用户 m31327 / m31526）：组头只留一份头像 + 名字，
       // 组内每条只剩「左时间 / 正文 / 右字数」。分组键是 role + 发言人，不是纯 role——
       // 一条 user 消息里常拼着好几个人，按 role 并会把不同人合成一组、名字只剩一个。
-      var grpKey = null, grpRole = null, grpUid = "", grpBuf = "", grpHead = "", grpNote = "", grpTools = 0;
+      var grpKey = null, grpRole = null, grpUid = "", grpBuf = "", grpHead = "", grpNote = "", grpTools = 0, grpSkip = false;
       // v3.94（用户 m08398 图2/图3）：还没有对应回复的决策记录（判定不回那种）要画在
       // 待发区之后——它判的就是那几条待发，画在前面像在事前预言。
       var flushGrp = function(){
@@ -1002,10 +1013,50 @@
         // 用户 m06193：拉黑的人整组默认折叠（只留组头），点「展开」才看内容
         var blkCls = (UBLK_ON && grpRole === "user" && grpUid && UBLK[grpUid])
           ? (" blk" + (UBLK_OPEN[grpUid] ? " open" : "")) : "";
+        // 用户 m32048 第 3 条：整组都是被拉黑挡下来的消息时，折叠后只剩组头，
+        // 「未进入上下文」得挂在组头上，不然点开才知道这组没给模型看。
+        if(grpSkip && ghead){
+          ghead = ghead.replace(/<\/span><\/div>$/,
+            "<span class='chb tag skiptag'>未进入上下文</span></span></div>");
+        }
         html += "<div class='mgrp " + esc(grpRole || "user") + blkCls + "'>" + ghead + grpBuf + "</div>";
-        grpBuf = ""; grpHead = ""; grpTools = 0; grpUid = "";
+        grpBuf = ""; grpHead = ""; grpTools = 0; grpUid = ""; grpSkip = false;
       };
-      msgs.forEach(function(m, i){
+      // 用户 m17018 图2：被「文件/视频不进上下文」挡下来的消息不再单独挂在末尾，
+      // 按时间插回上下文原位——虚线框 + 斜纹遮罩 + 「未进入上下文」标签，
+      // 一眼能看出「这个位置本来有一条，但模型没看到」。
+      // 用户 m32048 第 2 条：虚线卡按后端算好的锚点插回原位（at = 插在第几条之前）。
+      // 以前按时间戳比，决策注记一进窗口时间就更晚，虚线就被挤到那次请求的最前面。
+      var rows = msgs;
+      var skips = (ctxSnap ? (ctxSnap.skipped || []) : (d.skipped || [])).slice();
+      if(echo) skips = [];
+      // 实时窗口里被拉黑的消息本体还在（已经画成虚线卡了），别再补一张；
+      // 快照里它们整条不在，才需要这张卡（用户 m32048 第 4 条）。
+      if(!ctxSnap){
+        skips = skips.filter(function(s){ return String((s && s.reason) || "") !== "blacklist"; });
+      }
+      var skipAt = {}, skipLoose = [];
+      skips.forEach(function(s){
+        var at = Number(s && s.at);
+        if(!isFinite(at) || at < 0){ skipLoose.push(s); return; }
+        (skipAt[at] = skipAt[at] || []).push(s);
+      });
+      if(skipLoose.length){
+        skipAt[msgs.length] = (skipAt[msgs.length] || []).concat(skipLoose);
+      }
+      var skipNo = 0;
+      var emitSkips = function(list){
+        if(!list || !list.length) return;
+        flushGrp();
+        grpKey = null; grpRole = null; grpUid = "";
+        list.forEach(function(s){
+          skipNo++;
+          grpBuf += skipCards(Object.assign({}, s, { __skip: true }), skipNo, VIEW, true);
+        });
+        flushGrp();
+      };
+      rows.forEach(function(m, i){
+        emitSkips(skipAt[i]);
         if(m.role === "user"){
           var q0 = splitMetaAll(tidyBody(m.text || ""))[0];
           if(q0 && q0.meta && q0.meta.ts) lastTs = shortTs(q0.meta.ts);
@@ -1041,10 +1092,20 @@
           pCard = String(pCard).replace(/<div class='mc (user|assistant|summary)/g,
                                           "<div class='mc pend $1");
           grpBuf += pCard;
+        } else if(m.skip){
+          // 用户 m32048 第 3 条：被拉黑挡下来的消息也画虚线 + 「未进入上下文」，
+          // 跟文件那条一个样子——它确实收到了，只是没给模型看。
+          grpSkip = true;
+          var sCard = msgCards(mv, i + 1, VIEW, lastTs, true,
+                               "<span class='chb tag skiptag'>未进入上下文</span>");
+          sCard = String(sCard).replace(/<div class='mc (user|assistant|summary)/g,
+                                        "<div class='mc skip $1");
+          grpBuf += sCard;
         } else {
           grpBuf += msgCards(mv, i + 1, VIEW, lastTs, true);
         }
       });
+      emitSkips(skipAt[msgs.length]);
       flushGrp();
       // v3.76（用户本轮图5）：待发区自成一组。以前第一条待发会跟上一条历史并组
       //（同一个人连着发），组头和头像都不画，屏幕上只剩「15:13 @冇似」这样一行，
@@ -1054,6 +1115,7 @@
       // commit 那一刻决定；前端不再按旧落点把它挪进待发序列（那套锚点已经废了）。
       // 待发也接着拼：不然底部又冒出一堆独立气泡框，跟上面的色块对不上
       pend.forEach(function(m, j){
+        emitSkips(skipAt[msgs.length + j]);
         var prole = (m.mark === "bot") ? "assistant" : "user";
         // 待发项的 sender 是 QQ 号、name 才是昵称，组头要昵称（头像再用号）
         var pwho = String(m.name || m.sender || "");
@@ -1066,7 +1128,11 @@
         }
         grpBuf += pendCards(m, msgs.length + j + 1, VIEW, true);
       });
+      // 没有待发时这一桶跟上面 emitSkips(skipAt[msgs.length]) 是同一个，别画两遍。
+      if(pend.length) emitSkips(skipAt[msgs.length + pend.length]);
       flushGrp();
+      // 用户 m17018 图2：跳过项已经按时间插回上下文原位（见上面 rows 的拼装），
+      // 不再在末尾单独挂一组。
       // v3.75（用户本轮第 3 条）：这一轮请求失败时，把原因写在快照结尾。
       // 请求快照里早就有这个字段（failed + error），窗口快照以前完全看不到。
       // 只画在页面里，不进 messages，所以永远不会被拼进下一轮上下文。
@@ -1080,7 +1146,7 @@
       html += "</div>";
     }
     swapWinBody(html);
-    box.onclick = winClick;
+    bindWinClick();
     if(keepTop){
       var ns = box.querySelector(".scroll");
       if(ns) ns.scrollTop = keepTop;
@@ -1117,9 +1183,12 @@
       var buid = blkU.getAttribute("data-blk-uid") || "";
       var bname = blkU.getAttribute("data-blk-name") || "";
       if(!buid) return;
-      var byes = await mdConfirm("把「" + (bname || buid) + "」拉黑？\n\n" +
-        "拉黑后他之后发的消息不再进入上下文（模型看不到），窗口里这一组默认折叠，点「展开」还能看。\n" +
-        "名单是全局的，所有群一起生效；已经在窗口里的历史消息不动。");
+      var byes = await mdConfirm("把「" + (bname || buid) + "」拉黑？", {
+        note: [
+          "拉黑后他之后发的消息不再进入上下文（模型看不到），窗口里这一组默认折叠，点「展开」还能看。",
+          "名单是全局的，所有群一起生效；已经在窗口里的历史消息不动。"
+        ]
+      });
       if(!byes) return;
       ublkSet(buid, bname, "add").then(function(d){
         if(!d || !d.ok){ mdAlert("拉黑失败：" + ((d && d.detail) || "未知错误")); return; }
@@ -1259,6 +1328,9 @@
                  tools: (m.tool_calls || []).length, tool_call_id: m.tool_call_id || "",
                  // v3.89（用户 m05321 第 1 条）：裁切快照里带「待发」标记的项要一眼认出
                  pending: !!dm.pending,
+                 // 用户 m32048 第 4 条：被拉黑的消息在快照里也是本体画虚线，
+                 // 后端把标记写在投影上，这里要带过去，否则快照里看不出它没进上下文。
+                 skip: !!dm.skip, skip_reason: dm.skip_reason || "",
                  tc: tcOf(m) };
       });
       // 群聊冷启动那一轮根本没发历史（request.messages 是空的），点柱子会看到
@@ -1281,6 +1353,9 @@
         failed: !!r.failed,
         // v3.89（用户 m05321 第 1 条）：裁切快照里有多少条是待发（标题上写出来）
         pending_n: Number(r.trim_pending_count || 0) || 0,
+        // 用户 m32048 第 1 条：这一轮没进上下文的消息（虚线卡）也存进了快照，
+        // 点柱子看那一轮时按 at 插回原位——只是不进上下文，记录还在。
+        skipped: hasSnapshot ? (snapshot.skipped || []) : (r.skipped || []),
         result: roundResult(r), legacy: !hasSnapshot,
         // 用户 m00942 第 4 条：标题上那个可点的快照编号（后端 _request_detail_head 补的）。
         snap_id: r.snap_id || "" };
@@ -1289,7 +1364,11 @@
       // 同时记下绝对位置，退出快照时按它原样回去。
       if(ctxSnapReturnY == null) ctxSnapReturnY = window.scrollY || 0;
       grabWinAnchor("snap");
-      if(ctxPane !== "window"){ ctxPane = "window"; try{ localStorage.setItem("mdp_ctx_pane", "window"); }catch(e){} }
+      if(ctxPane !== "window"){
+        saveCtxPane(ctxPane);
+        ctxPane = "window";
+        try{ localStorage.setItem("mdp_ctx_pane", "window"); }catch(e){}
+      }
       // 不滚到面板顶部：点柱子只是换右栏内容，页面滚动位置要留在原处（用户 m40932）。
       // renderCtxWindow 内部已经用 keepWinY + restoreWinScroll 把整页滚动位置放回去了。
       renderCtxWindow(ctxWin, true);
@@ -1307,78 +1386,95 @@
     });
   }
 
+  var ctxPaneCache = Object.create(null);
+  var ctxPaneStamp = null;
+  var ctxRoundsDirty = false;
+  function noteCtxPane(pane, items){
+    ctxPaneStamp = {pane: pane, sid: ctxSid, view: VIEW, items: items, keep: ctxKeep};
+  }
+  function resetCtxPaneCache(){
+    ctxPaneCache = Object.create(null);
+    ctxPaneStamp = null;
+    deferWin = null;
+    ctxRoundsDirty = false;
+    paneOpen = {window: [], rounds: [], decisions: []};
+    ctxRoundDetails = Object.create(null);
+    ctxDecisionDetails = Object.create(null);
+    document.getElementById("ctx-rounds").replaceChildren();
+  }
+  function saveCtxPane(pane){
+    if(pane === "window") return;
+    var box = document.getElementById("ctx-rounds");
+    paneOpen[pane] = Array.prototype.map.call(box.querySelectorAll("tr.round-row.open"), function(tr){
+      return tr.getAttribute("data-round");
+    }).filter(Boolean);
+    if(ctxPaneStamp && ctxPaneStamp.pane === pane){
+      var table = box.querySelector(".tbl");
+      var body = document.createDocumentFragment();
+      var tableX = table ? table.scrollLeft : 0;
+      while(box.firstChild) body.appendChild(box.firstChild);
+      ctxPaneCache[pane] = {stamp: ctxPaneStamp, body: body, tableX: tableX};
+    } else {
+      box.replaceChildren();
+    }
+    ctxPaneStamp = null;
+  }
+  function restoreCtxPane(pane, items){
+    var saved = ctxPaneCache[pane];
+    if(!saved) return false;
+    delete ctxPaneCache[pane];
+    var stamp = saved.stamp;
+    if(stamp.sid !== ctxSid || stamp.view !== VIEW) return false;
+    var box = document.getElementById("ctx-rounds");
+    box.replaceChildren(saved.body);
+    ctxPaneStamp = stamp;
+    // 数据变了才重建表头与行，仍可搬回同会话、同档位的已展开详情。
+    if(stamp.items !== items || (pane === "rounds" && stamp.keep !== ctxKeep)){
+      if(pane === "rounds") renderCtxRounds(items, true);
+      else renderCtxDecisions(items, true);
+      reopenRows(paneOpen[pane]);
+    }
+    var table = saved.tableX && box.querySelector(".tbl");
+    if(table) table.scrollLeft = saved.tableX;
+    return true;
+  }
   function setCtxPane(v){
     if(ctxPane === v){
-      // v3.91：已经在决策记录页时再点一下就是「刷新一下」（后台可能刚判定过一轮）
       if(v === "decisions") loadCtxDecisions(ctxSid);
       return;
     }
-    var leavingOpen = [];
-    Array.prototype.forEach.call(document.querySelectorAll("#ctx-rounds tr.round-row.open"), function(tr){
-      var nmX = tr.getAttribute("data-round");
-      if(nmX) leavingOpen.push(nmX);
-    });
-    if(ctxPane) paneOpen[ctxPane] = leavingOpen;
+    var keepY = window.scrollY || window.pageYOffset || 0;
+    saveCtxPane(ctxPane);
     ctxPane = v;
-    // 页签选中态在这里就地刷新：renderCtxWindow 数据没变时会早返回，不再顺手刷这两个按钮。
-    Array.prototype.forEach.call(document.querySelectorAll("#ctx-window [data-pane]"), function(b){
+    document.querySelectorAll("#ctx-window [data-pane]").forEach(function(b){
       b.classList.toggle("on", b.getAttribute("data-pane") === v);
     });
     try{ localStorage.setItem("mdp_ctx_pane", v); }catch(e){}
-    // v3.91（用户 m05749）：三个页签共用下面那一块，圆角拼缝得自己同步。
-    var wbL = document.getElementById("ctx-window"), rbL = document.getElementById("ctx-rounds");
-    if(wbL) wbL.classList.toggle("linked", v !== "window");
-    if(rbL) rbL.classList.toggle("linked", v !== "window");
-    // 切页只是换右栏内容，视口位置别动（用户 m42220）：以前这里把 winAnchor 设成 0，
-    // 切回窗口时按「面板顶部对齐视口」算，页面在顶部时会被硬生生往下弹 246px。
     winAnchor = null;
-    // 必须在这里先记一次位置：渲染过程中窗口面板会被清空，文档高度瞬间塌到一屏以内，
-    // 浏览器立刻把 scrollY 夹成 0——等 renderCtxWindow 里再读就已经是 0 了。
-    var keepY = window.scrollY || window.pageYOffset || 0;
-    // v4.02（用户 m11629 图1）：preserveDetails 会把上一档画好的详情行原样搬回来
-    //（在决策页画的、或者切档前那个档位的），于是从决策切回回复记录时，展开的详情还是旧档的长相，
-    // 跟顶上选着的档位对不上。这里跟 setView 一个做法：整表重画把 detail 清掉，再按记录重新展开，
-    // 展开时 toggleRequestRow 会用当前档位、拿内存里的记录同步重画（不闪，也不多打一次请求）。
+    syncCtxPaneVisibility();
     if(v === "rounds"){
-      var hydratedR = false;
-      if(!ctxRoundsFull && ctxSid){
-        // 用户 m14026 第 4 条：内存里没有全量列表时先拿上次的缓存铺上，
-        // 不再先闪一屏「正在读取回复记录…」再等接口回来。
-        var rc0 = null;
-        try{ rc0 = cacheGet("rounds"); }catch(e){}
-        if(rc0 && rc0.sid === ctxSid && rc0.items && rc0.items.length){
-          ctxRounds = rc0.items;
-          ctxRoundsFull = true;
-          if(rc0.keep) ctxKeep = Number(rc0.keep) || ctxKeep;
-          hydratedR = true;
-        }
-      }
+      var hydrated = hydrateCtxRounds();
       if(ctxRoundsFull){
-        renderCtxRounds(ctxRounds);
-        Array.prototype.forEach.call(document.querySelectorAll("#ctx-rounds tr.round-row"), function(tr){
-          tr.classList.remove("open");
-        });
-        reopenRows(paneOpen.rounds);
+        if(!restoreCtxPane(v, ctxRounds)){
+          renderCtxRounds(ctxRounds);
+          reopenRows(paneOpen.rounds);
+        }
       } else {
-        var boxR = document.getElementById("ctx-rounds");
-        if(boxR) boxR.innerHTML = "<div class='empty'>正在读取回复记录…</div>";
+        document.getElementById("ctx-rounds").innerHTML = "<div class='empty'>正在读取回复记录…</div>";
       }
-      // 缓存直出后仍要跟后台核对一次，数据变了再整表重画。
-      if(ctxSid && (!ctxRoundsFull || hydratedR)) refreshCtxRounds(ctxSid, true);
-    }
-    else if(v === "decisions"){
-      renderCtxDecisions(ctxDecisions);
-      Array.prototype.forEach.call(document.querySelectorAll("#ctx-rounds tr.round-row"), function(tr){
-        tr.classList.remove("open");
-      });
-      reopenRows(paneOpen.decisions);
+      if(ctxSid && (!ctxRoundsFull || hydrated || ctxRoundsDirty)) loadRoundLane(ctxSid, "table");
+    } else if(v === "decisions"){
+      hydrateCtxDecisions();
+      if(!restoreCtxPane(v, ctxDecisions)){
+        renderCtxDecisions(ctxDecisions);
+        reopenRows(paneOpen.decisions);
+      }
       loadCtxDecisions(ctxSid);
+    } else {
+      hydrateCtxTrends();
+      renderCtxWindow(ctxWin);
     }
-    else document.getElementById("ctx-rounds").style.display = "none";
-    // 用户 m14026 第 4 条：force 去掉——数据没变时切回来只把主体显示出来，不重画。
-    if(ctxWin) renderCtxWindow(ctxWin);
-    // 用切页前的位置兜底再放一次（restoreWinScroll 内部会按新文档高度夹一次）。
-    restoreWinScroll(keepY);
+    if(keepY) restoreWinScroll(keepY);
   }
 
   function loadCtxDecisions(sid, force){
@@ -1396,17 +1492,20 @@
     if(ctxPane === "decisions" && ctxDecisionsSid !== sid) renderCtxDecisions([], true);
     var p = get(API + "/decision-rounds?sid=" + encodeURIComponent(sid) + "&limit=0&_" + Date.now()).then(function(d){
       if(sid !== ctxSid || requestId !== ctxDecisionsRequest) return;
-      ctxDecisions = (d && d.items) || [];
+      var next = (d && d.items) || [];
+      var changed = ctxDecisionsSid !== sid || JSON.stringify(next) !== JSON.stringify(ctxDecisions);
+      if(changed) ctxDecisions = next;
       ctxDecisionsSid = sid;
       ctxDecisionsAt = Date.now();
-      cachePut("decisions", {sid: sid, items: ctxDecisions});
+      if(changed) cachePut("decisions", {sid: sid, items: ctxDecisions});
       ctxSnapKeep = Number(d && (d.snap_show || d.snap_keep) || 0) || ctxSnapKeep;
       ctxSnapTotal = Number(d && d.snap_total || 0) || ctxSnapTotal;
       // 趋势只由 refreshCtxWindow 的轻量结果更新，切页不缩短它。
-      if(ctxPane === "decisions") renderCtxDecisions(ctxDecisions, true);
-      // 实时窗口顶部那条「最近一次判定」也吃这份数据；拉回来之后要重画一次窗口，
-      // 否则要等下一次数据变化（sig 变了）才轮到它。
-      else if(ctxPane === "window" && ctxWin) renderCtxWindow(ctxWin, true);
+      if(ctxPane === "decisions"){
+        if(changed) renderCtxDecisions(ctxDecisions, true);
+      } else if(ctxPane === "window" && ctxWin){
+        renderCtxWindow(ctxWin);
+      }
     }).catch(function(e){
       if(sid !== ctxSid || requestId !== ctxDecisionsRequest) return;
       ctxDecisionsError = "读取决策记录失败" + (e && e.message ? "：" + e.message : "") + "，请再点一次重试。";
@@ -1425,99 +1524,124 @@
 
   // 2026-10-31（用户 m05138）：决策只给建议，不再用「要回／不回」下命令。
   // 失败也不再挤在窗口条数那一格，结论列直接写「决策失败」，悬停看当时的报错。
-  function refreshCtxRounds(sid, full){
-    if(sid !== ctxSid) return;
-    // 表格与趋势分别按各自的上限读取；全量列表不能覆盖更长的轻量趋势。
-    var wantFull = !!full || ctxPane === "rounds";
-    var key = sid + (wantFull ? ":f" : ":l");
-    if(ctxRoundsLoading === key) return;
-    var requestId = ++ctxRoundsRequest;
-    ctxRoundsLoading = key;
+  function refreshCtxRounds(sid, full, afterChange){
+    if(!sid || sid !== ctxSid) return;
+    // 两路独立交付：可见的回复表无需等更长的趋势，趋势也不被列表失败拖累。
+    var loads = [];
+    if(full || ctxPane === "rounds") loads.push(loadRoundLane(sid, "table", afterChange));
+    loads.push(loadRoundLane(sid, "trend", afterChange));
+    return Promise.all(loads);
+  }
+
+  function loadRoundLane(sid, lane, afterChange){
+    if(!sid || sid !== ctxSid) return;
+    var active = ctxRoundsLoads[lane];
+    if(active){
+      // 状态已看到新记录，但当前 GET 可能拿的是旧快照；完成后补一次，不叠发。
+      if(afterChange) active.again = true;
+      return active.promise;
+    }
+    var job = {};
+    var light = lane === "trend";
     var base = API + "/requests?sid=" + encodeURIComponent(sid) + "&limit=0&trim=1";
-    return Promise.all([
-      get(base + "&light=1&_=" + Date.now()),
-      wantFull ? get(base + "&_=" + Date.now()) : Promise.resolve(null)
-    ]).then(function(res){
-      if(sid !== ctxSid || requestId !== ctxRoundsRequest) return;
-      var d = res[0] || {}, list = wantFull ? (res[1] || {}) : d;
+    ctxRoundsLoads[lane] = job;
+    job.promise = get(base + (light ? "&light=1" : "") + "&_=" + Date.now()).then(function(d){
+      if(sid !== ctxSid || ctxRoundsLoads[lane] !== job) return;
+      d = d || {};
       var items = d.items || [];
-      ctxKeep = Number(list.keep || 0) || 0;
-      ctxSnapKeep = Number(d.snap_show || d.snap_keep || 0) || 0;
-      ctxSnapTotal = Number(d.snap_total || 0) || 0;
-      // v4.73（用户 m02417）：裁切快照回走势图，但 v4.07 的口径不变——回复记录表里仍然
-      // 只有真实请求（它们不占行、不进「本页合计」的命中率）。两路在这里就分开。
-      var _plain = (list.items || []).filter(function(it){
-        return !(String(it.outcome || "") === "trim" || it.trim_only === true);
-      });
-      // 走势图那一路单独判变化：只多了一份裁切快照时，回复记录表没变，
-      // 但也得让走势图重画，否则青柱要等到下一轮请求才出现。
-      var _trendChanged = JSON.stringify(items) !== JSON.stringify(ctxTrendRounds);
-      ctxTrendRounds = items;
-      ctxTrendReq = true;
-      // v4.83（用户 m08855）：趋势数据也进缓存，下次刷新首屏直接画完整走势图。
-      if(_trendChanged) cachePut("trendreq", {version: 3, sid: sid, items: items, snapKeep: ctxSnapKeep, snapTotal: ctxSnapTotal});
-      var changed = wantFull && JSON.stringify(_plain) !== JSON.stringify(ctxRounds);
-      // 轻量轮询只刷新趋势，不冲掉已加载的完整回复表和它的展开缓存。
-      if(wantFull){
-        ctxRounds = _plain;
-        ctxRoundsFull = true;
-        cachePut("rounds", {sid: sid, items: _plain, keep: ctxKeep});
-      }
-      if(!changed && !_trendChanged && document.querySelector("#ctx-rounds [data-round]")){
-        if(ctxWin) renderCtxWindow(ctxWin);
+      if(light){
+        var keep = Number(d.snap_show || d.snap_keep || 0) || 0;
+        var total = Number(d.snap_total || 0) || 0;
+        var changed = !ctxTrendReq || keep !== ctxSnapKeep || total !== ctxSnapTotal ||
+          JSON.stringify(items) !== JSON.stringify(ctxTrendRounds);
+        ctxSnapKeep = keep;
+        ctxSnapTotal = total;
+        if(changed){
+          ctxTrendRounds = items;
+          ctxTrendReq = true;
+          if(ctxWin) renderCtxWindow(ctxWin);
+          cachePut("trendreq", {version: 3, sid: sid, items: items, snapKeep: keep, snapTotal: total});
+        }
         return;
       }
-      if(wantFull && ctxPane === "rounds"){
-        var box = document.getElementById("ctx-rounds");
-        var scrollX = window.scrollX, scrollY = window.scrollY;
-        var table = box.querySelector(".tbl"), tableX = table ? table.scrollLeft : 0;
-        renderCtxRounds(_plain, true);
-        if(ctxPane === "rounds") reopenRows(paneOpen.rounds);
-        table = box.querySelector(".tbl");
-        if(table) table.scrollLeft = tableX;
-        window.scrollTo(scrollX, scrollY);
+      // 裁切快照仍只进走势图，不占回复记录行和本页合计。
+      var plain = items.filter(function(it){
+        return !(String(it.outcome || "") === "trim" || it.trim_only === true);
+      });
+      var keepRows = Number(d.keep || 0) || 0;
+      var listChanged = !ctxRoundsFull || keepRows !== ctxKeep ||
+        JSON.stringify(plain) !== JSON.stringify(ctxRounds);
+      ctxKeep = keepRows;
+      ctxRoundsFull = true;
+      if(!job.again) ctxRoundsDirty = false;
+      if(listChanged){
+        ctxRounds = plain;
+        if(ctxPane === "rounds"){
+          var box = document.getElementById("ctx-rounds");
+          var scrollX = window.scrollX, scrollY = window.scrollY;
+          var table = box.querySelector(".tbl"), tableX = table ? table.scrollLeft : 0;
+          renderCtxRounds(plain, true);
+          table = box.querySelector(".tbl");
+          if(table && tableX) table.scrollLeft = tableX;
+          if(scrollX || scrollY) window.scrollTo(scrollX, scrollY);
+        }
+        cachePut("rounds", {sid: sid, items: plain, keep: ctxKeep});
       }
-      if(ctxWin) renderCtxWindow(ctxWin);
     }).catch(function(){
-      // 临时失败保留旧列表与详情，下个周期重试。
+      // 一路临时失败保留它的旧内容，不影响另一路。
     }).then(function(){
-      if(requestId === ctxRoundsRequest) ctxRoundsLoading = "";
+      if(ctxRoundsLoads[lane] !== job) return;
+      delete ctxRoundsLoads[lane];
+      if(job.again) return loadRoundLane(sid, lane);
     });
+    return job.promise;
   }
 
   // 裁切记录只用来给走势图的柱子标橙色 + 悬停提示，不再单独成块。
   function refreshCtxWindow(sid){
     if(!sid || sid !== ctxSid) return;
+    if(ctxWindowInFlight) return ctxWindowInFlight;
     var requestId = ++ctxWindowRequest;
-    // 同一代次一起提交窗口和裁切；较早请求即使较晚返回也不能覆盖。
-    return Promise.all([
-      get(API + "/window?sid=" + encodeURIComponent(sid)).catch(function(){ return null; }),
-      // v4.71（用户 m01516 第 1 条）：limit=0 = 要全部保留的窗口快照（后端按 windows_keep 给满）。
-      // 以前写死 100：群聊设了 200 份，走势图也只画得出 100 根裁切柱。
-      get(API + "/windows?limit=0&sid=" + encodeURIComponent(sid)).catch(function(){ return null; }),
-      // 所有页签共用完整轻量趋势，limit=0 由后端按快照显示上限解析。
-      get(API + "/decision-rounds?sid=" + encodeURIComponent(sid) + "&limit=0&light=1&_" + Date.now()).catch(function(){ return null; })
+    var querySid = encodeURIComponent(sid);
+    function current(){ return sid === ctxSid && requestId === ctxWindowRequest; }
+    // 正文先交付；裁切和决策趋势仍一起提交，避免先显示不完整的柱子。
+    var win = get(API + "/window?sid=" + querySid).then(function(d){
+      if(!current() || !d) return;
+      ctxWin = d;
+      renderCtxWindow(d);
+    }).catch(function(){});
+    var trend = Promise.all([
+      get(API + "/windows?limit=0&sid=" + querySid).catch(function(){ return null; }),
+      get(API + "/decision-rounds?sid=" + querySid + "&limit=0&light=1&_" + Date.now()).catch(function(){ return null; })
     ]).then(function(res){
-      if(sid !== ctxSid || requestId !== ctxWindowRequest) return;
-      if(res[1]){
-        ctxTrims = res[1].items || [];
-        ctxTrimKeep = Number(res[1].keep || 0) || 0;
+      if(!current()) return;
+      if(res[0]){
+        ctxTrims = res[0].items || [];
+        ctxTrimKeep = Number(res[0].keep || 0) || 0;
         if(!ctxSnapKeep && ctxTrimKeep) ctxSnapKeep = ctxTrimKeep;
       }
-        if(res[2]){
-          ctxSnapKeep = Number(res[2].snap_show || res[2].snap_keep || 0) || ctxSnapKeep;
-          ctxSnapTotal = Number(res[2].snap_total || 0) || ctxSnapTotal;
-          var trend = decisionTrendOf(res[2].items || []);
-          ctxDecTrend = trend.items;
-          ctxDecFolded = trend.folded;
+      if(res[1]){
+        ctxSnapKeep = Number(res[1].snap_show || res[1].snap_keep || 0) || ctxSnapKeep;
+        ctxSnapTotal = Number(res[1].snap_total || 0) || ctxSnapTotal;
+        var rows = decisionTrendOf(res[1].items || []);
+        var changed = !ctxTrendDec || rows.folded !== ctxDecFolded ||
+          JSON.stringify(rows.items) !== JSON.stringify(ctxDecTrend);
+        if(changed){
+          ctxDecTrend = rows.items;
+          ctxDecFolded = rows.folded;
           ctxTrendDec = true;
+          cachePut("trenddec", {version: 3, sid: sid, items: ctxDecTrend, folded: ctxDecFolded});
         }
-      if(res[2]) cachePut("trenddec", {version: 3, sid: sid, items: ctxDecTrend, folded: ctxDecFolded});
-      if(res[0]) ctxWin = res[0];
-      if(!ctxWin) return;
-      cachePut("win", {sid: sid, win: ctxWin, trims: ctxTrims, trimKeep: ctxTrimKeep, snapKeep: ctxSnapKeep, snapTotal: ctxSnapTotal});
-      renderCtxWindow(ctxWin);
+      }
+      if(ctxWin) renderCtxWindow(ctxWin);
+    }).catch(function(){});
+    var p = Promise.all([win, trend]).then(function(){
+      if(!current()) return;
+      ctxWindowInFlight = null;
+      if(ctxWin) cachePut("win", {sid: sid, win: ctxWin, trims: ctxTrims, trimKeep: ctxTrimKeep, snapKeep: ctxSnapKeep, snapTotal: ctxSnapTotal});
     });
+    ctxWindowInFlight = p;
+    return p;
   }
 
   function openCtx(sid){
@@ -1525,23 +1649,20 @@
     ctxSid = sid;
     lastWinSig = "";
     lastTrendSig = "";
+    winPaintInputs = null;
     ctxRounds = [];
     ctxTrendRounds = [];
-    ctxRoundsFull = false;
+    ctxKeep = 0;
     ctxRoundPage = 0;
     ctxDecisionPage = 0;
     ctxTrims = []; ctxTrimKeep = 0;
-    ctxDecTrend = [];
-    ctxTrendReq = false; ctxTrendDec = false;   // v4.83：换会话重新等两路趋势
     ctxWin = null;
     ctxSnap = null;
+    ++ctxSnapRequest;
     renderCtxList();
-    if(ctxPane === "decisions") loadCtxDecisions(sid);
-    refreshCtxWindow(sid);
-    renderCtxRounds([]);
-    refreshCtxRounds(sid);
-    // v3.91：决策记录既给「决策记录」页用，也给走势图用；换会话时先拉轻量趋势，
-    // 只有停在「决策记录」页才再拉全量列表（带图片与轨迹）。
+    paintCtxPaneFromCache();
+    if(ctxPane !== "window") swapWinBody("");
+    refreshSelectedCtx(sid);
   }
 
   function toggleRequestRow(name){
@@ -1597,6 +1718,23 @@
           });
           h += "</div>";
         }
+      }
+      // 用户 m32048 第 1 条：这一轮被挡在上下文之外的消息也存进了快照。它们不在
+      // ①②③ 任何一段里（本来就没发出去），明细页单独列一行，事后能查到当时收到了什么。
+      var skipRows = Array.isArray(r.skipped) ? r.skipped : [];
+      if(skipRows.length){
+        h += "<div class='hint skipnote'><b>未进入上下文 " + skipRows.length + " 条</b>" +
+             skipRows.map(function(s){
+               var t = String((s && s.text) || "").trim();
+               if(!t){
+                 var nm = ((s && s.files) || []).map(function(f){ return String((f && f.name) || ""); })
+                   .filter(function(x){ return !!x; });
+                 t = nm.length ? nm.join("、")
+                   : ("[" + (MEDIA_LABEL[String((s && s.media_kind) || "")] || "文件") + "]");
+               }
+               var when = Number((s && s.ts) || 0) > 0 ? fmtTime(Number(s.ts)).slice(6, 11) + " " : "";
+               return "<span class='skiphit'>" + esc(when + t.slice(0, 40)) + "</span>";
+             }).join("") + "</div>";
       }
       // 占比、标题统一取本次 canonical 投影，不依赖旧 sections / total_chars。
       var SEC = {};
@@ -2020,11 +2158,45 @@
     setSwitch("sw-auto", !!on);
   }
 
-  // 5s 主刷新与 1s 状态刷新共用一个在途请求，慢网也不叠发。
+  function hydrateCtxRounds(){
+    if(!ctxSid || ctxRoundsFull) return false;
+    var rc = cacheGet("rounds");
+    if(!rc || rc.sid !== ctxSid || !Array.isArray(rc.items)) return false;
+    ctxRounds = rc.items;
+    ctxRoundsFull = true;
+    ctxKeep = Number(rc.keep || 0) || 0;
+    return true;
+  }
+  function hydrateCtxDecisions(){
+    if(!ctxSid || ctxDecisionsSid === ctxSid || ctxDecisionsError) return;
+    var dc = cacheGet("decisions");
+    if(!dc || dc.sid !== ctxSid || !Array.isArray(dc.items)) return;
+    ctxDecisions = dc.items;
+    ctxDecisionsSid = ctxSid;
+    // 缓存只负责直出；时间戳仍为 0，进入时会向后台核对。
+  }
+  function hydrateCtxTrends(){
+    if(!ctxSid || (ctxTrendReq && ctxTrendDec)) return;
+    var tr = !ctxTrendReq && cacheGet("trendreq"), td = !ctxTrendDec && cacheGet("trenddec");
+    var req = tr && tr.version === 3 && tr.sid === ctxSid;
+    var dec = td && td.version === 3 && td.sid === ctxSid;
+    // 首屏不能只拿半份旧趋势画图，也不能盖掉已经回来的新数据。
+    if(!(ctxTrendReq || req) || !(ctxTrendDec || dec)) return;
+    if(req){
+      ctxTrendRounds = tr.items || [];
+      ctxSnapKeep = Number(tr.snapKeep || 0) || ctxSnapKeep;
+      ctxSnapTotal = Number(tr.snapTotal || 0) || ctxSnapTotal;
+      ctxTrendReq = true;
+    }
+    if(dec){
+      ctxDecTrend = td.items || [];
+      ctxDecFolded = Number(td.folded || 0) || 0;
+      ctxTrendDec = true;
+    }
+  }
   function paintFromCache(){
     var ov = cacheGet("ov");
-    // 缓存直出时不动副标题：改成「刷新中…」比真时间短一大截，右边热重载按钮会跳一下
-    //（用户 m07864 第 1 条）。占位文案「更新于 --:--:--」本来就等宽，等接口回来再填。
+    // 缓存直出时不改副标题，避免右上按钮位置跳动。
     if(ov){ try{ renderCards(ov, true); }catch(e){} }
     var cs = cacheGet("sessions");
     if(cs){ try{
@@ -2032,53 +2204,31 @@
       aliases = cs.aliases || aliases;
       if(cs.health) renderHealth(cs.health);
     }catch(e){} }
-    // 窗口和请求也直出（v3.19）：只画卡片时首屏才 1013px，真实数据 98ms 后把页面撑到
-    // 4163px，这一下布局跳变才是「从设置切回首页卡一下」的来源（实测帧间隔 241~368ms）。
-    var wc = cacheGet("win"), rc = cacheGet("rounds");
+    var wc = cacheGet("win");
     if(wc && wc.sid && (!ctxSessions.length || ctxSessions.some(function(s){ return s.sid === wc.sid; }))){
       ctxSid = wc.sid;
       ctxWin = wc.win || null;
       ctxTrims = wc.trims || [];
       ctxTrimKeep = Number(wc.trimKeep || 0) || 0;
-      ctxSnapKeep = Number(wc.snapKeep || 0) || ctxSnapKeep;
-      ctxSnapTotal = Number(wc.snapTotal || 0) || ctxSnapTotal;
-      lastWinSig = "";
-      lastTrendSig = "";
+      ctxSnapKeep = Number(wc.snapKeep || 0) || 0;
+      ctxSnapTotal = Number(wc.snapTotal || 0) || 0;
     }
-    if(rc && rc.sid && rc.sid === ctxSid){
-      ctxRounds = rc.items || [];
-      ctxRoundsFull = true;
-    }
-    var dc = cacheGet("decisions");
-    if(dc && ctxSid && dc.sid === ctxSid && Array.isArray(dc.items) && dc.items.length){
-      ctxDecisions = dc.items;
-      ctxDecisionsSid = ctxSid;
-      // 缓存只负责首屏直出，仍要立刻向后台核对最新记录。
-      ctxDecisionsAt = 0;
-    }
-    // v4.83（用户 m08855）：走势图的数据也缓存（trendreq/trenddec），首屏直接画上次的完整趋势，
-    // 不再先画缓存里的 40 根、再被决策和请求两次补齐（标题会跳 40 → 150 → 220）。
-    // 老缓存没有这两份时先不画，等两路都回来一次性画（renderCtxWindow 里的骨架）。
-    var tr = cacheGet("trendreq"), td = cacheGet("trenddec");
-    if(tr && tr.version === 3 && tr.sid === ctxSid && td && td.version === 3 && td.sid === ctxSid){
-      ctxTrendRounds = tr.items || [];
-      ctxSnapKeep = Number(tr.snapKeep || 0) || ctxSnapKeep;
-      ctxSnapTotal = Number(tr.snapTotal || 0) || ctxSnapTotal;
-      ctxDecTrend = td.items || [];
-      ctxDecFolded = Number(td.folded || 0) || 0;
-      ctxTrendReq = true;
-      ctxTrendDec = true;
-    } else {
-      ctxTrendRounds = [];
-      ctxDecTrend = [];
-      ctxDecFolded = 0;
-    }
-    if(rc && rc.keep) ctxKeep = Number(rc.keep) || 0;
     if(cs){ try{ renderCtxList(); }catch(e){} }
-    if(ctxWin){ try{ renderCtxWindow(ctxWin); }catch(e){} }
-    if(ctxRounds.length){ try{ renderCtxRounds(ctxRounds); }catch(e){} }
-    // 有同会话的旧列表就直接画；没有时由渲染函数显示加载态，等后台确认。
-    if(ctxPane === "decisions") renderCtxDecisions(ctxDecisions);
+    paintCtxPaneFromCache();
+  }
+  function paintCtxPaneFromCache(){
+    syncCtxPaneVisibility();
+    if(ctxPane === "rounds"){
+      hydrateCtxRounds();
+      if(ctxRoundsFull) renderCtxRounds(ctxRounds);
+      else document.getElementById("ctx-rounds").innerHTML = "<div class='empty'>正在读取回复记录…</div>";
+    } else if(ctxPane === "decisions"){
+      hydrateCtxDecisions();
+      renderCtxDecisions(ctxDecisions);
+    } else {
+      hydrateCtxTrends();
+      renderCtxWindow(ctxWin);
+    }
   }
 
   // 用户 m01874：模型没配时首页「设置」按钮亮个红点，点进去设置页里再逐级指到具体那一行。
@@ -2102,80 +2252,94 @@
     }).catch(function(){});
   }
 
-  function load(){
-    // 后台标签页不轮询：5 秒一次的全量刷新在看不见的时候纯属浪费带宽。
+  function refreshSelectedCtx(sid){
+    if(ctxPane === "decisions") loadCtxDecisions(sid);
+    if(ctxPane === "rounds") loadRoundLane(sid, "table");
+    refreshCtxWindow(sid);
+    loadRoundLane(sid, "trend");
+  }
+  var ctxPrefetchTimer = null;
+  function queueCtxPrefetch(sid){
+    if(ctxPrefetchTimer !== null) clearTimeout(ctxPrefetchTimer);
+    ctxPrefetchTimer = setTimeout(function(){
+      ctxPrefetchTimer = null;
+      if(sid !== ctxSid || document.hidden) return;
+      if(ctxPane !== "rounds" && !ctxRoundsFull) loadRoundLane(sid, "table");
+      if(ctxPane !== "decisions" && ctxDecPrefetched !== sid){
+        ctxDecPrefetched = sid;
+        loadCtxDecisions(sid);
+      }
+    }, 1500);
+  }
+  var ctxListLoad = null;
+  function load(warmStart){
     if(document.hidden) return;
     loadOverview();
     loadModelDot();
-    getContextSessions().then(function(d){
+    if(ctxListLoad) return ctxListLoad;
+    var startedSid = warmStart === true ? ctxSid : "";
+    if(startedSid) refreshSelectedCtx(startedSid);
+    ctxListLoad = getContextSessions().then(function(d){
       cachePut("sessions", {items: d.items || [], aliases: d.aliases || {}, health: d.health || null});
       ctxSessions = d.items || [];
       aliases = d.aliases || aliases;
       if(d.health) renderHealth(d.health);
-      renderCtxList();
       if(ctxSid && ctxSessions.some(function(s){ return s.sid === ctxSid; })){
-        if(ctxPane === "decisions") loadCtxDecisions(ctxSid);
-        refreshCtxWindow(ctxSid);
-        refreshCtxRounds(ctxSid);
-        // 用户 m14026 第 4 条：回复记录页要的是全量表，趁用户还停在窗口页时后台先拉一次，
-        // 等他点过去就是现成的表，不用当场等接口（refreshCtxRounds 内部已有在途去重）。
-        if(!ctxRoundsFull && ctxPane !== "rounds") setTimeout(function(){
-          if(ctxSid && !ctxRoundsFull) refreshCtxRounds(ctxSid, true);
-        }, 1200);
-        // 用户 m17375 第 5 条：决策记录页点进去会先空一下再长出来（接口 300ms）。
-        // 跟回复记录一样，趁用户还停在别的页签时后台先拉一次，点过去就是现成的。
-        // 每个会话只预取一次，别让 5 秒的刷新一直白拉 240KB。
-        if(ctxPane !== "decisions" && ctxDecPrefetched !== ctxSid) setTimeout(function(){
-          if(ctxSid && ctxPane !== "decisions" && ctxDecPrefetched !== ctxSid){
-            ctxDecPrefetched = ctxSid;
-            loadCtxDecisions(ctxSid);
-          }
-        }, 2200);
-      }
-      else if(ctxSessions.length) openCtx(ctxSessions[0].sid);
-      else {
+        renderCtxList();
+        if(ctxSid !== startedSid) refreshSelectedCtx(ctxSid);
+        if(!ctxRoundsFull || ctxDecPrefetched !== ctxSid) queueCtxPrefetch(ctxSid);
+      } else if(ctxSessions.length){
+        openCtx(ctxSessions[0].sid);
+        queueCtxPrefetch(ctxSid);
+      } else {
         invalidateCtxRequests();
-        ctxSid = ""; ctxWin = null; ctxSnap = null; ctxRounds = []; ctxTrendRounds = []; ctxTrims = []; ctxTrimKeep = 0; ctxSnapKeep = 0; ctxSnapTotal = 0;
-        renderCtxWindow(null); renderCtxRounds([]);
+        ctxSid = ""; ctxWin = null; ctxSnap = null; ctxRounds = []; ctxTrendRounds = []; ctxTrims = []; ctxTrimKeep = 0;
+        renderCtxList();
+        syncCtxPaneVisibility();
+        if(ctxPane === "window") renderCtxWindow(null);
+        else document.getElementById("ctx-rounds").innerHTML = "<div class='empty'>选一个会话</div>";
       }
     }).catch(function(e){
       document.getElementById("ctx-list").innerHTML = '<div class="empty">读取失败：' + esc(e.message) + "</div>";
-    });
+    }).then(function(){ ctxListLoad = null; });
+    return ctxListLoad;
   }
 
   // 状态点每 1 秒自己刷一次：只改那几个字，不重画列表，
   // 免得用户正看着的时候列表跳一下（重画会丢滚动位置和悬停状态）。
   // 受「自动刷新」开关管：关掉就整个停，否则那个开关等于没做（审查 bug）
   function startStateTimer(){
-    if(!stateTimer) stateTimer = setInterval(function(){
-      if(document.hidden) return;
-      // 用户 m11091 第 8 条：滚动时这一秒的活全跳过——改文字也会触发重排，
-      // 滚起来就是一顿一顿的。滚动停下后下一拍照常。
-      if(isScrolling()) return;
-      var map = {};
-      ctxSessions.forEach(function(s){ map[s.sid] = s; });
-      paintStateNodes(map);
-      tickEtas();
-      pollStates();
-    }, 1000);
+    if(!stateTimer) stateTimer = setInterval(pollStates, 1000);
+    pollStates();
   }
+  var statePollPending = false;
   function pollStates(){
-    if(document.hidden) return;
-    var list = document.getElementById("ctx-list");
-    if(!list || !list.offsetParent) return;   // 没在看上下文页就不拉
+    if(document.hidden || statePollPending) return;
+    statePollPending = true;
+    var sid = ctxSid;
+    var baseline = ctxSessions.find(function(s){ return s.sid === sid; });
+    function roundSig(s){ return (Number(s.rounds) || 0) + ":" + (Number(s.last_ts) || 0); }
+    var oldSig = pollRoundSig[sid];
+    if(oldSig === undefined && baseline) oldSig = roundSig(baseline);
     getContextSessions(true).then(function(d){
-      if(d.health) renderHealth(d.health);
-      var map = {};
+      if(!stateTimer || document.hidden) return;
+      var map = Object.create(null);
       (d.items || []).forEach(function(s){ map[s.sid] = s; });
-      paintStateNodes(map);
-      var _cur = ctxSid ? map[ctxSid] : null;
-      if(_cur){
-        var _sig = (Number(_cur.rounds) || 0) + ":" + (Number(_cur.last_ts) || 0);
-        var _old = pollRoundSig[ctxSid];
-        pollRoundSig[ctxSid] = _sig;
-        if(_old !== undefined && _old !== _sig){
-          if(ctxPane === "decisions") loadCtxDecisions(ctxSid, true);
-          else refreshCtxRounds(ctxSid);
+      // 滚动时不触碰状态栏布局，但仍检测并拉取新回复。
+      if(!isScrolling()){
+        if(d.health) renderHealth(d.health);
+        paintStateNodes(map);
+        tickEtas();
+      }
+      var current = sid && sid === ctxSid && map[sid];
+      if(current){
+        var sig = roundSig(current);
+        pollRoundSig[sid] = sig;
+        if(oldSig !== undefined && oldSig !== sig){
+          ctxRoundsDirty = true;
+          if(ctxPane === "rounds") refreshCtxRounds(sid, true, true);
+          else if(ctxPane === "decisions") loadCtxDecisions(sid, true);
+          else loadRoundLane(sid, "trend", true);
         }
       }
       (ctxSessions || []).forEach(function(s){
@@ -2188,7 +2352,13 @@
         s.last_mark = n.last_mark; s.last_mark_ago = n.last_mark_ago;
         s.counter = n.counter; s.threshold = n.threshold; s.trigger_mode = n.trigger_mode;
       });
-    }).catch(function(){});
+    }).catch(function(){
+      if(!stateTimer || document.hidden || isScrolling()) return;
+      var map = Object.create(null);
+      ctxSessions.forEach(function(s){ map[s.sid] = s; });
+      paintStateNodes(map);
+      tickEtas();
+    }).then(function(){ statePollPending = false; });
   }
 
   async function togglePlugin(){
@@ -2347,6 +2517,13 @@
   paintViewSw();
   watchFolds();
   ltWatch();
+  // 用户 m11651：初始化时无条件挂页签委托（renderCtxWindow 在非窗口页签会提前返回）。
+  bindWinClick();
+  // 用户 m11651：初始页签的高亮同样只在 renderCtxWindow 里刷，以回复记录 / 决策记录
+  // 打开时三个页签一个都不亮，看不出当前在哪一页；这里补一次。
+  document.querySelectorAll("#ctx-window [data-pane]").forEach(function(b){
+    b.classList.toggle("on", b.getAttribute("data-pane") === ctxPane);
+  });
   paintFromCache();
-  load();
+  load(true);
   setAuto(true);

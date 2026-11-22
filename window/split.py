@@ -136,6 +136,59 @@ _META_RE = re.compile(
 )
 
 
+#: 用户 m22683：引用块里的 @ 不算「本条艾特了机器人」——引用的是别人说的话，
+#: 里面 @ 了谁跟这条消息无关。引用 / 转发 / 卡片一律是行首的方括号段（括号配平），
+#: 剥掉之后再判昵称。
+_QUOTE_SPAN_OPENERS = ("[Reply ID:", "[Forward", "[Json card")
+
+
+def _strip_quote_spans(text: str) -> str:
+    """剥掉引用 / 转发 / 卡片段，只留本条自己说的话。"""
+    s = str(text or "")
+    if not s or "[" not in s:
+        return s
+    out, i, n = [], 0, len(s)
+    while i < n:
+        if not s.startswith(_QUOTE_SPAN_OPENERS, i):
+            out.append(s[i])
+            i += 1
+            continue
+        depth, j, end = 0, i, -1
+        while j < n:
+            ch = s[j]
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+            j += 1
+        if end < 0:
+            out.append(s[i:])
+            break
+        i = end + 1
+    return "".join(out)
+
+
+def _mention_in_quote_only(body: str, names) -> bool:
+    """名字只出现在引用 / 转发 / 卡片段里，本条自己说的话里没有。
+
+    用户 m22683：这种标记是错的，要摘掉。但「昵称改过、当前名字对不上」的
+    旧标记不能摘——那是冻结语义（昵称改变不追补），摘了本轮消息就和历史
+    对不上，整轮顺序校验会失败。
+    """
+    stripped = _strip_quote_spans(body)
+    if stripped == body:
+        return False
+    lowered = stripped.lower()
+    for name in names or ():
+        name = str(name or "").strip()
+        if name and name.lower() in lowered:
+            return False
+    return True
+
+
 def mark_mention(chunk: str, names) -> str:
     """一条消息里提到机器人时，在 meta 后面插一个 [@你]。
 
@@ -153,7 +206,9 @@ def mark_mention(chunk: str, names) -> str:
     # 拿整条 chunk 判会把它当成已打过，结果真正叫到机器人的消息反而没有徽章。
     if MARK.strip() in body:
         return chunk
-    lowered = body.lower()
+    # 用户 m22683：引用块里 @ 了机器人不算本条艾特——引用的是别人说的话，
+    # 剥掉引用 / 转发 / 卡片段之后再判昵称。
+    lowered = _strip_quote_spans(body).lower()
     for name in names:
         name = str(name or "").strip()
         if name and name.lower() in lowered:
@@ -251,6 +306,11 @@ def normalize_mention_content(content, names, results):
             if results[mid] and not marked:
                 lines[i] = meta.group("meta") + MARK + suffix
             elif not results[mid] and marked:
+                lines[i] = meta.group("meta") + suffix[len(MARK):]
+            elif marked and _mention_in_quote_only(suffix[len(MARK):], names):
+                # 用户 m22683：引用块里的 @ 不算本条艾特——旧窗口里已经打错的
+                # 标记在这里按新口径重算一次，重载后自己纠正。只摘「名字只在
+                # 引用里」的那种，其余旧标记保持冻结。
                 lines[i] = meta.group("meta") + suffix[len(MARK):]
         return "\n".join(lines)
 

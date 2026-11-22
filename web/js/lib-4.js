@@ -113,10 +113,235 @@
     }
   }
 
+  // 用户 m11430：日期以前在 1839px 就藏了，那时时间列还有 22px 余量。改成按实测判断——
+  // 时间列扣掉内边距后余量不足 3px 才藏日期；不够时先从「回复内容 / 决策理由」那列借（它本来就是
+  // 省略号列，少一点只是截得更短），借不出来才藏日期。卡片布局（≤1000）不参与。
+  var _fitTimeTimer = 0;
+  // 这一列所有行里最宽的那条超出格子多少（>0 就是压到隔壁格了）。
+  function _worstOver(rows, idx){
+    var w = 0;
+    for(var k = 0; k < rows.length; k++){
+      var c = rows[k].children[idx];
+      if(!c) continue;
+      var s = getComputedStyle(c);
+      var p = (parseFloat(s.paddingLeft) || 0) + (parseFloat(s.paddingRight) || 0);
+      var rg = document.createRange();
+      rg.selectNodeContents(c);
+      var o = rg.getBoundingClientRect().width + p - c.clientWidth;
+      if(o > w) w = o;
+    }
+    return w;
+  }
+  // 用户 m01379：命中预估 / 缓存命中 两格以前在 1568 宽就折成「2 步 / 58.9%」两行，
+  // 而旁边好几列还有 20–46px 空隙。规则改成：先把所有列的空隙（≥3px 才算）收回来补给
+  // 装不下的列，收光了还装不下才隐藏「N 步」前缀——窄屏顶多省略步数，不换行。
+  function _padOf(td){
+    var s = getComputedStyle(td);
+    return (parseFloat(s.paddingLeft) || 0) + (parseFloat(s.paddingRight) || 0);
+  }
+  // 每一列所有行里最宽的那条自然宽（含内边距）。量的时候给整张表挂 .measuring，
+  // 让所有格子连同里面的小标签（token 格的「N 步」胶囊）都按 nowrap 排：
+  // 已经折行的格子直接量出来就是格子宽，看不出「其实装不下」。
+  function _needAll(rows, n){
+    // .tbl 是包着 <table> 的滚动容器，类要挂在它身上 CSS 才匹配得到。
+    var tbl = rows[0].closest(".tbl") || rows[0].closest("table");
+    var need = [], i, k;
+    if(!tbl) return need;
+    tbl.classList.add("measuring");
+    for(i = 0; i < n; i++){
+      var w = 0;
+      for(k = 0; k < rows.length; k++){
+        var c = rows[k].children[i];
+        if(!c) continue;
+        var rg = document.createRange();
+        rg.selectNodeContents(c);
+        var m = rg.getBoundingClientRect().width + _padOf(c);
+        if(m > w) w = m;
+      }
+      need[i] = w;
+    }
+    tbl.classList.remove("measuring");
+    return need;
+  }
+  function _cwOf(rows, idx){
+    var c = rows[0].children[idx];
+    return c ? c.clientWidth : 0;
+  }
+  // 把还有 ≥3px 空隙的列收回来，补给装不下的列。第 3、5 列是省略号列（回复内容 / 回复模型），
+  // 本来就该截断，不参与；时间列有自己的 hide-date 逻辑，也不参与。
+  function _reclaim(rows, ths, borrow){
+    var n = ths.length, i, k;
+    var deficit = [], pool = [];
+    var need = _needAll(rows, n);
+    for(i = 0; i < n; i++){
+      // 时间列平时不参与（有自己的 hide-date 逻辑）；藏了日期之后它就有富余，可以补给缺的列。
+      if(i === 2 || i === 4) continue;
+      if(i === 0 && !rows[0].closest(".tbl").classList.contains("hide-date")) continue;
+      var cw = _cwOf(rows, i);
+      // need 和 clientWidth 都含内边距，直接比；别拿扣过内边距的 inner 去减，会多算一份 padding。
+      if(need[i] > cw) deficit.push({i: i, d: need[i] - cw, cw: cw});
+      else if(cw - need[i] >= 3) pool.push({i: i, s: cw - need[i] - 3, cw: cw});
+    }
+    if(!deficit.length) return need;
+    var total = 0, avail = 0;
+    for(k = 0; k < deficit.length; k++) total += deficit[k].d;
+    for(k = 0; k < pool.length; k++) avail += pool[k].s;
+    // 空隙不够时默认一点不动：挪一半只会让别的列也没余量，问题还在。
+    // 只有调用方明确要求「借」（borrow）时，才从两个省略号列（决策理由 / 决策模型）借——
+    // 它们本来就截断，少几像素只是截得更短，比把渠道列截成「WorkB…」强。
+    var donors = [];
+    if(avail < total){
+      if(!borrow) return need;
+      var short = total - avail;
+      var cand = [{i: 2, floor: 60}, {i: 4, floor: 50}];
+      for(k = 0; k < cand.length && short > 0; k++){
+        var dcw = _cwOf(rows, cand[k].i);
+        var give = Math.min(short, Math.max(0, dcw - cand[k].floor));
+        if(give > 0){
+          donors.push({i: cand[k].i, s: give, cw: dcw});
+          avail += give;
+          short -= give;
+        }
+      }
+      // 借不出来就一点不动：挪一半只会让别的列也没余量，问题还在。
+      if(short > 0) return need;
+    }
+    pool.sort(function(a, b){ return b.s - a.s; });
+    var remain = total;
+    for(k = 0; k < pool.length && remain > 0; k++){
+      var t = Math.min(remain, pool[k].s);
+      pool[k].take = t;
+      remain -= t;
+    }
+    for(k = 0; k < donors.length && remain > 0; k++){
+      var t2 = Math.min(remain, donors[k].s);
+      donors[k].take = t2;
+      remain -= t2;
+    }
+    for(k = 0; k < pool.length; k++){
+      if(!pool[k].take) continue;
+      ths[pool[k].i].style.width = Math.floor(pool[k].cw - pool[k].take) + "px";
+    }
+    for(k = 0; k < donors.length; k++){
+      if(!donors[k].take) continue;
+      ths[donors[k].i].style.width = Math.floor(donors[k].cw - donors[k].take) + "px";
+    }
+    for(k = 0; k < deficit.length; k++){
+      ths[deficit[k].i].style.width = Math.ceil(deficit[k].cw + deficit[k].d) + "px";
+    }
+    return need;
+  }
+  // 命中预估 / 缓存命中 两格还装不下（含「N 步」前缀），或者 token 格的步数胶囊折行了。
+  // need 传进来就复用，省一次重排。
+  function _stepsOver(rows, need){
+    if(!need) need = _needAll(rows, 12);
+    return need[8] > _cwOf(rows, 8) + 0.5 ||
+           need[10] > _cwOf(rows, 10) + 0.5 ||
+           need[11] > _cwOf(rows, 11) + 0.5;
+  }
+  // 除省略号列（决策理由 / 决策模型）、时间列和体积估算（有自己的折行兜底）外，还有列装不下。
+  function _overAny(rows){
+    var need = _needAll(rows, 13);
+    for(var i = 1; i < need.length; i++){
+      if(i === 2 || i === 4 || i === 9) continue;
+      if(need[i] > _cwOf(rows, i) + 0.5) return true;
+    }
+    return false;
+  }
+  function fitCols(){
+    var box = document.getElementById("ctx-rounds");
+    if(!box) return;
+    var tbl = box.querySelector(".tbl");
+    if(!tbl) return;
+    var rows = tbl.querySelectorAll("tr.round-row");
+    var ths = tbl.querySelectorAll("thead th");
+    if(!rows.length || ths.length < 3) return;
+    var cell = rows[0].children[0];
+    // 面板没显示（实时窗口页签）时量不出宽度，保持上一次的判断。
+    if(!cell || !cell.clientWidth) return;
+    tbl.classList.remove("hide-date");
+    tbl.classList.remove("tprob-off");
+    tbl.classList.remove("vol-wrap");
+    tbl.classList.remove("steps-off");
+    tbl.classList.remove("res-wrap");
+    for(var t = 0; t < ths.length; t++) ths[t].style.width = "";
+    if(innerWidth <= 1000) return;
+    // 用户 m01379：先把所有列的空隙收回来，收光了才允许省略 / 换行。
+    var need = _reclaim(rows, ths);
+    // 命中预估 / 缓存命中 还是装不下 → 隐藏「N 步」前缀（窄屏顶多省略步数，不换行），再收一次。
+    if(_stepsOver(rows, need)){
+      tbl.classList.add("steps-off");
+      for(var t2 = 0; t2 < ths.length; t2++) ths[t2].style.width = "";
+      _reclaim(rows, ths);
+    }
+    // 用户 m02449：触发类型的「概率」二字换行就藏掉它（只留百分比），再收一次。
+    var needT = _needAll(rows, 13);
+    if(needT[12] > _cwOf(rows, 12) + 0.5){
+      tbl.classList.add("tprob-off");
+      for(var t3 = 0; t3 < ths.length; t3++) ths[t3].style.width = "";
+      _reclaim(rows, ths);
+    }
+    // 空隙收完、该藏的也藏了还装不下，才从两个省略号列借（它们本来就截断）。
+    if(_overAny(rows)){
+      for(var t4 = 0; t4 < ths.length; t4++) ths[t4].style.width = "";
+      _reclaim(rows, ths, true);
+    }
+    // 还装不下：按用户 m02449 的建议先藏掉时间列的日期，把省下的宽度让给缺的列，再收一次。
+    if(_overAny(rows)){
+      tbl.classList.add("hide-date");
+      for(var t5 = 0; t5 < ths.length; t5++) ths[t5].style.width = "";
+      _reclaim(rows, ths, true);
+    }
+    // 窄到省略号列借光、日期也藏了还装不下，才让结果列折行：宁可两行，也不能压到隔壁格。
+    var needR = _needAll(rows, 2);
+    if(needR[1] > _cwOf(rows, 1) + 0.5) tbl.classList.add("res-wrap");
+    var cs = getComputedStyle(cell);
+    var pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    var rng = document.createRange();
+    rng.selectNodeContents(cell);
+    var tw = rng.getBoundingClientRect().width;
+    // 按百分比本来就够 3px 余量：不动列宽。
+    if(cell.clientWidth - pad - tw < 3){
+      var need = Math.ceil(tw + pad + 3);
+      var delta = need - cell.clientWidth;
+      var c3 = rows[0].children[2];
+      var w3 = c3 ? c3.clientWidth - delta : 0;
+      if(w3 >= 50){
+        var base = {};
+        for(var b = 1; b < rows[0].children.length; b++) base[b] = _worstOver(rows, b);
+        ths[0].style.width = need + "px";
+        ths[2].style.width = w3 + "px";
+        // 借完还有列被挤到溢出，就放弃日期。第 3、5 列是省略号列，本来就该截断，不参与判断。
+        // 只跟「借之前」比：有些格子本来就因为内容锁死一行而溢出（窗口条数里的「回退」标签、
+        // 触发类型的「17.6% 概率」），那是既有排版，不该拿来否决日期。
+        var bad = false;
+        for(var i = 1; i < rows[0].children.length; i++){
+          if(i === 2 || i === 4) continue;
+          // 0.4px 这种亚像素误差肉眼看不出来，不算挤爆。
+          if(_worstOver(rows, i) > Math.max(base[i] || 0, 1)){ bad = true; break; }
+        }
+        if(bad){
+          ths[0].style.width = "";
+          ths[2].style.width = "";
+          tbl.classList.add("hide-date");
+        }
+      }else{
+        tbl.classList.add("hide-date");
+      }
+    }
+    // 体积估算：装不下就允许折行，别压到隔壁格。
+    if(_worstOver(rows, 9) > 0) tbl.classList.add("vol-wrap");
+  }
+  window.addEventListener("resize", function(){
+    if(_fitTimeTimer) clearTimeout(_fitTimeTimer);
+    _fitTimeTimer = setTimeout(fitCols, 120);
+  });
   function renderCtxDecisions(items, preserveDetails){
     var box = document.getElementById("ctx-rounds");
     if(!box) return;
     box.style.display = (ctxPane === "decisions") ? "" : "none";
+    if(ctxDecisionsSid === ctxSid && ctxSid) noteCtxPane("decisions", items);
+    else ctxPaneStamp = null;
     if(!preserveDetails) ctxDecisionDetails = Object.create(null);
     else box.querySelectorAll("[data-detail]").forEach(function(row){
       ctxDecisionDetails[row.getAttribute("data-detail")] = row;
@@ -164,9 +389,9 @@
       // 时间 / 结果 / 一格说明（决策写理由、回复写正文）/ 模型那一格。
       "<div class='tbl'><table><thead><tr><th>时间</th><th>结果</th><th class='lft'>决策<wbr>理由</th>" +
       "<th class='lft'>渠道</th>" + "<th class='lft'>决策<wbr>模型</th>" +
-      "<th class='lft'>防抖<wbr>用时</th>" +
+      "<th class='lft'>防抖</th>" +
       "<th class='lft'>用时</th><th class='lft'>窗口<wbr>条数</th>" +
-      "<th class='lft' title='这一次决策调用的输入 / 输出 token'>token（入/出）</th>" +
+      "<th class='lft' title='这一次决策调用的输入 / 输出 token'>token<wbr><span class='nw'>（入/出）</span></th>" +
       "<th class='lft'>体积<wbr>估算</th>" +
       "<th class='lft'>命中<wbr>预估</th><th class='lft'>缓存<wbr>命中</th>" +
       "<th class='lft' title='这一轮是怎么被叫起来的：概率类写触发概率，@ 或叫昵称写来源'>触发<wbr>类型</th></tr></thead><tbody>";
@@ -210,11 +435,13 @@
       var del = Number(r.decision_debounce) || 0;
       var tk = r.tokens || {};
       html += "<tr class='round-row' data-round='" + esc(r.name) + "'>";
-      html += "<td class='num'>" + fmtTime(r.ts) + "</td>";
+      html += "<td class='num'>" + fmtTimeHtml(r.ts) + "</td>";
       html += "<td class='res'>" + decisionConcl(r) + "</td>";
       html += "<td class='lft rtxt' title='" + esc(tip) + "'><span class='ell'>" + esc(body) + "</span></td>";
       // 用户 m15537 第 4 条：渠道单独一列（在模型列左边），模型格只留模型名。
-      html += "<td class='chc'>" + (mch ? esc(mch) : "<span class='dim'>—</span>") + "</td>";
+      // 用户 m02449：渠道列不换行，装不下就省略号截尾，全名挂在 title 上。
+      html += "<td class='chc'" + (mch ? " title='" + esc(mch) + "'" : "") + ">" +
+              (mch ? esc(mch) : "<span class='dim'>—</span>") + "</td>";
       html += "<td class='mdl' title='" + esc("模型：" + mlabFull) + "'>" +
               "<span class='mn'><span class='mnt'>" + esc(mlabFull) + "</span>" +
               (r.decision_via === "fallback" ? "<span class='tag pend'" +
@@ -250,7 +477,7 @@
       } else {
         pcellD = pb ? fmtBytes(pb) : "<span class='dim'>—</span>";
       }
-      html += "<td class='num'>" + pcellD + "</td>";
+      html += "<td class='num vol'>" + pcellD + "</td>";
       var est = (r.hit_estimate === null || r.hit_estimate === undefined) ? null : Number(r.hit_estimate);
       html += "<td class='num'>" + (est === null ? "<span class='dim'>—</span>"
         : "<span class='est'>" + est.toFixed(1) + "%</span>") + "</td>";
@@ -265,7 +492,10 @@
       if(tp > 0){
         // 用户 m02038 第 7 条：写成「2% 概率」。窄屏下百分号会被折到下一行，
         // 所以整段套 nowrap（以前是靠数字和 % 之间的不换行空格粘住，看着多个空格）。
-        tcell = "<span style='white-space:nowrap'>" + (Math.round(tp * 10) / 10) + "% 概率</span>";
+        // 用户 m11430：窄屏下这格只有 58px，锁死一行会压到右边；改成宽屏锁一行、窄屏折行。
+        // 用户 m02449：窄屏下「概率」二字会折到第二行。整段仍锁一行，装不下时由
+        // fitCols 给表挂 .tprob-off 把「概率」藏掉，只留百分比（跟「N 步」同一套做法）。
+        tcell = "<span class='tprob'>" + (Math.round(tp * 10) / 10) + "%<span class='tpw'> 概率</span></span>";
       } else if(dsrc && dsrc !== "decision"){
         tcell = esc(REASON_LABEL[dsrc] || dsrc);
       } else {
@@ -278,6 +508,7 @@
     html += "</tbody></table></div>";
     box.innerHTML = html;
     labelTableCells(box);
+    fitCols();
     // 展开着的那几行原样塞回去：节点是从上一版表格里捞的，内容还在，不用重新请求
     box.querySelectorAll("[data-detail]").forEach(function(row){
       var old = ctxDecisionDetails[row.getAttribute("data-detail")];
@@ -332,8 +563,9 @@
   }
 
   function renderCtxRounds(items, preserveDetails){
-    // v3.91：三页共用 #ctx-rounds 这一块，轮询回来别把「决策记录」盖成回复记录。
-    if(ctxPane === "decisions") return;
+    // 三页共用一个容器：隐藏时只更新数据，不绘制回复表。
+    if(ctxPane !== "rounds") return;
+    noteCtxPane("rounds", items);
     var box = document.getElementById("ctx-rounds");
     if(!preserveDetails) ctxRoundDetails = Object.create(null);
     else box.querySelectorAll("[data-detail]").forEach(function(row){
@@ -380,9 +612,9 @@
             // 不是 IM 平台；列名改成「回复模型」，机器人账号挪到 title 里。
             "<th class='lft'>渠道</th>" +
             "<th class='lft' title='这一轮真正发出去的模型'>回复<wbr>模型</th>" +
-            "<th class='lft'>防抖<wbr>用时</th>" +
+            "<th class='lft'>防抖</th>" +
             "<th class='lft'>用时</th><th class='lft'>窗口<wbr>条数</th>" +
-            "<th class='lft' title='这一轮所有步骤的合计；多步（有工具调用）时会把上下文重复计一次'>token（入/出）</th>" +
+            "<th class='lft' title='这一轮所有步骤的合计；多步（有工具调用）时会把上下文重复计一次'>token<wbr><span class='nw'>（入/出）</span></th>" +
             "<th class='lft'>体积<wbr>估算</th>" +
             "<th class='lft'>命中<wbr>预估</th>" +
             "<th class='lft'>缓存<wbr>命中</th><th class='lft'>触发<wbr>类型</th></tr></thead><tbody>";
@@ -391,7 +623,7 @@
       html += "<tr class='round-row' data-round='" + esc(r.name) + "'>";
       // v4.78（用户 2026-11-07 第 5 条）：回复记录不再显示快照编号。编号是「实时窗口快照」
       // 的标识（v4.71 用户 m01516 第 3 条），回复快照是另一种东西，不该共用一套号。
-      html += "<td class='num'>" + fmtTime(r.ts) + "</td>";
+      html += "<td class='num'>" + fmtTimeHtml(r.ts) + "</td>";
       html += "<td class='res'>" + roundResultHtml(r) + "</td>";
       // v4.85（用户 m10425 第 8 条）：这一轮真正发出去的正文。跟决策表的理由列一样只露
       // 前面一段，完整正文挂在 title 上；老快照没有 reply_text，显示「—」。
@@ -491,7 +723,7 @@
                  : " · <span class='dim'>无图</span>") +
           (pi.partial && rpcnt ? "（" + (r.image_unknown_count || 0) + " 张未知）" : "")
         : (pi.total ? pi.label : "<span class='dim'>—</span>");
-      html += "<td class='num'>" + pcell + "</td>";
+      html += "<td class='num vol'>" + pcell + "</td>";
       // 命中预估（用户 m41511）：后端按「本轮公共前缀占比」算基准，只在距上一轮
       // 超过 3 小时时打五折（离线 97 轮 MAE 10.1pp）；不再写「（字符）」也不再拿上一轮实测去平均。
       var est = (r.hit_estimate === null || r.hit_estimate === undefined) ? null : r.hit_estimate;
@@ -513,7 +745,7 @@
         if(eAvg === null){
           estCell = "<span class='dim'>—</span>";
         }else{
-          estCell = "<span class='steps'>" + ss.length + " 步 <span class='est'>" + eAvg.toFixed(1) + "%</span></span>";
+          estCell = "<span class='steps'><span class='stp'>" + ss.length + " 步 </span><span class='est'>" + eAvg.toFixed(1) + "%</span></span>";
         }
       } else {
         estCell = (est == null) ? "<span class='dim'>—</span>"
@@ -534,7 +766,7 @@
           if(hAvg === null){
             cacheCell = (chv !== null ? chv : cacheUnreportedCell());
           }else{
-            cacheCell = "<span class='steps'>" + ss.length + " 步 ≈" + hAvg.toFixed(1) + "%</span>";
+            cacheCell = "<span class='steps'><span class='stp'>" + ss.length + " 步 </span>≈" + hAvg.toFixed(1) + "%</span>";
           }
         } else {
           var h0 = (ss && ss.length && ss[0] && ss[0].hit_est != null) ? ss[0].hit_est : null;
@@ -547,7 +779,7 @@
         if(nAvg === null){
           cacheCell = tk.cache_hit + "%";
         }else{
-          cacheCell = "<span class='steps'>" + ss.length + " 步 " + nAvg.toFixed(1) + "%</span>";
+          cacheCell = "<span class='steps'><span class='stp'>" + ss.length + " 步 </span>" + nAvg.toFixed(1) + "%</span>";
         }
       } else {
         cacheCell = tk.cache_hit + "%" + ((stN > 1 && fch !== null) ? " <span class='dim'>（首步 " + fch + "%）</span>" : "");
@@ -582,6 +814,7 @@
     html += "</tbody></table></div>";
     box.innerHTML = html;
     labelTableCells(box);
+    fitCols();
     box.querySelectorAll("[data-detail]").forEach(function(row){
       var old = ctxRoundDetails[row.getAttribute("data-detail")];
       if(!old) return;
@@ -592,14 +825,15 @@
   }
 
   // 请求索引也要轮询；未变化不碰 DOM，变化时复用详情节点，保留内部展开与媒体状态。
-  var ctxRoundsRequest = 0;
-  var ctxRoundsLoading = "";
+  var ctxRoundsLoads = Object.create(null);
   // 用户 m13250 第 2 条：后端「保留请求数」原样带回来，请求页标题跟着它走
   var ctxKeep = 0;
   var ctxWindowRequest = 0;
+  var ctxWindowInFlight = null;
   function invalidateCtxRequests(){
     ++ctxWindowRequest;
-    ++ctxRoundsRequest;
+    ctxRoundsLoads = Object.create(null);
+    ctxWindowInFlight = null;
     ++ctxDecisionsRequest;   // v3.91（用户 m05749）：决策记录跟着会话换代
     ctxDecisions = [];
     ctxDecisionsSid = "";
@@ -614,13 +848,15 @@
     ctxDecisionsInFlightSid = "";
     ctxDecPrefetched = "";
     roundRecCache = Object.create(null);
-    ctxRoundsLoading = "";
+    resetCtxPaneCache();
+    pollRoundSig = Object.create(null);
     ctxRoundsFull = false;
   }
   function fmtBytes(n){
     if(n === null || n === undefined || !n) return "—";
     if(n < 1024) return n + " B";
-    if(n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    // 用户 m11361：100 KB 起直接用 MB，少一位数字，体积估算那格才排得下一行。
+    if(n < 102400) return (n / 1024).toFixed(1) + " KB";
     return (n / 1048576).toFixed(2) + " MB";
   }
 
@@ -1053,8 +1289,10 @@
   var sessionsInFlight = null;
   var sessionsLightInFlight = null;
   function getContextSessions(light){
-    if(sessionsInFlight) return sessionsInFlight;
-    if(light && sessionsLightInFlight) return sessionsLightInFlight;
+    // 轻量状态拍不能挂在较慢的完整会话列表后面。
+    if(light ? sessionsLightInFlight : sessionsInFlight){
+      return light ? sessionsLightInFlight : sessionsInFlight;
+    }
     var url = API + "/context-sessions" + (light ? "?light=1" : "");
     var p = get(url).then(function(d){
       (d.items || []).forEach(sampleStateClock);

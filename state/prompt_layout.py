@@ -30,6 +30,22 @@ DYNAMIC = {"sessions", "chat_env", "memory", "time"}
 #: （decision/engine.py 的 _NOISY_PROMPT_NAMES），系统动态段再显示出来就是
 #: 「早就删掉的东西又回来了」。预览和真实请求必须是同一份。
 NOISY_NAMES = ("sessions", "chat_env")
+# 用户 m3284：占位符只列「框架 / 插件在请求时自动填进去」的那几段。
+# 静态默认提示词不在这里——它们是给玩家改的正文，不是占位符。
+# sessions / chat_env 也不列：它们在真实请求里被 _drop_noisy_prompts 删掉了（见 NOISY_NAMES）。
+# 2026-11-21（J）：角色扮演、实时窗口这两段不再当占位符列——人格由「角色扮演」模块自己挑
+# 文件、实时窗口只是位置说明，都不是能往正文里抄的变量。
+PLACEHOLDER_SPECS = (
+    ("identity", "你的身份", ("accounts",), "平台、账号、群 / 私聊信息"),
+    ("tools", "工具说明", ("tools_note",), "勾选注入的工具清单"),
+    ("memory", "记忆段", (), "记忆插件这一轮注入的内容"),
+    ("time", "时间段", (), "当前时间与时段"),
+    ("bot", "bot 昵称", ("name", "self"), "这个会话里 bot 自己的昵称"),
+)
+
+# 用户 m00364：工具说明以前把框架那行「## Tools 说明」整段顶掉了，注入后这一段没有标题，
+# 跟身份 / 记忆 / 时间几段对不上。抬头前面补回同一行，跟框架模板、没勾工具时的占位行一致。
+TOOLS_TITLE = "## Tools 说明"
 # 用户 m02159 图3：身份段两边本来就是同一个文件，命名规则跟决策那边统一——去掉英文括注。
 LABELS = {"role": "角色设定", "persona": "角色扮演", "chat_rules": "注意事项提示词",
           "attention": "注意事项", "output": "输出要求", "format": "输出格式",
@@ -69,6 +85,27 @@ MARKER_TYPES = {"realtime_marker", "dynamic", "system_dynamic", "system_memory",
 # 没有就先写一句说明，别让整段消失（原来 StrictUndefined 一抛，整段 format 就没了）。
 _TAG_FILL = {"message_types": "", "root_tags": ""}
 _TAG_FILL_NOTE = "（这一段由框架按当前语言与适配器支持的标签自动填写）"
+# 用户 m2013：输出格式段里这两处是框架每轮现填的（可用标签清单 / 控制标签），
+# 卡片正文要显示成占位符，不能只留一句说明。花括号分开拼，源码里不出现连写的两对。
+_PH_OPEN, _PH_CLOSE = "{" * 2, "}" * 2
+_TAG_TOKENS = ("message_types", "root_tags")
+# 框架 assemble 阶段给 root_tags 加的那句抬头（_kira_src/core/workflow/src/im/stages/assemble.py），
+# 预览要跟真实请求一模一样，所以照抄一份。
+ROOT_TAG_HEAD = "此外，你可以在<msg>标签外使用以下控制标签（与<msg>同级）：\n"
+
+
+def _tag_token(name):
+    return _PH_OPEN + str(name) + _PH_CLOSE
+
+
+def _format_body(rendered, template):
+    """输出格式段的卡片正文：模板里的动态变量换成占位符，其余原样。"""
+    body = str(template or "")
+    if not body.strip():
+        body = str(rendered or "").replace(_TAG_FILL_NOTE, _tag_token("message_types"))
+    for name in _TAG_TOKENS:
+        body = re.sub(r"\{\{\s*" + name + r"\s*\}\}", _tag_token(name), body)
+    return body
 DYNAMIC_NOTE = ("（这一段不注入固定 system：会话信息、聊天环境、记忆、时间会由框架拼在"
                 "实时窗下方，实时窗本身又接在系统提示词后面。）")
 # 用户 m02993：动态段默认就是这段「强化格式遵守」——拼在本轮聊天记录最后，紧贴模型开口的位置，
@@ -316,6 +353,14 @@ class PromptLayouts:
         # 用户 m02159 图3：「工具说明」段里的勾选单独存一份，勾了才注入、才允许模型调用。
         self.tools_path = Path(data_dir) / "prompt_tools.json"
         self._tools = self._load(self.tools_path, {"version": 1, "names": []})
+        # 用户 m2618 第 3 条：标签清单落一份盘——插件一重载 _TAG_FILL 就是空的，
+        # 预览会退回那句「由框架自动填写」，看着像没做。
+        self.tag_fill_path = Path(data_dir) / "prompt_tag_fill.json"
+        self._tag_fill = self._load(self.tag_fill_path, {"version": 1, "message_types": "", "root_tags": ""})
+        for _name in _TAG_TOKENS:
+            _value = self._tag_fill.get(_name)
+            if isinstance(_value, str) and _value.strip():
+                _TAG_FILL[_name] = _value
 
     @staticmethod
     def _load(path, default):
@@ -740,6 +785,66 @@ class PromptLayouts:
                     _TAG_FILL["root_tags"] = rt
             return
 
+    def remember_tag_set(self, tag_set):
+        """用户 m00998 第 3 条：预览里要填出真标签清单。
+
+        框架在 assemble 阶段才把 message_types / root_tags 写进 format 段的 kwargs，
+        那时插件已经装配完，抄不到；这里趁 ON_LLM_REQUEST 钩子里 tag_set 已经含内置标签，
+        直接问它要一份，存给设置页预览用。
+        """
+        try:
+            mt = tag_set.to_prompt()
+        except Exception:
+            mt = ""
+        try:
+            rt = tag_set.to_root_prompt()
+        except Exception:
+            rt = ""
+        changed = False
+        if isinstance(mt, str) and mt.strip() and _TAG_FILL.get("message_types") != mt:
+            _TAG_FILL["message_types"] = mt
+            changed = True
+        if isinstance(rt, str):
+            value = (ROOT_TAG_HEAD + rt) if rt.strip() else ""
+            if _TAG_FILL.get("root_tags") != value:
+                _TAG_FILL["root_tags"] = value
+                changed = True
+        if changed:
+            try:
+                self._write(self.tag_fill_path, {"version": 1,
+                                                 "message_types": _TAG_FILL.get("message_types", ""),
+                                                 "root_tags": _TAG_FILL.get("root_tags", "")})
+            except Exception:
+                logger.debug("[multi-decision] 标签清单落盘失败（已吞掉）", exc_info=True)
+
+    @staticmethod
+    def _fill_tag_values(body):
+        """把输出格式段里的两个标签占位符换成这一刻真会给的内容。"""
+        text = str(body or "")
+        if not text:
+            return text
+        mt = _TAG_FILL.get("message_types") or ""
+        rt = _TAG_FILL.get("root_tags") or ""
+        for name, value in (("message_types", mt), ("root_tags", rt)):
+            if not value.strip():
+                value = _TAG_FILL_NOTE if name == "message_types" else ""
+            text = re.sub(r"\{\{\s*" + name + r"\s*\}\}", lambda _m, v=value: v, text)
+        if mt.strip():
+            text = text.replace(_TAG_FILL_NOTE, mt)
+        return text
+
+    def _format_preview_text(self, sid, fallback):
+        """预览里的输出格式段：优先用框架原模板，再把两个标签换成真值。"""
+        tpl = ""
+        try:
+            for row in (self._ensure_source(sid) or {}).get("native") or []:
+                if str((row or {}).get("name") or "") == "format":
+                    tpl = str((row or {}).get("template") or "")
+                    break
+        except Exception:
+            tpl = ""
+        return self._fill_tag_values(tpl if tpl.strip() else fallback)
+
     def capture_native(self, request, sid):
         """抄进入本插件前的模板，不渲染尚待绑定的 format，不写用户消息。"""
         sid = normalize_sid(sid)
@@ -1078,7 +1183,7 @@ class PromptLayouts:
                 rows.append({"name": name, "text": text, "location": "system"})
         rows.append({"name": "persona", "text": "", "location": "system"})
         rows.append({"name": "accounts", "text": self._sample_identity(sid), "location": "system"})
-        rows.append({"name": "tools", "text": "## Tools 说明" + chr(10) + chr(10), "location": "system"})
+        rows.append({"name": "tools", "text": TOOLS_TITLE + chr(10) + chr(10), "location": "system"})
         rows.append({"name": "memory", "text": "## 核心记忆（Core Memory）" + chr(10) + self._core_memory_text(),
                      "location": "dynamic"})
         rows.append({"name": "time", "text": self._live_time_text(), "location": "dynamic"})
@@ -1668,8 +1773,9 @@ class PromptLayouts:
                         calls = self.plugin.decision_options(sid).tool_calls_per_turn
                     except Exception:
                         calls = 5
-            return ((head or TOOL_HEAD) % {"rounds": max(1, int(rounds or 2)),
-                                           "calls": max(1, int(calls or 5))}) + "\n" + text
+            # 用户 m00364：抬头前面补回框架那行标题，注入后这一段才跟身份 / 记忆 / 时间一样有标题。
+            return (TOOLS_TITLE + "\n" + (head or TOOL_HEAD) % {"rounds": max(1, int(rounds or 2)),
+                                                                "calls": max(1, int(calls or 5))}) + "\n" + text
         except Exception:
             logger.exception("[multi-decision] 拼工具说明失败")
             return ""
@@ -1793,17 +1899,49 @@ class PromptLayouts:
             part["inject"] = bool(m.get("enabled", True)) and bool(live)
             part["inject_text"] = str(live or "")
         return part
-    def _render(self, kind, sid, layout, context, rows=None, sample=False):
+    def _placeholder_rows(self, sid, context, by_name):
+        """用户 m3284：占位符要看的「这一刻某个占位符会变成什么」。
+
+        取的是真实请求里 fill_tokens 用的同一个 _token_value，所以页面上看到的就是
+        模型收到的那份；by_name 为空（单段文本装配）时只留不依赖框架段的几项。
+        2026-11-21（J）：不再按决策 / JEV / 回复分侧取值，统一按回复链算——三条链里
+        只有工具说明不同，其余几段本来就跟链无关。
+        """
+        ctx = dict(context or {})
+        try:
+            ctx["tools"] = self._reply_tools_text(sid)
+        except Exception:
+            logger.debug("[multi-decision] 取回复链工具说明失败，占位符按原上下文", exc_info=True)
+        out = []
+        for tok, label, aliases, hint in PLACEHOLDER_SPECS:
+            try:
+                text = self._token_value(tok, "reply", sid, ctx, by_name or {})
+            except Exception:
+                logger.debug("[multi-decision] 取占位符 %s 失败", tok, exc_info=True)
+                text = ""
+            text = str(text or "")
+            out.append({"token": tok, "label": label, "aliases": list(aliases),
+                        "hint": hint, "text": text, "chars": len(text)})
+        return out
+
+    def _render(self, kind, sid, layout, context, rows=None, sample=False,
+                with_placeholders=False):
         layout = normalize_layout(layout, kind)
         if layout["mode"] == "text":
             txt = layout["text"]
             parts = [{"id": "full-text", "label": "单段文本", "type": "text", "name": "custom_system", "text": txt, "chars": len(txt)}] if txt else []
-            return {"ok": True, "system": txt, "parts": parts, "chars": len(txt), "warnings": [], "source": "同源单段装配"}
+            return {"ok": True, "system": txt, "parts": parts, "chars": len(txt), "warnings": [],
+                    "placeholders": (self._placeholder_rows(sid, context, {})
+                                     if with_placeholders else []),
+                    "source": "同源单段装配"}
         source_rows = self._keyed(rows) if rows is not None else self._base_rows(sid, sample)
         by_name = {row["key"]: row for row in source_rows}
         for row in source_rows:
             if row["name"] not in by_name:
                 by_name[row["name"]] = dict(row, text="".join(r["text"] for r in source_rows if r["name"] == row["name"]))
+        # 用户 m3284：占位符要看的「这一刻某个占位符会变成什么」，跟真实请求用同一个取值函数。
+        # 2026-11-21（J）：只有设置页要这份清单，真实请求不算——省掉每轮一次回复链工具说明。
+        placeholders = self._placeholder_rows(sid, context, by_name) if with_placeholders else []
         parts, warnings, inactive = [], [], []
         for m in layout["modules"]:
             # 用户 m06721 图1：关掉「启用」的段一律不进预览，系统动态段也不例外——
@@ -1867,6 +2005,10 @@ class PromptLayouts:
             elif typ == "framework":
                 # 用户 m23323：本地默认副本里有就用它，装配不再被「这一刻框架给没给」牵着走。
                 text = self._defaults_text(key) or by_name.get(key, {}).get("text", "")
+                if key == "format" and sample:
+                    # 用户 m00998 第 3 条：预览里把两个标签占位符换成框架这一刻真会给的内容，
+                    # 别再显示那句「由框架自动填写」的说明。真实请求不走这里。
+                    text = self._format_preview_text(sid, text)
                 if kind == "reply" and key == "output":
                     # 用户 m13442 第 4 条：预览里也显示插件接管后的轮数 / 单轮工具数。
                     text = self._rewrite_agent_limits(text, sid)
@@ -1923,6 +2065,7 @@ class PromptLayouts:
                 # 用户 m10297 图1：被「启用」关掉的展示段（系统动态段 / 动态段）放在这里，
                 # 只给左边卡片显示字数与正文，不参与 system 拼接、也不进右侧预览。
                 "inactive": inactive,
+                "placeholders": placeholders,
                 "source": self._source_label(sid, sample)}
 
     def _rewrite_agent_limits(self, text, sid=""):
@@ -2279,7 +2422,8 @@ class PromptLayouts:
             # 用户 m11103：回复页「工具说明」这一段显示的必须是回复链真正要挂的那几个工具，
             # 以前这里拿到的是决策链那份（默认空），页面上就只剩框架那行标题。
             context["tools"] = self._reply_tools_text(context_sid)
-        preview = self._render(kind, context_sid, doc, context, sample=True)
+        preview = self._render(kind, context_sid, doc, context, sample=True,
+                               with_placeholders=True)
         reply_rows = {}
         for row in self._base_rows(context_sid, sample=True):
             reply_rows[row["name"]] = reply_rows.get(row["name"], "") + row["text"]
@@ -2336,8 +2480,10 @@ class PromptLayouts:
                 # 用户 m02159 图1：记忆 / 时间这类动态段不进下拉；身份 / 人格 / 工具已各有专块。
                 if seg_key(name) in DYNAMIC or seg_key(name) in ("accounts", "persona", "tools"):
                     continue
+                tpl = native.get(key, {}).get("template", "")
                 tail.append({"type": "framework", "key": key, "label": type_label("framework", key),
-                             "text": row["text"], "template": native.get(key, {}).get("template", ""),
+                             "text": (_format_body(row["text"], tpl) if key == "format" else row["text"]),
+                             "template": tpl,
                              "source": src.get("source", ""), "available": True, "group": "default",
                              "tag": "框架原段", "suffix": "原段"})
         # 用户 m02159 图3：人格段的下拉不是「选模板」而是「选人格」——两边都只列人格文件。

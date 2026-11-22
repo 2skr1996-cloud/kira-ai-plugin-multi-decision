@@ -305,6 +305,8 @@
     ppPane = (name === "reply" || name === "jev" || name === "templates") ? name : "decision";
     Array.prototype.forEach.call(document.querySelectorAll("#settings .pp-tab"),function(b){ b.classList.toggle("on",b.getAttribute("data-pp") === ppPane); });
     Array.prototype.forEach.call(document.querySelectorAll("#settings .pp-pane"),function(p){ p.hidden = p.getAttribute("data-pane") !== ppPane; });
+    // 用户 m3096：模型卡跟着子页签走，切过来才量得到标签列宽（隐藏时量出来是 0）。
+    ppSyncPairLabel();
     if(ppPane === "templates"){ ppEnsureTplStates(); ppTplRender(); return; }
     ppAutoPreview();
   }
@@ -316,6 +318,12 @@
     if(!st || st.loaded || st.loading) return;
     ppLoad(st, false, true).then(function(){ if(curPage === "prompt" && ppPane === kind) ppRenderEditor(ppState(kind)); }, function(){});
   }
+  // 用户 m04756：预热另一页会跟首屏的实时窗 / 预览抢服务端，等这一页画完再补。
+  var ppWarmTimer = 0;
+  function ppWarmLater(kind){
+    if(ppWarmTimer) clearTimeout(ppWarmTimer);
+    ppWarmTimer = setTimeout(function(){ ppWarmTimer = 0; ppWarmOther(kind); }, 900);
+  }
   function ppAutoPreview(){
     if(curPage !== "prompt") return;
     ppLayout();
@@ -325,7 +333,7 @@
     // 用户 m15846 图4：读到了布局却没拿到预览（预热那条路）时补一次，别让预览区空着。
     var p = (s.loaded && s.preview) ? ppPreview(s) : ppLoad(s,false);
     // 另一页只用来填「＋ 新增」下拉：等当前页首屏出来再读，别跟首屏抢请求。
-    Promise.resolve(p).then(function(){ ppWarmOther(ppPane); }, function(){ ppWarmOther(ppPane); });
+    Promise.resolve(p).then(function(){ ppWarmLater(ppPane); }, function(){ ppWarmLater(ppPane); });
     return p;
   }
 
@@ -391,7 +399,7 @@
       var t = e.target, root = editorFor(t);
       if(root && t.getAttribute){
         var field = t.getAttribute("data-pm-field");
-        if(field === "mode" || field === "type" || field === "enabled"){
+        if(field === "type" || field === "enabled"){
           var stPM = ppState(root.getAttribute("data-pp-editor"));
           ppUpdateField(stPM,field,Number(t.getAttribute("data-pm-index")),field === "enabled" ? t.checked : t.value);
           // v4.34（用户 m13976 第 1/3 条）：勾「启用」以前只改草稿，不点右下角保存
@@ -543,7 +551,15 @@
       ppModuleAction(s,action,Number(button.getAttribute("data-pm-index")),add ? add.value : undefined,
         zone ? zone.value : "");
     });
-    window.addEventListener("resize",function(){ if(curPage === "prompt") ppLayout(); silentFitNotes(document.getElementById("settings")); });
+    var resizeFrame = 0;
+    window.addEventListener("resize", function(){
+      if(resizeFrame) return;
+      resizeFrame = requestAnimationFrame(function(){
+        resizeFrame = 0;
+        if(curPage === "prompt") ppLayout();
+        document.querySelectorAll("#settings .setgrp[data-page='" + curPage + "']").forEach(silentFitNotes);
+      });
+    });
   }
 
   // 用户 2026-11-06：转发消息处理是左右格式的分段按钮，说明跟着选中项走。
@@ -684,7 +700,7 @@
         used[k] = 1;
         // v3.54：配额（两行「开关+数字框」）与缓存记录（先表后设置）都由 custom 块整块画，
         // 这里只把键标成已用，免得它们再渲染一份重复行。
-        if(g.custom === "quota" || g.custom === "cache" || g.custom === "show" || g.custom === "img") return;
+        if(g.custom === "quota" || g.custom === "cache" || g.custom === "show" || g.custom === "img" || g.custom === "gif") return;
         // v3.33：开关与清单合成一个两行块，别各占一行
         if(k === "phrase_filter_enabled") return;
         if(k === "phrase_filter_list"){ rows += phraseRowHtml(); return; }
@@ -745,6 +761,8 @@
       // 用户 m17752：显示条数三行（回复记录 / 决策记录 / 窗口快照），每行右侧两个数字框。
       if(g.custom === "show"){ rows += showRowsHtml(); }
       // 用户 m09851：窗口页「图片」组——两个看图开关 + 框架那边的图片压缩四项。
+      // 用户 m27095：动图三档是分段按钮（一次只能选一个），整块由 gifBlockHtml 画。
+      if(g.custom === "gif"){ rows += gifBlockHtml(); }
       if(g.custom === "img"){ rows += imgBlockHtml(); }
       // v3.54（用户本轮第 4 条）：缓存整块——表格 + 合计 + 没进表的兜底行 + 按类型清空（v3.56 起这一页叫「缓存记录」）。
       // 三个上限行也在 cacheBlockHtml 里画（表格要排在最前面），所以 keys 那轮只标已用。
@@ -851,7 +869,6 @@
     // 老键（observe_* / quota_* / trace_enabled 等）早就从 schema 删了，这一手只会凭空长出第五个页签。
     // 上面那一串 used 标记照旧留着：同一个键被两个分组画两遍才是真问题。
     box.innerHTML = html;
-    silentFitNotes(box);
     // v3.92（用户 m06951 第 5 条）：提示词页的预览自动跑，不用点按钮。
     bindDecisionPage();
     setTimeout(ppAutoPreview, 0);
@@ -880,7 +897,6 @@
     bindBandBox();
     bindCacheClear();
     mountCacheBlock();   // v3.62：装「作用范围」选择器 + 按当前作用域重画缓存表（真值等 loadCacheStats 回来再刷）
-    loadPricing();
     renderTabs();
   }
 
@@ -917,6 +933,9 @@
     schemaCache = c.schema;
     configCache = c.config || {};
     boundsCache = c.bounds || {};
+    // 用户 m14921：框架那边的图片压缩四项也一起缓存，热刷新首帧就有真实行，
+    // 不会先画「读取框架配置失败」再长出来。
+    coreImgCache = c.coreImg || null;
     renderSettings();
     dcRefresh();
     // 这里不再把说明改成「刷新中…」：宽度一变，右边的按钮就像被推了一下
@@ -971,7 +990,8 @@
     var shown = [];
     Array.prototype.forEach.call(document.querySelectorAll("#settings .setgrp[data-page]"), function(el){
       var on = el.getAttribute("data-page") === curPage;
-      el.style.display = on ? "" : "none";
+      var display = on ? "" : "none";
+      if(el.style.display !== display) el.style.display = display;
       if(on) shown.push(el);
     });
     // v3.67（用户 m20117 第 7 条）：价目页跟「对哪个群生效」无关，卡片条在那页收起来。
@@ -990,8 +1010,8 @@
     if(curPage === "prompt") ppAutoPreview();
     // 用户 m10962：这三页的悬浮提示在渲染后统一摘掉（见上面的 NOTIP_PAGES）。
     watchNoTip();
-    stripNoTipPages();
-    silentFitNotes(document.getElementById("settings"));
+    // 隐藏页量出来的宽度无效；等真正打开该页才量。
+    shown.forEach(silentFitNotes);
   }
 
   // 用户 m01874：把「模型没配」的红点画到三处——页签、提示词页的子页签、具体那一行。
@@ -1052,7 +1072,24 @@
       return "<button data-page='" + p.id + "'" + (p.id === curPage ? " class='on'" : "") + ">" + esc(p.t) + "</button>";
     }).join("");
     applyPage(false);
+    stripNoTipPages();
     paintModelDots();
+  }
+
+  // 用户 m04756：刷新时只拉当前页要的数据。以前一进页面就把价目、分布、缓存账本、短语清单、
+  // 黑名单全拉一遍，服务端串行处理，提示词页自己的 /prompt-layout 排在队尾要等 600ms 才回来。
+  // 现在按页懒加载：切到哪页再补哪页；作用范围变了由 loadSettings 带 force 重取。
+  var pageDataDone = {};
+  function loadPageData(page, force){
+    page = page || curPage;
+    if(!force && pageDataDone[page]) return;
+    pageDataDone[page] = 1;
+    if(page === "trigger"){ loadHours(); loadBandStats(); return; }
+    if(page === "window"){ loadPhraseBlock(); return; }
+    if(page === "log"){ loadCacheStats(); return; }
+    if(page === "blacklist"){ ublkLoad(); return; }
+    if(page === "pricing"){ loadPricing(); return; }
+    if(page === "prompt"){ loadDecisionOptions(); loadJevOptions(); return; }
   }
 
   function loadSettings(){
@@ -1085,6 +1122,7 @@
       if(coreCfg){
         coreImgCache = (coreCfg.bot_config && coreCfg.bot_config.image_compression) || {};
       }
+      coreImgTried = true;
       schemaCache = (res[1] && res[1].schema) || d.schema || {};
       cacheDefCfg = fillSchemaDefaults(d.config || {});
       var sub = document.getElementById("set-sub");
@@ -1110,16 +1148,12 @@
       }
       renderSettings();
     dcRefresh();
-      if(!scopeSid) cachePut("set", {schema: schemaCache, config: configCache, bounds: boundsCache});
+      if(!scopeSid) cachePut("set", {schema: schemaCache, config: configCache, bounds: boundsCache, coreImg: coreImgCache});
       releaseBoot();
-      checkConfig();
-      loadHours();
-      // v3.71（用户第 6 条）：段上「目前概率」与动态模式面板要时段统计，跟分布一起拉；
-      // 切作用范围时 loadSettings 会再走一遍，这里跟着重取。
-      loadBandStats();
-      // 用户 m10749 第 5 条：记录页的图片缓存占用要现算，跟价目一样等页面画完再拉
-      loadCacheStats();
-      loadPhraseBlock();   // 用户 m07085 第 7 条：配置画完再补一次插件侧的最新短语清单
+      // 用户 m04756：只拉当前页要的数据，别的页切过去再补；作用范围变了要按新 sid 重取。
+      loadPageData(curPage, true);
+      // 体检条不挡首屏：等当前页的请求先发出去再补。
+      setTimeout(checkConfig, 0);
     }).catch(function(e){
       if(requestedScopeVersion !== saveScopeVersion || requestedEditVersion !== saveEditVersion || requestedSid !== String(scopeSid || "") || dirty) return;
       document.getElementById("settings").innerHTML = '<div class="empty">读取配置失败：' + esc(e.message) + "</div>";
@@ -1302,12 +1336,32 @@
       x.classList.toggle("on", x === b);
     });
     applyPage(true);
+    loadPageData(curPage);
     // 吸顶页签允许在页面中部换页；留在原滚动位置会停在新页面中段，看着像跳了一下。
     if((window.scrollY || window.pageYOffset || 0) > 4) window.scrollTo(0, 0);
   });
 
   // 用户 m08123：JEV 自定义接口的密钥——单独一个接口存，不走配置自动保存。
   document.getElementById("settings").addEventListener("click", function(e){
+    // 用户 m3096 追加：折叠开关在左栏工具条上，按钮自己带卡片 id。
+    var mch = (e.target && e.target.closest) ? e.target.closest("[data-mc-toggle]") : null;
+    if(mch){
+      var mcid = mch.getAttribute("data-mc-toggle") || "";
+      var mcard = mcid ? document.getElementById(mcid) : null;
+      if(mcard){
+        var mclosed = mcard.classList.toggle("mc-collapsed");
+        if(mcid) MC_OPEN[mcid] = !mclosed;
+        mch.setAttribute("aria-expanded", mclosed ? "false" : "true");
+        // 提示词页会摘掉所有 title（用户 m10962），状态说明改挂 aria-label。
+        mch.setAttribute("aria-label", mclosed ? "展开模型设置" : "收起模型设置");
+        // 用户 m01754：按钮上直接写出「折叠 / 展开」，不用悬浮也知道现在是什么状态。
+        var mst = mch.querySelector(".pp-mc-st");
+        if(mst) mst.textContent = mclosed ? "折叠" : "展开";
+        // 展开后标签列宽才量得准（--dlbw 只在可见时有效）。
+        if(typeof ppSyncPairLabel === "function") ppSyncPairLabel();
+      }
+      return;
+    }
     // 用户 m06705：设置页里的引导气泡（data-goto）点一下切到对应页签。
     var go = (e.target && e.target.closest) ? e.target.closest("[data-goto]") : null;
     if(go){
@@ -1407,6 +1461,8 @@
     var b = e.target && e.target.closest ? e.target.closest("[data-fwdmode]") : null;
     if(!b) return;
     var v = b.getAttribute("data-fwdmode");
+    // 用户 m30204：点已经选中的那一项不该再存一次——按钮上的 .on 就是当前值。
+    if(b.classList.contains("on")) return;
     if(!configCache) configCache = {};
     configCache["forward_mode"] = v;
     var box = b.parentNode;
@@ -1423,6 +1479,72 @@
       var nm = row.querySelector(".nm");
       if(nm) nm.setAttribute("title", fwdModeDesc(v));
     }
+    dirty = true;
+    saveNow();
+  });
+  // 用户 m27095：动图三档也是分段按钮，点哪个存哪个——三个键一次写全，
+  // 后端 _gif_mode 按 九帧 → 原图 → 首帧 的顺序取第一个 true，所以只留选中的那个为 true。
+  document.getElementById("settings").addEventListener("click", function(e){
+    var b = e.target && e.target.closest ? e.target.closest("[data-gifmode]") : null;
+    if(!b) return;
+    var v = b.getAttribute("data-gifmode");
+    // 用户 m30204：点已经选中的那一项不该再存一次——按钮上的 .on 就是当前值。
+    if(b.classList.contains("on")) return;
+    if(!configCache) configCache = {};
+    GIF_MODES.forEach(function(o){ configCache[o.k] = (o.v === v); });
+    var box = b.parentNode;
+    if(box && box.querySelectorAll){
+      [].slice.call(box.querySelectorAll("[data-gifmode]")).forEach(function(x){
+        if(x === b) x.classList.add("on"); else x.classList.remove("on");
+      });
+    }
+    // 说明跟着选中项走，不用把三句都铺在行里。
+    var row = b.closest ? b.closest("[data-row]") : null;
+    if(row){
+      var ds = row.querySelector("[data-gifdesc]");
+      if(ds) ds.textContent = gifModeDesc(v);
+    }
+    dirty = true;
+    saveNow();
+  });
+  // 用户 m30656：拼图帧数也是分段按钮，点哪个存哪个。
+  document.getElementById("settings").addEventListener("click", function(e){
+    var b = e.target && e.target.closest ? e.target.closest("[data-gifframes]") : null;
+    if(!b) return;
+    var v = parseInt(b.getAttribute("data-gifframes"), 10);
+    // 用户 m30204：点已经选中的那一项不该再存一次——按钮上的 .on 就是当前值。
+    if(b.classList.contains("on")) return;
+    // 用户 m13967：0 是「自动」档，不能被 || 9 吃掉
+    if(!isFinite(v) || v < 0) v = 9;
+    if(!configCache) configCache = {};
+    configCache["gif_frames"] = v;
+    var box = b.parentNode;
+    if(box && box.querySelectorAll){
+      [].slice.call(box.querySelectorAll("[data-gifframes]")).forEach(function(x){
+        if(x === b) x.classList.add("on"); else x.classList.remove("on");
+      });
+    }
+    gifFramesPaint();
+    dirty = true;
+    saveNow();
+  });
+  // 用户 m31535：单帧边长也是分段按钮，点哪个存哪个；拼图尺寸和 token 估算跟着变。
+  document.getElementById("settings").addEventListener("click", function(e){
+    var b = e.target && e.target.closest ? e.target.closest("[data-giftile]") : null;
+    if(!b) return;
+    var v = parseInt(b.getAttribute("data-giftile"), 10) || 384;
+    // 用户 m30204：点已经选中的那一项不该再存一次——按钮上的 .on 就是当前值。
+    if(b.classList.contains("on")) return;
+    if(!configCache) configCache = {};
+    configCache["gif_tile"] = v;
+    var box = b.parentNode;
+    if(box && box.querySelectorAll){
+      [].slice.call(box.querySelectorAll("[data-giftile]")).forEach(function(x){
+        if(x === b) x.classList.add("on"); else x.classList.remove("on");
+      });
+    }
+    gifTilePaint();
+    gifFramesPaint();
     dirty = true;
     saveNow();
   });
@@ -1637,6 +1759,8 @@
   document.getElementById("settings").addEventListener("change", function(e){
     // v3.30：伪随机兜底开关变了，用不上的参数行要跟着灰/亮
     var dk0 = (e.target && e.target.getAttribute) ? e.target.getAttribute("data-k") : null;
+    // 用户 m15110：动图质量改了，拼图帧数那行的 token 预估要跟着重算（质量越低估得越少）。
+    if(dk0 === "gif_quality") gifFramesPaint(undefined, e.target.value);
     // 用户 m09851：窗口页「图片」组里那四项是框架的图片压缩设置（system_config.json），
     // 不在插件配置里，走 data-core 单独存，别混进 collectSettings。
     var coreF = (e.target && e.target.getAttribute) ? e.target.getAttribute("data-core") : null;
@@ -1657,6 +1781,7 @@
       return;
     }
     if(dk0 === "prob_pseudo") refreshDimRows();
+    // 用户 m31535：单帧边长改成档位按钮后不再走 change，尺寸估算在点击处理里刷新。
     // 2026-11-08（J）：不确定区间合成一行两个下拉，选完当场把另一头拉回来，
     // 别让下限跑到上限上面去（后端会判错，用户还得自己找哪一头不对）。
     if(dk0 === "jev_lower" || dk0 === "jev_upper"){
@@ -1750,7 +1875,7 @@
     }
     if(dk0 === "advanced_enabled") refreshDimRows();
     // v3.44：成对行的开关一动，数值框的明暗跟着变
-    // 用户 m04896 第 6 条：文件不进上下文一动，「过滤文件视频」那行的明暗跟着变。
+    // 用户 m04896 第 6 条：丢弃文件视频一动，「过滤文件视频」那行的明暗跟着变。
     // 用户 m06021：静默过滤两两并排的开关一动，自己那格条数框的明暗也跟着变。
     if(dk0 && (Object.prototype.hasOwnProperty.call(PAIR_NUM, dk0) ||
                Object.prototype.hasOwnProperty.call(SW_PAIR, dk0) ||
@@ -1762,10 +1887,6 @@
     }
     // 用户 m10297 第 2 条：唤醒组一行里「触发 / 必回」互斥，逻辑在 wakeMutex。
     if(dk0 && wakeMutex(dk0, !!e.target.checked)){
-      dirty = true;
-    }
-    // v4.45（用户 m22611）：历史动图三档互斥（只读首帧 / 原图发送 / 九帧模式）。
-    if(dk0 && gifMutex(dk0, !!e.target.checked)){
       dirty = true;
     }
     // v3.16（用户 m40583）：三列标题上的模式开关 + 普通模式列里的两个子开关。
@@ -1849,6 +1970,7 @@
       }).then(function(r){
         if(!r.ok) throw new Error("HTTP " + r.status);
         coreImgCache = ic;
+        coreImgTried = true;
         if(msg) msg.textContent = "图片压缩已保存";
       });
     }).catch(function(e){
@@ -1858,6 +1980,7 @@
         var ic2 = d && d.configuration && d.configuration.bot_config &&
                   d.configuration.bot_config.image_compression;
         if(ic2) coreImgCache = ic2;
+        coreImgTried = true;
         renderSettings();
       }).catch(function(){});
     });
@@ -3125,10 +3248,7 @@
     scopeSid = qs.get("sid") || "";
   } catch(err) { scopeSid = ""; }
   paintFromCache();
-  loadScopes();
   loadSettings();
-  loadHidden();
-  // v3.91（用户 m05749）：提示词页的人格 / 工具 / 模型清单与两个按钮
   bindDecisionPage();
-  loadDecisionOptions();
-  loadJevOptions();
+  // 用户 m04756：作用范围 / 隐藏会话不挡首屏——等配置和当前页的数据先发出去再补。
+  setTimeout(function(){ loadScopes(); loadHidden(); }, 0);

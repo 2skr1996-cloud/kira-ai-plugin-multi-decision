@@ -182,8 +182,41 @@ def _strip_lead_meta(text: str) -> str:
     return s[i:]
 
 
-def visible_chars(text) -> int:
-    return len(_CHAR_MARK_RE.sub("", _strip_lead_meta(text)).strip())
+def visible_chars(text, names=None) -> int:
+    """字数口径：元数据、表情 / 艾特 / 图片标记、@ 昵称都不算字。
+
+    用户 m22683：`@[编码]昵称` 这种 QQ 艾特整段是元数据，不是他说的话——
+    以前只剥 `[At …]`，`@某某` 留在正文里，一句话被算成十几个字。
+    用户 m12748：昵称里带空格时（`@Angels of the Apocalypse 上号啊`），通用
+    正则只吃两个词，剩下的「the Apocalypse」被算成 18 字。窗口里见过的昵称
+    由调用方传进来，先整段吃掉，再让通用正则兜剩下的。
+    """
+    body = _strip_lead_meta(text)
+    for nm in (names or ()):
+        if nm:
+            body = body.replace("@" + nm, " ")
+    body = _AT_MENTION_RE.sub(" ", body)
+    return len(_CHAR_MARK_RE.sub("", body).strip())
+
+
+#: 窗口里每条消息都带 `[user_nickname: 昵称, user_id: 号]`，昵称池从这里收。
+_NICK_LINE_RE = re.compile(r"\[user_nickname:\s*([^,\]]{1,40}),\s*user_id:")
+
+
+def _nick_pool_of(msgs) -> list:
+    """窗口里出现过的昵称，长的在前（用户 m12748）。
+
+    @ 昵称在页面上是一个徽章，不是他说的话；昵称里可能带空格，通用 @ 正则
+    只吃两个词，剩下的会被算成字。这里把窗口里见过的昵称整段列出来。
+    """
+    seen = set()
+    for msg in msgs or []:
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+        for nm in _NICK_LINE_RE.findall(str(text_of_content(content) or "")):
+            nm = nm.strip()
+            if nm:
+                seen.add(nm)
+    return sorted(seen, key=len, reverse=True)
 
 
 def _get(msg, key, default=None):
@@ -396,6 +429,10 @@ _SHORT_STRIP_RE = re.compile(r"[\s\u3000-\u303f\uff00-\uffef!-/:-@\[-\x60{-~]+")
 _AT_MENTION_RE = re.compile(
     r"@[A-Za-z0-9_\-]{1,32}(?:[ \t]+[A-Za-z0-9_\-]{1,32})?"
     r"|@[\u4e00-\u9fa5A-Za-z0-9_\-]{1,16}"
+    #: 用户 m05993 第 3 条：QQ 的 @ 昵称是「@[编码]昵称」两截（`@[%ĀĀ␇Ö]我在未来，等你`），
+    #: 上面两条都从 `[` 就断了，昵称整段留在正文里，一句话被算成十几个字、判不成短句。
+    #: 这里整段吃掉「@ + [编码] + 紧跟的昵称」，昵称到空白为止。
+    r"|@\[[^\]]{0,64}\][^\s]{0,32}"
 )
 
 
@@ -405,13 +442,39 @@ def _short_len_of(text: str) -> int:
     return len(_SHORT_STRIP_RE.sub("", out))
 
 
+def _mention_tokens(text: str) -> list:
+    """正文里所有 @ 昵称（去掉 @ 本身）。"""
+    out = []
+    for m in _AT_MENTION_RE.finditer(str(text or "")):
+        tok = m.group(0).lstrip("@").strip()
+        if tok:
+            out.append(tok)
+    return out
+
+
+def has_at_other(text: str, bot_names=None) -> bool:
+    """正文里有没有「@ 了别人」——@ 的不是机器人自己（用户 m22683）。
+
+    只要正文里有一个 @ 落不到机器人身上就算命中。认不出机器人叫什么就不判，
+    宁可多冒一次泡，也别把该接的话吞掉。
+    """
+    names = [str(n or "").strip().lower() for n in (bot_names or []) if str(n or "").strip()]
+    if not names:
+        return False
+    for tok in _mention_tokens(text):
+        low = tok.lower()
+        if not any(n in low for n in names):
+            return True
+    return False
+
+
 def _has_link(text: str) -> bool:
     """整条里只要出现链接就算（用户 m04605：带链接就跳过，不管前后还有没有别的话）。"""
     return bool(_NO_TEXT_URL_RE.search(_text_without_noise(text, keep_links=True)))
 
 
 
-#: 用户 m04896 第 5 条：「文件不进上下文」开着时，带文字的文件消息只留文字，
+#: 用户 m04896 第 5 条：「丢弃文件视频」开着时，带文字的文件消息只留文字，
 #: 把 [File xxx] / [Video xxx] 这类占位从正文与原文里摘掉。
 _FILE_PLACEHOLDER_RE = re.compile(r"\[(?:File|Video|文件|视频)(?:\s[^\[\]]{0,120})?\]")
 
@@ -430,11 +493,52 @@ def has_text_body(text: str) -> bool:
     return bool(_text_without_noise(strip_file_placeholders(text)))
 
 
-def pending_tags(item, short_len: int = 5) -> set:
+def _raw_body(content) -> str:
+    """框架原文里「|」之后才是正文，前面是时间 / message_id / 昵称。"""
+    s = text_of_content(content)
+    at = s.find("|")
+    return s[at + 1:] if at >= 0 else s
+
+
+def is_file_only_message(content) -> bool:
+    """纯文件 / 视频消息：整条不进上下文（用户 m32048）。
+
+    判据与决策层一致：带文件 / 视频占位、剥掉占位后没有正文、且不是转发。
+    转发里带视频是转发的内容，不是这条消息本身是视频（用户 m17018 图2）。
+    """
+    s = text_of_content(content)
+    if not s or "[" not in s:
+        return False
+    if "[Forward" in s:
+        return False
+    if not _FILE_PLACEHOLDER_RE.search(s):
+        return False
+    return not has_text_body(_raw_body(s))
+
+
+#: 框架原文开头那个 [Nov 22 2026 14:06 Sat]。
+_RAW_TS_RE = re.compile(r"^\[([A-Z][a-z]{2}) (\d{1,2}) (\d{4}) (\d{1,2}):(\d{2})")
+
+
+def raw_line_ts(content) -> float:
+    """把框架原文开头的时间戳换成秒，认不出就是 0（绝不用当前时间顶上）。"""
+    m = _RAW_TS_RE.match(str(text_of_content(content) or "").lstrip())
+    if not m:
+        return 0.0
+    try:
+        return time.mktime(time.strptime(
+            "%s %s %s %s:%s" % (m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)),
+            "%b %d %Y %H:%M"))
+    except Exception:
+        return 0.0
+
+
+def pending_tags(item, short_len: int = 5, bot_names=None) -> set:
     """给一条待发打上「没什么可接」的类型标签，认不出就是空集合。
 
     标签：link（带链接）、short（短句）、single_image（单图片）、
-    single_sticker（单表情包）、forward（合并转发）、file_video（文件 / 视频）。
+    single_sticker（单表情包）、forward（合并转发）、file_video（文件 / 视频）、
+    at_other（@ 了别人，用户 m22683）。
     """
     tags = set()
     if not isinstance(item, dict):
@@ -450,6 +554,10 @@ def pending_tags(item, short_len: int = 5) -> set:
     # 用户 m04896 第 8 条：合并转发改成「任意转发」——带不带正文都算。
     if "[Forward" in text:
         tags.add("forward")
+    # 用户 m22683：正文里 @ 了别人（不是机器人）也算「没什么可接」。
+    # body 已经把引用 / 转发段剥掉了，引用里 @ 谁不算本条艾特。
+    if has_at_other(body, bot_names):
+        tags.add("at_other")
     # 用户 m04896 第 4 条：文件 / 视频（.mp4 这类附件，不是链接）。
     if media in ("file", "video") or files:
         tags.add("file_video")
@@ -459,7 +567,10 @@ def pending_tags(item, short_len: int = 5) -> set:
                 tags.add("single_image")
             elif media in ("sticker", "emoji"):
                 tags.add("single_sticker")
-    elif _short_len_of(body) <= max(1, int(short_len or 5)):
+    elif media not in ("image", "sticker") and _short_len_of(body) <= max(1, int(short_len or 5)):
+        # 用户 m07822：带图的消息不是「纯文本短句」——短句规则只管纯文字，
+        # 否则「神啊，拯救我」这种带一张图的 5 字消息会被当成短句过滤掉。
+        # 行内 emoji 不算附件，仍按纯文本判。
         tags.add("short")
     return tags
 
@@ -3504,6 +3615,9 @@ def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list
         seq = list(msgs or [])
     except TypeError:
         return []
+    # 用户 m12748：@ 昵称整段是徽章，不该算字。昵称里可能带空格，通用 @ 正则
+    # 只吃两个词，剩下的会被算成字——先把窗口里见过的昵称整段列出来。
+    names = _nick_pool_of(seq)
     if limit and limit > 0:
         seq = seq[-limit:]
     out = []
@@ -3536,7 +3650,7 @@ def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list
         item = {
             "role": role,
             "text": text,
-            "chars": visible_chars(text),
+            "chars": visible_chars(text, names),
             "tools": len(tool_calls or []),
             "tool_call_id": str(tool_call_id)[:60],
             "raw": _jsonable(content),
@@ -3544,6 +3658,15 @@ def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list
             "name": _tool_name(msg),
             "tc": _tool_calls_of(tool_calls),
         }
+        # 用户 m17018 图2：跳过项要按时间插回上下文原位，前端得知道每条消息的时刻。
+        # 没有可信时刻的消息（None / 0 / 负数 / inf / nan）不补 ts——v3.01 的契约是
+        # 「缺时间戳绝不用当前时间或请求时间顶上」，页面也就不会凭空画一个时刻。
+        try:
+            _ts = float(_get(msg, "ts") or 0.0)
+        except (TypeError, ValueError):
+            _ts = 0.0
+        if _ts > 0 and math.isfinite(_ts):
+            item["ts"] = _ts
         # 决策注记：名字换成注记名，正文剥掉「[决策记录] HH:MM」这一截，
         # 时刻单拎成 at，前端按普通一条 assistant 消息画（用户 m11166 图2）。
         if role == "assistant" and (item["name"] in (_DEC_NOTE_NAME, _DEC_NOTE_NAME_OLD)
@@ -3553,7 +3676,7 @@ def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list
             if _m:
                 text = text[_m.end():]
                 item["text"] = text
-                item["chars"] = visible_chars(text)
+                item["chars"] = visible_chars(text, names)
                 item["raw"] = text
                 if _m.group(1):
                     item["at"] = _m.group(1)
@@ -3563,7 +3686,7 @@ def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list
                 _m2 = _DEC_NOTE_TS_HEAD.match(text)
                 _body = strip_note_decl(text[_m2.end():])
                 item["text"] = _body
-                item["chars"] = visible_chars(_body)
+                item["chars"] = visible_chars(_body, names)
                 item["at"] = _m2.group(1)
             else:
                 item["raw"] = text
@@ -3589,7 +3712,7 @@ def view_of(msgs, limit: int = 0, bot_name: str = "", raw_sid: str = "") -> list
                 _body = text[_m3.end():]
             _body = _TOOL_NOTE_DECL_RE.sub("", _body)
             item["text"] = _body
-            item["chars"] = visible_chars(_body)
+            item["chars"] = visible_chars(_body, names)
             item["raw"] = _body
             if not item.get("at"):
                 _ts = _get(msg, "ts")
@@ -4295,13 +4418,15 @@ def _with_content(msg, parts):
 
 
 def strip_old_images(messages, keep: int = 128) -> List[Any]:
-    """只保留最近 keep 张原图，更早的换成「[图片]」。
+    """只保留最早 keep 张原图，再往后的换成「[图片]」。
 
-    思路照搬 MaiBot 的 `limit_latest_images_in_messages`：按「张」从新往旧数，
-    其余换文本占位。它默认留 128 张（`visual.max_image_num`），这里也默认 128 ——
-    框架发图前会把超过 1MB 的图压缩，正常群聊根本摸不到这个上限，历史内容几乎不变，
-    前缀缓存也就不会因为「图被换掉」而断（v2.30 之前按「条带图消息」算、默认 2 条，
-    每来一张新图就可能改写一条历史，白白重算）。
+    用户 m24812：名额先到先得——窗口里先来的图先占名额，满了以后新进来的图
+    直接变占位符，老图一张都不动。这样新图进来不会改写任何历史，前缀缓存也就
+    不会因为「图被换掉」而断；反过来（保留最新的 N 张）每来一张新图都要把最老
+    的一张换掉，等于每轮都让前缀失效。
+
+    默认 128 张（MaiBot 的 `visual.max_image_num` 也是 128）——框架发图前会把
+    超过 1MB 的图压缩，正常群聊根本摸不到这个上限。
 
     窗口本体不动，只改发出去的那一份，所以页面上还能看到原图。
     """
@@ -4309,14 +4434,14 @@ def strip_old_images(messages, keep: int = 128) -> List[Any]:
         return list(messages)
     out = list(messages)
     kept = 0
-    for i in range(len(out) - 1, -1, -1):
+    for i in range(len(out)):
         content = _get(out[i], "content")
         if not _has_image(content):
             continue
         parts = list(content)
         changed = False
-        # 同一条消息里也按「后面的更新」算
-        for j in range(len(parts) - 1, -1, -1):
+        # 同一条消息里也按「前面的更早」算
+        for j in range(len(parts)):
             part = parts[j]
             if _part_type(part) not in IMAGE_TYPES:
                 continue
@@ -4363,29 +4488,79 @@ _PIC_TEXT_RE = re.compile(r"\[(?:图片|表情|Image attached|image|Image)\]", r
 #: - 静态大图：压到最长边 1280；压完反而更大就保留原图（已经压过的 JPEG 常见）；
 #: - 小于 1 MB 的静态图一律不动，原样发最清楚。
 #: - 例外：像素数超过 600 万的图（手机长截图那种）不管多大都要缩——上游按像素数
-#:   拒收，1600 万像素的图会让整轮回复失败（用户 m13535）。
+#:   拒收，1600 万像素的图会让整轮回复失败（用户 m13535）；单边超过 8192 也一样
+#:   拒收（用户 m10848），所以这两条都要过。
 #:
 #: 文件名 = sha1(源文件内容) + 参数，同一个源永远算出同一个名字，字节也完全一样，
 #: 所以前缀缓存不会因为「每轮重算」而断。文件写在 session_media/derived 下——框架的
 #: resolve_media_references 只认 session_media 里的真实文件，plugin_data 下会被当成
 #: 「图片没了」换成 [image unavailable]（探针实测，见 changelog）。
 _DERIVE_DIR = "session_media/derived"
+#: 用户 m30656：拼图抽几帧也能在设置页选（9 / 16 / 25），这里只是默认值；
+#: 硬上限 36 是配置写坏时兜底用的，界面上选不到。
 _DERIVE_MAX_FRAMES = 9
+_DERIVE_FRAMES_MAX = 36
+#: 用户 m13967：拼图帧数多一个「自动」档（0 = 自动）。自动档先逐帧去重，
+#: 再按剩下的关键帧数决定拼几格，不再固定抽 9 / 16 / 25 帧。
+_DERIVE_AUTO_FRAMES = 0
+#: 自动档最多拼 25 格（5×5）；关键帧再多就在关键帧序列上等距丢掉一部分。
+_DERIVE_AUTO_MAX = 25
+#: 去重指纹：每帧缩成 64×64 灰度再比，够看出「动没动」，又不至于被噪点骗。
+_DERIVE_KEY_SIDE = 64
+#: 单像素差 ≥ 12 才算变了，GIF 调色板抖动一般到不了这个数。
+_DERIVE_KEY_PIX = 12
+#: 变了的像素占比 ≥ 0.4% 才算新关键帧：眨眼、挥手这种小动作也留得住。
+_DERIVE_KEY_RATIO = 0.004
+#: 用户 m14811：循环动画的收尾帧常常就是首帧，再占一格纯属浪费。收尾处跟首帧比，
+#: 变了的像素不到 0.8% 就当「回到起点」，这一帧不占格；动画中间回到起点的帧照旧保留。
+_DERIVE_LOOP_RATIO = 0.008
+#: 用户 m10267：单帧边长、JPEG 质量暴露到设置页「动图设置」，下面这几个常量只是默认值，
+#: 实际取值走 gif_tile / gif_quality / gif_frames。
+#: 用户 m30982：首帧边长（1280）撤掉——只读首帧那一档也按单帧边长缩，大动图本来就不多。
 _DERIVE_TILE = 384
 _DERIVE_GAP = 6
-_DERIVE_GRID_Q = 88
+_DERIVE_GRID_Q = 90
 _DERIVE_STATIC_SIDE = 1280
 _DERIVE_STATIC_Q = 95
 _DERIVE_STATIC_MIN = 1024 * 1024
 #: 用户 m13535：上游按像素数拒收，600 万像素以内实测能过、800 万就 400。
 #: 这一项在设置页是锁死的开关，只用来告诉用户有这个功能，所以不做配置读取。
 _DERIVE_PIXEL_MAX = 6_000_000
+#: 用户 m10848：上游单边超过 8192 就整张拒收（实测 8192 能过、9000 就 400）。
+#: 586×10228 的长截图只有 599 万像素，过了像素闸却过不了这一关，一张图能让整轮
+#: 回复失败、决策退回纯文字。留一点余量取 8000。
+_DERIVE_EDGE_MAX = 8000
 _DERIVE_KEEP_MAX = 600
 _DERIVE_SHA_CACHE: dict = {}
 _DERIVE_MEMO: dict = {}
+#: 自动档的去重结果按 (内容 sha1, 帧数) 缓存，同一张动图别每次请求都重扫一遍。
+_DERIVE_KEYS_CACHE: dict = {}
 # v4.45（用户 m22611）：历史里的动图怎么发给模型，三档互斥——九帧拼图（默认）/ 原图 /
 # 只读首帧；三个都不开就是 skip：这张图不发，正文里只留 [图片]。
 _GIF_MODES = ("grid", "original", "first", "skip")
+
+
+def _gif_opts_of(opts) -> tuple:
+    """把 (单帧边长, 质量, 帧数) 归一化，缺省或非法就用写死的默认值。
+
+    用户 m10267：前两个值在设置页「动图设置」里能改，范围跟 ui_schema 的 min/max 对齐。
+    用户 m30656：第三个是拼图抽几帧（9 / 16 / 25），复杂动图多抽几帧看得更清。
+    用户 m13967：第三个还能填 0，表示「自动」——按动图内容去重后自己决定拼几格。
+    用户 m30982：首帧边长撤掉，只读首帧那一档也按单帧边长缩。
+    """
+    tile, q, frames = _DERIVE_TILE, _DERIVE_GRID_Q, _DERIVE_MAX_FRAMES
+    if opts:
+        try:
+            vals = list(opts)
+            if len(vals) >= 2:
+                tile = int(vals[0]) if vals[0] is not None else tile
+                q = int(vals[1]) if vals[1] is not None else q
+            if len(vals) >= 3 and vals[2] is not None:
+                frames = int(vals[2])
+        except Exception:
+            tile, q, frames = _DERIVE_TILE, _DERIVE_GRID_Q, _DERIVE_MAX_FRAMES
+    return (max(64, min(1024, tile)), max(1, min(100, q)),
+            max(0, min(_DERIVE_FRAMES_MAX, frames)))
 
 
 def _derive_root() -> Optional[Path]:
@@ -4430,22 +4605,172 @@ def _frame_rgb(frame):
     return bg
 
 
-def _grid_jpeg(im, frames: int) -> tuple:
-    """等距抽帧拼九宫格，返回 (jpeg 字节, 列, 行, 实际帧数)。"""
+def _frame_sig(frame):
+    """一帧的去重指纹：缩到 64×64 的 RGB（用户 m13967）。"""
     from PIL import Image
 
-    k = max(1, min(_DERIVE_MAX_FRAMES, frames))
-    if k == 1:
-        idxs = [0]
+    side = _DERIVE_KEY_SIDE
+    return frame.convert("RGB").resize((side, side), Image.BILINEAR)
+
+
+def _sig_changed(prev, cur) -> int:
+    """两张指纹里「明显变了」的像素个数。
+
+    三个通道取最大差再数：只比亮度会漏掉「一样亮、颜色变了」的帧。
+    """
+    from PIL import ImageChops
+
+    r, g, b = ImageChops.difference(prev, cur).split()
+    hist = ImageChops.lighter(ImageChops.lighter(r, g), b).histogram()
+    return int(sum(hist[_DERIVE_KEY_PIX:]))
+
+
+def _key_frames_scored(im, frames: int) -> list:
+    """逐帧去重，返回 [(关键帧下标, 这一帧比上一个关键帧变了多少像素)]（用户 m13967 / m14556）。
+
+    每帧缩成 64×64，跟「上一个保留的关键帧」比：变了的像素不到 0.4% 就算
+    同一张图停了几帧，并掉。只跟上一次保留的比，所以缓慢渐变的动画不会被整段吃掉，
+    攒够变化照样会留一帧。比的是 RGB 三通道的最大差——只看灰度的话，「同亮度
+    不同颜色」的帧会被当成没变（合成测试里 4 张图只认出 2 张）。
+    变化量留着给 _pick_frames 排序：关键帧比目标多时先丢变化最小的。
+    用户 m14811：循环动画的收尾帧常常就是首帧，扫完再把「跟首帧几乎一样」的收尾帧
+    去掉，不重复占格；只在收尾处判断，动画中间回到起点的帧照旧保留。
+    """
+    side = _DERIVE_KEY_SIDE
+    need = max(4, int(round(side * side * _DERIVE_KEY_RATIO)))
+    loop_need = max(need, int(round(side * side * _DERIVE_LOOP_RATIO)))
+    keys = []
+    sigs = []
+    prev = None
+    for i in range(max(1, int(frames))):
+        try:
+            im.seek(i)
+            cur = _frame_sig(im)
+        except Exception:
+            continue
+        if prev is None:
+            keys.append((i, side * side))
+            sigs.append(cur)
+            prev = cur
+            continue
+        try:
+            changed = _sig_changed(prev, cur)
+        except Exception:
+            changed = side * side
+        if changed >= need:
+            keys.append((i, changed))
+            sigs.append(cur)
+            prev = cur
+    # 用户 m14811：循环动画的收尾帧常常就是首帧，再占一格纯属浪费。只在收尾处判断，
+    # 动画中间回到起点的帧（来回摆动）照旧保留。
+    while len(keys) > 1:
+        try:
+            if _sig_changed(sigs[0], sigs[-1]) >= loop_need:
+                break
+        except Exception:
+            break
+        keys.pop()
+        sigs.pop()
+    if not keys:
+        keys = [(0, side * side)]
+    return keys
+
+
+def _key_frames(im, frames: int) -> list:
+    """只要下标的那一版（测试和别处用）。"""
+    return [i for i, _ in _key_frames_scored(im, frames)]
+
+
+def _pick_frames(keys, target: int) -> list:
+    """从关键帧里挑要拼的帧（用户 m13967 / m14556）。
+
+    keys 是 [(下标, 变化量)]，按时间排好。
+    关键帧比目标多：首尾固定保留，中间按变化量从大到小留，最后按时间排回去——
+    等于把「几乎没动」的那些帧丢掉（用户 m14556：超出就丢信息量最少的）。
+    关键帧比目标少：用实际数量（遗弃），格子跟着变少。
+    """
+    keys = list(keys or [])
+    if not keys:
+        return [0]
+    n = len(keys)
+    target = max(1, int(target))
+    if n <= target:
+        return [i for i, _ in keys]
+    if target == 1:
+        return [keys[0][0]]
+    if target == 2:
+        return [keys[0][0], keys[-1][0]]
+    mid = sorted(keys[1:-1], key=lambda kv: (-kv[1], kv[0]))[:target - 2]
+    picked = sorted([keys[0]] + mid + [keys[-1]], key=lambda kv: kv[0])
+    return [i for i, _ in picked]
+
+
+def _auto_frame_plan(im, frames: int) -> tuple:
+    """自动档：先去重拿关键帧，再决定拼几格（用户 m13967）。
+
+    关键帧不超过 25 个就全用上（有几个拼几格）；超过 25 个就按变化量丢到 25 个，
+    首尾保留。返回 (去重后的关键帧数, 要拼的下标)。
+    """
+    keys = _key_frames_scored(im, frames)
+    n = len(keys)
+    return n, _pick_frames(keys, min(n, _DERIVE_AUTO_MAX))
+
+
+def _grid_cols(k: int) -> int:
+    """k 帧排几列：尽量方（ceil(sqrt(k))）。k ≤ 9 时跟原来的 1 / 2 / 3 完全一致。"""
+    if k <= 1:
+        return 1
+    return int(math.ceil(math.sqrt(k)))
+
+
+def _grid_tile(k: int, tile: int) -> int:
+    """拼图整体不能超过上游的像素 / 单边闸，超了就把单帧边长收小。
+
+    用户 m30656：帧数一多拼图就大，25 帧配 512 会到 2596×2596 = 674 万像素，
+    超过 _DERIVE_PIXEL_MAX 会让整轮请求 400，所以这里按几何关系反推一个能过的边长。
+    """
+    cols = _grid_cols(k)
+    rows = int(math.ceil(k / float(cols)))
+    gap = _DERIVE_GAP
+    t = max(64, int(tile))
+    edge_cap = (_DERIVE_EDGE_MAX - (cols + 1) * gap) // cols
+    if edge_cap > 0:
+        t = min(t, edge_cap)
+    while t > 64:
+        w = cols * t + (cols + 1) * gap
+        h = rows * t + (rows + 1) * gap
+        if w * h <= _DERIVE_PIXEL_MAX:
+            break
+        t -= 1
+    return max(64, t)
+
+
+def _grid_jpeg(im, frames: int, tile: int = _DERIVE_TILE, quality: int = _DERIVE_GRID_Q,
+               want: int = _DERIVE_MAX_FRAMES, idxs=None) -> tuple:
+    """等距抽帧拼成一张图，返回 (jpeg 字节, 列, 行, 实际帧数)。
+
+    tile / quality / want 由设置页「动图设置」给（用户 m10267 / m30656），默认 384 / 88 / 9。
+    idxs 是自动档挑好的关键帧下标（用户 m13967），给了就直接用，不再等距抽。
+    """
+    from PIL import Image
+
+    if idxs:
+        idxs = [max(0, min(int(frames) - 1, int(i))) for i in idxs]
+        k = max(1, len(idxs))
     else:
-        idxs = [int(round(i * (frames - 1) / (k - 1))) for i in range(k)]
+        k = max(1, min(int(want or _DERIVE_MAX_FRAMES), frames))
+        if k == 1:
+            idxs = [0]
+        else:
+            idxs = [int(round(i * (frames - 1) / (k - 1))) for i in range(k)]
+    tile = _grid_tile(k, tile)
     tiles = []
     for i in idxs:
         im.seek(int(i))
         bg = _frame_rgb(im.copy())
-        bg.thumbnail((_DERIVE_TILE, _DERIVE_TILE), Image.LANCZOS)
+        bg.thumbnail((tile, tile), Image.LANCZOS)
         tiles.append(bg)
-    cols = 1 if k == 1 else (2 if k <= 4 else 3)
+    cols = _grid_cols(k)
     rows = int(math.ceil(k / float(cols)))
     cw = max(t.width for t in tiles)
     ch = max(t.height for t in tiles)
@@ -4457,27 +4782,34 @@ def _grid_jpeg(im, frames: int) -> tuple:
         y = gap + ry * (ch + gap) + (ch - t.height) // 2
         canvas.paste(t, (x, y))
     buf = io.BytesIO()
-    canvas.save(buf, "JPEG", quality=_DERIVE_GRID_Q, optimize=True)
+    canvas.save(buf, "JPEG", quality=quality, optimize=True)
     return buf.getvalue(), cols, rows, k
 
 
-def _shrink_jpeg(im) -> bytes:
-    """静态图压到最长边 1280，质量 95（与框架自带压缩同参）。"""
+def _shrink_jpeg(im, side: int = _DERIVE_STATIC_SIDE, quality: int = _DERIVE_STATIC_Q) -> bytes:
+    """静态图压到最长边 side、质量 quality（默认 1280 / 95，与框架自带压缩同参）。
+
+    动图「只读首帧」那一档也走这里，side 用「单帧边长」、quality 用「动图质量」
+    （用户 m10267 / m30982）；静态图压缩仍用默认值。
+    """
     from PIL import Image
 
     im.seek(0)
     frame = _frame_rgb(im)
-    frame.thumbnail((_DERIVE_STATIC_SIDE, _DERIVE_STATIC_SIDE), Image.LANCZOS)
+    frame.thumbnail((side, side), Image.LANCZOS)
     buf = io.BytesIO()
-    frame.save(buf, "JPEG", quality=_DERIVE_STATIC_Q, optimize=True)
+    frame.save(buf, "JPEG", quality=quality, optimize=True)
     return buf.getvalue()
 
 
-def _shrink_pixels(im, max_px: int) -> bytes:
+def _shrink_pixels(im, max_px: int, max_edge: int = 0) -> bytes:
     """静态图按总像素缩（用户 m13535）。
 
     长截图按最长边缩会变成一条看不清的细线（1250×12800 → 125×1280），
     按像素预算缩才既过得了上游、又还看得清字。
+
+    用户 m10848：光看像素还不够——586×10228 只有 599 万像素，过了像素闸，
+    但上游单边超过 8192 就整张拒收。所以再压一道单边上限，两个比例取小的那个。
     """
     from PIL import Image
 
@@ -4485,8 +4817,12 @@ def _shrink_pixels(im, max_px: int) -> bytes:
     frame = _frame_rgb(im)
     w, h = frame.size
     total = max(1, int(w) * int(h))
+    scale = 1.0
     if total > max_px:
         scale = (float(max_px) / float(total)) ** 0.5
+    if max_edge and max(int(w), int(h)) * scale > max_edge:
+        scale = float(max_edge) / float(max(int(w), int(h)))
+    if scale < 1.0:
         frame = frame.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
     buf = io.BytesIO()
     frame.save(buf, "JPEG", quality=_DERIVE_STATIC_Q, optimize=True)
@@ -4545,14 +4881,16 @@ def _read_derived_hit(droot: Path, digest: str, tag: str, note: str = "", source
     return {"path": _DERIVE_DIR + "/" + name, "note": note}
 
 
-def _derive_media(rel: str, gif_mode: str = "grid", *, _noop=None) -> Optional[dict]:
+def _derive_media(rel: str, gif_mode: str = "grid", *, _noop=None, gif_opts=None) -> Optional[dict]:
     """把一张历史图做成「便宜又看得懂」的一份，返回 {path, note}；不需要或不支持就 None。
 
     动图按 gif_mode 分三档（v4.45，用户 m22611）：grid → 九宫格 + 一句说明；
     original → 原样发（返回 None）；first → 只发第 1 帧、压成一张静图；
     skip → 返回 {"skip": True, "note": …}，调用方把图整个撤掉。
     静态大图 → 压到 1280。源图不存在、PIL 解不开、压完反而更大，一律返回 None。
+    gif_opts 是 (单帧边长, 质量, 帧数)，来自设置页「动图设置」（用户 m10267 / m30656 / m30982）。
     """
+    tile, quality, want = _gif_opts_of(gif_opts)
     root = _data_root()
     droot = _derive_root()
     if root is None or droot is None or not rel:
@@ -4604,27 +4942,48 @@ def _derive_media(rel: str, gif_mode: str = "grid", *, _noop=None) -> Optional[d
                 return {"skip": True,
                         "note": "（这张是动图，按设置没有发给模型）"}
             if mode == "first":
-                tag = "f%d_%d" % (_DERIVE_STATIC_SIDE, _DERIVE_STATIC_Q)
+                tag = "f%d_%d" % (tile, quality)
                 note = "（动图 · 共 %d 帧，只发了第 1 帧，后面的帧没发）" % frames
                 hit = _read_derived_hit(droot, digest, tag, note)
                 if hit:
                     return hit
                 try:
-                    blob = _shrink_jpeg(im)
+                    blob = _shrink_jpeg(im, tile, quality)
                 except Exception:
                     return None
             else:
-                k = max(1, min(_DERIVE_MAX_FRAMES, frames))
-                cols = 1 if k == 1 else (2 if k <= 4 else 3)
+                auto = (int(want) == _DERIVE_AUTO_FRAMES)
+                # 用户 m13990 / m14556：四档都先去重，再从关键帧里挑；固定档超出时丢变化最小的。
+                ck = (digest, frames)
+                keys = _DERIVE_KEYS_CACHE.get(ck)
+                if keys is None:
+                    keys = _key_frames_scored(im, frames)
+                    if len(_DERIVE_KEYS_CACHE) > 4096:
+                        _DERIVE_KEYS_CACHE.clear()
+                    _DERIVE_KEYS_CACHE[ck] = keys
+                keys_n = len(keys)
+                if auto:
+                    idxs = _pick_frames(keys, min(keys_n, _DERIVE_AUTO_MAX))
+                else:
+                    target = max(1, min(int(want), frames))
+                    idxs = _pick_frames(keys, target)
+                k = len(idxs)
+                cols = _grid_cols(k)
                 rows = int(math.ceil(k / float(cols)))
-                tag = "g%d_%d_%d" % (k, _DERIVE_TILE, _DERIVE_GRID_Q)
-                note = "（动图 · 共 %d 帧，上面是等距抽的 %d 帧拼图，%d×%d，从左到右、从上到下）" % (
-                    frames, k, cols, rows)
+                tile = _grid_tile(k, tile)
+                if auto:
+                    # 收尾帧规则变了，老衍生图不能复用，前缀跟着换（用户 m14811）。
+                    tag = "gm%d_%d_%d" % (k, tile, quality)
+                else:
+                    # 固定档换成 gl 前缀：老版本按全部帧等距抽、或按旧收尾规则拼的衍生图不能复用。
+                    tag = "gl%d_%d_%d" % (k, tile, quality)
+                note = "（动图 · 共 %d 帧，去重后 %d 个关键帧，上面是 %d 帧拼图，%d×%d，从左到右、从上到下）" % (
+                    frames, keys_n, k, cols, rows)
                 hit = _read_derived_hit(droot, digest, tag, note)
                 if hit:
                     return hit
                 try:
-                    blob, cols, rows, k = _grid_jpeg(im, frames)
+                    blob, cols, rows, k = _grid_jpeg(im, frames, tile, quality, want, idxs)
                 except Exception:
                     return None
         else:
@@ -4637,18 +4996,24 @@ def _derive_media(rel: str, gif_mode: str = "grid", *, _noop=None) -> Optional[d
             except Exception:
                 px = 0
             too_big = px > _DERIVE_PIXEL_MAX
-            if src_size <= _DERIVE_STATIC_MIN and not too_big:
+            edge = 0
+            try:
+                edge = max(int(im.width), int(im.height))
+            except Exception:
+                edge = 0
+            too_long = edge > _DERIVE_EDGE_MAX
+            if src_size <= _DERIVE_STATIC_MIN and not too_big and not too_long:
                 if _noop is not None:
                     _noop.append(True)
                 return None
-            if too_big:
-                tag = "p%d_%d" % (_DERIVE_PIXEL_MAX // 10000, _DERIVE_STATIC_Q)
+            if too_big or too_long:
+                tag = "p%d_e%d_%d" % (_DERIVE_PIXEL_MAX // 10000, _DERIVE_EDGE_MAX, _DERIVE_STATIC_Q)
                 # 缩完可能比原图还大（原图已经压得很狠），不能按大小判缓存是否有效
                 hit = _read_derived_hit(droot, digest, tag, note)
                 if hit:
                     return hit
                 try:
-                    blob = _shrink_pixels(im, _DERIVE_PIXEL_MAX)
+                    blob = _shrink_pixels(im, _DERIVE_PIXEL_MAX, _DERIVE_EDGE_MAX)
                 except Exception:
                     return None
                 if not blob:
@@ -4684,10 +5049,11 @@ def _derive_media(rel: str, gif_mode: str = "grid", *, _noop=None) -> Optional[d
         return None
 
 
-def _derive_cached(rel: str, gif_mode: str = "grid"):
+def _derive_cached(rel: str, gif_mode: str = "grid", gif_opts=None):
     """同一份源图（路径 + 大小 + 修改时间没变）只算一次，每轮请求别重复解图。
 
     模式也要进键：换档之后同一张动图得重算一遍，不能吃到上一档的结果（v4.45）。
+    三个动图参数也进键（用户 m10267）：改了边长 / 质量，同一张图同样得重算。
     """
     key = None
     try:
@@ -4696,7 +5062,7 @@ def _derive_cached(rel: str, gif_mode: str = "grid"):
             src = (root / str(rel).replace("\\", "/"))
             st = src.stat()
             key = (str(rel), int(st.st_size), int(st.st_mtime_ns),
-                   str(gif_mode or "grid"))
+                   str(gif_mode or "grid"), tuple(gif_opts or ()))
     except Exception:
         key = None
     if str(rel or "").replace("\\", "/").startswith(_DERIVE_DIR + "/"):
@@ -4708,7 +5074,7 @@ def _derive_cached(rel: str, gif_mode: str = "grid"):
             return hit
         _DERIVE_MEMO.pop(key, None)  # 缺失/损坏的 JPEG 都必须重建，不能把坏字节发出去
     noop = []
-    res = _derive_media(rel, gif_mode, _noop=noop)
+    res = _derive_media(rel, gif_mode, _noop=noop, gif_opts=gif_opts)
     # 缓存正常“不需衍生”，但不能把暂时解码/读写失败永久冻成原图。
     if key is not None and (res is not None or noop):
         if len(_DERIVE_MEMO) > 4096:
@@ -4717,10 +5083,11 @@ def _derive_cached(rel: str, gif_mode: str = "grid"):
     return res
 
 
-def swap_derived_parts(parts, gif_mode: str = "grid") -> list:
+def swap_derived_parts(parts, gif_mode: str = "grid", gif_opts=None) -> list:
     """把一条消息里的图片引用换成衍生图（动图九宫格 / 静态压缩），并补上说明。
 
     gif_mode 三档见 _derive_media；skip 时这张动图整个撤掉、只留一句说明。
+    gif_opts 是「动图设置」那几个参数（用户 m10267），一路传给 _derive_cached。
     """
     if not isinstance(parts, list):
         return parts
@@ -4732,7 +5099,7 @@ def swap_derived_parts(parts, gif_mode: str = "grid") -> list:
             continue
         hit = None
         try:
-            hit = _derive_cached(str(part.get("path") or ""), gif_mode)
+            hit = _derive_cached(str(part.get("path") or ""), gif_mode, gif_opts)
         except Exception:
             hit = None
         if not hit:
@@ -4752,7 +5119,7 @@ def swap_derived_parts(parts, gif_mode: str = "grid") -> list:
     return out if changed else parts
 
 
-def _apply_derived(messages, gif_mode: str = "grid") -> List[Any]:
+def _apply_derived(messages, gif_mode: str = "grid", gif_opts=None) -> List[Any]:
     """把整份消息里的图片都换成「发出去那一份」（动图九宫格 / 静态压缩）。
 
     不能只在「刚挂上去的那几条」上做：窗口本体里本来就带图的消息（最近 128 张）
@@ -4764,7 +5131,7 @@ def _apply_derived(messages, gif_mode: str = "grid") -> List[Any]:
         if not isinstance(content, list):
             continue
         try:
-            new = swap_derived_parts(list(content), gif_mode)
+            new = swap_derived_parts(list(content), gif_mode, gif_opts)
         except Exception:
             continue
         if new != content:
@@ -4929,7 +5296,7 @@ def forward_refs_for(text: str, mid: str, raw_sid: str = "") -> list:
 
 
 def forward_model_refs(raw_sid: str, mid: str, refs, gif_mode: str = "grid",
-                       drop_gif: bool = False) -> list:
+                       drop_gif: bool = False, gif_opts=None) -> list:
     """把转发图物化成框架认得的 session_media 路径，返回可挂进请求的 refs。
 
     view_forward 工具用：模型要看完整转发时，把这些图当工具结果的附件带回去。
@@ -4957,7 +5324,7 @@ def forward_model_refs(raw_sid: str, mid: str, refs, gif_mode: str = "grid",
         note = ""
         derived = False
         try:
-            hit = _derive_cached(rel, gif_mode)
+            hit = _derive_cached(rel, gif_mode, gif_opts)
         except Exception:
             hit = None
         if isinstance(hit, dict):
@@ -4981,7 +5348,8 @@ def forward_model_refs(raw_sid: str, mid: str, refs, gif_mode: str = "grid",
 
 
 def attach_window_images(messages, raw_sid: str, keep: int = 128,
-                         gif_mode: str = "grid", media_map=None, sources=None) -> List[Any]:
+                         gif_mode: str = "grid", media_map=None, sources=None,
+                         gif_opts=None) -> List[Any]:
     """统一模型媒体投影：首次 owned 原图固定，按模式派生，最后统一限图。
 
     sources 是会话内按 message_id 留的固定源与成功投影（含相邻说明），绝不写回窗口/页面。
@@ -4999,7 +5367,7 @@ def attach_window_images(messages, raw_sid: str, keep: int = 128,
         mid = _mid_of_text(text)
         if not mid:
             # 没有编号的兼容消息不做跨轮认领，仍处理其已有图片。
-            out[i] = _apply_derived([msg], gif_mode)[0]
+            out[i] = _apply_derived([msg], gif_mode, gif_opts)[0]
             continue
         record = sources.get(mid)
         if record is None:
@@ -5040,7 +5408,7 @@ def attach_window_images(messages, raw_sid: str, keep: int = 128,
             if _PIC_TEXT_RE.search(text) and not isinstance(content, list):
                 out[i] = _with_content(msg, [{"type": "text", "text": text}])
             else:
-                out[i] = _apply_derived([msg], gif_mode)[0]
+                out[i] = _apply_derived([msg], gif_mode, gif_opts)[0]
             continue
         # 来源路径可能是同张图片的原件/缓存别名，固定后才知道它们是同一份内容。
         # 对最终 owned 路径去重，也修复热重载前已经认领出重复 refs 的记录；
@@ -5059,8 +5427,9 @@ def attach_window_images(messages, raw_sid: str, keep: int = 128,
         def emit(ref):
             # 准备成功后绑定固定源+模式，不再因一次源 stat/解码失败退回原 GIF。
             # 保存在同一个 mid record，同进程热重载保留；随 clear/forget/trim 回收，先准备再限图。
+            # 用户 m10267：单帧边长/首帧边长/质量也进 key，改设置后同一 mid 不会命中旧投影。
             projections = record.setdefault("prepared", {})
-            key = (str(ref.get("path") or ""), str(gif_mode or "grid"))
+            key = (str(ref.get("path") or ""), str(gif_mode or "grid"), tuple(gif_opts or ()))
             ready = projections.get(key)
             if ready is not None and _restore_model_projection(ready):
                 derived = [dict(p) for p in ready]
@@ -5074,7 +5443,7 @@ def attach_window_images(messages, raw_sid: str, keep: int = 128,
                                 healed = _pin_model_refs([slot.get("source")], text, raw_sid)
                                 if healed and healed[0].get("path") == key[0]:
                                     break
-                    derived = swap_derived_parts([dict(ref)], gif_mode)
+                    derived = swap_derived_parts([dict(ref)], gif_mode, gif_opts)
                 except Exception:
                     derived = [dict(ref)]
                 if derived != [ref] and _restore_model_projection(derived):
@@ -5914,6 +6283,122 @@ class WindowManager:
         st = self._states.get(sid)
         return list(st.pending) if st else []
 
+    def push_skipped(self, sid: str, sender: str, name: str, text: str,
+                     media: str = "", ts: float = 0.0, raw: str = "",
+                     files=None, reason: str = "file",
+                     mid: str = "", after_mid: str = "") -> dict:
+        """记一条「没进上下文」的消息，页面单独一组显示（用户 m5411）。
+
+        只给界面看：不进窗口、不进待发、不参与裁切和条数统计。
+        类型字段叫 media_kind 不叫 media——display_projection 会把 media 当
+        引用列表遍历，字符串会被逐字符迭代。
+
+        用户 m32048：多记两个 message_id——mid 是这条自己的（同一条只记一次，
+        框架记忆每轮都会把同一条文件消息再吐回来），after_mid 是它被挡下来时
+        窗口 / 待发里最后一条消息的编号，页面按这个锚点把虚线卡插回原位。
+        """
+        st = self.state(sid)
+        mid = str(mid or "").strip() or self._bl_mid_of(raw)
+        raw_key = str(raw or "").strip()
+        for old in st.skipped:
+            if not isinstance(old, dict):
+                continue
+            if mid and str(old.get("mid") or "") == mid:
+                return old
+            if not mid and raw_key and str(old.get("raw") or "") == raw_key:
+                return old
+        item = {
+            "ts": float(ts or time.time()),
+            "sender": str(sender or ""),
+            "name": str(name or ""),
+            "text": str(text or "").strip(),
+            "raw": self.normalize_mentions(sid, str(raw or "")),
+            "media_kind": str(media or ""),
+            "files": [dict(f) for f in (files or []) if isinstance(f, dict)],
+            "reason": str(reason or "file"),
+            "mid": mid,
+            "after_mid": str(after_mid or "").strip(),
+        }
+        st.skipped.append(item)
+        if len(st.skipped) > 20:
+            del st.skipped[:len(st.skipped) - 20]
+        return item
+
+    def skipped_of(self, sid: str) -> list:
+        st = self._states.get(sid)
+        if st is None:
+            return []
+        # 用户 m32048 第 4 条：被拉黑挡在请求之外的消息也算「没进上下文」，
+        # 快照里它们整条不在，补一条虚线卡才查得到当时收到了什么。
+        rows = list(st.skipped)
+        rows.extend(self.blacklist_skip_rows(sid))
+        return rows
+
+    def _last_mid(self, st, include_pending: bool = True) -> str:
+        """窗口 / 待发里最后一条消息的 message_id（虚线卡按它定位，用户 m32048）。"""
+        if st is None:
+            return ""
+        if include_pending:
+            for it in reversed(list(getattr(st, "pending", []) or [])):
+                if not isinstance(it, dict):
+                    continue
+                mid = str(it.get("message_id") or "").strip()
+                if not mid:
+                    mid = self._bl_mid_of(it.get("raw") or it.get("text") or "")
+                if mid:
+                    return mid
+        for m in reversed(list(getattr(st, "messages", []) or [])):
+            content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+            mid = self._bl_mid_of(content)
+            if mid:
+                return mid
+        return ""
+
+    def _drop_file_only(self, msgs, sid: str = "", anchor_mid: str = "") -> list:
+        """纯文件消息整条不进上下文（用户 m32048 第 2 条）。
+
+        以前只把正文里的文件占位符剥掉，user 那行还留着，页面上就成了一条
+        「有 user 信息、内容被换成 [文件]」的空壳。现在整条剔掉，同时记一条
+        虚线卡（push_skipped）：页面照常显示、快照也带着，只是不进请求。
+
+        anchor_mid 是这批消息之前窗口里的最后一条编号，虚线卡按它插回原位；
+        同一条消息框架记忆每轮都会再吐回来，push_skipped 按 mid 去重。
+        """
+        try:
+            on = bool(self.plugin.eff("file_skip_context", sid))
+        except Exception:
+            on = bool(getattr(self.plugin, "file_skip_context", True))
+        if not on:
+            return list(msgs or [])
+        out = []
+        prev_mid = str(anchor_mid or "").strip()
+        for m in msgs or []:
+            if not isinstance(m, dict) or str(m.get("role") or "") != "user":
+                out.append(m)
+                continue
+            content = m.get("content")
+            if not is_file_only_message(content):
+                out.append(m)
+                mid = self._bl_mid_of(content)
+                if mid:
+                    prev_mid = mid
+                continue
+            raw = text_of_content(content)
+            nick = self._NICK_RE.search(raw)
+            self.push_skipped(
+                sid,
+                self._bl_uid_of(content),
+                nick.group(1).strip() if nick else "",
+                "",
+                "",
+                raw_line_ts(content),
+                raw,
+                reason="file",
+                mid=self._bl_mid_of(content),
+                after_mid=prev_mid,
+            )
+        return out
+
     def take_pending(self, sid: str) -> list:
         """把待发整批摘下（重试不带待发时暂存，结算后原样放回）。
 
@@ -5944,6 +6429,7 @@ class WindowManager:
     # 前面没有独立的「[」，所以这里不能带开头的 \[（2026-11-14 实测踩过）。
     _BL_UID_RE = re.compile(r"user_id:\s*([^,\]\n]+)")
     _BL_MID_RE = re.compile(r"\[message_id:\s*([^\]\n]+)")
+    _NICK_RE = re.compile(r"\[user_nickname:\s*([^,\]\n]+)")
 
     def _blacklist_map(self, sid: str = "") -> dict:
         """uid -> 放行的 message_id 集合（拉黑那一刻已经在窗口里的历史）。
@@ -6028,6 +6514,71 @@ class WindowManager:
             mid = self._bl_mid_of(content)
             if self._bl_keep(bl, uid, mid):
                 out.append(m)
+        return out
+
+    def blacklist_dropped_ids(self, sid: str = "") -> list:
+        """窗口里被黑名单挡在请求之外的消息编号（页面画虚线用，用户 m32048 第 4 条）。
+
+        窗口本体不动（页面照常显示），只是这些消息不会进请求上下文。
+        """
+        st = self._states.get(sid)
+        if st is None:
+            return []
+        bl = self._blacklist_map(sid)
+        if not bl:
+            return []
+        out = []
+        for m in list(getattr(st, "messages", []) or []):
+            content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+            uid = self._bl_uid_of(content)
+            if not uid or uid not in bl:
+                continue
+            mid = self._bl_mid_of(content)
+            if self._bl_keep(bl, uid, mid):
+                continue
+            if mid:
+                out.append(mid)
+        return out
+
+    def blacklist_skip_rows(self, sid: str = "") -> list:
+        """窗口里被黑名单挡在请求之外的消息，做成虚线卡（用户 m32048 第 4 条）。
+
+        窗口本体不动（页面照常显示），只是这些消息不进请求上下文。快照里它们
+        整条不在，所以补一条虚线卡：事后还能看到「这条收到了，但没给模型看」。
+        after_mid 取它前面最后一条**放行**的消息，快照里才找得到锚点。
+        """
+        st = self._states.get(sid)
+        if st is None:
+            return []
+        bl = self._blacklist_map(sid)
+        if not bl:
+            return []
+        out = []
+        prev_mid = ""
+        for m in list(getattr(st, "messages", []) or []):
+            content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+            mid = self._bl_mid_of(content)
+            uid = self._bl_uid_of(content)
+            if uid and uid in bl and not self._bl_keep(bl, uid, mid):
+                raw = text_of_content(content)
+                nick = self._NICK_RE.search(raw)
+                out.append({
+                    "ts": raw_line_ts(content),
+                    "sender": uid,
+                    "name": nick.group(1).strip() if nick else "",
+                    "text": _raw_body(content).strip(),
+                    "raw": self.normalize_mentions(sid, raw),
+                    "media_kind": "",
+                    "files": [],
+                    "reason": "blacklist",
+                    "mid": mid,
+                    "after_mid": prev_mid,
+                })
+                continue
+            if mid:
+                prev_mid = mid
+        if len(out) > 20:
+            del out[:len(out) - 20]
         return out
 
     def blacklist_keep_ids(self, uid: str) -> list:
@@ -6219,6 +6770,10 @@ class WindowManager:
             mention_normalizer=lambda content: self.normalize_mentions(sid, content),
             drop_tools=drop_tools,
         )
+        # 用户 m32048 第 2 条：纯文件消息整条不进上下文——以前只剥正文里的占位符，
+        # user 那行还留着，页面上成了一条「有 user 信息、内容被换成 [文件]」的空壳。
+        # 放在合并之后做：这时 st.messages 就是最终顺序，虚线卡的锚点才对得上。
+        st.messages = self._drop_file_only(st.messages, sid)
         # 框架 assemble 会把整批图片都挂到最后一条 user 上（用户 m26465），
         # 入窗后按 path 里的 message_id 哈希把图挪回原主。只修被改到的消息。
         fixed = regroup_images(st.messages)
@@ -6263,6 +6818,8 @@ class WindowManager:
         # 全等，于是主路修过的两个重复 bug（v3.37 同一条回复显示两遍、v3.54
         # 模型学着成对地写）在这条路上原地复现。
         added = merge_trusted_messages(st, extra)
+        # 用户 m32048 第 2 条：判不回就地定格时，纯文件消息同样整条不进上下文。
+        st.messages = self._drop_file_only(st.messages, sid)
         if added:
             fixed = regroup_images(st.messages)
             if fixed is not st.messages:
@@ -6350,7 +6907,7 @@ class WindowManager:
         st = self.state(sid)
         if st is None or not responses:
             return 0
-        # 开关打开（工具结果不进实时窗）时不补，否则刚摘掉的又被插回来
+        # 开关打开（丢弃工具结果）时不补，否则刚摘掉的又被插回来
         if self._bool_eff("window_drop_tools", sid, False):
             return 0
         have = set()
@@ -6637,7 +7194,8 @@ class WindowManager:
             if mid not in active:
                 sources.pop(mid, None)
         want = self._int_eff("history_images", sid, 128) if keep is None else int(keep)
-        out = attach_window_images(msgs, raw_sid, want, self._gif_mode(sid), extra, sources)
+        out = attach_window_images(msgs, raw_sid, want, self._gif_mode(sid), extra, sources,
+                                   self._gif_opts(sid))
         for _mid, _sig in _fwd_sigs.items():
             _rec = sources.get(_mid)
             if isinstance(_rec, dict):
@@ -6863,7 +7421,8 @@ class WindowManager:
         失败（用户 m07898）。不同图各自保留，顺序按首次出现。
 
         messages 可传 engine 已准备的 decision_snapshot，避免重复投影/读盘。
-        skip、限图、关闭后的图不会被原始 media_list 再补回。
+        skip、限图、关闭后的图不会被原始 media_list 再补回。限图按「先到先得」
+        取最早的那批（跟 strip_old_images 同一口径，用户 m24812）。
         """
         want = self._int_eff("history_images", sid, 128) if limit is None else int(limit)
         if want == 0:
@@ -6897,7 +7456,7 @@ class WindowManager:
                     continue
                 seen.add(key)
             uniq.append(it)
-        return uniq if want < 0 else uniq[-want:]
+        return uniq if want < 0 else uniq[:want]
 
 
     @staticmethod
@@ -7004,6 +7563,14 @@ class WindowManager:
             except Exception:
                 name = ""
         return name
+
+    def bot_own_name(self, sid: str = "") -> str:
+        """这个会话里机器人自己的名字（不含设置页外号）；探测不到就是空。
+
+        用户 m22683：「@ 了别人」得先认得出机器人自己叫什么，认不出就不判，
+        否则会把所有 @bot 的消息都当成 @ 了别人过滤掉。
+        """
+        return self._bot_name(sid)
 
     def mention_names(self, sid: str = "") -> List[str]:
         """这个会话里「叫到机器人」的所有写法：主名 + 设置页填的外号。
@@ -7162,6 +7729,17 @@ class WindowManager:
         except Exception:
             return "grid"
 
+    def gif_opts(self, sid: str) -> tuple:
+        """当前会话的动图派生参数（公开入口，view_forward 工具那条路要用）。
+
+        用户 m10267：单帧边长 / 首帧边长 / 质量三个值在设置页「动图设置」里能改。
+        """
+        try:
+            key = normalize_sid(str(sid or "")) or str(sid or "")
+        except Exception:
+            key = str(sid or "")
+        return self._gif_opts(key)
+
     def _gif_mode(self, sid: str) -> str:
         """历史里的动图怎么发给模型（v4.45，用户 m22611）。
 
@@ -7176,6 +7754,16 @@ class WindowManager:
         if self._bool_eff("history_gif_first", sid, False):
             return "first"
         return "skip"
+
+    def _gif_opts(self, sid: str) -> tuple:
+        """动图派生的三个可调参数（用户 m10267 / m30656 / m30982）。
+
+        单帧边长、质量、抽几帧；默认值就是原来写死的 384 / 88 / 9。
+        静态图压缩不走这里，仍是 1280 / 95。
+        """
+        return (self._int_eff("gif_tile", sid, _DERIVE_TILE),
+                self._int_eff("gif_quality", sid, _DERIVE_GRID_Q),
+                self._int_eff("gif_frames", sid, _DERIVE_MAX_FRAMES))
 
     def _summary_on(self, sid: str) -> bool:
         try:
@@ -8009,7 +8597,7 @@ def _persist(fn):
     return wrap
 
 
-for _name in ("push_pending", "mark_pending", "collect", "normalize",
+for _name in ("push_pending", "mark_pending", "push_skipped", "collect", "normalize",
               "maybe_trim", "commit_decision", "_append_summary", "clear_summary",
               "forget", "clear"):
     setattr(WindowManager, _name, _persist(getattr(WindowManager, _name)))

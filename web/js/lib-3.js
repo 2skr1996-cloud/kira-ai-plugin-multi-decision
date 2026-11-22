@@ -484,6 +484,79 @@
   // 这两个特征只有官方机器人的 markdown 消息才有，普通群消息不会误伤。
   var BOT_MD_RE = /mqqapi:\/\/markdown\/mention|qqbot\.ugcimg\.cn/i;
   function isBotMarkdown(t){ return BOT_MD_RE.test(String(t == null ? "" : t)); }
+  // 用户 m12198 图1/图3：QQ 官方机器人（运势、抽卡、塔罗这类）发的是 markdown 消息，
+  // 群里渲染成一张卡片：标题、正文、配图、一排可点的指令按钮。原文里这些分别是
+  //   # 标题 / ***粗体*** / ```html 代码块 / > 引用前缀 / ➢ [文字](mqqapi://aio/inlinecmd?…)
+  //   / [](%7B%22version%22%3A2%7D)（QQ 的「菜单」按钮占位）
+  // 以前一律当普通正文铺开，窗口里看到的就是一堆 markdown 语法。
+  // 只给机器人卡片用（bodyHtml 的第 6 个参数），普通群消息不受影响。
+  // 用户 m12469：字数气泡以前由 tailChip 插在 .mono 末尾，正文按行拆成 .qqmd-p 之后，
+  // 气泡落在块级段落后面只能另起一行（「5 字 拉黑」孤零零挂在正文下面）。
+  // 调用方把气泡放进 QQMD_TAIL，最后一段是段落就塞进段落里，跟文字排在同一行。
+  var QQMD_TAIL = "";
+  function qqMdHtml(t){
+    var lines = String(t == null ? "" : t).split(/\r?\n/);
+    var out = "", buf = [], fence = [], inFence = false, lastKind = "";
+    function flushText(){
+      if(!buf.length) return;
+      var s = buf.join("\n");
+      buf = [];
+      if(!s.trim()) return;
+      out += "<div class='qqmd-p'>" + qqMdInline(s) + "</div>";
+      lastKind = "p";
+    }
+    function flushFence(){
+      if(!fence.length) return;
+      out += "<pre class='qqmd-code'>" + esc(fence.join("\n")) + "</pre>";
+      lastKind = "pre";
+      fence = [];
+    }
+    for(var i = 0; i < lines.length; i++){
+      var ln = lines[i];
+      if(/^\s*```/.test(ln)){
+        if(inFence){ flushFence(); inFence = false; }
+        else { flushText(); inFence = true; }
+        continue;
+      }
+      if(inFence){ fence.push(ln); continue; }
+      // QQ 的「菜单」按钮占位，浏览器里点不了，留着只是一串 %7B%22version%22…
+      if(/^\s*\[\]\([^)]*%7B%22version%22%3A2%7D[^)]*\)\s*$/.test(ln)) continue;
+      // 卡片正文整段包在 > 里，剥掉前缀
+      var q = ln.replace(/^\s*(?:>\s?)+/, "");
+      // 指令按钮：➢ [文字](mqqapi://aio/inlinecmd?…)
+      var cm = q.match(/^\s*[➢►▶]\s*(.*)$/);
+      if(cm){ flushText(); out += "<div class='qqmd-cmd'>" + qqMdInline(cm[1]) + "</div>"; lastKind = "cmd"; continue; }
+      // 标题
+      var hm = q.match(/^\s*#{1,6}\s+(.+?)\s*#*\s*$/);
+      if(hm){ flushText(); out += "<div class='qqmd-h'>" + qqMdInline(hm[1]) + "</div>"; lastKind = "h"; continue; }
+      buf.push(q);
+    }
+    flushFence();
+    flushText();
+    if(QQMD_TAIL){
+      // 最后一块是段落就塞进段落里（跟文字同一行）；是代码块/指令/标题就接在后面
+      var k = lastKind === "p" ? out.lastIndexOf("</div>") : -1;
+      out = k >= 0 ? out.slice(0, k) + QQMD_TAIL + out.slice(k) : out + QQMD_TAIL;
+    }
+    return out;
+  }
+  // 行内：***粗体*** → **粗体**（inlineMd 只认两个星号），
+  // [文字](mqqapi://…) → 文字（QQ 的指令按钮，浏览器里点不了，只留文字）
+  function qqMdInline(s){
+    var t = String(s == null ? "" : s);
+    // QQ 的「菜单」按钮占位，浏览器里点不了，留着只是一串 %7B%22version%22…
+    t = t.replace(/\[\]\([^)]*%7B%22version%22%3A2%7D[^)]*\)/g, "");
+    // ***粗体*** → **粗体**（下面只认两个星号）
+    t = t.replace(/\*\*\*([^*\n]+?)\*\*\*/g, "**$1**");
+    // [文字](mqqapi://…) → 文字（QQ 的指令按钮，浏览器里点不了，只留文字）
+    t = t.replace(/\[([^\]\n]*)\]\(mqqapi:\/\/[^)\s]*\)/g, "$1");
+    // 粗体 / 行内代码先换成占位符，交给 richText 处理 @ 徽章和表情，最后再换回来
+    var stash = [];
+    function keep(html){ stash.push(html); return "\u0000QB" + (stash.length - 1) + "\u0000"; }
+    t = t.replace(/\*\*([^*\n]{1,140}?)\*\*/g, function(_, x){ return keep("<b>" + esc(x) + "</b>"); });
+    t = t.replace(/`([^`\n]{1,220}?)`/g, function(_, x){ return keep("<code class='ic'>" + esc(x) + "</code>"); });
+    return richText(t).replace(/\u0000QB(\d+)\u0000/g, function(_, i){ return stash[+i]; });
+  }
   function botCardHtml(m, idx, mode, ts, extra, grp){
     var raw = String((mode === "mixed" ? rawOf(m) : m.text) || "");
     // 图片地址必须趁原文还没洗之前抠出来：tidyBody 会把 ![img …](url) 换成「[图片]」，
@@ -499,9 +572,17 @@
     var parts = splitMetaAll(tidyBody(marked));
     var p = parts[0] || { meta: {}, body: raw };
     var meta = p.meta || {};
-    var body = String(p.body || "")
-      // @ 已经在头部做成徽章，正文里那串 At token 不再重复
-      .replace(/\[At\s+\d+\(\s*nickname:\s*[^)]*\)\]/g, " ")
+    var body = String(p.body || "");
+    // @ 已经在头部做成徽章，正文里那串 At token 不再重复。
+    // 用户 m12198 图1：以前这里把正文里所有 At token 一律删掉，可 splitMeta 只把
+    // 「开头那一段」收进 meta.at；QQ 机器人 markdown 消息的 @ 在第二行（菜单链接后面），
+    // 收不进头部、又被这里删掉，整行 @ 就凭空消失了。现在只删头部已经画出来的那几个。
+    (meta.at || []).forEach(function(nm){
+      var needle = "[At 0(nickname: " + nm + ")]";
+      var at = body.indexOf(needle);
+      if(at >= 0) body = body.slice(0, at) + body.slice(at + needle.length);
+    });
+    body = body
       // 图片占位先保留，等地址和槽位一一对应后再原位换图。
       .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
     var slots = body.split(new RegExp(marker + "(\\d+)\\u0000", "g"));
@@ -540,8 +621,21 @@
     var bd = "", lastText = -1;
     slots.forEach(function(t, i){ if(i % 2 === 0 && t) lastText = i; });
     slots.forEach(function(t, i){
-      if(i % 2) bd += botThumbs([pics[Number(t)]]);
-      else if(t) bd += chipInto("", bodyHtml(t, null, 0, "bot-txt"), i === lastText ? chip : "");
+      if(i % 2){ bd += botThumbs([pics[Number(t)]]); return; }
+      if(!t) return;
+      var isLast = i === lastText;
+      // 用户 m12463：折起来的时候字数气泡跟「展开/收起」排在同一行（.mc-tail），
+      // 展开后气泡回到正文末尾，字数 / 收起 / 拉黑三个小标签一行读完。
+      // 跟 bodyHtml 的阈值保持一致：机器人卡片的 CSS 是 3 行才折（用户 m12637）
+      var folded = isLast && estLines(t) > 3;
+      QQMD_TAIL = (isLast && !folded) ? chip : "";
+      var h = bodyHtml(t, null, 0, "bot-txt", false, qqMdHtml);
+      QQMD_TAIL = "";
+      if(folded){
+        var wrapped = h.replace(/(<span class='more'[^>]*>[^<]*<\/span>)$/, "<div class='mc-tail'>" + chip + "$1</div>");
+        h = wrapped === h ? chipInto("", h, chip) : wrapped;
+      }
+      bd += h;
     });
     if(!bd) bd = bodyHtml("", pics.length ? null : "(空)", 0, "bot-txt");
     if(grp){
@@ -570,7 +664,7 @@
     return ids.length ? (" data-mid='" + esc(ids.join(" ")) + "'") : "";
   }
 
-  function mcHtml(m, idx, mode, extra, preMeta, ts, grp, tailExtra){
+  function mcHtml(m, idx, mode, extra, preMeta, ts, grp, tailExtra, chipInCard){
     var role = m.role || "?";
     var ex = extra || "";
     if(role === "summary"){
@@ -758,7 +852,7 @@
           : bodyHtml(bodyTxt, hasPart ? null : "(这条只有元数据，正文是空的)");
         // 无槽位的老附件无法恢复原始坐标：引用/卡片/已知正文优先，附图保守尾随。
         // 不把附图交给 tailChip，字数/待发标签仍紧贴文字末尾。
-        bd2 = chipInto(partHtml, bodyPart, chipU) +
+        bd2 = chipInto(partHtml, bodyPart, chipU, chipInCard) +
               ((fwdIn || inQuote) || inlPlan ? "" : mediaHtml(m, mode));
         }
       } else {
@@ -803,7 +897,7 @@
                            fileHtml(q.meta.file) + (qi === 0 ? filesHtml(m.files) : ""),
                           (segInl ? renderInlineMedia(segInl)
                                   : bodyHtml(segBody, segHasPart ? null : "(这条只有元数据，正文是空的)")),
-                          segChip) + (segInl ? "" : mediaHtml({ media: segOut }, mode)) + "</div>";
+                          segChip, chipInCard) + (segInl ? "" : mediaHtml({ media: segOut }, mode)) + "</div>";
         });
         // 跨段归属不明时仍只画一份，放在已知各段之后，不插进任何引用里。
         if(!claims) bd2 += mediaHtml(m, mode);
@@ -1008,7 +1102,8 @@
   var MARK_CLASS = {
     counted: "ok", direct: "ok", private: "ok", bot: "ok",
     burst: "no", short: "no", rest: "no", backoff: "no", quota: "no",
-    filtered: "no", file: "no"
+    // 用户 m05993 第 2 条：「过滤」单独一个 flt 类，用琥珀色高亮，跟连发/太短那些灰标区分开。
+    filtered: "flt", file: "no"
   };
   // ---- 按发言人分组（v2.80）----
   // 之前按 role 分组：连续几条 assistant 并一块没问题，但 user 那边一条消息里
@@ -1112,6 +1207,15 @@
     if(!changed){ for(var k in m){ if(!UBLK[k]){ changed = true; break; } } }
     UBLK_ON = on;
     UBLK = m;
+    return changed;
+  }
+  // 用户 m13254：窗口接口现在自带名单，首屏（含 sessionStorage 直出）就能折叠，
+  // 不会先按「谁都没拉黑」画一遍、等名单接口回来再折起来。
+  function ublkApply(payload, sid){
+    if(!payload || !payload.ok) return false;
+    var changed = ublkFill(payload);
+    if(sid) ublkSid = sid;
+    ublkAt = Date.now();   // 30 秒内不再单独拉一次
     return changed;
   }
   // 名单按会话缓存 30 秒：窗口每 5 秒重画一次，不能每次都打接口；
@@ -1256,9 +1360,50 @@
     // 时间口径跟历史卡一样只给 HH:MM（fmtTime 带日期和秒，太吵）
     // 组内：标签（刚发出/待发/计入）挪到行尾，头部只留时间
     var full = m.ts ? fmtTime(m.ts) : "";
-    var h = mcHtml(vm, idx, mode, grp ? "" : tags, null, grp ? full : full.slice(6, 11), grp, grp ? tags : "");
+    var h = mcHtml(vm, idx, mode, grp ? "" : tags, null, grp ? full : full.slice(6, 11), grp, grp ? tags : "", true);
     // user 的待发还是虚线框着：它确实还没进历史；bot 的已经发出去了，不框
     return isBot ? h : h.replace(/^<div class='mc /, "<div class='mc pend ");
+  }
+
+  // 用户 m5411：被「文件/视频不进上下文」挡下来的消息单独画一张虚线卡，挂「未进入上下文」标签。
+  // 它不在窗口里、也不在待发里，只是让页面能看出「这条我收到了，但没给模型看」。
+  function skipCards(m, idx, mode, grp){
+    mode = mode || VIEW;
+    var t = (m.text === undefined || m.text === null) ? "" : String(m.text).trim();
+    var kind = String(m.media_kind || "");
+    var files = (m.files && m.files.length) ? m.files : [];
+    var names = [];
+    files.forEach(function(f){
+      var nm = String((f && f.name) || "").trim();
+      if(nm) names.push(nm);
+    });
+    // 视频元素不在 files 里（file_refs_of 只收 File），名字只在 raw 的 [Video name: …] 里
+    if(!names.length){
+      var nmRaw = String(m.raw || "").match(/\[(?:Video|File|视频|文件)\s+name:\s*([^\]\(]+)/i);
+      if(nmRaw) names.push(nmRaw[1].trim());
+    }
+    var body = t;
+    if(!body && names.length) body = names.join("、");
+    if(!body && kind) body = "[" + (MEDIA_LABEL[kind] || "文件") + "]";
+    var rawShown = pendRaw({ raw: m.raw, text: t, ts: m.ts });
+    var full = m.ts ? fmtTime(m.ts) : "";
+    // 组内（grp）时 mcHtml 的时间是从正文的 [时间] 元数据里取的，跳过卡没有正文，
+    // 这里补一个 [MM-DD HH:MM]，否则卡片左上角的时间列是空的。
+    var stamp = (full.match(/\d{1,2}-\d{1,2} \d{1,2}:\d{2}/) || [""])[0];
+    var shown = (mode === "raw") ? rawShown : body;
+    if(grp && stamp && mode !== "raw") shown = "[" + stamp + "] " + shown;
+    var vm = { role: "user", text: shown, raw: rawShown,
+               media: [], display: m.display, who: "",
+               chars: visLen(body), tools: 0, tool_call_id: "" };
+    // 用户 m32048 第 4 条：被拉黑挡下来的那条，标签写「拉黑」而不是媒体类型——
+    // 它跟文件那条一样没进上下文，但原因不同，混在一起看不出为什么。
+    var reason = String(m.reason || "");
+    var tags = "<span class='chb tag skiptag'>未进入上下文</span>" +
+               (reason === "blacklist"
+                 ? "<span class='chb'>拉黑</span>"
+                 : (kind ? "<span class='chb'>" + esc(MEDIA_LABEL[kind] || kind) + "</span>" : ""));
+    var h = mcHtml(vm, idx, mode, grp ? "" : tags, null, grp ? full : full.slice(6, 11), grp, grp ? tags : "");
+    return h.replace(/^<div class='mc /, "<div class='mc skip ");
   }
 
   // 原文档只做视觉排版，文本一律原样：后端给了 raw 就用 raw
@@ -1481,9 +1626,20 @@
 
   function toggleMore(more){
     var holder = more.parentNode;
+    // 用户 m12463：折起来时「展开/收起」跟字数气泡一起放在 .mc-tail 里，
+    // 它前面是气泡不是正文，正文是 .mc-tail 的前一个兄弟。
+    if(holder && holder.classList && holder.classList.contains("mc-tail")) holder = holder.parentNode;
     // v4.82（用户 m08672）：引用块的长原话也走同一个按钮，只是折叠的是 .qbody
     var isQuote = more.getAttribute("data-qbody") === "1";
-    var body = holder ? holder.querySelector(isQuote ? ".qbody" : ".mono") : null;
+    // 用户 m12198 图1：一条消息被图片切成两段正文时，.mc-bd 里有不止一个 .mono，
+    // 以前 querySelector 永远取第一个（没折的那段），点「展开」只是给它又加了一次 clip，
+    // 真正折着的第二段没动、按钮文案也不变，看着就是点了没反应。
+    // 按钮总是紧跟在它所属的那段后面，先认前一个兄弟节点。
+    var body = null;
+    var prev = more.previousElementSibling;
+    if(prev && prev.classList && prev.classList.contains(isQuote ? "qbody" : "mono")) body = prev;
+    if(!body && holder) body = holder.querySelector(isQuote ? ".qbody" : ".mono.clip") ||
+                               holder.querySelector(isQuote ? ".qbody" : ".mono");
     if(!body) return false;
     var clipped = body.classList.toggle("clip");
     // 用生成时记下的文案还原（JSON 是「N 行」，普通文本是「N 字」，别拿渲染后的长度糊弄）

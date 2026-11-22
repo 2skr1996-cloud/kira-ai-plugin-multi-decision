@@ -560,6 +560,10 @@ class DecisionOptions:
     tools: list = field(default_factory=list)
     model: str = ""
     fallback: str = ""
+    # 用户 m01994：思考等级（reasoning_effort）。留空 = 跟随模型自己的设置，不传这个参数。
+    reasoning_effort: str = ""
+    # 用户 m7217：备用模型单独一套思考等级，不跟主模型共用。
+    fallback_reasoning_effort: str = ""
     retry: int = 2
     retry_delay: float = 3.0
     # 用户 m08153：连续失败切换从「几次」改成开关，阈值固定 2。
@@ -633,6 +637,8 @@ def options_from_config(get) -> DecisionOptions:
         tools=[str(x).strip() for x in tools if str(x).strip()],
         model=str(get("decision_model", "") or "").strip(),
         fallback=str(get("decision_fallback_model", "") or "").strip(),
+        reasoning_effort=str(get("decision_reasoning_effort", "") or "").strip().lower(),
+        fallback_reasoning_effort=str(get("decision_fallback_reasoning_effort", "") or "").strip().lower(),
         # 用户 m07859：重试 / 重试间隔 / 单次超时不再各留一份，统一读基础设置页那三项。
         retry=_int("retry_max", 2, 0, 10),
         retry_delay=_num("retry_delay", 5, 0, 600),
@@ -1044,7 +1050,8 @@ class DecisionPhase:
             logger.warning("[multi-decision] 取决策模型失败（%s）：%s", key or "fast", exc)
             return None
 
-    async def _one_call(self, client, messages, tools, timeout: float) -> dict:
+    async def _one_call(self, client, messages, tools, timeout: float,
+                       effort: str = "") -> dict:
         """发一次请求，保留这个真实响应的 token、模型身份与请求开始时刻。"""
         if LLMRequest is None:
             return {"ok": False, "error": "框架没有 core.provider.LLMRequest"}
@@ -1074,7 +1081,16 @@ class DecisionPhase:
                      if identity.get("provider_id") and identity.get("model_id") else "")
         try:
             request_started = time.time()
-            resp = client.chat(req)
+            # 用户 m01994：思考等级按请求覆盖。框架的 client.chat 都收 **kwargs，
+            # DeepSeek 与 OpenAI 兼容两端都会把它并进请求体；留空就照旧不传。
+            if effort:
+                try:
+                    resp = client.chat(req, reasoning_effort=effort)
+                except TypeError:
+                    # 第三方客户端不一定收 kwargs，退回不带参数的那次调用。
+                    resp = client.chat(req)
+            else:
+                resp = client.chat(req)
             if asyncio.iscoroutine(resp):
                 resp = await asyncio.wait_for(resp, timeout=timeout)
         except asyncio.TimeoutError:
@@ -1156,7 +1172,7 @@ class DecisionPhase:
 
     async def _tool_loop(self, client, messages, tools, opt: DecisionOptions, budget: dict,
                          tool_cache: dict = None, reuse: bool = False,
-                         reuse_media: bool = True) -> dict:
+                         reuse_media: bool = True, effort: str = "") -> dict:
         """多轮工具循环。返回最后一次模型结果（带上累计 token）。
 
         H07：reuse=True 表示这是同一次决策的重试/降级尝试，同一件工具的同一个参数
@@ -1167,7 +1183,7 @@ class DecisionPhase:
         cap = max(1, int(getattr(opt, "tool_calls_per_turn", 5) or 5))
         timeout = float(getattr(opt, "tool_timeout", 60) or 0)
         out_tokens = int(getattr(opt, "tool_output_tokens", 10000) or 0)
-        last = await self._one_call(client, messages, tools, opt.timeout)
+        last = await self._one_call(client, messages, tools, opt.timeout, effort)
         budget.setdefault("usage", []).extend(last.get("usage") or [])
         rounds = 0
         while last.get("ok") and last.get("tool_calls") and rounds < max(0, opt.tool_rounds):
@@ -1258,7 +1274,7 @@ class DecisionPhase:
             budget["in"] += last.get("in", 0)
             budget["out"] += last.get("out", 0)
             budget["cached"] += last.get("cached", 0)
-            last = await self._one_call(client, messages, tools, opt.timeout)
+            last = await self._one_call(client, messages, tools, opt.timeout, effort)
             budget["usage"].extend(last.get("usage") or [])
         return last
 
@@ -1337,9 +1353,12 @@ class DecisionPhase:
                 if note:
                     msg_copy.append({"role": "user", "content": note})
                 usage_start = len(budget["usage"])
+                # 用户 m7217：主模型和备用模型各用自己那一档思考等级。
+                effort = (opt.fallback_reasoning_effort if kind == "fallback"
+                          else opt.reasoning_effort)
                 last = await self._tool_loop(client, msg_copy, tools, opt, budget,
                                              tool_cache, reuse=reuse_first or attempts > 1,
-                                             reuse_media=reuse_media)
+                                             reuse_media=reuse_media, effort=effort)
                 for item in budget["usage"][usage_start:]:
                     if not item.get("model"):
                         item["model"] = model or "fast"
@@ -1397,7 +1416,7 @@ class DecisionPhase:
 
     # ---------- 对外入口 ----------
     async def one_shot(self, messages, client=None, model: str = "",
-                       timeout: float = 120.0) -> dict:
+                       timeout: float = 120.0, effort: str = "") -> dict:
         """发一次纯对话请求（回复页的「测试」按钮用，用户 m01977）。
 
         跟决策链共用 _one_call，所以 token / 模型身份 / reasoning 的口径一致。
@@ -1406,7 +1425,7 @@ class DecisionPhase:
             client = self._client_for(model)
         if client is None:
             return {"ok": False, "error": "取不到模型客户端"}
-        return await self._one_call(client, messages, [], timeout)
+        return await self._one_call(client, messages, [], timeout, effort)
 
     async def decide(self, sid: str, messages, opt: DecisionOptions,
                      identity: str = "", images=None) -> dict:

@@ -52,6 +52,50 @@ _TIMER_REASONS = ("silent", "buffer", "curve", "adaptive", "probability", "count
 _TIMER_NO_EVENT_REASONS = ("silent", "curve", "adaptive", "probability", "count")
 
 
+def _effort_client(client, effort: str):
+    """给回复模型套一层「思考等级」（用户 m01994）。
+
+    框架在 ON_LLM_REQUEST 里按 ``isinstance(m, LLMModelClient)`` 过滤 model_group，
+    普通代理对象会被直接丢掉，所以这里必须是真的子类；取不到基类就原样返回，
+    宁可这一轮不带思考等级，也不能让回复发不出去。
+    """
+    level = str(effort or "").strip().lower()
+    if not level or client is None:
+        return client
+    base = None
+    try:
+        from core.provider import LLMModelClient  # type: ignore
+        base = LLMModelClient
+    except Exception:
+        try:
+            from core.provider.provider import LLMModelClient  # type: ignore
+            base = LLMModelClient
+        except Exception:
+            base = None
+    if base is None:
+        # 导入不到就顺着客户端自己的继承链找——框架给的客户端本来就是它的子类，
+        # 这样即使 core.provider 的导出变了，isinstance 过滤也照样过得去。
+        for cls in type(client).__mro__:
+            if cls.__name__ == "LLMModelClient":
+                base = cls
+                break
+    if base is None:
+        return client
+
+    class _EffortClient(base):
+        def __init__(self, inner, level: str):
+            super().__init__(getattr(inner, "model", None))
+            self._inner = inner
+            self._level = level
+
+        async def chat(self, request, **kwargs):
+            kwargs.setdefault("reasoning_effort", self._level)
+            return await self._inner.chat(request, **kwargs)
+
+    try:
+        return _EffortClient(client, level)
+    except Exception:
+        return client
 def _is_dm_sid(sid: str) -> bool:
     """这个 sid 是不是私聊（认 dm:1 / dm_1 / 桃华:dm:1 三种写法）。
 
@@ -300,6 +344,26 @@ def _looks_forward(element) -> bool:
         rep = ""
     return str(rep).strip().startswith("[Forward")
 
+
+def _is_forward_message(message, text: str = "") -> bool:
+    """这条消息本身是不是一条合并转发。
+
+    用户 m17018 图2：转发里带视频是转发的内容，不是「这条消息是视频」，
+    不该被「文件/视频不进上下文」整条挡掉。
+    """
+    if "[Forward" in str(text or ""):
+        return True
+    try:
+        chain = getattr(message, "chain", None) or []
+    except Exception:
+        return False
+    for element in chain:
+        try:
+            if _looks_forward(element):
+                return True
+        except Exception:
+            continue
+    return False
 
 def _fw_time(obj) -> str:
     for attr in ("timestamp", "time", "ts", "send_time", "datetime", "date"):
@@ -2090,6 +2154,8 @@ class DecisionEngine:
                 decision_passed=decision_passed,
                 # 用户 m17492 图5/图6：这一轮是别的插件的通知事件触发的，不是聊天请求。
                 notice_only=notice_round,
+                # 用户 m32048 第 1 条：虚线卡跟着快照一起落盘，只是不进上下文。
+                skipped_rows=(self.window.skipped_of(sid) if self.window is not None else []),
             )
         # Keep the identity captured before preparation; tool steps share its deadline.
         await self._check_reply_round(request._mdp_reply_round)
@@ -3521,6 +3587,30 @@ class DecisionEngine:
             return
         await self._admit_message(event, sid, st, now, flow)
 
+    def _note_skipped(self, sid: str, message, text: str, media: str, now: float) -> None:
+        """记一条「没进上下文」的消息，页面单独一组显示（用户 m5411）。
+
+        只给界面看：不进窗口、不进待发、不进 user_prompt。raw 用框架那行原文，
+        视频/文件的名字就在里面（[Video name: …]）。
+        """
+        if self.window is None:
+            return
+        try:
+            sender = sender_id_of(message)
+            name = sender_name_of(message)
+            raw_line = raw_line_of(message, text, sender, name, now)
+            # 用户 m32048：带上这条自己的 message_id 和「挡下来时窗口/待发里最后一条」
+            # 的编号，页面按锚点把虚线卡插回原位，快照也照这个位置存。
+            st = getattr(self.window, "_states", {}).get(sid)
+            self.window.push_skipped(
+                sid, sender, name, text, media, now, raw_line,
+                files=file_refs_of(message), reason="file",
+                mid=self.window._bl_mid_of(raw_line),
+                after_mid=self.window._last_mid(st),
+            )
+        except Exception:
+            logger.debug("[multi-decision] 记跳过消息失败（已忽略）", exc_info=True)
+
     async def _admit_message(self, event, sid: str, st, now: float, flow) -> None:
         """Internal replay entry: already buffered, ordered, no receive accounting."""
         message = event.message
@@ -3532,10 +3622,28 @@ class DecisionEngine:
 
         def _log_msg(result):
             self._write_log(sid, result, msg_ts=msg_ts)
+        text = extract_text(message)
+        media = media_kind(message)
+        # 用户 m04896 第 5 条：丢弃文件视频窗口（默认开）。
+        # 纯文件 / 视频消息整条不进；带文字的文件消息只留文字，把文件占位摘掉。
+        # 用户 m5411：跳过必须发生在 _stash_trigger / flow.ready.append 之前——
+        # 以前先 append 再判断，被跳过的那条已经躺在 flow.ready 里，下一轮
+        # flow.active = flow.ready 照样把它拼进 user_prompt（视频就是这么进上下文的）。
+        # 用户 m17018 图2：转发整条不算「文件/视频消息」——转发里带视频是转发的内容，
+        # 不是这条消息本身是视频，不该被「丢弃文件视频」整条挡掉。
+        skip_file = (bool(self._c("file_skip_context", sid))
+                     and media in ("file", "video")
+                     and not _is_forward_message(message, text))
+        if skip_file and not has_text_body(text):
+            self._mark(sid, None, "file")
+            _log_msg("file_skip")
+            self._note_skipped(sid, message, text, media, now)
+            return
         self._stash_trigger(sid, event)
         flow.ready.append(event)
         flow.admitting = (event, now)
-        text = extract_text(message)
+        if skip_file:
+            text = strip_file_placeholders(text)
 
         # 上下文页要「一直能看到下一轮会送给 agent 什么」，这里挂进窗口的待发列表
         pend = None
@@ -3565,17 +3673,6 @@ class DecisionEngine:
                 file_refs = file_refs_of(message)
             except Exception:
                 logger.debug("[multi-decision] 取待发文件信息失败（已忽略）", exc_info=True)
-        media = media_kind(message)
-        # 用户 m04896 第 5 条：文件不进上下文窗口（默认开）。
-        # 纯文件 / 视频消息整条不进；带文字的文件消息只留文字，把文件占位摘掉。
-        skip_file = bool(self._c("file_skip_context", sid)) and media in ("file", "video")
-        if skip_file and not has_text_body(text):
-            flow.admitting = None
-            self._mark(sid, None, "file")
-            _log_msg("file_skip")
-            return
-        if skip_file:
-            text = strip_file_placeholders(text)
         if self.window is not None:
             try:
                 raw_line = raw_line_of(message, text, sender, sender_name_of(message), now,
@@ -3622,7 +3719,7 @@ class DecisionEngine:
 
         # 普通纯文字整句命中拉黑短语时，各触发模式统一早退；上下文和收到量已保留。
         # 媒体、必回和主动唤醒仍按原优先级处理，不消费概率、节奏或休息掷骰。
-        # media 在上面「文件不进上下文」那段已经算过了。
+        # media 在上面「丢弃文件视频」那段已经算过了。
         if not (must or direct or media) and self._phrase_hit(text, sid):
             self._mark(sid, pend, "short")
             _log_msg("phrase_skip")
@@ -5002,6 +5099,8 @@ class DecisionEngine:
         ("silent_skip_single_sticker", "silent_skip_single_sticker_count", "single_sticker"),
         ("silent_skip_empty_forward", "silent_skip_empty_forward_count", "forward"),
         ("silent_skip_file_video", "silent_skip_file_video_count", "file_video"),
+        # 用户 m22683：正文里 @ 了别人（不是机器人）也算没什么可接。
+        ("silent_skip_at_other", "silent_skip_at_other_count", "at_other"),
     )
 
     def _silent_skip_rules(self, sid: str) -> list:
@@ -5010,7 +5109,7 @@ class DecisionEngine:
         返回 [(标签, 条数)]；条数 0 表示不限条数（整批都按这个类型过滤）。
         """
         out = []
-        # 用户 m04896 第 6 条：「文件不进上下文」开着时「文件视频」这一项失效——
+        # 用户 m04896 第 6 条：「丢弃文件视频」开着时「文件视频」这一项失效——
         # 设置页那边整行压暗、开关禁用、悬浮写「此选项失效」，这里也必须真跳过，
         # 否则带文字的文件消息照样进待发、照样被这条规则过滤掉，跟设置页说的对不上。
         skip_file_ctx = bool(self._c("file_skip_context", sid))
@@ -5027,6 +5126,23 @@ class DecisionEngine:
             out.append((tag, max(0, min(50, count))))
         return out
 
+    def _silent_bot_names(self, sid: str) -> list:
+        """这个会话里「叫到机器人」的所有写法，判「@ 了别人」用（用户 m22683）。
+
+        认不出机器人自己叫什么就返回空——那样 has_at_other 一律不判，
+        免得把 @bot 的消息全当成「@ 了别人」过滤掉。
+        """
+        win = getattr(self, "window", None)
+        if win is None:
+            return []
+        try:
+            own = getattr(win, "bot_own_name", None)
+            if not callable(own) or not str(own(sid) or "").strip():
+                return []
+            return list(win.mention_names(sid) or [])
+        except Exception:
+            return []
+
     def _silent_short_len(self, sid: str) -> int:
         """短句算几个字以内（用户 m04896 第 3 条：默认 5）。"""
         try:
@@ -5037,8 +5153,8 @@ class DecisionEngine:
         return max(1, min(50, short_len))
 
     @staticmethod
-    def _silent_filtered(rules, tags: set, idx: int) -> bool:
-        """待发里第 idx 条算不算被过滤掉：命中任一项、且还在那一项管的条数内。"""
+    def _silent_hit(rules, tags: set, idx: int) -> bool:
+        """第 idx 条本身命中过滤：命中任一项、且还在那一项管的条数内。"""
         for tag, limit in rules:
             if tag not in tags:
                 continue
@@ -5046,6 +5162,18 @@ class DecisionEngine:
                 return True
         return False
 
+    @classmethod
+    def _silent_filtered(cls, rules, tags_list, idx: int) -> bool:
+        """待发里第 idx 条算不算被过滤掉（用户 m22343）。
+
+        过滤只作用于**连续命中的前缀**：第一条命中过滤，第二条可以继续命中；
+        第一条没命中，后面不管各自规则设几条都不再命中。所以第 idx 条被过滤，
+        要求 0..idx 每一条都命中（各自按自己的条数上限）。
+        """
+        for i in range(0, idx + 1):
+            if not cls._silent_hit(rules, tags_list[i], i):
+                return False
+        return True
     def _silent_hold(self, sid: str) -> bool:
         """待发里没有能接的话时，兜底不冒泡（用户 m02245 / m02652 / m03197 / m04896）。
 
@@ -5053,6 +5181,8 @@ class DecisionEngine:
         又把「头几条」拆成每项各管各的。这几条里命中已开启的过滤类型就不算「有内容」，
         超出条数的不再看类型、一律算有内容。所以「第一条是链接、第二条是正经话」
         照样兜底，只有「攒着的全是这几类」才不冒泡。
+        用户 m22343 又补了一条：过滤只作用于连续命中的前缀——第一条没命中，
+        后面不管各自规则设几条都不再命中。
         拿不准的时候一律按「有正文」处理——宁可多冒一次泡，也别把该接的话吞掉。
         """
         win = getattr(self, "window", None)
@@ -5069,9 +5199,11 @@ class DecisionEngine:
         if not rules:
             return False
         short_len = self._silent_short_len(sid)
+        bot_names = self._silent_bot_names(sid)
+        tags_list = [pending_tags(it, short_len, bot_names) for it in rows]
         kept = 0
-        for idx, it in enumerate(rows):
-            if self._silent_filtered(rules, pending_tags(it, short_len), idx):
+        for idx in range(len(rows)):
+            if self._silent_filtered(rules, tags_list, idx):
                 continue
             kept += 1
         return kept == 0
@@ -5080,7 +5212,8 @@ class DecisionEngine:
         """刚进来的这一条是不是被静默过滤掉了（用户 m04896 第 7 条）。
 
         只看待发里的最后一条：前面几条的条数已经数过了，这里只回答「这一条本身
-        算不算被过滤」——被过滤的消息不触发静默、也不触发决策。
+        算不算被过滤」——被过滤的消息不触发静默、也不触发决策。按前缀口径，
+        前面只要有一条没命中，这一条就不算被过滤。
         """
         win = getattr(self, "window", None)
         if win is None:
@@ -5095,8 +5228,10 @@ class DecisionEngine:
         rules = self._silent_skip_rules(sid)
         if not rules:
             return False
-        idx = len(rows) - 1
-        return self._silent_filtered(rules, pending_tags(rows[-1], self._silent_short_len(sid)), idx)
+        short_len = self._silent_short_len(sid)
+        bot_names = self._silent_bot_names(sid)
+        tags_list = [pending_tags(it, short_len, bot_names) for it in rows]
+        return self._silent_filtered(rules, tags_list, len(rows) - 1)
 
     def silent_eta(self, sid: str) -> dict:
         """静默 / 休兜 下一次会自动冒泡的绝对时刻（给左栏标签倒计时用）。
@@ -5806,7 +5941,11 @@ class DecisionEngine:
                 logger.warning("[multi-decision] 取回复模型失败（%s）：%s", key, exc)
                 client = None
             if client is not None:
-                clients.append(client)
+                # 用户 m7217：主模型和备用模型各用自己那一档思考等级，不共用。
+                effort = (self._c("reply_fallback_reasoning_effort", sid)
+                          if fallback and key == fallback
+                          else self._c("reply_reasoning_effort", sid))
+                clients.append(_effort_client(client, effort))
         return clients
 
     def _apply_reply_models(self, sid: str, event) -> None:
@@ -6303,6 +6442,32 @@ class DecisionEngine:
                     self._retry_after_fail(sid, st)
                 await self._settle_input(sid, epoch=epoch)
 
+    def _place_skipped(self, rec: dict) -> None:
+        """把这一轮没进上下文的记录算成快照里的插入位置（用户 m32048 第 1 条）。
+
+        决策快照没有窗口快照那一层，位置只能在这里算好；算不出来就原样留着，
+        页面退到末尾，至少记录还在。
+        """
+        rows = rec.get("skipped") or []
+        if not rows:
+            return
+        fn = getattr(self.plugin, "_apply_skips", None)
+        if callable(fn):
+            try:
+                rec["skipped"] = fn(rows, rec.get("display_messages") or [],
+                                    float(rec.get("ts") or 0.0))
+            except Exception:
+                logger.exception("[multi-decision] 决策快照虚线定位失败（保留原样）")
+            return
+        fn = getattr(self.plugin, "_skip_rows_at", None)
+        if not callable(fn):
+            return
+        try:
+            rec["skipped"] = fn(rows, rec.get("display_messages") or [],
+                                float(rec.get("ts") or 0.0))
+        except Exception:
+            logger.exception("[multi-decision] 决策快照虚线定位失败（保留原样）")
+
     async def _decision_gate(self, sid: str, st) -> bool:
         """进阶模式的第一段：让模型读一遍实时窗口，判「这一轮要不要开口」。
 
@@ -6472,6 +6637,9 @@ class DecisionEngine:
             "jev": copy.deepcopy(got.get("jev") or {}),
             # 转交普通决策那一次的两阶段账（只在「不确定 + 交给决策模型」时非空）。
             "jev_transfer": copy.deepcopy(got.get("jev_transfer") or {}),
+            # 用户 m32048 第 1 条：这一轮被挡在上下文之外的消息也落进决策快照，
+            # 事后翻记录还能看到「这条收到了但没给模型看」。
+            "skipped": (self.window.skipped_of(sid) if self.window is not None else []),
         }
         # v4.12（用户 m18246/m18275）：决策快照的 ②③ 跟回复快照走同一套投影。
         # 以前 display_messages 直接存原始窗口消息（纯文本、没有 media），转发消息
@@ -6493,6 +6661,7 @@ class DecisionEngine:
             )
         except Exception:
             logger.exception("[multi-decision] 决策快照投影失败（退回原始消息）")
+        self._place_skipped(rec)
         # 两份账：一份落成快照（和请求记录同一套模板），一份进窗口当聊天记录。
         if self.request_log is not None:
             try:

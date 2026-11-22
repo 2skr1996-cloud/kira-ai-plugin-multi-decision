@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="icon" href="data:," />
 <title>多样决策</title>
+<script defer src="js/lib-1.js"></script>
+<script defer src="js/lib-2.js"></script>
+<script defer src="js/lib-3.js"></script>
+<script defer src="js/lib-4.js"></script>
+<script defer src="js/app.js"></script>
 <script>
 /* 首帧引导（v3.06）
    ① 按上次缓存先把「启用」开关摆到正确位置，避免刷新时播放一次「自动重开」的滑动动画；
@@ -196,14 +201,19 @@ html.plugin-on #sw-plugin .tr:after{transform:translateX(20px);}
 .st .idle{font-size:12px;color:var(--muted);}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px;}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;}
-.card .k{color:var(--muted);font-size:12px;}
-.card .v{font-size:22px;font-weight:600;margin-top:2px;font-variant-numeric:tabular-nums;}
-.card .v small{font-size:12px;font-weight:400;color:var(--muted);margin-left:4px;}
+.card .k{color:var(--muted);font-size:11.5px;}
+/* 用户 m11651：统计卡整体字号降一档（22→20），单位统一走 <small>（见 lib-1.js）。 */
+.card .v{font-size:20px;font-weight:600;margin-top:2px;font-variant-numeric:tabular-nums;}
+.card .v small{font-size:11px;font-weight:400;color:var(--muted);margin-left:3px;}
+/* 用户 m11651：¥ 是前缀不是后缀，margin-left 会把它推离数字，单独给一条。 */
+.card .v small.pre{margin-left:0;margin-right:2px;}
+/* 用户 m12784：命中率写成「48%命中」，百分号是数字的一部分，不能留 3px 间距。 */
+.card .v small.pct{margin-left:0;}
 /* v4.68（用户 m02807）：回复 / 决策两格的主值行是三段「30次 / 17秒 / 命中87%」，
    22px 装不下，压到 17px；斜杠用淡色小一号，别抢数字的注意力。
    用户 m14836 图3：17px 跟旁边几张卡的 22px 差得太明显，提到 21px（226px 卡宽下实测 213px，
    还留 13px 余量）；斜杠再收一点，窄屏折行时也不会顶到边。 */
-.card .v .vm{font-size:21px;font-weight:600;letter-spacing:0;}
+.card .v .vm{font-size:19px;font-weight:600;letter-spacing:0;}
 .card .v .vsep{color:var(--muted);font-weight:400;font-size:13px;margin:0 4px;}
 .card .metric-sep{font-size:16px;font-weight:400;color:var(--muted);margin:0 9px;}
 /* 副行一律不折行（用户 m02080 图2）：原来插件数据那行会掉到第二行，卡片被撑高、右边还剩一大片空 */
@@ -225,8 +235,15 @@ th{color:var(--muted);font-weight:500;background:var(--soft);white-space:nowrap;
 tr:last-child td{border-bottom:none;}
 td.num{font-variant-numeric:tabular-nums;white-space:nowrap;}
 .tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;border:1px solid var(--line);white-space:nowrap;}
-/* 用户 m13767：窗口条数那格里的「N 条」和后面的标签要锁在一行，别让标签掉到第二行。 */
-.wn{white-space:nowrap;}
+/* 用户 m13767：窗口条数那格里的「N 条」和后面的标签要锁在一行，别让标签掉到第二行。
+   用户 m11430：但窄屏下这格只有 56px，锁死一行会直接压到隔壁的 token 数上（「39 条 · 图 12」盖住「8.3k」）。
+   所以只在宽屏锁一行，窄屏允许折成两行。 */
+@media (min-width:1701px){ .wn{white-space:nowrap;} .tprob{white-space:nowrap;} }
+/* 用户 m11651：窄屏放不下时「20 条 · 图2」会断在「图」和数字中间（「· 图」/「2」），
+   把后半段整体锁住，只允许在「条」后面断，变成「20 条」/「· 图2」。 */
+#ctx-rounds .wn .dim{white-space:nowrap;}
+/* 窄屏折行时「概率」两个字别被拆开（默认 CJK 任意两字之间都能断，会断成「17.6% 概」/「率」）。 */
+.tprob{word-break:keep-all;}
 .tag.cut{background:rgba(6,182,212,.14);color:#0e7490;border-color:rgba(6,182,212,.45);}
 html[data-theme="dark"] .tag.cut{background:rgba(6,182,212,.22);color:#67e8f9;}
 .tag.ok{color:var(--ok);border-color:var(--ok);}
@@ -252,6 +269,20 @@ html[data-theme="dark"] .tag.cut{background:rgba(6,182,212,.22);color:#67e8f9;}
 .split > *{min-width:0;}
 .list{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:auto;
   max-height:calc(100vh - 24px);position:sticky;top:12px;}
+/* 用户 m03397：夜间模式下系统那根白底灰块的滚动条太扎眼。换成细的、内缩的圆头，
+   轨道透明，跟卡片同色；白天模式保持系统默认。注意不能写 scrollbar-width:thin，
+   Chromium 一旦看到它就会忽略 ::-webkit-scrollbar，等于没做（settings 页踩过）。 */
+.list::-webkit-scrollbar{width:12px;height:12px;}
+.list::-webkit-scrollbar-track{background:transparent;}
+.list::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px;border:3px solid transparent;background-clip:padding-box;}
+.list::-webkit-scrollbar-thumb:hover{background:var(--muted);background-clip:padding-box;}
+.list::-webkit-scrollbar-corner{background:transparent;}
+html[data-theme="dark"] .list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);background-clip:padding-box;}
+html[data-theme="dark"] .list::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.30);background-clip:padding-box;}
+html[data-theme="dark"]::-webkit-scrollbar{width:12px;height:12px;}
+html[data-theme="dark"]::-webkit-scrollbar-track{background:var(--bg);}
+html[data-theme="dark"]::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:8px;border:3px solid transparent;background-clip:padding-box;}
+html[data-theme="dark"]::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.30);background-clip:padding-box;}
 .list .grp{padding:9px 13px 7px;font-size:12px;font-weight:600;color:var(--muted);background:var(--soft);letter-spacing:.4px;
   border-bottom:1px solid var(--line);position:sticky;top:0;z-index:1;}
 .list .it{display:block;position:relative;padding:11px 13px 12px;border-bottom:1px solid var(--line);cursor:pointer;}
@@ -430,6 +461,12 @@ html[data-theme="dark"] .list .it .cfg.st .chip.on.hi-dec{background:rgba(167,13
 /* 卡片式消息 */
 .mc{border:1px solid var(--line);border-radius:10px;background:var(--card);margin:8px 0;overflow:hidden;}
 .mc.pend{border-style:dashed;}
+/* 用户 m5411：没进上下文的消息（文件/视频被挡）也画虚线框，跟待发一个长相，但颜色更淡 */
+/* 用户 m17018 图2：没进上下文的那条按时间插回原位，整圈虚线 + 斜纹遮罩，
+   跟正常消息一眼分开（以前是单独一组挂在末尾）。 */
+.mc.skip{border-style:dashed;}
+.mc.skip::after{content:"";position:absolute;inset:0;pointer-events:none;border-radius:inherit;
+  background-image:repeating-linear-gradient(45deg,rgba(148,163,184,.10) 0 8px,transparent 8px 16px);}
 /* 连续同角色的消息并成一组：一个色块 + 左侧竖条，组内只留一条细线，
    不再每条都套一层气泡框（用户 m31327）。窗口页与请求页的历史都按 role 分组。 */
 .mgrp{margin:0;background:var(--card);}
@@ -446,6 +483,7 @@ html[data-theme="dark"] .mgrp + .mgrp{border-top-color:rgba(255,255,255,.22);}
 .mgrp > .mc .mc-hd .k{background:rgba(255,255,255,.6);border-color:rgba(0,0,0,.06);}
 .mgrp > .mc .mc-bd{padding:0 12px 5px;}
 .mgrp > .mc.pend{border:none;border-left:2px dashed var(--accent);}
+.mgrp > .mc.skip{border:1px dashed var(--muted);border-radius:8px;margin:4px 0;}
 /* 组内消息悬停：v2.78 把 .mc 的边框去掉后，.mc:hover 的 border-color 就失效了（用户 m32094） */
 .mgrp > .mc:hover{background:rgba(0,0,0,.035);}
 html[data-theme="dark"] .mgrp > .mc:hover{background:rgba(255,255,255,.05);}
@@ -453,6 +491,7 @@ html[data-theme="dark"] .mgrp > .mc:hover{background:rgba(255,255,255,.05);}
 .mgrp-hd{display:grid;grid-template-columns:46px minmax(0,1fr);column-gap:8px;align-items:center;padding:6px 10px 1px;}
 .mgrp-hd .gh-info{display:flex;align-items:center;gap:6px;min-width:0;}
 .mgrp-hd .gh-av{position:relative;grid-column:1;justify-self:start;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;overflow:hidden;flex:0 0 auto;font-size:12px;font-weight:600;color:#fff;line-height:1;}
+.mgrp-hd .gh-av.skip-av{background:var(--soft);color:var(--muted);font-size:13px;}
 .mgrp-hd .gh-av.u{background:#3b82f6;}
 .mgrp-hd .gh-av.bot{background:#10b981;}
 .mgrp-hd .gh-ch{position:relative;z-index:0;}
@@ -525,12 +564,24 @@ html[data-theme="dark"] .mgrp-hd .gh-blk.on{color:#fbbf24;}
 /* 待发状态（待发/刚发出/计入/连发/太短）也做成气泡，跟字数气泡一个长相（用户 m32370） */
 .chb.tag{background:rgba(59,130,246,.13);color:#1d4ed8;}
 .chb.tag.pendtag{background:var(--soft);color:var(--muted);}
+.chb.tag.skiptag{background:var(--soft);color:var(--muted);}
+/* 用户 m32048 第 1 条：明细页单独列一行「未进入上下文 N 条」，虚线小标签，
+   跟正文区分开——这些消息收到了但没发给模型，①②③ 里都找不到它们。 */
+.hint.skipnote{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 0 2px;}
+.hint.skipnote b{font-weight:600;color:var(--muted);}
+.hint.skipnote .skiphit{padding:1px 7px;border:1px dashed var(--muted);border-radius:6px;
+  background:var(--soft);color:var(--muted);font-size:11.5px;max-width:100%;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;}
 .chb.tag.mk.ok{background:rgba(16,185,129,.14);color:#047857;}
 .chb.tag.mk.no{background:rgba(0,0,0,.06);color:var(--muted);}
+/* 用户 m05993 第 2 条：「过滤」要跟别的 no 标（连发/太短/休息…）区分开，用琥珀色高亮。 */
+.chb.tag.mk.flt{background:rgba(245,158,11,.16);color:#b45309;}
 html[data-theme="dark"] .chb{background:rgba(255,255,255,.10);}
 html[data-theme="dark"] .chb.tag{background:rgba(59,130,246,.22);color:#93c5fd;}
 html[data-theme="dark"] .chb.tag.pendtag{background:var(--soft);color:var(--muted);}
+html[data-theme="dark"] .chb.tag.skiptag{background:var(--soft);color:var(--muted);}
 html[data-theme="dark"] .chb.tag.mk.ok{background:rgba(16,185,129,.22);color:#6ee7b7;}
+html[data-theme="dark"] .chb.tag.mk.flt{background:rgba(245,158,11,.22);color:#fbbf24;}
 html[data-theme="dark"] .mgrp.user{background:rgba(59,130,246,.18);}
 html[data-theme="dark"] .mgrp.assistant{background:rgba(16,185,129,.18);}
 html[data-theme="dark"] .mgrp.tool{background:rgba(245,158,11,.14);}
@@ -580,13 +631,28 @@ html[data-theme="dark"] .mgrp-hd .gh-nm.dec-name{color:#c4b5fd;}
    不是浮在卡片最右边那一个）。组内卡片头部只有一列时间，也照样跟在时间后面。 */
 /* 用户 m01522 第 2 条：组内卡片头部只有一列时间（没有标签行），按钮挂 hd 会掉到时间下面、
    离正文好几行。那种卡改挂正文末尾（字数气泡之后），所以选择器不能只认 .mc-hd。 */
-.mc .mc-blk{display:none;margin-left:6px;vertical-align:1px;padding:1px 7px;border-radius:6px;
-  border:1px solid var(--line);background:var(--card);color:var(--muted);font-size:11px;line-height:16px;
+/* 用户 m12893：「拉黑」以前是 11px 字 + 16px 行高 + 1px 内边距 + 1px 边框，算下来 20px 高，
+   旁边的字数气泡只有 15px，一行里高矮不齐、圆角也不一样（6 对 8），看着像临时贴上去的。
+   现在跟 .chb 同一套尺寸：10px 字、13px 行高 + 1px 边框 = 15px、圆角 8px，
+   边框画在盒子里不额外撑高，底边跟气泡对齐；底色留空，靠悬停变琥珀色表示可点。 */
+.mc .mc-blk{display:none;margin-left:6px;vertical-align:1px;padding:0 6px;border-radius:8px;
+  border:1px solid var(--line);background:var(--soft);color:var(--muted);font-size:10px;line-height:13px;
   cursor:pointer;user-select:none;white-space:nowrap;}
 .mc:hover .mc-blk{display:inline-block;}
-.mc .mc-blk:hover{color:#b45309;border-color:#f59e0b;}
+.mc .mc-blk:hover{color:#b45309;border-color:#f59e0b;background:rgba(245,158,11,.10);}
 .mc .mc-blk.on{display:inline-block;color:#b45309;border-color:rgba(245,158,11,.55);background:rgba(245,158,11,.12);}
 html[data-theme="dark"] .mc .mc-blk:hover,html[data-theme="dark"] .mc .mc-blk.on{color:#fbbf24;border-color:rgba(245,158,11,.6);}
+/* 用户 m12463：折起来的时候字数气泡跟「展开/收起」排在同一行，展开后气泡回到正文末尾。
+   以前气泡在 .mono 里、按钮在 .mono 外面，字数 / 收起 / 拉黑散成两三行。 */
+.mc-bd .mc-tail{display:flex;align-items:center;gap:6px;margin-top:6px;}
+.mc-bd .mc-tail .chb,.mc-bd .mc-tail .mc-blk{margin-left:0;}
+.mc-bd .mc-tail .more{margin-top:0;}
+.mc-bd .mono.clip + .mc-tail .chb.count{display:none;}
+/* 用户 m12469：字数气泡包在一个 nowrap 的壳里，浏览器不能从中间断行。
+   用户 m05993 第 1 条：「拉黑」挪到小标签的最后（待发 / 计入之后），而且不悬浮时
+   不能占位——以前用 visibility 隐藏，字数后面永远空一块。现在回到 .mc .mc-blk 的
+   display:none 与 .mc:hover 的 inline-block，按钮出现时整行重排一次，这是要的。 */
+.mc-tags{display:inline-block;white-space:nowrap;vertical-align:1px;}
 .mc-hd .k.weak{opacity:.6;font-weight:400;}
 .k.you{display:inline-block;padding:0 7px;border-radius:8px;background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.45);color:#b45309;font-size:11px;font-weight:600;line-height:16px;vertical-align:1px;}
 html[data-theme="dark"] .k.you{background:rgba(245,158,11,.26);border-color:rgba(245,158,11,.5);color:#fbbf24;}
@@ -939,11 +1005,30 @@ html[data-theme="dark"] .mc-bd .at{background:rgba(59,130,246,.26);color:#93c5fd
     .mc.botcard .mc-hd .k.nm{font-weight:600;}
     .mc.botcard .mono.bot-txt.clip{-webkit-line-clamp:3;}
     .mc.botcard .thumbs.botpic{margin:6px 0 0;}
+    /* 用户 m12198：QQ 官方机器人的 markdown 卡片——标题、正文、代码块、指令按钮 */
+    .mc.botcard .qqmd-h{font-weight:600;margin:0 0 4px;}
+    .mc.botcard .qqmd-p{margin:0 0 4px;white-space:pre-wrap;}
+    .mc.botcard .qqmd-p:last-child{margin-bottom:0;}
+    .mc.botcard .qqmd-code{margin:4px 0;padding:6px 8px;border-radius:6px;background:rgba(127,127,127,.10);
+      font-family:ui-monospace,Consolas,monospace;font-size:12px;line-height:1.6;
+      white-space:pre-wrap;word-break:break-word;}
+    .mc.botcard .qqmd-cmd{display:inline-block;margin:2px 6px 2px 0;padding:2px 9px;border-radius:999px;
+      border:1px solid var(--line);background:rgba(127,127,127,.08);font-size:12px;}
     /* v3.63（用户 m18492 图4）：徽章原来贴着卡片底边对齐，卡片一高（B 站/分享卡）就掉到下沿，看着偏低；
        改成按卡片顶边对齐，并下移 6px 贴住卡片第一行文字。 */
     .mc-bd .chip-line{display:flex;align-items:flex-start;gap:8px;}
     .mc-bd .chip-line > .chb{margin-top:6px;}
     .mc-bd .chip-line .qcard{flex:1;min-width:0;}
+    /* 用户 m07185：转发卡被塞进 .chip-line 时不能跟着缩成 max-content 的窄框 */
+    .mc-bd .chip-line > .fwd{flex:1;min-width:0;}
+    /* 用户 m13647：X 卡的「待发 / 计入」标签原来挂在卡片下面，看着像跟卡片脱开。
+       改成放进卡片右上角：卡片外面套一层相对定位的壳，标签绝对定位到右上角；
+       卡片头部右侧留出标签的宽度，昵称太长时提前省略，不会压到标签下面。 */
+    .mc-bd .tw-host{position:relative;display:inline-block;max-width:100%;vertical-align:top;}
+    .mc-bd .tw-host > .qcard.tw{display:flex;}
+    .mc-bd .tw-host > .qcard.tw .tw-hd{padding-right:84px;}
+    .mc-bd .tw-host > .card-chips{position:absolute;top:9px;right:8px;display:flex;align-items:center;gap:4px;}
+    .mc-bd .tw-host > .card-chips .chb{margin-left:0;}
   /* v4.87（用户 m11323）：正文里抽出来的分享卡不再跟正文并排——以前 .chip-line.tc 让正文
      吃掉整行剩余宽度，卡片被挤到最右边（用户 m11237 报的「飘移」）。现在正文在上、
      卡片另起一行顶格排在下面，靠 .qcard 自己的块级排版，这里不再需要额外规则。 */
@@ -989,9 +1074,9 @@ html[data-theme="dark"] .jx .j-b{color:#f9a8d4;}
 
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}
 .hint{color:var(--muted);font-size:12px;}
-select,input[type=text],input[type=number]{font:inherit;padding:5px 9px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--text);}
+select,input[type=text],input[type=number]{font:inherit;padding:5px 9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--text);}
 /* 就地改名 */
-.nm-edit{font:inherit;font-weight:600;font-size:13.5px;padding:1px 6px;border-radius:6px;border:1px solid var(--accent);background:var(--card);color:var(--text);min-width:120px;}
+.nm-edit{font:inherit;font-weight:600;font-size:13.5px;padding:1px 6px;border-radius:6px;border:1px solid var(--accent);background:var(--bg);color:var(--text);min-width:120px;}
 tr.round-row{cursor:pointer;}
 tr.round-row:hover{background:var(--soft);}
 tr.round-row td:first-child:before{content:"\25B8 ";color:var(--muted);}
@@ -1044,7 +1129,7 @@ tr.round-detail .mini .tag{margin-right:6px;}
   #ctx-rounds .dcon{font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:999px;border:1px solid rgba(16,185,129,.45);background:rgba(16,185,129,.12);color:#059669;}
   #ctx-rounds td.res{vertical-align:middle;}
   /* 19px 高的胶囊在结果列里用 21px 行高，才能上下精确居中 */
-  #ctx-rounds td.res .dcon{font-size:11px;line-height:21px;}
+  #ctx-rounds td.res .dcon{font-size:11px;line-height:21px;padding:1px 5px;}
   #ctx-rounds .dcon.no{border-color:var(--line);background:rgba(127,127,127,.1);color:var(--muted);}
   #ctx-rounds .dcon.bad{border-color:rgba(239,68,68,.45);background:rgba(239,68,68,.12);color:#dc2626;}
   html[data-theme="dark"] #ctx-rounds .dcon{color:#34d399;}
@@ -1058,23 +1143,33 @@ tr.round-detail .mini .tag{margin-right:6px;}
    改成固定布局 + 百分比列宽：任何窗口宽度都按比例缩，不再横向溢出。 */
 #ctx-rounds .tbl table{table-layout:fixed;}
 #ctx-rounds .tbl th, #ctx-rounds .tbl td{padding:8px 6px;vertical-align:middle;}
-#ctx-rounds .tbl thead th{white-space:normal;line-height:1.35;}
+/* 用户 m11651：表头只在 <wbr> 处折行。默认 CJK 可以逐字断，窄列里「命中预估」会断成
+   「命中预 / 估」，看着像掉了一个字；keep-all 之后按写好的 <wbr> 断成「命中 / 预估」。 */
+#ctx-rounds .tbl thead th{white-space:normal;line-height:1.35;word-break:keep-all;}
+/* 用户 m11651：「token（入/出）」里的括号段整体不拆，只在 <wbr> 处断成「token / （入/出）」。 */
+#ctx-rounds .tbl thead th .nw{white-space:nowrap;}
 #ctx-rounds .tbl thead th:nth-child(1){width:7%;}     /* 时间 */
-#ctx-rounds .tbl thead th:nth-child(2){width:5.2%;}   /* 结果 */
-#ctx-rounds .tbl thead th:nth-child(3){width:16.5%;}  /* 回复内容 / 决策理由 */
+#ctx-rounds .tbl thead th:nth-child(2){width:6%;}     /* 结果 */
+/* 用户 m11651 图1：决策理由那格被压到 84px（1335 宽实测），而防抖 / 用时 / 命中预估 /
+   缓存命中四列各有 15–21px 富余。按实测把富余收回来给说明列：
+   防抖 5→4.2、用时 4.6→4、命中预估 6.4→4.8、缓存命中 6.4→4.8，结果 6.4→7.2（「建议回复」
+   胶囊以前折成两行），说明列 10.8→14.6。 */
+#ctx-rounds .tbl thead th:nth-child(3){width:19.2%;}  /* 回复内容 / 决策理由 */
 #ctx-rounds .tbl thead th:nth-child(4){width:6.5%;}   /* 渠道 */
 #ctx-rounds .tbl thead th:nth-child(5){width:9%;}     /* 回复模型 / 决策模型 */
-#ctx-rounds .tbl thead th:nth-child(6){width:4.4%;}   /* 防抖用时 */
-#ctx-rounds .tbl thead th:nth-child(7){width:4.6%;}   /* 用时 */
-#ctx-rounds .tbl thead th:nth-child(8){width:6.4%;}   /* 窗口条数 */
+#ctx-rounds .tbl thead th:nth-child(6){width:3.6%;}   /* 防抖 */
+#ctx-rounds .tbl thead th:nth-child(7){width:3.8%;}   /* 用时 */
+#ctx-rounds .tbl thead th:nth-child(8){width:7.4%;}   /* 窗口条数 */
 #ctx-rounds .tbl thead th:nth-child(9){width:9%;}     /* token */
-#ctx-rounds .tbl thead th:nth-child(10){width:9.6%;}  /* 体积估算 */
-#ctx-rounds .tbl thead th:nth-child(11){width:7.8%;}  /* 命中预估 */
-#ctx-rounds .tbl thead th:nth-child(12){width:7.8%;}  /* 缓存命中 */
+#ctx-rounds .tbl thead th:nth-child(10){width:9.5%;}  /* 体积估算 */
+#ctx-rounds .tbl thead th:nth-child(11){width:6.4%;}  /* 命中预估 */
+#ctx-rounds .tbl thead th:nth-child(12){width:6.4%;}  /* 缓存命中 */
 #ctx-rounds .tbl thead th:nth-child(13){width:6.2%;}  /* 触发类型 */
 /* 用户 m15537 第 4 条：渠道从模型格里拆出来单独一列（在模型列左边），
    模型格只剩模型名，不用再挤两行。 */
-#ctx-rounds td.chc{font-size:11.5px;line-height:1.35;color:var(--muted);overflow-wrap:anywhere;}
+/* 用户 m02449：渠道列不换行——以前 overflow-wrap:anywhere 会把 WorkBuddy 断成
+   「WorkBud / dy」两行。装不下就省略号截尾，全名在 td 的 title 上。 */
+#ctx-rounds td.chc{font-size:11.5px;line-height:1.35;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 /* 用户 m16262 图5：模型名太长时以前按字符硬折行（gemini-3.8-flash- / high），
    现在整格只占一行，超出部分省略号截掉，完整名字挂在 td 的 title 上。
    .mn 用 flex：名字那段可收缩（省略号），「备用」小标签不收缩，始终露在外面。 */
@@ -1082,7 +1177,19 @@ tr.round-detail .mini .tag{margin-right:6px;}
 #ctx-rounds td.mdl .mn .mnt{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 #ctx-rounds td.mdl .mn .tag{flex:none;}
 /* 用户 m15537 第 3 条：多步命中折成一句「3 步 42.1%」，不再排成网格拉长整行。 */
-#ctx-rounds td .steps{display:inline;font-size:11.5px;line-height:1.5;}
+#ctx-rounds td .steps{display:inline;font-size:11.5px;line-height:1.5;white-space:nowrap;}
+/* 用户 m01379：窄屏装不下时隐藏「N 步」前缀，只留百分比，不折行（lib-4.js 的 fitCols 判断）。 */
+#ctx-rounds .tbl.steps-off td .steps .stp{display:none;}
+/* 用户 m02449：触发类型的「概率」二字换行就藏掉，只留百分比（lib-4.js 的 fitCols 判断）。 */
+#ctx-rounds .tbl.tprob-off td .tprob .tpw{display:none;}
+/* token 格的步数胶囊同理：窄屏装不下就藏起来，别折到第二行。 */
+#ctx-rounds .tbl.steps-off tr.round-row td.tokc .stp{display:none;}
+/* 用户 m02449：窄到连省略号列都借光还装不下（约 1100 以下）才让结果列折行，
+   宁可两行也不能压到隔壁格（lib-4.js 的 fitCols 判断）。 */
+#ctx-rounds .tbl.res-wrap tr.round-row td.res{white-space:normal;}
+/* 量列宽时给整张表挂 .measuring：所有格子连同里面的小标签都按 nowrap 排，
+   才能量出「其实装不下」的自然宽（lib-4.js 的 _needAll）。 */
+#ctx-rounds .tbl.measuring td, #ctx-rounds .tbl.measuring td *{white-space:nowrap !important;}
 /* token 格原来是「数字绝对居中 + 步数胶囊挂在格子右边缘外面」，格子一窄胶囊就压到下一列
    （体积估算）上，读起来像「3722 步」。改成普通流：数字和胶囊都在格子里居中排，放不下就折行。 */
 #ctx-rounds .tbl td.tokc{position:static;}
@@ -1095,27 +1202,48 @@ tr.round-detail .mini .tag{margin-right:6px;}
    这几格是 nowrap 的，缩到 1500px 以下就顶出格子（实测 1600 宽有 62 个格子溢出）。
    这里统一放开换行、字号降一档，宁可多折一行也不横向溢出；多步网格退回单列，
    token 的绝对居中改回普通流，免得数字和步数胶囊互相压。 */
+/* 用户 m10848 第 5 条：时间列固定一行，不再折成「11-19 / 21:06:29」两行。
+   放得下就「11-19 21:06:29」，窄一档收掉日期，再窄一档连秒也收掉，只留「21:06」。
+   只认第一列：窗口条数、体积估算那几格也是 td.num，它们该折行还得折。 */
+#ctx-rounds .tbl tr.round-row td.num:first-child{white-space:nowrap;}
+/* 用户 m11361：体积估算那格「文 7.1 KB · 图 966.2 KB」会折成两行，断在半截很难读。
+   100 KB 起改用 MB 显示（lib-4.js 的 fmtBytes），这里再固定一行；卡片布局（≤1000）不套用。 */
+@media (min-width:1001px){
+  #ctx-rounds .tbl tr.round-row td.num.vol{white-space:nowrap;}
+}
+/* 用户 m11430：窄到体积估算那格装不下时允许折行，别压到隔壁格（lib-4.js 的 fitCols 判断）。 */
+#ctx-rounds .tbl.vol-wrap tr.round-row td.num.vol{white-space:normal;}
+/* 用户 m11430：日期以前在 1839px 就藏了，那时时间列还有 22px 余量。改成按实测判断——
+   时间列扣掉内边距后余量不足 3px 才藏日期（lib-4.js 的 fitTimeCol），卡片布局（≤1000）不参与。 */
+#ctx-rounds .tbl.hide-date tr.round-row td.num:first-child .d{display:none;}
+@media (min-width:1001px) and (max-width:1200px){
+  #ctx-rounds .tbl tr.round-row td.num:first-child .s{display:none;}
+}
 @media (max-width:1700px){
   #ctx-rounds .tbl th, #ctx-rounds .tbl td{padding:7px 4px;font-size:12px;}
   #ctx-rounds .tbl tr.round-row td.num,
-  #ctx-rounds .tbl tr.round-row td.res,
   #ctx-rounds .tbl tr.round-row td .sub{white-space:normal;}
+  #ctx-rounds .tbl tr.round-row td.num:first-child{white-space:nowrap;}
   #ctx-rounds .tbl tr.round-row td.tokc{position:static;}
   #ctx-rounds .tbl tr.round-row td.tokc .tokw{position:static;left:auto;top:auto;transform:none;
     white-space:normal;display:inline;}
   #ctx-rounds .tbl tr.round-row td.tokc .stp{position:static;left:auto;top:auto;transform:none;
     margin-left:4px;display:inline-block;}
-  /* 窄一档时把「结果 / 防抖 / token」几格放宽一点，免得「请求成功」胶囊和「防抖用时」表头折成两行。 */
+  /* 窄一档时把「结果 / 防抖 / token」几格放宽一点，免得「请求成功」胶囊和「防抖」表头折成两行。 */
   #ctx-rounds .tbl thead th:nth-child(1){width:7.4%;}
-  #ctx-rounds .tbl thead th:nth-child(2){width:6.4%;}
-  #ctx-rounds .tbl thead th:nth-child(3){width:12.8%;}
+  #ctx-rounds .tbl thead th:nth-child(2){width:7.2%;}
+  /* 用户 m11361：体积估算那格要排成一行（文 34.3 KB · 图 13.57 MB ≈ 132px），
+     从「回复内容 / 命中预估 / 缓存命中」各让一点给它，13 列仍然不横向溢出。 */
+  #ctx-rounds .tbl thead th:nth-child(3){width:14.6%;}
   #ctx-rounds .tbl thead th:nth-child(4){width:6.6%;}
   #ctx-rounds .tbl thead th:nth-child(5){width:9.2%;}
-  #ctx-rounds .tbl thead th:nth-child(6){width:5%;}
+  #ctx-rounds .tbl thead th:nth-child(6){width:3.6%;}
+  #ctx-rounds .tbl thead th:nth-child(7){width:4%;}
+  #ctx-rounds .tbl thead th:nth-child(8){width:8.4%;}
   #ctx-rounds .tbl thead th:nth-child(9){width:8%;}
-  #ctx-rounds .tbl thead th:nth-child(10){width:9.6%;}
-  #ctx-rounds .tbl thead th:nth-child(11){width:8.7%;}
-  #ctx-rounds .tbl thead th:nth-child(12){width:8.7%;}
+  #ctx-rounds .tbl thead th:nth-child(10){width:14.8%;}
+  #ctx-rounds .tbl thead th:nth-child(11){width:4.8%;}
+  #ctx-rounds .tbl thead th:nth-child(12){width:4.8%;}
   #ctx-rounds .tbl thead th:nth-child(13){width:6.6%;}
 }
 /* 再窄一档（≤1200）：13 列在 720px 里每列只剩 55px，「1m42s」这种数字会顶出格子。
@@ -1123,17 +1251,17 @@ tr.round-detail .mini .tag{margin-right:6px;}
 @media (max-width:1200px){
   #ctx-rounds .tbl th, #ctx-rounds .tbl td{padding:6px 3px;font-size:11.5px;}
   #ctx-rounds .tbl thead th:nth-child(1){width:7%;}
-  #ctx-rounds .tbl thead th:nth-child(2){width:6%;}
+  #ctx-rounds .tbl thead th:nth-child(2){width:6.8%;}
   #ctx-rounds .tbl thead th:nth-child(3){width:12.2%;}
   #ctx-rounds .tbl thead th:nth-child(4){width:6.4%;}
-  #ctx-rounds .tbl thead th:nth-child(5){width:8.4%;}
-  #ctx-rounds .tbl thead th:nth-child(6){width:5.5%;}
-  #ctx-rounds .tbl thead th:nth-child(7){width:6%;}
-  #ctx-rounds .tbl thead th:nth-child(8){width:6.5%;}
+  #ctx-rounds .tbl thead th:nth-child(5){width:7.6%;}
+  #ctx-rounds .tbl thead th:nth-child(6){width:4.8%;}
+  #ctx-rounds .tbl thead th:nth-child(7){width:5.2%;}
+  #ctx-rounds .tbl thead th:nth-child(8){width:8.8%;}
   #ctx-rounds .tbl thead th:nth-child(9){width:8%;}
-  #ctx-rounds .tbl thead th:nth-child(10){width:10%;}
-  #ctx-rounds .tbl thead th:nth-child(11){width:9%;}
-  #ctx-rounds .tbl thead th:nth-child(12){width:9%;}
+  #ctx-rounds .tbl thead th:nth-child(10){width:14.4%;}
+  #ctx-rounds .tbl thead th:nth-child(11){width:6.4%;}
+  #ctx-rounds .tbl thead th:nth-child(12){width:6.4%;}
   #ctx-rounds .tbl thead th:nth-child(13){width:6%;}
 }
 /* v3.60（用户 m17581 第 6 条）：选中柱的描边（2px + 外扩 1px）原来被容器的 overflow 裁掉——按满高画的柱子
@@ -1202,6 +1330,12 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
 .dlg h3{margin:0 0 10px;font-size:15px;}
 .dlg p{margin:0 0 8px;font-size:12.5px;line-height:1.75;color:var(--muted);}
 .dlg p.p2{color:var(--text);}
+/* 用户 m13149：带说明块的确认弹窗（拉黑这类）加宽到 680px，说明单独成块、
+   一行一条。520px 时第一句 45 个字必然折行，末行只剩几个字，很难看。 */
+.dlg.wide{width:min(680px,92vw);}
+.dlg.wide p.p2{margin:0 0 10px;font-size:14px;font-weight:600;}
+.dlg-note{margin:0 0 4px;padding:10px 13px;border-radius:10px;border-left:3px solid var(--accent);background:var(--soft);font-size:12.5px;line-height:1.9;color:var(--muted);}
+.dlg-note>div+div{margin-top:2px;}
 .dlg-btns{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;}
 .dlg-btns button{padding:6px 14px;border-radius:8px;border:1px solid var(--line);background:var(--soft);color:var(--text);font-size:12.5px;}
 .dlg-btns button.danger{background:var(--bad);border-color:var(--bad);color:#fff;}
@@ -1400,10 +1534,5 @@ html[data-theme="dark"] #ctx-rounds .dcon.cut{color:#67e8f9;}
   </div>
 </div>
 
-<script src="js/lib-1.js"></script>
-<script src="js/lib-2.js"></script>
-<script src="js/lib-3.js"></script>
-<script src="js/lib-4.js"></script>
-<script src="js/app.js"></script>
 </body>
 </html>

@@ -152,11 +152,13 @@
   }
   // 一张卡片「真正说的那句话」：引用块、展开按钮、字数气泡、卡片标题都不算正文，
   // 不然拉黑存下来的是一串元数据，永远匹配不上下一句一样的话
-  function blockTextOf(card){
+  // extraSel：额外要剔掉的选择器（用户 m12463 用它把 QQ 菜单卡那排指令胶囊排除在
+  // 字数之外——那是按钮不是正文，算进去会把一句 9 个字的问候判成长文）。
+  function blockTextOf(card, extraSel){
     var bd = card.querySelector(".mc-bd");
     if(!bd) return "";
     var c = bd.cloneNode(true);
-    Array.prototype.forEach.call(c.querySelectorAll(".quote,.more,.chb,.mixnote,.qcard,.qfile,.unassigned-media,.rawtxt,.body-empty,.thumbs,.mc-blk"), function(x){
+    Array.prototype.forEach.call(c.querySelectorAll(".quote,.more,.chb,.mixnote,.qcard,.qfile,.unassigned-media,.rawtxt,.body-empty,.thumbs,.mc-blk" + (extraSel || "")), function(x){
       if(x.parentNode) x.parentNode.removeChild(x);
     });
     var bodies = c.querySelectorAll(".mono");
@@ -183,16 +185,37 @@
     // 只给「人说的话」加：摘要卡、tool 卡拉黑没意义
     var role = (String(card.className || "").match(/(?:^|\s)(user|assistant)(?:\s|$)/) || [])[1] || "";
     if(!role) return;
-    var txt = blockTextOf(card);
+    // 用户 m12463：特别长的文不给「拉黑」——短语黑名单是给「一句话」用的，
+    // 几百字的正文拉黑进去永远匹配不上，按钮只是碍事。10 字以内才给。
+    var txt = blockTextOf(card, ",.qqmd-cmd");
     if(!txt) return;
+    if(visLen(txt) > 10) return;
     var b = document.createElement("span");
     b.className = "mc-blk";
     b.setAttribute("data-blk", "1");
     b.setAttribute("data-txt", txt);
     b.textContent = "拉黑";
+    // 用户 m12442：按钮要排在字数气泡后面（所有小标签的最后）。以前组内卡片挂到
+    // 第一个 .mono 末尾，气泡在最后一段，按钮就跑到正文中间去了。
+    var chip = bd0 ? bd0.querySelector(".chb.count") : null;
+    if(!chip && hd) chip = hd.querySelector(".chb.count");
+    if(chip && chip.parentNode){
+      // 用户 m05993 第 1 条：「拉黑」要排在小标签的最后（字数、待发、计入之后），
+      // 而且不悬浮时不能占位。以前把字数和按钮一起包进 nowrap 的 .mc-tags、按钮用
+      // visibility 隐藏，字数后面就永远空一块。现在挂到同一行最后一个 .chb 后面。
+      var row = chip.parentNode;                       // .mc-tags（字数气泡的壳）
+      var scope = row.closest ? (row.closest(".mono") || row) : row;
+      var last = chip;
+      Array.prototype.forEach.call(scope.querySelectorAll(".chb"), function(x){
+        if(x !== chip && x.parentNode === scope) last = x;
+      });
+      last.parentNode.insertBefore(b, last.nextSibling);
+      return;
+    }
     var grow = hd ? hd.querySelector(".grow") : null;
     if(hd && grow && grow.parentNode === hd){ hd.insertBefore(b, grow); return; }
-    var mono = bd0 ? bd0.querySelector(".mono") : null;
+    var monos = bd0 ? bd0.querySelectorAll(".mono") : null;
+    var mono = monos && monos.length ? monos[monos.length - 1] : null;
     if(mono){ mono.appendChild(b); return; }
     if(bd0){ bd0.appendChild(b); return; }
     if(hd){ hd.appendChild(b); return; }
@@ -477,6 +500,15 @@
   // 以前直接 length，一条 7 个字的回复带着 [Emoji 21] 就显示 17 字（用户 m33778 图2）
   function visLen(t){
     var s = String(t == null ? "" : t);
+    // 用户 m12748：@ 昵称在页面上是一个徽章，不是他说的话。昵称里可能带空格
+    // （`@Angels of the Apocalypse 上号啊`），下面「最多两个英文词」的正则只吃掉
+    // 前两个词，剩下的「the Apocalypse」被算成字，待发卡就多算了 2 个字。
+    // 窗口里见过的昵称在 AT_POOL 里（lib-1.js），长的先吃，整段剔掉。
+    if(typeof AT_POOL !== "undefined" && AT_POOL.length && s.indexOf("@") >= 0){
+      AT_POOL.slice().sort(function(a, b){ return b.length - a.length; }).forEach(function(nm){
+        if(nm) s = s.split("@" + nm).join(" ");
+      });
+    }
     s = s.replace(/\[Emoji\s+[^\]]*\]/g, "")
          .replace(/\[Emoji\]/g, "")
          .replace(/\[At\s+[^\]]*\]/g, "")
@@ -501,6 +533,9 @@
       // 再兜底吃「@ + 一个不含空格的昵称」；最多吃两个词，再多就可能把真话一起吞掉。
       .replace(/(^|[\s。，,、；;：:])@[A-Za-z0-9_\-]{1,32}(?:[ \t]+[A-Za-z0-9_\-]{1,32})?/g, "$1")
       .replace(/(^|[\s。，,、；;：:])@[\u4e00-\u9fa5A-Za-z0-9_\-]{1,16}/g, "$1")
+      // 用户 m22683：QQ 的 @ 昵称是「@[编码]昵称」两截（`@[%ĀĀ␇Ö]我在未来，等你`），
+      // 上面两条都从 `[` 就断了，昵称整段留在正文里，一句话被算成十几个字。
+      .replace(/(^|[\s。，,、；;：:])@\[[^\]]{0,64}\][^\s]{0,32}/g, "$1")
       .replace(/(?:https?:\/\/|www\.)[^\s<>"「」]+/gi, "")
       .replace(/<\/?[A-Za-z_][^>]*>/g, "")
       .replace(/\s/g, "").length;
@@ -1139,9 +1174,13 @@
     // 用户 m07367：被引用的是转发时，q.media 只是「发给模型的那几张」（默认 3 张），
     // 原转发卡用的是 display.forward_media_all（整条转发的全部图）。以前 qown 优先，
     // 引用里就只剩 3 张、还挂着「（已发 3）」，跟上面那张原转发卡对不上。
+    // 用户 m07484：被引用的转发在 direct_reply.media 里只有模型侧那几张（默认 3 张），
+    // 而 d.own 是后端按转发缓存对齐好的完整图集（source=forward_cache_aligned）。
+    // 以前 qown 优先，引用里的转发卡就永远只画 3 张、还挂一句「还有 N 张」。
     var qsrc = (qIsFwd && d.all && d.all.length) ? d.all
-      : ((qown && qown.length) ? qown
-        : (d.known ? d.own : (d.unassigned || [])));
+      : ((qIsFwd && d.known && d.own && d.own.length > (qown ? qown.length : 0)) ? d.own
+        : ((qown && qown.length) ? qown
+          : (d.known ? d.own : (d.unassigned || []))));
     // 用户 m21787 图4：引用里既然换成聊天里原本那张图，正文里「（动图 · 共 N 帧…）」这句
     // 派生说明也得一起去掉，否则原图旁边还挂着一句「上面是等距抽的 9 帧拼图」。
     if(qown && qown.length) body = stripDeriveNote(body);
@@ -1153,7 +1192,13 @@
     var qh = "<span class='qwho'>" + (who ? esc(who) : "引用") +
       (when ? "<span class='dim'> · " + esc(when) + "</span>" : "") + "</span>";
     var fw = forwardHtml(body, qsrc);
-    if(fw) return "<div class='quote'" + mark + jump + ">" + qh + fw + "</div>";
+    if(fw){
+      // 用户 m09904：转发卡只画出一部分图（卡上挂着「（已发 N）」）时也要挂修复标记。
+      // 以前只在 qsrc 一张都没有时挂，于是「有 3 张、缺 11 张」的卡片永远不会重画。
+      // 只在归属未知（!d.known）时挂：已知的图集再查一次还是同一份，避免反复重画。
+      if(!mark && !d.known && id && fw.indexOf("fw-sent") >= 0) mark = " data-qpic='" + esc(id) + "'";
+      return "<div class='quote'" + mark + jump + ">" + qh + fw + "</div>";
+    }
     // 用户 m00456：引用里只剩 [Forward] 这个空壳——框架当时没把聊天记录取回来，
     // 图倒是认回来了（qsrc 有 9 张），可没有条目就画不出卡，只能落成「内容未获取」。
     // 挂上标记交给 fillQuoteMiss：后端按 message_id 能补回正文，补到就整块重画。
@@ -1379,10 +1424,13 @@
     });
     // v4.48（用户 m25038 第 4 项）：卡里三行预览也把真图露出来——只写小图标的话，
     // 图明明取到了，卡片上还是一个「🖼」，看着就像没获取。
+    // 用户 m07645 第 1 条：卡片预览最多画 5 张缩略图，第 6 张起在缩略图后面写「还有 N 张」。
+    // 以前这里写死 4 张、多出来的直接消失，看着就像「图被清掉了」。
+    var FWD_MINI_MAX = 5;
     function fwdMini(list){
       if(!list || !list.length) return "";
       var out = "";
-      list.slice(0, 4).forEach(function(it){
+      list.slice(0, FWD_MINI_MAX).forEach(function(it){
         var obj = (typeof it === "string") ? { path: it } : (it || {});
         if(obj.missing) return;
         var p = obj.path || "", direct = obj.url || "";
@@ -1441,6 +1489,13 @@
                (ico[k] || k) + (n ? "×" + n : "") + "</span>";
       });
     }
+    // 用户 m28299 图1：合并行里的视频卡要按条数重复。以前弹层只画一张卡再补「×N」，
+    // 那是图片占位的写法，3 条视频看着像 1 条；缩略图分支（用户 m07484）也走这里。
+    function fwdRestHtml(t, n){
+      var v = nativeVideoHtml(t, function(part){ return fwdPicChip(part, false); }, false);
+      if(v !== null) return n > 1 ? v.repeat(n) : v;
+      return fwdPicChip(t, false) + (n > 1 && t ? " ×" + n : "");
+    }
     var lis = merged.map(function(r, idx){
       var got = claims[idx] || [];
       var pre = r.sub ? "" : fwdStrip(r, got);
@@ -1448,11 +1503,27 @@
       // 「（已发 N）」是「还有图没到手」的说明，不是张数统计：图全认领完了就不写
       // （用户 m00942 图2：2 条转发只有 1 张图，图已经画出来了还挂一句「已发 1」）。
       var _need = fwdNeed(r).pic;
-      var body = r.sub ? fwdSubChip(r.sub) : fwdPicChip(pre, true, /^(?:\[视频\]\s*)+$/.test(String(r.text || "").trim())) + (r.n > 1 && pre ? " ×" + r.n : "") +
-        (!r.sub && _shown > 0 && pre && _shown < _need ? "<span class='fw-sent'>（已发 " + _shown + "）</span>" : "");
+      // 用户 m07484：图已经画成缩略图了，就别再在缩略图前面写「🖼 ×5（已发 3）」——
+      // 那串字和旁边的图重复，还让人以为只发了 3 张。条目里除图片以外的文字照留，
+      // 还差几张在缩略图后面补一句「还有 N 张」。
+      var _mini = fwdMini(got);
+      // 用户 m07645 第 1 条：超出预览上限的那几张也要算进「还有 N 张」，
+      // 否则 5 张图只画 5 张里的前几张、后面一句说明都没有。
+      var _left = Math.max(0, _need - Math.min(_shown, _need)) + Math.max(0, _shown - FWD_MINI_MAX);
+      var _zh = /^(?:\[视频\]\s*)+$/.test(String(r.text || "").trim());
+      var body, tail = "";
+      if(r.sub){
+        body = fwdSubChip(r.sub);
+      } else if(_mini){
+        var _rest = stripFwdKind(pre, "图片");
+        body = _rest ? fwdPicChip(_rest, true, _zh) : "";
+        tail = _left > 0 ? "<span class='fw-sent'>还有 " + _left + " 张</span>" : "";
+      } else {
+        body = fwdPicChip(pre, true, _zh) + (r.n > 1 && pre ? " ×" + r.n : "");
+      }
       return "<div class='fwd-it'><span class='fw-w'>" + esc(r.who || "某人") + "</span>" +
              (r.when ? "<span class='fw-t'>" + esc(r.when) + "</span>" : "") +
-             "<span class='fw-c'>" + body + fwdMini(got) + "</span></div>";
+             "<span class='fw-c'>" + body + _mini + tail + "</span></div>";
     });
     var full = merged.map(function(r, idx){
       var got = claims[idx] || [], body = "";
@@ -1466,11 +1537,16 @@
         // 用户 m28299 图1（转发的 emoji 没显示）：图都认领完了的那一支原来只 esc，
         // 弹层里 [Emoji 344] 就成了一行方括号。表情与正文同一套，一律过 emojiFaces。
         var _stripped = fwdStrip(r, got);
-        var video = nativeVideoHtml(_stripped, function(part){ return fwdPicChip(part, false); }, false);
-        if(video !== null && r.n > 1) video = video.repeat(r.n);
-        var txt = video !== null ? video
-                : (fwdPicChip(_stripped, false) + (r.n > 1 && _stripped ? " ×" + r.n : ""));
-        body = (txt ? "<div class='fp-tx'>" + txt + (_leftF > 0 && _shownF > 0 ? "<span class='fw-sent'>（已发 " + _shownF + "）</span>" : "") + "</div>" : "") + thumbsHtml(got);
+        var txt = fwdRestHtml(_stripped, r.n);
+        var _thumbs = thumbsHtml(got);
+        if(_thumbs && _leftF > 0){
+          // 用户 m07484：图已经铺出来了，弹层里也不再写「🖼 ×5（已发 3）」，
+          // 只留条目里除图片以外的文字，还差几张在缩略图后面补一句。
+          var _restF = stripFwdKind(_stripped, "图片");
+          txt = _restF ? fwdRestHtml(_restF, r.n) : "";
+        }
+        body = (txt ? "<div class='fp-tx'>" + txt + (_thumbs ? "" : (_leftF > 0 && _shownF > 0 ? "<span class='fw-sent'>（已发 " + _shownF + "）</span>" : "")) + "</div>" : "") + _thumbs +
+               (_thumbs && _leftF > 0 ? "<span class='fw-sent'>还有 " + _leftF + " 张</span>" : "");
       }
       return "<div class='fp-it'><div class='fp-meta'><span class='fw-w'>" + esc(r.who || "某人") + "</span>" +
              (r.when ? "<span class='fw-t'>" + esc(r.when) + "</span>" : "") + "</div>" + body + "</div>";

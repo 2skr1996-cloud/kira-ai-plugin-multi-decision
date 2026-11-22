@@ -747,6 +747,21 @@ def _forward_record_of(records: dict, raw_sid: str, mid: str):
         mine = [rec for rec in hits if str(rec.get("raw_sid") or "") == sid]
         if mine:
             return mine[0]
+        # 用户 m09904：插件自己的 raw_sid 映射表只在 collect 时才填，热重载后是空的，
+        # 这时调用方传进来的是短 sid（gm:xxx），记录里存的却是完整 sid（bot:gm:xxx）。
+        # 按「完整 sid 以 :短 sid 结尾」再认一次；认出不止一条就不猜，宁可少图不串图。
+        # 短 sid 是 gm_1145141974 这种（下划线），记录里是 樱井桃华:gm:1145141974，
+        # 两种写法都试一遍。
+        tails = {":" + sid}
+        alt = sid.replace("_", ":", 1)
+        if alt != sid:
+            tails.add(":" + alt)
+        near = [rec for rec in hits
+                if any(str(rec.get("raw_sid") or "").endswith(t) for t in tails)]
+        if len(near) == 1:
+            return near[0]
+        if near:
+            return None
         legacy = [rec for rec in hits if not str(rec.get("raw_sid") or "")]
         return legacy[0] if len(legacy) == 1 else None
     if len(hits) == 1:
@@ -1499,8 +1514,16 @@ def _display_proof_save(raw_sid, mid, proof) -> None:
     if records is None or (proof is not None and not _display_proof_ok(proof, raw_sid, mid)):
         return
     outer = str(mid or "").strip()
-    old_key = _FORWARD_MID_INDEX.get(outer)
-    old = records.get(old_key) if old_key is not None else None
+    # 用户 m10643：以前用 _FORWARD_MID_INDEX 找旧记录，那张表把同号的不同会话折成一条，
+    # 后写的会话会把先写的那条删掉。现在只认本会话自己的那条（短 sid 与完整 sid 认成同一条），
+    # 别的会话同号记录一律不碰。
+    old = _forward_record_of(records, raw_sid, outer)
+    old_key = None
+    if old is not None:
+        for rec_key, rec in records.items():
+            if rec is old:
+                old_key = rec_key
+                break
     if proof is None and old is None:
         return
     if proof is None:

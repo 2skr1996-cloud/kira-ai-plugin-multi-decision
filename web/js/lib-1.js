@@ -308,6 +308,17 @@
   }
   function el(tag, cls, text){ var e=document.createElement(tag); if(cls)e.className=cls; if(text!=null)e.textContent=text; return e; }
   function fmtTime(ts){ if(!ts) return "-"; var d=new Date(ts*1000); function p(n){return n<10?"0"+n:""+n;} return (d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds()); }
+  // 用户 m10848 第 5 条：记录表的时间列以前在窄屏折成「11-19 / 21:06:29」两行。
+  // 日期单独包一层，表格放不下时由 CSS 把日期收起来，只留时间。
+  function fmtTimeHtml(ts){
+    if(!ts) return "-";
+    var s = fmtTime(ts), i = s.indexOf(" ");
+    if(i < 0) return esc(s);
+    var hm = s.slice(i + 1), j = hm.lastIndexOf(":");
+    return "<span class='d'>" + esc(s.slice(0, i)) + "</span> " +
+           "<span class='t'>" + esc(hm.slice(0, j)) + "</span>" +
+           "<span class='s'>" + esc(hm.slice(j)) + "</span>";
+  }
   function fmtClock(ts){ if(!ts) return "-"; var d=new Date(ts*1000); function p(n){return n<10?"0"+n:""+n;} return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds()); }
   // 会话 id 现在是「类型:号码」（v2.42 去掉了前面的机器人名字），最多两段，
   // 所以一律按最后两段取，旧的三段式也照样能显示。
@@ -342,9 +353,20 @@
       var mask = document.createElement("div");
       mask.className = "mask";
       var box = document.createElement("div");
-      box.className = "dlg";
+      box.className = opt.note ? "dlg wide" : "dlg";
+      // 用户 m13149：说明文字以前跟标题挤在同一个 <p> 里，弹窗只有 520px，
+      // 第一句 45 个字必然折行、末行只剩「「展开」还能看。」。带 note 的弹窗
+      // 加宽到 680px，说明单独放进 .dlg-note，一行一条，不再折。
+      var noteHtml = "";
+      if(opt.note){
+        var noteLines = (typeof opt.note === "string") ? [opt.note] : (opt.note || []);
+        noteHtml = "<div class='dlg-note'>" + noteLines.map(function(s){
+          return "<div>" + esc(String(s || "")) + "</div>";
+        }).join("") + "</div>";
+      }
       box.innerHTML = "<h3>" + esc(opt.title || (opt.alert ? "提示" : "确认操作")) + "</h3>" +
         "<p class='p2'>" + esc(opt.message || "").replace(/\n/g, "<br>") + "</p>" +
+        noteHtml +
         "<div class='dlg-btns'>" +
           (opt.alert ? "" : "<button data-act='cancel'>取消</button>") +
           "<button class='" + (opt.danger ? "danger" : "") + "' data-act='ok'>" +
@@ -457,15 +479,17 @@
       if(v == null || typeof v !== "number") return "—";
       return (v < 10 ? (Math.round(v * 10) / 10) : Math.round(v)) + "秒";
     };
-    // 百分比后缀叫「命中」两个字：一个字没有不别扭的说法（「中」「命」都读不通），
-    // 也跟 token 卡里的「命中 X%」对上。
+    // 用户 m12784：主值行改成「48%命中」——数字在前、单位在后，跟「21次」一个写法；
+    // 「%命中」整体当单位，走跟其他卡一样的 <small>（11px 淡色）。
+    // 百分号不留 3px 间距（small 默认 margin-left:3px），否则会写成「48 %命中」，
+    // 所以单独给一个 .pct 类（见 index.html）。
     // null 一律写「命中 —」：回复这一路框架回的 LLMResponse 不带 cached_tokens，
     // 0 是「没记录」不是「没命中」，写成 0% 会让人以为缓存全废了。
     var pctTxt = function(v){
       return (v == null || typeof v !== "number") ? "—" : Math.round(v) + "%";
     };
     var hitTxt = function(v){
-      return (v == null || typeof v !== "number") ? "命中 —" : "命中" + Math.round(v) + "%";
+      return (v == null || typeof v !== "number") ? "命中 —" : Math.round(v) + "<small class='pct'>%命中</small>";
     };
     var seg = function(s){ return "<span class='nowrap'>" + s + "</span>"; };
     // 主值行三段：段之间用淡一点的斜杠，别让 / 抢了数字的注意力
@@ -475,6 +499,8 @@
     };
     // 用户 m16262 图1：用时从主值行挪到副行，主值只剩「次数 / 命中」两段。
     // 两段的写法单独留一个（三段那个 vline 还有别的卡在用，不动）。
+    // 用户 m11651：a / b 里可以带 <small>单位</small>（「21<small>次</small>」），
+    // seg() 只包一层 nowrap，不会把里面的标签转义掉。
     var vline2 = function(a, b){
       return "<span class='vm'>" + seg(a) + vsep + seg(b) + "</span>";
     };
@@ -503,7 +529,7 @@
       // v4.68（用户 m02472）：改名「24小时回复概览」——这格现在同时讲次数、平均用时、
       // 缓存命中，还叫「回复」会让人以为只有次数；群聊/私聊拆分挪进悬浮（一行装不下）。
       ["最近24小时回复概览",
-        vline2((t.replied || 0) + "次", hitTxt(kr.cache_hit)), "",
+        vline2((t.replied || 0) + "<small>次</small>", hitTxt(kr.cache_hit)), "",
         "真正发出去的回复条数；平均每次 " + secTxt(kr.avg_elapsed) +
         "（回复请求本身的耗时，不含决策），命中率 " + pctTxt(kr.cache_hit) +
         " 按最近 24 小时有记录的 " + (kr.elapsed_rounds || 0) + " 轮回复算" +
@@ -517,7 +543,7 @@
       // 建议回复 / 建议不回 / 决策失败改挂悬停（一行装不下四项）。
       // 建议不回不发请求，所以决策次数跟「请求」卡不是一回事。
       ["最近24小时决策概览",
-        decOk ? vline2((dec.rounds || 0) + "次", hitTxt(kd.cache_hit)) : "—", "",
+        decOk ? vline2((dec.rounds || 0) + "<small>次</small>", hitTxt(kd.cache_hit)) : "—", "",
         decOk ? ("最近 24 小时决策模型跑了 " + dec.rounds + " 次；其中建议回复 " +
                  (Number(dec.reply) || 0) + " 次、建议不回 " + (Number(dec.silent) || 0) +
                  " 次" +
@@ -548,8 +574,16 @@
     ];
     // 最近 24 小时 token（用户 m33573 图4）：总 / 输入 / 输出 / 平均缓存命中。
     // 用户 m02952：副行原来写「入 / 出」，跟价目表统一成「输入 / 输出」，不用单字缩写。
+    // 用户 m11651：token 卡的 M / K / B 后缀要跟「条」「次」一样小一号。
+    // tokText 在 lib-4.js 里（那边不动），这里只对它的返回值做一次包装：
+    // 结尾是单位字母就拆出来包 <small>，纯数字（<1000）和「—」原样返回。
+    var tokHtml = function(n){
+      var s = tokText(n);
+      var m = /^([\d.]+)([kKMB])$/.exec(s);
+      return m ? (m[1] + "<small>" + m[2] + "</small>") : s;
+    };
     if(tk.total){
-      items.push(["最近24小时 token", tokText(tk.total), "",
+      items.push(["最近24小时 token", tokHtml(tk.total), "",
                   "输入 " + Math.max(0, (tk.input || 0) - (tk.cached || 0)) + " · 缓存 " + (tk.cached || 0) +
                   " · 输出 " + (tk.output || 0) +
                   (tk.cache_hit == null ? "" : " · 命中 " + tk.cache_hit + "%") +
@@ -569,6 +603,13 @@
       var money = function(v){
         if(!(v > 0)) return "¥0";
         return "¥" + (v < 0.01 ? v.toFixed(4) : v.toFixed(2));
+      };
+      // 用户 m11651：花费卡的 ¥ 是前缀，包成 <small class='pre'> 让符号小一号；
+      // 用 .pre 是因为 .v small 的 margin-left 会把前缀推歪（样式主会话在 index.html 里补）。
+      // money() 还被悬停提示和副行用着（那些地方要纯文本），所以另写一个，不改 money。
+      var moneyHtml = function(v){
+        var s = money(v);
+        return s.charAt(0) === "¥" ? ("<small class='pre'>¥</small>" + s.slice(1)) : s;
       };
       var shortModel = function(name){
         var s = String(name || "");
@@ -607,7 +648,7 @@
       } else {
         costSub = cost.priced ? "按设置页价目估算" : "还没填价目";
       }
-      items.push(["最近24小时花费", costTotal == null ? "—" : money(costTotal), "", costTip, costSub, costSubHtml]);
+      items.push(["最近24小时花费", costTotal == null ? "—" : moneyHtml(costTotal), "", costTip, costSub, costSubHtml]);
     }
     // 最右一格放内存（用户 m28965）：窗口和待发都吃内存，出问题先看这里。
     // 峰值和明细挂 title，格子里只留一位小数，别把统计条撑高。
@@ -651,16 +692,33 @@
     memGroups.push({ name: "其他", mb: otherMb, bytes: otherBytes, cnt: otherCnt,
                      lbl: fmtMb(otherMb, otherBytes) });
     // v4.86（用户 m11062）：副行只列最大的几类，别把卡片顶得比旁边六张高。
-    // 用户 m14620：列最大的三类、用真实类目名；尾巴不再拼一个「其他」——
+    // 用户 m14620：用真实类目名，尾巴不再拼一个「其他」——
     // 以前「其他」既可能是没登记的最大类目、又可能是剩下的尾巴，于是同时出现两个。
     var memBySize = memGroups.filter(function(g){ return (g.bytes || 0) > 0 || (g.mb || 0) > 0; })
       // 用户 m14620：后端只给 mb、没给 bytes 时也要按大小排，不然顺序会退回类目表顺序。
       .sort(function(a2, b2){
         return ((b2.bytes || 0) - (a2.bytes || 0)) || ((b2.mb || 0) - (a2.mb || 0));
       });
-    var memSub = memBySize.slice(0, 3).map(function(g){
-      return (PIE_SHORT[g.name] || g.name) + " " + g.lbl;
-    }).join(" · ");
+    // 用户 m13028：第三项固定写「其他」，值是除前两类以外的全部缓存合计。
+    // 以前列第三大的类目，卡片窄的时候正好被省略号切掉，等于白占一格。
+    var memTop = memBySize.slice(0, 2);
+    var memRestMb = 0, memRestBytes = 0;
+    memGroups.forEach(function(g){
+      if(memTop.indexOf(g) < 0){ memRestMb += (g.mb || 0); memRestBytes += (g.bytes || 0); }
+    });
+    var memHasRest = memRestMb > 0 || memRestBytes > 0;
+    // 三项挤在一行：有「其他」时前两项省掉 MB，只在最后写一次，不然第三项会被省略号切掉。
+    // 十位以上不留小数（480.1 → 480），给「其他」多留一点宽度；个位数保留一位，免得 0.4 变成 0。
+    var memShort = function(mb, bytes){
+      var s = fmtMb(mb, bytes);
+      return (mb >= 10) ? s.replace(/^(\d+)\.\d(\s*MB)$/, "$1$2") : s;
+    };
+    var memSub = memTop.map(function(g){
+      var lbl = memHasRest ? memShort(g.mb, g.bytes).replace(/\s*MB$/, "") : g.lbl;
+      return (PIE_SHORT[g.name] || g.name) + " " + lbl;
+    });
+    if(memHasRest) memSub.push("其他 " + memShort(memRestMb, memRestBytes));
+    memSub = memSub.join(" · ");
     items.push(["插件数据", tot == null ? "—" : tot.toFixed(1), tot == null ? "" : "MB", "",
                 tot == null ? "" : memSub, null, ""]);
     var cardsHtml = items.map(function(it){
@@ -1421,6 +1479,17 @@ var ctxSnapRequest = 0;
   var FOLD_LINES = 2;
   // 折几行由 CSS 定，但「有没有超出」渲染前猜不准：先按初判挂上 clip，
   // 渲完再量一次，没超出的放开并把「展开」按钮删掉，免得按钮点了没反应。
+  // 用户 m12643：bot 卡的正文是按行拆开的块级 .qqmd-p，气泡直接 append 到 .mono 末尾
+  // 会落在块级 div 后面、只能另起一行（截图里「104 字」孤零零占一行）。有块级文本容器
+  // 就塞进最后一个里面，跟 QQMD_TAIL 的做法一致。
+  var TAIL_HOSTS = { "qqmd-p": 1, "qqmd-h": 1, "qtx": 1, "mdp": 1, "mdli": 1 };
+  function appendTail(el, node){
+    var last = el.lastElementChild;
+    if(last && last.classList){
+      for(var k in TAIL_HOSTS){ if(last.classList.contains(k)){ last.appendChild(node); return; } }
+    }
+    el.appendChild(node);
+  }
   function settleFolds(){
     var els = document.querySelectorAll(".mono.clip, .qbody.clip");
     for(var i = 0; i < els.length; i++){
@@ -1429,7 +1498,16 @@ var ctxSnapRequest = 0;
       if(el.scrollHeight <= el.clientHeight + 2){
         el.classList.remove("clip");
         var sib = el.nextElementSibling;
-        if(sib && sib.classList && sib.classList.contains("more") && sib.parentNode){
+        if(sib && sib.classList && sib.classList.contains("mc-tail")){
+          // 用户 m12463：折起来时气泡和「展开」一起放在 .mc-tail 里；实际没超行，
+          // 气泡（和已经挂上去的「拉黑」）挪回正文末尾，整条尾巴拆掉。
+          var tc = sib.querySelector(".chb.count"), tb = sib.querySelector(".mc-blk");
+          // 气泡和「拉黑」可能被包在 .mc-tags 里（用户 m12469 防换行），整壳搬走。
+          var tw = (tc && tc.parentNode && tc.parentNode.classList && tc.parentNode.classList.contains("mc-tags")) ? tc.parentNode : null;
+          if(tw){ appendTail(el, tw); }
+          else { if(tc) appendTail(el, tc); if(tb) appendTail(el, tb); }
+          if(sib.parentNode) sib.parentNode.removeChild(sib);
+        } else if(sib && sib.classList && sib.classList.contains("more") && sib.parentNode){
           sib.parentNode.removeChild(sib);
         }
       }
@@ -1449,14 +1527,36 @@ var ctxSnapRequest = 0;
   // 通用 @ 正则遇到空白就停，徽章只包住前半段、后半段落在外面成了普通字。
   // 这里记一份「这个窗口里见过的昵称」，richText 先用它整段替换，再让通用正则兜剩下的。
   var AT_POOL = [];
-  function atPoolAdd(nm){
+  // 用户 m10848：昵称池以前只装「这次打开页面后窗口里说过话的人」，@ 的对象没在窗口里
+  // 说过话时，带空格的昵称又会被通用正则截成前半段。池子改成存进 localStorage，
+  // 见过一次就记住，下次打开页面照样认得。
+  var AT_POOL_KEY = "md_at_pool";
+  var AT_POOL_MAX = 300;
+  var _atPoolTimer = 0;
+  function atPoolSave(){
+    if(_atPoolTimer) return;
+    _atPoolTimer = setTimeout(function(){
+      _atPoolTimer = 0;
+      try{ localStorage.setItem(AT_POOL_KEY, JSON.stringify(AT_POOL.slice(-AT_POOL_MAX))); }catch(e){}
+    }, 500);
+  }
+  function atPoolAdd(nm, quiet){
     nm = String(nm == null ? "" : nm).trim();
     if(!nm || nm.length > 40) return;
     // 含空白或方括号的昵称，通用 @ 正则吃不全，整段记下来先替换
     if(nm.indexOf(" ") < 0 && nm.indexOf("\u3000") < 0
        && nm.indexOf("[") < 0 && nm.indexOf("]") < 0) return;
-    if(AT_POOL.indexOf(nm) < 0) AT_POOL.push(nm);
+    if(AT_POOL.indexOf(nm) >= 0) return;
+    AT_POOL.push(nm);
+    if(AT_POOL.length > AT_POOL_MAX) AT_POOL.splice(0, AT_POOL.length - AT_POOL_MAX);
+    if(!quiet) atPoolSave();
   }
+  (function atPoolLoad(){
+    try{
+      var arr = JSON.parse(localStorage.getItem(AT_POOL_KEY) || "[]");
+      if(Array.isArray(arr)) arr.forEach(function(nm){ atPoolAdd(nm, true); });
+    }catch(e){}
+  })();
 
   // 用户 m27528 图1：转发卡片里的 [Emoji 344] / [Emoji 笑哭(ID: 182)] 以前只走 esc，
   // 群里好好的表情到了卡片里就是一行方括号。抽成一个函数，正文与转发条目共用。
@@ -1547,6 +1647,10 @@ var ctxSnapRequest = 0;
         }
       });
     }
+    // 用户 m10848：像「Mcp_management service」这种「英文名里带下划线/数字 + 一个空格 + 英文词」
+    // 的昵称，池子里没有时通用正则只吃到空格前，后半截落在徽章外面。这里先把这种整段收掉。
+    s = s.replace(/(^|[^\w\u4e00-\u9fa5\[])@([A-Za-z][A-Za-z0-9_.\-]*[_0-9][A-Za-z0-9_.\-]*) ([A-Za-z][A-Za-z0-9_.\-]{0,23})/g,
+      function(_, pre, a, b){ return pre + keepAt(a + " " + b); });
     // 2026-11-01（用户 m06025 图1）：@[ 后面的方括号不一定是包装，可能是昵称本身
     // （[%ĀĀ␇Ö]我在未来，等你）。只有 ] 后面就是空白/标点/结尾时才按包装剥括号；
     // 后面还接着字的，整段到空白为止，再按昵称规则洗掉装饰性前缀。
@@ -1640,7 +1744,9 @@ var ctxSnapRequest = 0;
     return out || "<div class='mdp'>" + inlineMd(t || "") + "</div>";
   }
 
-  function bodyHtml(text, empty, foldAt, cls, noFold){
+  // renderer 是给 QQ 官方机器人卡片用的（用户 m12198）：那种消息是 markdown，
+  // 要按卡片画（标题 / 粗体 / 代码块 / 指令按钮），普通正文传空走 richText。
+  function bodyHtml(text, empty, foldAt, cls, noFold, renderer){
     var t = text || "";
     // empty 传 null 表示「这条本来就没有正文，别补 (空)」——文件卡、分享卡自己
     // 就是正文，底下再挂个 (空) 很怪（用户 m29392 图4）
@@ -1655,10 +1761,15 @@ var ctxSnapRequest = 0;
     }
     // 超过 2 行先折起来，点「展开」再看全部——不截断内容，只收版面。
     // 字数只是初判（一行按 60 字估，比真实宽度保守），渲染完 settleFolds() 会纠正。
-    var long = !noFold && estLines(t) > FOLD_LINES;
+    // 用户 m12637：机器人卡片的 CSS 是 3 行才折（.mc.botcard .mono.bot-txt.clip），
+    // 这里却按 2 行判 —— 3 行的机器人消息先折上、settleFolds 量完又放开，刷新时
+    // 会闪一下「展开（N 字）」。阈值跟 CSS 对齐。
+    var foldLines = cls === "bot-txt" ? 3 : FOLD_LINES;
+    var long = !noFold && estLines(t) > foldLines;
     var foldChars = cls === "rawtxt" ? t.length : visLen(t);
     var lb = cls === "rawtxt" || foldChars ? "展开（" + foldChars + " 字）" : "展开";
-    return "<div class='mono" + (cls ? " " + cls : "") + (long ? " clip" : "") + "'>" + (cls === "rawtxt" ? esc(t) : richText(t)) + "</div>" +
+    var inner = cls === "rawtxt" ? esc(t) : (renderer ? renderer(t) : richText(t));
+    return "<div class='mono" + (cls ? " " + cls : "") + (long ? " clip" : "") + "'>" + inner + "</div>" +
            (long ? "<span class='more' data-more='1' data-label='" + esc(lb) + "'>" + lb + "</span>" : "");
   }
 
@@ -1695,7 +1806,26 @@ var ctxSnapRequest = 0;
     return "";
   }
 
-  function chipInto(pre, body, chip){
+  // 用户 m13647：X 卡（.qcard.tw）的「待发 / 计入」标签原来挂在卡片下面，看着像跟卡片脱开。
+  // 这里认出「正文就是一张 X 卡」的情况，交给 chipInto 把标签放进卡片右上角。
+  // 不能把标签塞进 <a> 里：fillTweets() 拿到数据后是整张 <a> 换掉的，塞进去的标签会被一起换没。
+  function twCardOnlyHtml(h){
+    var s = String(h == null ? "" : h).trim();
+    var m = s.match(/^<div class='mono'[^>]*>([\s\S]*)<\/div>$/);
+    if(!m) return "";
+    var inner = m[1].trim();
+    if(inner.indexOf("<a class='qcard tw'") !== 0) return "";
+    var j = inner.indexOf("</a>");
+    if(j < 0) return "";
+    return inner.slice(j + 4).trim() ? "" : inner;
+  }
+
+  function chipInto(pre, body, chip, inCard){
+    // 用户 m13647：X 卡的标签放进卡片右上角（卡片外面套一层相对定位的壳，标签绝对定位）
+    if(chip && inCard){
+      var tw = twCardOnlyHtml(body);
+      if(tw) return "<div class='tw-host'>" + tw + "<span class='card-chips'>" + chip + "</span></div>";
+    }
     // 整段只有一张卡：气泡挂卡片右边，别落进卡片内部/下面
     var sole = chip ? cardOnlyHtml(body) : "";
     if(sole) return "<div class='chip-line'>" + sole + chip + "</div>";
@@ -1708,6 +1838,12 @@ var ctxSnapRequest = 0;
     // v4.18 补（用户 m20945 图1）：抖音卡整条是 <a class='qcard dycard'>，当初为了保住 v3.98
     // 那个「插进 </a> 前」被排除在外，结果它在 <a> 里同样被撑成两行整行 —— 一律走 chip-line，
     // 卡片（含 <a>）当 chip-line 的 flex 子项，气泡放在卡片右边，不再进卡片内部。
+    // 转发卡（用户 m07185）：卡里可能嵌着 .qcard.video，以前会命中下面那条「pre 里有
+    // qcard」的判断，整张转发卡被塞进 .chip-line 的 flex 里缩成 max-content 的窄框
+    // （3 条那张只有 250px），没嵌视频的又把气泡塞进卡里，两张转发卡长得不一样。
+    // 转发卡一律把气泡放到卡片外面下方，卡片保持通栏。
+    if(chip && pre.indexOf("<div class='fwd'") >= 0)
+      return pre + "<div class='mc-tail'>" + chip + "</div>";
     if(chip && pre.indexOf("class='qcard") >= 0)
       return "<div class='chip-line'>" + pre + chip + "</div>";
     return tailChip(pre, chip);

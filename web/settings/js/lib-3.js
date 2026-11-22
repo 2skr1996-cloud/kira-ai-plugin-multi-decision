@@ -55,6 +55,8 @@
     // v3.13（用户 m39983）：window_enabled 恒为开。后端 _LOCKED_ON 已经忽略任何关闭意图，
     // 这里再补一次，免得旧配置里残留的 false 被原样提交上去、日志里看着像关掉了。
     if(Object.prototype.hasOwnProperty.call(out, "window_enabled")) out.window_enabled = true;
+    // 用户 m25921：保护工具同样锁死开启，旧配置里的 false 不再提交上去。
+    if(Object.prototype.hasOwnProperty.call(out, "protect_tool_groups")) out.protect_tool_groups = true;
     // v3.67（用户 m20117 第 2 条）：消息日志 / 会话统计的保留天数有硬下限 56 天（自适应阈值要长期历史）。
     // 2026-11-18（用户 m13966）：两者合成一行，只剩 decisions_keep_days 一个键（stats_keep_days 后端当别名读）。
     // 填 0 / 30 一律按 56 存，输入框也顺手改成 56——别让页面留着一个后端不接受的数。
@@ -184,6 +186,44 @@
   }
   // 作用范围卡片条（v3.67 用户 m20117 第 6 条，替掉原来的下拉框）：
   // 最左一张「全局」（默认选中），后面每张一个会话；选中谁就编辑谁的设置。
+  // 2026-11-20（J）：群组一多，卡片条后面的就看不见了——
+  //   ① 滚轮上下 = 左右滚：向后滚（往下）往右、向前滚（往上）往左，滚到头把滚动交还页面；
+  //   ② 「全局」右边一个折叠按钮，折叠后群组只留头像（全局那张保留文字），默认展开。
+  //   折叠状态只记在本机浏览器（localStorage），不进配置、不跟会话走。
+  var SCOPE_FOLD_KEY = "mdp_scope_fold";
+  var scopeFolded = false;
+  try{ scopeFolded = localStorage.getItem(SCOPE_FOLD_KEY) === "1"; }catch(x){}
+  // 滚轮一格该走多少像素：触控板横向手势（deltaX 更大）按原方向走；
+  // deltaMode 1 是「按行」、2 是「按页」，先换算成像素再滚。
+  function scopeWheelStep(e, box){
+    var dx = Number(e && e.deltaX) || 0, dy = Number(e && e.deltaY) || 0;
+    var d = Math.abs(dx) > Math.abs(dy) ? dx : dy;
+    if(!d) return 0;
+    if(e.deltaMode === 1) d *= 16;
+    else if(e.deltaMode === 2) d *= (box && box.clientWidth) || 400;
+    return d;
+  }
+  // 滚轮该把卡片条滚到哪：返回新的 scrollLeft；返回 null 表示「这次不拦，交还页面」。
+  // 没溢出、已经到头、或者这一下没有位移，都交还页面，别把整页的滚动卡死。
+  function scopeWheelTarget(at, d, max){
+    if(!d || !(max > 0)) return null;
+    at = Number(at) || 0;
+    if((d > 0 && at >= max - 1) || (d < 0 && at <= 0)) return null;
+    return Math.max(0, Math.min(max, at + d));
+  }
+  // 展开时箭头朝左（点了收起来），折叠时箭头朝右（点了放出来）。
+  function scopeFoldIcon(){
+    return scopeFolded
+      ? "<svg viewBox='0 0 24 24' fill='currentColor' aria-hidden='true'>" +
+        "<path d='M8.59 16.59 10 18l6-6-6-6-1.41 1.41L13.17 12z'/></svg>"
+      : "<svg viewBox='0 0 24 24' fill='currentColor' aria-hidden='true'>" +
+        "<path d='M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z'/></svg>";
+  }
+  function setScopeFolded(on){
+    scopeFolded = !!on;
+    try{ localStorage.setItem(SCOPE_FOLD_KEY, scopeFolded ? "1" : "0"); }catch(x){}
+    renderScopeOptions();
+  }
   function renderScopeOptions(list){
     var box = document.getElementById("set-cards");
     if(Array.isArray(list)) sessCache = list.slice();
@@ -194,13 +234,39 @@
     var html = "<button type='button' class='scard all" + (scopeSid ? "" : " on") +
       "' data-sid='' title='" + esc("全局设置：所有会话的默认值") + "'>" +
       "<span class='sc-globe' aria-hidden='true'>◎</span><span class='sc-nm'>全局</span></button>";
+    // 折叠按钮紧跟在「全局」后面：它只改卡片条自己的显示，不换作用范围，所以不挂 .scard。
+    html += "<button type='button' class='sc-fold" + (scopeFolded ? " on" : "") + "' data-fold='1'" +
+      " aria-pressed='" + (scopeFolded ? "true" : "false") + "'" +
+      " title='" + esc(scopeFolded ? "展开群组：显示群名" : "折叠群组：只留头像") + "'>" +
+      scopeFoldIcon() + "</button>";
     html += all.map(function(sid){
       return "<button type='button' class='scard" + (sid === scopeSid ? " on" : "") +
         "' data-sid='" + esc(sid) + "' title='" + esc(scopeCardName(sid) + "（" + sid + "）") + "'>" +
         scopeAvatarHtml(sid) + "<span class='sc-nm'>" + esc(scopeCardName(sid)) + "</span></button>";
     }).join("");
+    box.className = "scards" + (scopeFolded ? " fold" : "");
     box.innerHTML = html;
   }
+  // 卡片条自己的两个交互：折叠按钮的点击、滚轮换横向滚动。
+  // 点击换作用范围仍由 app.js 那个监听处理（它只认 .scard，这里只认 .sc-fold，互不打架）。
+  (function bindScopeStrip(){
+    var box = document.getElementById("set-cards");
+    if(!box || !box.addEventListener) return;
+    box.addEventListener("click", function(e){
+      var b = (e.target && e.target.closest) ? e.target.closest(".sc-fold") : null;
+      if(!b) return;
+      if(e.preventDefault) e.preventDefault();
+      setScopeFolded(!scopeFolded);
+    });
+    box.addEventListener("wheel", function(e){
+      var d = scopeWheelStep(e, box);
+      var max = (box.scrollWidth || 0) - (box.clientWidth || 0);
+      var next = scopeWheelTarget(box.scrollLeft || 0, d, max);
+      if(next === null) return;
+      if(e.preventDefault) e.preventDefault();
+      box.scrollLeft = next;
+    }, {passive: false});
+  })();
 
   // v3.11（用户 m39492）：改完就存，不再手动点「保存并生效」。
   // 防抖 700ms 把连续调整（连续加外号、拖动数字）合并成一次提交——
@@ -942,17 +1008,23 @@
   // 用户 m09851：窗口页「图片」组。前两行是插件自己的两个看图开关（从提示词页的模型卡搬来），
   // 后四行接管 KiraAI 基础设置里的「图片压缩」——那四项存在框架的 system_config.json
   // （bot_config.image_compression），不在插件配置里，所以不带 data-k，走 data-core 单独保存。
+  // 用户 m26550：顺序改成 图片压缩 - 长边压缩 - 压缩阈值 - 图片质量（前面还有两道保护闸），
+  // 说明换成更直白的说法；图片质量补上 % 单位。
+  // 用户 m15110：这四项也要标默认值。默认值取框架自己的常量
+  // （_kira_src/core/utils/image_compression.py 的 DEFAULT_MAX_SIZE / DEFAULT_QUALITY /
+  // DEFAULT_MIN_FILE_SIZE_MB，enabled 默认 True），不是插件配置里的默认。
   var CORE_IMG_FIELDS = [
     { k: "core_img_enabled", f: "enabled", t: "图片压缩", type: "switch",
-      d: "请求前把大图压小，省 token。" },
-    { k: "core_img_max", f: "max_size", t: "图片最长边", type: "integer", unit: "像素",
-      d: "压缩后的最长边。", min: 1, max: 8192 },
-    { k: "core_img_quality", f: "quality", t: "JPEG 质量", type: "integer", unit: "",
-      d: "输出质量，1 到 100。", min: 1, max: 100 },
+      d: "发图前先压小，省 token。", dft: "开启" },
+    { k: "core_img_max", f: "max_size", t: "长边压缩", type: "integer", unit: "像素",
+      d: "压完最长边留多少像素。", min: 1, max: 8192, dft: "1280 像素" },
     { k: "core_img_minmb", f: "min_file_size_mb", t: "压缩阈值", type: "integer", unit: "MB",
-      d: "超过这个大小才压。", min: 0 }
+      d: "图比这大才压。", min: 0, dft: "1 MB" },
+    { k: "core_img_quality", f: "quality", t: "图片质量", type: "integer", unit: "%",
+      d: "压完画质留多少，100 最清楚。", min: 1, max: 100, dft: "95%" }
   ];
   var coreImgCache = null;   // 框架 bot_config.image_compression 的当前值，loadSettings 里拉
+  var coreImgTried = false;  // 拉过一次没有：区分「还没回来」和「真失败」（用户 m14921）
   function coreImgVal(field, dft){
     var ic = coreImgCache || {};
     var v = ic[field];
@@ -973,17 +1045,23 @@
         (u ? "<b class='unit'>" + esc(u) + "</b>" : "") + "</span>";
     }
     return "<div class='setrow inline' data-row='" + esc(it.k) + "'>" +
-      "<div class='nm'>" + esc(it.t) + "</div>" +
+      "<div class='nm'>" + esc(it.t) + (it.dft ? "<i class='dfv'>默认 " + esc(it.dft) + "</i>" : "") + "</div>" +
       "<div class='ds'>" + esc(it.d) + "</div>" +
       "<div class='ctl'>" + ctl + "</div></div>";
   }
   function imgBlockHtml(){
     var h = "";
-    ["decision_see_images", "reply_see_images"].forEach(function(k){
-      var f = schemaCache[k];
-      if(f) h += rowHtml(k, f);
-    });
+    // 用户 m25921：两个「看图」开关挪去「窗口实验」组，这里只剩压缩参数与两道保护闸。
     if(!coreImgCache){
+      if(!coreImgTried){
+        // 用户 m14921：刷新时配置还没回来，先占住这一行，别先写「失败」再改口——
+        // 那样右栏会先短一截再长出来，下面的组跟着往下跳。
+        h += "<div class='setrow inline' data-row='core_img_note'>" +
+          "<div class='nm'>图片压缩</div>" +
+          "<div class='ds'>读取中…</div>" +
+          "<div class='ctl'></div></div>";
+        return h;
+      }
       // 框架配置没读回来（接口挂了 / 没登录）时别画一排空框，给一句能看懂的提示。
       h += "<div class='setrow inline' data-row='core_img_note'>" +
         "<div class='nm'>图片压缩</div>" +
@@ -992,13 +1070,168 @@
       return h;
     }
     // 用户 m13535：像素数超标的图（手机长截图）会先缩小再发，不然上游按像素数拒收。
-    // 这一项固定开启，开关只用来告诉用户有这个功能，所以不带 data-k / data-core，点不动。
-    h += "<div class='setrow inline' data-row='image_pixel_guard'>" +
-      "<div class='nm'>长图自动缩小</div>" +
-      "<div class='ds'>超过 600 万像素先缩小再发。</div>" +
+    // 用户 m10969：单边太长的图上游同样拒收（实测 8192 能过、9000 就 400），所以单边也有一道闸。
+    // 用户 m10007：两道闸合成一行「图片保护」，描述也并成一句——都是固定开启，开关只用来告诉用户
+    // 有这个功能，所以不带 data-k / data-core，点不动。
+    h += "<div class='setrow inline locked' data-row='image_guard'>" +
+      "<div class='nm'>图片保护<i class='dfv'>默认 开启</i></div>" +
+      "<div class='ds'>图超过 600 万像素，或一边超过 8000 像素，就先缩小再发。</div>" +
       "<div class='ctl'><label class='sw2 lock'><input type='checkbox' checked disabled>" +
       "<span class='tr' data-on='开启' data-off='关闭'></span></label></div></div>";
     h += CORE_IMG_FIELDS.map(coreImgRow).join("");
+    return h;
+  }
+  // 用户 m27095：动图三档改成跟「转发消息处理」一样的分段按钮——一次只能选一个，
+  // 不再靠三个开关互斥（gifMutex 已撤）。三档全关＝跳过这条路不再从界面走，
+  // 后端 _gif_mode 仍认全关（老配置里三个都 false 时照旧跳过）。
+  // 用户 m31535：只读首帧改名「首帧模式」，并跟「原图发送」换位，排到第二个。
+  var GIF_MODES = [
+    { v: "original", k: "history_gif_original", t: "原图发送", d: "原样发整段动图，不丢精度，最费 token。" },
+    { v: "first", k: "history_gif_first", t: "首帧模式", d: "只发第 1 帧，丢失全部动作，最省 token。" },
+    { v: "grid", k: "history_gif_grid", t: "拼图模式", d: "抽多帧拼成一张图，丢失一部分精度，能省 token。" }
+  ];
+  function gifModeNow(){
+    var c = configCache || {};
+    if(c.history_gif_grid) return "grid";
+    if(c.history_gif_original) return "original";
+    if(c.history_gif_first) return "first";
+    // 三项都不在配置里（老配置 / 还没读回来）时按后端默认的九帧模式显示。
+    if(!Object.prototype.hasOwnProperty.call(c, "history_gif_grid")) return "grid";
+    return "";
+  }
+  function gifModeDesc(v){
+    for(var i = 0; i < GIF_MODES.length; i++) if(GIF_MODES[i].v === v) return GIF_MODES[i].d;
+    return "三档都没开，动图跳过，正文只留 [图片]。";
+  }
+  // 用户 m30656：复杂动图多抽几帧看得更清，档位 9 / 16 / 25，拼图跟着变大。
+  // 用户 m13967：最后面加一个「自动」（0）——后端先去重，再按关键帧数决定拼几格。
+  // 用户 m13990 / m14556：9 / 16 / 25 也先去重，再从关键帧里挑变化大的（首尾保留）。
+  var GIF_FRAMES = [9, 16, 25, 0];
+  function gifFramesNow(){
+    var c = configCache || {};
+    // 没配过才回默认 9；配成 0 是「自动」，不能被当成没配。
+    if(!Object.prototype.hasOwnProperty.call(c, "gif_frames")) return 9;
+    var v = parseInt(c.gif_frames, 10);
+    if(!isFinite(v) || v < 0) return 9;
+    return v;
+  }
+  function gifGridOf(k, tile){
+    var cols = k <= 1 ? 1 : Math.ceil(Math.sqrt(k));
+    var rows = Math.ceil(k / cols);
+    var gap = 6;
+    // 跟后端 _grid_tile 同一套闸：拼图整体不能超过 600 万像素、单边 8000，
+    // 超了后端会把单帧边长收小，这里先算出来，别让说明写着 2596 实际只有 2400。
+    var t = Math.max(64, Math.min(1024, tile));
+    var edgeCap = Math.floor((8000 - (cols + 1) * gap) / cols);
+    if(edgeCap > 0) t = Math.min(t, edgeCap);
+    while(t > 64 && (cols * t + (cols + 1) * gap) * (rows * t + (rows + 1) * gap) > 6000000) t -= 1;
+    return { cols: cols, rows: rows, tile: t,
+      w: cols * t + (cols + 1) * gap,
+      h: rows * t + (rows + 1) * gap };
+  }
+  // 用户 m15110：动图质量默认 90（仍可调），token 预估按这个质量折算。
+  function gifQualityNow(){
+    var v = parseInt((configCache || {}).gif_quality, 10);
+    if(!isFinite(v) || v <= 0 || v > 100) return 90;
+    return v;
+  }
+  // 750 像素 ≈ 1 token，各家视觉模型都按这个量级算，只用来给个大概；
+  // 用户 m15110：再乘质量百分比——质量越低，同样像素数压出来的图越小，估的 token 也少。
+  function gifTokenOf(w, h, q){
+    return Math.round(w * h / 750 * q / 100);
+  }
+  function gifFramesDesc(k, tile, q){
+    var t = parseInt(tile, 10);
+    if(!isFinite(t) || t <= 0) t = parseInt((configCache || {}).gif_tile, 10);
+    if(!isFinite(t) || t <= 0) t = 384;
+    var qq = parseInt(q, 10);
+    if(!isFinite(qq) || qq <= 0 || qq > 100) qq = gifQualityNow();
+    if(k === 0){
+      // 用户 m13967：自动档按动图内容去重后自己决定拼几格，这里只报上限。
+      // 用户 m15110：说明压成一行，别在右栏折成两行。
+      // 用户 m15473：自动档不报 token 预估——帧数不定，报了也只是按上限瞎猜，只留格数。
+      var gm = gifGridOf(25, t);
+      var sm = "按内容去重，有几个关键帧拼几格，最多 25 帧（" + gm.cols + "×" + gm.rows + "）。";
+      if(gm.tile < t) sm += "（" + t + " 超上限，已降到 " + gm.tile + "）";
+      return sm;
+    }
+    var g = gifGridOf(k, t);
+    var s = "先去重，再挑变化大的 " + k + " 帧拼成 " + g.cols + "×" + g.rows + "，" +
+      g.w + "×" + g.h + " 像素，质量 " + qq + "% 约 " + gifTokenOf(g.w, g.h, qq) + " token。";
+    // 用户 m31535：合成超过像素上限时后端会自动把单帧边长收小，这里说清楚收到了多少。
+    if(g.tile < t) s += "（" + t + " 超上限，已降到 " + g.tile + "）";
+    return s;
+  }
+  function gifFramesHtml(){
+    var cur = gifFramesNow();
+    // 用户 m15473：说明独占第二行（.ds2），右栏窄的时候也不会折成两行。
+    return "<div class='setrow inline ds2' data-row='gif_frames'>" +
+      "<div class='nm'>拼图帧数<i class='dfv'>默认 9 帧</i></div>" +
+      "<div class='ds' data-gifframesdesc='1'>" + esc(gifFramesDesc(cur)) + "</div>" +
+      "<div class='ctl'><span class='seg'>" + GIF_FRAMES.map(function(n){
+        return "<button type='button' class='segbtn" + (n === cur ? " on" : "") +
+          "' data-gifframes='" + n + "'>" + (n === 0 ? "自动" : n + " 帧") + "</button>";
+      }).join("") + "</span></div></div>";
+  }
+  // 用户 m15110：质量改了要能当场重算 token 预估，所以允许把新质量直接传进来
+  // （change 事件里 configCache 还没更新，读它只会拿到旧值）。
+  function gifFramesPaint(tile, q){
+    var el = document.querySelector("#settings [data-gifframesdesc]");
+    if(el) el.textContent = gifFramesDesc(gifFramesNow(), tile, q);
+  }
+  // 用户 m31535：单帧边长改成几个性价比档位——256 省 token、320 偏省、384 均衡、512 高质量。
+  // 边长只是上限：超了才缩，没超就按原样拆；合成超过 600 万像素时后端会自动降级，
+  // 降级值不一定落在档位里（比如 25 帧配 512 会降到 482），说明里会写出来。
+  var GIF_TILES = [
+    { v: 256, t: "256", d: "每帧最长边 256 像素，最省 token，细节最少。" },
+    { v: 320, t: "320", d: "每帧最长边 320 像素，偏省 token。" },
+    { v: 384, t: "384", d: "每帧最长边 384 像素，均衡，默认。" },
+    { v: 512, t: "512", d: "每帧最长边 512 像素，最清楚，最费 token。" }
+  ];
+  function gifTileNow(){
+    var v = parseInt((configCache || {}).gif_tile, 10);
+    if(!isFinite(v) || v <= 0) return 384;
+    return v;
+  }
+  function gifTileDesc(v){
+    for(var i = 0; i < GIF_TILES.length; i++) if(GIF_TILES[i].v === v) return GIF_TILES[i].d;
+    // 老配置里可能是 200 这种不在档位里的值，照样按它算，不偷偷改。
+    return "每帧最长边 " + v + " 像素，超了才缩，不放大。";
+  }
+  function gifTileHtml(){
+    var cur = gifTileNow();
+    var list = GIF_TILES.slice();
+    // 当前值不在档位里时补一颗，免得一个都不亮、也点不回去。
+    var hit = false;
+    for(var i = 0; i < list.length; i++) if(list[i].v === cur) hit = true;
+    if(!hit) list.push({ v: cur, t: String(cur), d: gifTileDesc(cur) });
+    return "<div class='setrow inline' data-row='gif_tile'>" +
+      "<div class='nm'>单帧边长<i class='dfv'>默认 384 像素</i></div>" +
+      "<div class='ds' data-giftiledesc='1'>" + esc(gifTileDesc(cur)) + "</div>" +
+      "<div class='ctl'><span class='seg'>" + list.map(function(o){
+        return "<button type='button' class='segbtn" + (o.v === cur ? " on" : "") +
+          "' data-giftile='" + o.v + "'>" + esc(o.t) + "</button>";
+      }).join("") + "</span></div></div>";
+  }
+  function gifTilePaint(){
+    var el = document.querySelector("#settings [data-giftiledesc]");
+    if(el) el.textContent = gifTileDesc(gifTileNow());
+  }
+  function gifBlockHtml(){
+    var cur = gifModeNow();
+    var h = "<div class='setrow inline' data-row='history_gif_grid'>" +
+      "<div class='nm'>动图处理<i class='dfv'>默认 拼图模式</i></div>" +
+      "<div class='ds' data-gifdesc='1'>" + esc(gifModeDesc(cur)) + "</div>" +
+      "<div class='ctl'><span class='seg'>" + GIF_MODES.map(function(o){
+        return "<button type='button' class='segbtn" + (o.v === cur ? " on" : "") +
+          "' data-gifmode='" + esc(o.v) + "'>" + esc(o.t) + "</button>";
+      }).join("") + "</span></div></div>";
+    // 用户 m30656：帧数单独一行，说明里实时算出拼图尺寸和 token。
+    h += gifFramesHtml();
+    // 用户 m31535：单帧边长换成档位按钮，超上限后端自动降级。
+    h += gifTileHtml();
+    // 用户 m10267：质量也放这一组，改完下一轮请求就按新值重算。
+    if(schemaCache && schemaCache["gif_quality"]) h += rowHtml("gif_quality", schemaCache["gif_quality"]);
     return h;
   }
   // 框架的图片压缩只能走框架自己的接口：整份读回来 → 改 bot_config.image_compression → 整份写回去。

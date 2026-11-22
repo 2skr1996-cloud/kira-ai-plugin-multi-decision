@@ -92,7 +92,7 @@
     // 标题与这一行同处一个 .sub（v4.09 的 sect 合并），不会多出两层虚线内边距。
     { p: "trigger", t: "进阶模式", col: "normal", split: 3, sect: 1,
       // 用户 m06705：这句说明改成高亮气泡，点一下跳到「提示词」页（noteGo 由 app.js 画成可点）。
-      note: "开启产生额外调用，去「提示词」页设置", noteGo: "prompt" },
+      note: "开启产生额外调用，去「模型提示词」设置", noteGo: "prompt" },
     // v3.92（用户 m06951 第 4 条）：进阶模式改名「决策模式」，开关从提示词页搬回设置页，
     // 跟节奏模式一样「标题 + 开关」一行——这两行说的都是「这一轮怎么决定回不回」。
     // 提示词页只留人格 / 判断提示词 / 模型 / 工具那些设置（见那页顶上的两个子页签）。
@@ -158,7 +158,9 @@
         "silent_skip_single_sticker", "silent_skip_single_sticker_count",
         "silent_skip_single_image", "silent_skip_single_image_count",
         "silent_skip_short", "silent_skip_short_len", "silent_skip_short_count",
-        "silent_skip_file_video", "silent_skip_file_video_count"] },
+        "silent_skip_file_video", "silent_skip_file_video_count",
+        // 用户 m22683：正文 @ 了别人（不是 bot）也算不值得补，单占一行。
+        "silent_skip_at_other", "silent_skip_at_other_count"] },
     // v3.93（用户 m07570 图1 第 1 条）：节奏模式与决策模式说的都是「这一轮怎么决定
     // 回不回」，用户要在这两行上面加一条「高级设置」小标题把它们归进去。
     // 用户 m01961：决策模式搬去右列，这一节只剩节奏模式一行。
@@ -205,37 +207,42 @@
     // 用户 m10749 第 2 条：配额组已搬到基础设置（见上面「唤醒」组之后），限额页整页撤掉。
     // v3.13（用户 m39983）：window_enabled 从表单里撤掉——接管上下文窗口是这个插件的
     // 核心功能，关掉它等于插件不存在，不该给人一个关掉自己的按钮（后端强制 True）。
-    // v3.53（用户本轮第 5 条）：加「裁切缓冲条数」——一直没触发请求时，窗口攒到「保留 + 缓冲」
+    // v3.53（用户本轮第 5 条）：加「裁切缓存」——一直没触发请求时，窗口攒到「保留 + 缓存」
     // 条就强制裁一次，别让上下文无限长。
-    // v3.86（用户 m04644）：三个裁切参数排左列——裁切后保留条数 / 裁切触发阈值 / 裁切缓冲条数。
-    // 两列网格是「按顺序从左到右填」：偶数位落左列、奇数位落右列，所以要隔一个插一个杂项，
-    // 右列才是「历史里保留几张原图 / 保护工具调用组 / 裁切点选择方式」。
+    // v3.86（用户 m04644）：三个裁切参数排在一起——裁切保留 / 裁切阈值 / 裁切缓存。
+    // 用户 m26550：实时窗口的顺序改成 裁切保留 - 裁切阈值 - 裁切缓存 - 保留图片 - 保护工具；
+    // 组内行是整幅竖排，keys 的顺序就是看到的顺序。
     // 用户 m04115：窗口页改成两栏，不再六个组各占一整行。
     // 用户 m04287：改成三行两列——第一行 窗口 / 窗口显示，第二行 图片 / 动图设置，
     // 第三行 转发消息 / 摘要。
     // 用户 m04656：像基础设置页那样，左右两列各套一张卡片，中间不再空出来。
     // 渲染器只把「相邻且同 col」的组并进同一张卡，所以同栏的组必须连着写：
-    // 左栏 win = 窗口 / 图片（两个大块），右栏 media = 窗口显示 / 动图设置 / 转发消息 / 摘要（四个小块），
-    // 这样两栏高度基本齐平；按原来的三行两列分，右栏会比左栏矮一大截，卡片底下空出一片。
-    { p: "window", t: "窗口", split: 2, col: "win",
-      keys: ["window_keep", "history_images", "window_trim_threshold",
-             "protect_tool_groups", "window_buffer", "window_drop_tools",
-             "file_skip_context"] },
-    // 用户 m09851：两个「看图」开关从提示词页的模型卡搬到这里，跟图片压缩摆一块——
-    // 它们管的都是「图片怎么进请求」，跟选哪个模型不是一回事。
-    { p: "window", t: "图片", custom: "img", split: 2, col: "win",
-      keys: ["decision_see_images", "reply_see_images"] },
+    // 用户 m26550：窗口显示与图片压缩互换位置——左栏 win = 实时窗口 / 窗口实验 / 窗口显示，
+    // 右栏 media = 图片压缩 / 动图设置 / 转发消息 / 摘要。
+    { p: "window", t: "实时窗口", split: 2, col: "win",
+      keys: ["window_keep", "window_trim_threshold", "window_buffer",
+             "history_images", "protect_tool_groups"] },
+    // 用户 m24812：这两项都会让模型少看到东西——省 token 是真的，丢信息也是真的，
+    // 所以单独成组并挂「双刃剑」，别混在「实时窗口」里当成普通参数。
+    // 用户 m25921：两个「看图」开关也挪进来——它们同样是「让模型少看到东西」的取舍，
+    // 跟丢弃工具结果 / 丢弃文件视频摆在一起才好比较。
+    { p: "window", t: "窗口实验", warn: ["双刃剑"], split: 2, col: "win",
+      keys: ["decision_see_images", "reply_see_images",
+             "window_drop_tools", "file_skip_context"] },
     // 用户 m05550：基础设置页那组「窗口显示」挪到这一页——它管的就是窗口列多少条。
     // 用户 m17752：它管的是页面上列多少条，跟磁盘上留多少份不是一回事，别和「窗口快照上限」混着看。
-    { p: "window", t: "窗口显示", custom: "show", split: 2, col: "media",
+    // 用户 m26550：它跟「图片压缩」互换位置，现在排在左栏第三组。
+    { p: "window", t: "窗口显示", custom: "show", split: 2, col: "win",
       note: "只影响显示条数，不影响磁盘留存",
       keys: ["trace_keep", "trace_keep_dm", "decision_keep", "decision_keep_dm",
              "window_show", "window_show_dm"] },
-    // v4.45（用户 m22611）：历史里的动图怎么发给模型，三档互斥、默认九帧拼图；
-    // 三个都不开＝跳过（图上不来，正文只留 [图片]）。判定在后端 _gif_mode。
-    { p: "window", t: "动图设置", split: 2, col: "media",
-      note: "三档互斥，全关＝跳过",
-      keys: ["history_gif_first", "history_gif_original", "history_gif_grid"] },   // 用户 m10096：trim_strategy 已从设置里撤下（只剩机械裁切一种）
+    // 用户 m25921：图片组改名「图片压缩」。
+    // 用户 m26550：跟「窗口显示」互换位置，现在排在右栏第一组。
+    { p: "window", t: "图片压缩", custom: "img", split: 2, col: "media", keys: [] },
+    // v4.45（用户 m22611）：历史里的动图怎么发给模型，三档互斥、默认九帧拼图。
+    // 用户 m27095：三档改成跟「转发消息处理」一样的分段按钮，一次只能选一个——
+    // 三个开关互斥那套（gifMutex）随之撤掉，全关＝跳过也不再从界面走。
+    { p: "window", t: "动图设置", custom: "gif", split: 2, col: "media", keys: [] },   // 用户 m10096：trim_strategy 已从设置里撤下（只剩机械裁切一种）
     // 用户 2026-11-06：转发消息怎么进请求——三档 + 一个风险开关。
     // 用户 m04115：组说明去掉——「转发消息处理」那一行本来就把当前档位的说明写在行里。
     { p: "window", t: "转发消息", split: 2, col: "media",
@@ -268,8 +275,7 @@
     // 用户黑名单是新的：按 QQ 号整条剔除，连请求都不进（窗口页照常显示，默认折叠）。
     { p: "blacklist", t: "短语黑名单", solo: 1,
       keys: ["phrase_filter_enabled", "phrase_filter_list"] },
-    { p: "blacklist", t: "用户黑名单", custom: "ublack", solo: 1, keys: [],
-      warn: "未经充分测试" },
+    { p: "blacklist", t: "用户黑名单", custom: "ublack", solo: 1, keys: [] },
     // v3.37（用户 m02080 第 4 条）：API 价目。价目是按模型名动态长的表，不是固定键，
     // 所以不进 schema、不占 keys，走 custom 整块渲染（和时段曲线一样）。
     { p: "pricing", t: "模型单价", custom: "pricing", solo: 1,
@@ -288,7 +294,7 @@
     // v3.92（用户 m06951 第 5~7 条）：这一页重排成「顶上一半一半两个子页签 + 左边设置右边预览」。
     // 四块原来的位置也变了：聊天规则搬去「回复提示词」（它只在开口那一轮发出去），
     // 预览改成右栏自动刷新、只留一个「测试」按钮。整页由一块 custom 接管，不再拆成四组。
-    { p: "prompt", t: "提示词", custom: "promptpage", solo: 1, bare: 1 }
+    { p: "prompt", t: "模型提示词", custom: "promptpage", solo: 1, bare: 1 }
   ];
   // 设置页按页签分栏（用户 m33573：一页全堆着太乱，照 MaiBot 那样多分几页）
   var PAGES = [
@@ -299,11 +305,11 @@
     // URL 上残留 page=private 时 renderTabs 的兜底会把 curPage 拨回第一个页签。
     { id: "window",  t: "窗口设置" },
     // v3.91（用户 m05749）：进阶决策的开关、人格、提示词、模型、工具、预览全在这一页。
-    { id: "prompt",  t: "提示词" },
+    { id: "prompt",  t: "模型提示词" },
     // v3.56（用户本轮第 7 条）：「缓存设置」页改名「缓存记录」（这一页现在主要是各类缓存的账本 + 上限）；
     // 「其他」页签撤掉——它只是兜 schema 里没分组的键，一直是空的。
     { id: "log",     t: "缓存记录" },
-    { id: "blacklist", t: "黑名单" },
+    { id: "blacklist", t: "黑名单页" },
     // 用户 m09143：这一页现在主要是统计（用量、花费、占比），页签名从「API 价目」改成「API 统计」。
     { id: "pricing", t: "API 统计" }
     // 用户 m08902 第 6 条：「会话管理」页其实早就不存在了——内容块随某次改动删掉，
@@ -584,6 +590,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
       "<input type='checkbox' data-k='" + esc(k) + "'" + (on ? " checked" : "") + ">" +
       "<span class='tr' data-on='" + esc(onTxt || "开启") + "' data-off='" + esc(offTxt || "关闭") + "'></span></label>";
   }
+  // 用户 m25921：保护工具锁死开启——裁切时拆开工具调用和结果，模型会看到半截配对，
+  // 这一项没有关掉的正当理由。界面上只显示状态、点不动（后端 _LOCKED_ON 再兜一层）。
+  var LOCKED_ON = { protect_tool_groups: 1 };
+  function swLockedHtml(){
+    return "<label class='sw2 lock'><input type='checkbox' checked disabled>" +
+      "<span class='tr' data-on='开启' data-off='关闭'></span></label>";
+  }
   // v3.92（用户 m00697 第 15 条）：唤醒那几行是「关闭 / 触发 / 必回」三档，一条轨道三段、滑块跟着走。
   // 两个键（触发 / 必回）互斥，仍各留一个隐藏 input 带 data-k，提交链路不用改。
   function sw3(k, ak, v, title){
@@ -602,7 +615,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
   var UNIT_TEXT = { trigger_threshold: "次",
     watchdog_seconds: "秒", retry_max: "次", retry_delay: "秒",
     trace_keep: "条", trace_keep_dm: "条", decision_keep: "条", decision_keep_dm: "条",
-    window_show: "条", window_show_dm: "条" };
+    window_show: "条", window_show_dm: "条",
+    // 用户 m10267：动图派生参数的单位（质量走 %，跟图片质量一个写法）。
+    // 用户 m31535：单帧边长改成档位按钮，不再走数字框，单位写在按钮说明里。
+    gif_quality: "%" };
   // 用户 m04656：插件开关也写「开启 / 关闭」，不再单独写「接管」。
   // v3.72（用户第 7 / 9 条）：第 5 个参数是调用方给的 [下限, 上限]，用来兜 schema 里没写
   // min/max、后端 /config 也没下发 bounds 的键（数据使用 / 回看周数）。
@@ -611,6 +627,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(t === "switch" || t === "boolean" || t === "bool"){
       // v3.49（用户 m06348 第 7 条）：开关上的小字先统一成「开关」；v3.50（用户 m06761 第 4 条）
       // 又改回随状态显示「开 / 关」——名字仍在左边 .nm 里，小字只报状态。
+      // 用户 m25921：锁定项恒开，画成灰掉的开关，点不动。
+      if(LOCKED_ON[k]) return swLockedHtml();
       return swPill(k, v, "开启", "关闭");
     }
     // 单群模式：只显示本群写过的值，没写过就空着 + 占位提示全局值，
@@ -820,6 +838,49 @@ var DM_SPECIAL = { trigger_probability: 1 };
     "</div>";
   }
 
+  // 用户 m1821：三张模型卡从提示词页抽出来单独一页，卡顶各挂一行标题，不然分不清哪张管哪条链。
+  // 用户 m3096：卡片默认收起，只留主模型和备用模型两行。
+  // 用户 m3096 追加：卡顶那行标题不要了，折叠开关挪到左栏工具条「恢复默认」右边。
+  var MC_OPEN = {};
+  var MC_CARD = { decision: "dec-card", jev: "jev-card", reply: "rep-card" };
+  function mcCls(id){ return MC_OPEN[String(id || "")] ? "" : " mc-collapsed"; }
+  function mcToggleBtn(kind){
+    var id = MC_CARD[String(kind || "")];
+    if(!id) return "";
+    var open = !!MC_OPEN[id];
+    // 提示词页会摘掉所有 title（用户 m10962），状态说明改挂 aria-label。
+    return "<button type='button' class='dmini pp-mc' data-mc-toggle='" + id + "'" +
+      " aria-expanded='" + (open ? "true" : "false") + "'" +
+      " aria-label='" + (open ? "收起模型设置" : "展开模型设置") + "'>模型设置" +
+      "<span class='pp-mc-st'>" + (open ? "展开" : "折叠") + "</span>" +
+      "<span class='pp-mc-chev'></span></button>";
+  }
+  // 折叠时只留这两行；其余 .drow 由样式表按 .mc-collapsed 收起来。
+  function mcRowKeep(label, ctl){
+    return "<div class='drow mc-keep'><label class='dlb'>" + esc(label) + "</label>" + ctl + "</div>";
+  }
+  // 用户 m01994：思考等级（reasoning_effort）。留空 = 跟随模型自己的设置，不传这个参数。
+  // 用户 m13066：选项文案用英文，跟配置值同名，不再写中文档位。
+  var MC_EFFORT = [["", "default"], ["off", "off"], ["low", "low"], ["medium", "medium"], ["high", "high"], ["xhigh", "xhigh"], ["max", "max"]];
+  function dEffortOpts(cur){
+    var v = String(cur == null ? "" : cur).trim().toLowerCase();
+    var known = false;
+    MC_EFFORT.forEach(function(it){ if(it[0] === v) known = true; });
+    if(!known) v = "";
+    return MC_EFFORT.map(function(it){
+      return "<option value='" + it[0] + "'" + (it[0] === v ? " selected" : "") + ">" + it[1] + "</option>";
+    }).join("");
+  }
+  function dEffortSel(k, cur){
+    return "<select class='dipt eff' data-k='" + esc(k) + "'>" + dEffortOpts(cur) + "</select>";
+  }
+  // 用户 m7217：主模型和备用模型各配一档思考等级——左边模型、右边等级，两行对齐。
+  function mcModelRow(label, modelCtl, effKey, effCur){
+    return "<div class='drow mc-keep mrow'>" +
+      "<label class='dlb'>" + esc(label) + "</label>" + modelCtl +
+      "<label class='dlb eff'>思考等级</label>" + dEffortSel(effKey, effCur) +
+      "</div>";
+  }
   function dmodelBlockHtml(){
     var act = String(dVal("decision_fail_action", "allow")) === "block" ? "block" : "allow";
     // 用户 m08153：这一页的「!」图标和悬浮说明全删了；hint 参数留着不渲染，
@@ -830,19 +891,22 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 用户 m02993 图7：删掉「决策模型」这条小标题；备用模型挪到决策模型右边同一行；
     // 失败时的选项说人话（跳过决策、直接回复）；下面整块「决策可用的工具」也删了
     // ——工具已经改成提示词页的「工具说明」模块，在那里勾一次，两边都用同一份。
-    return "<div class='dcard'>" +
+    return "<div class='dcard mcard" + mcCls("dec-card") + "' id='dec-card'>" +
       "<input type='hidden' data-k='decision_tools' id='dec-tools' value='" +
         esc(JSON.stringify(dPickedRaw())) + "'>" +
       // 用户 m04343 第 8 条：两个模型选择框各自贴在标题右边，标题和下面六行同一列左对齐。
       // 用户 m09611：跟 JEV 卡一样套成两列小卡——左边模型与失败处理，右边工具那几项。
-      "<div class='jev-cols'>" +
-        "<div class='jev-col dcol'><div class='drows'>" +
-          row("决策模型", "<select class='dipt' data-k='decision_model' id='dec-model'>" +
-            dModelOpts(String(dVal("decision_model", "")), "跟随默认模型") + "</select>",
-            "它只负责看窗口判断回不回；真正的回复还是框架默认模型来写。") +
-          row("备用模型", "<select class='dipt' data-k='decision_fallback_model' id='dec-fb'>" +
-            dModelOpts(String(dVal("decision_fallback_model", "")), "未选择模型") + "</select>",
-            "主模型连续失败到「失败切换」那个次数，才切到它。") +
+      // 用户 m7217：模型行独占整卡宽度——左边模型、右边它自己的思考等级，两行对齐。
+      "<div class='drows mtop'>" +
+        mcModelRow("决策模型", "<select class='dipt' data-k='decision_model' id='dec-model'>" +
+          dModelOpts(String(dVal("decision_model", "")), "跟随默认模型") + "</select>",
+          "decision_reasoning_effort", dVal("decision_reasoning_effort", "")) +
+        mcModelRow("备用模型", "<select class='dipt' data-k='decision_fallback_model' id='dec-fb'>" +
+          dModelOpts(String(dVal("decision_fallback_model", "")), "未选择模型") + "</select>",
+          "decision_fallback_reasoning_effort", dVal("decision_fallback_reasoning_effort", "")) +
+      "</div>" +
+      "<div class='jev-cols flat-cols'>" +
+        "<div class='jev-col dcol flat'><div class='drows'>" +
           // 用户 m08678：决策页保留自己的一套，默认值与回复一致，可各自调整。
           // 用户 m10202：这两行并成一行；等待时间按分钟填（存盘仍是秒）。
           // 用户 m15201：「连续失败切换」改名「失败切换」，「单轮工具调用上限」改名「单轮工具上限」。
@@ -852,12 +916,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
             "<option value='allow'" + (act === "allow" ? " selected" : "") + ">跳过决策调用回复</option>" +
             "<option value='block'" + (act === "block" ? " selected" : "") + ">这一轮不回</option></select>",
             "决策模型挂了的时候：跳过判断、直接交给回复模型，还是这一轮干脆不回。") +
+          // 用户 m02969：工具超时挪到左边，左右两列各三行，看着对称。
+          row("工具调用超时", dnum("decision_tool_timeout", "秒", 180), "单个工具最多等多久，0 = 不限制。") +
           // 用户 m09851：「决策看图」搬到窗口设置页的「图片」组了，这里不再重复一份。
         "</div></div>" +
-        "<div class='jev-col dcol'><div class='drows'>" +
-          row("Agent循环次数", dnum("decision_tool_loop", "轮", 5), "最多调用几轮工具，最后判断那一轮不算。") +
+        "<div class='jev-col dcol flat'><div class='drows'>" +
+          row("Agent循环数", dnum("decision_tool_loop", "轮", 5), "最多调用几轮工具，最后判断那一轮不算。") +
           row("单轮工具上限", dnum("decision_tool_calls_per_turn", "个", 5), "一轮里最多调几个工具，多出来的不执行。") +
-          row("工具调用超时", dnum("decision_tool_timeout", "秒", 180), "单个工具最多等多久，0 = 不限制。") +
           row("工具输出上限", dnum("decision_tool_output_tokens", "token", 10000), "工具结果最多留多少，超了保留首尾，0 = 不限制。") +
         "</div></div>" +
       "</div></div>";
@@ -872,27 +937,31 @@ var DM_SPECIAL = { trigger_probability: 1 };
     function row(label, ctl, hint){
       return "<div class='drow'><label class='dlb'>" + esc(label) + "</label>" + ctl + "</div>";
     }
-    return "<div class='dcard'>" +
+    return "<div class='dcard mcard" + mcCls("rep-card") + "' id='rep-card'>" +
       // 用户 m09611：跟 JEV 卡一样套成两列小卡——左边模型与看图，右边工具那几项。
-      "<div class='jev-cols'>" +
-        "<div class='jev-col dcol'><div class='drows'>" +
-          row("回复模型", "<select class='dipt' data-k='reply_model' id='rep-model'>" +
-            dModelOpts(String(dVal("reply_model", "")), "跟随默认模型") + "</select>",
-            "真正写回复的那个模型。留空 = 用框架的默认模型。") +
-          row("备用模型", "<select class='dipt' data-k='reply_fallback_model' id='rep-fb'>" +
-            dModelOpts(String(dVal("reply_fallback_model", "")), "未选择模型") + "</select>",
-            "主模型连续失败到「失败切换」那个次数，才切到它。") +
+      // 用户 m7217：模型行独占整卡宽度——左边模型、右边它自己的思考等级，两行对齐。
+      "<div class='drows mtop'>" +
+        mcModelRow("回复模型", "<select class='dipt' data-k='reply_model' id='rep-model'>" +
+          dModelOpts(String(dVal("reply_model", "")), "跟随默认模型") + "</select>",
+          "reply_reasoning_effort", dVal("reply_reasoning_effort", "")) +
+        mcModelRow("备用模型", "<select class='dipt' data-k='reply_fallback_model' id='rep-fb'>" +
+          dModelOpts(String(dVal("reply_fallback_model", "")), "未选择模型") + "</select>",
+          "reply_fallback_reasoning_effort", dVal("reply_fallback_reasoning_effort", "")) +
+      "</div>" +
+      "<div class='jev-cols flat-cols'>" +
+        "<div class='jev-col dcol flat'><div class='drows'>" +
           // 用户 m07859：重试 / 重试间隔 / 单次超时统一在「基础设置 · 重试」里改，这里不再重复。
           // 用户 m10202：这两行并成一行；等待时间按分钟填（存盘仍是秒）。
           // 用户 m15201：跟决策卡一样，「连续失败切换」改名「失败切换」，「单轮工具调用上限」改名「单轮工具上限」。
           dPair("失败切换", swPill("reply_fail_switch", dVal("reply_fail_switch", true)),
             "切换模型", dnum("reply_fallback_cooldown", "分钟", 1800)) +
+          // 用户 m02969：工具超时挪到左边，跟决策卡一样左右对称。
+          row("工具调用超时", dnum("reply_tool_timeout", "秒", 180), "单个工具最多等多久，0 = 不限制。") +
           // 用户 m09851：「回复看图」搬到窗口设置页的「图片」组了，这里不再重复一份。
         "</div></div>" +
-        "<div class='jev-col dcol'><div class='drows'>" +
-          row("Agent循环次数", dnum("reply_tool_rounds", "轮", 5), "回复时最多调用几轮工具，最后写回复那一轮不算。") +
+        "<div class='jev-col dcol flat'><div class='drows'>" +
+          row("Agent循环数", dnum("reply_tool_rounds", "轮", 5), "回复时最多调用几轮工具，最后写回复那一轮不算。") +
           row("单轮工具上限", dnum("reply_tool_calls_per_turn", "个", 5), "一轮里最多调几个工具，多出来的不执行。") +
-          row("工具调用超时", dnum("reply_tool_timeout", "秒", 180), "单个工具最多等多久，0 = 不限制。") +
           row("工具输出上限", dnum("reply_tool_output_tokens", "token", 10000), "工具结果最多留多少，超了保留首尾，0 = 不限制。") +
         "</div></div>" +
       "</div></div>";
@@ -1051,15 +1120,15 @@ var DM_SPECIAL = { trigger_probability: 1 };
       return "<div class='drow stack'><label class='dlb'>" + esc(label) + "</label>" + ctl + "</div>";
     }
     function col(title, body){
-      return "<div class='jev-col'>" +
+      return "<div class='jev-col flat'>" +
         (title ? "<div class='jev-col-h'><span>" + esc(title) + "</span></div>" : "") +
         body + "</div>";
     }
     // ---- 左边：模型与不确定区间 ----
     var fwBody = "<div class='drows'>" +
-        row("JEV 模型", "<select class='dipt' data-k='jev_model' id='jev-model'>" +
+        mcRowKeep("JEV 模型", "<select class='dipt' data-k='jev_model' id='jev-model'>" +
           jevModelOpts(String(dVal("jev_model", "")), jevEmptyText()) + "</select>") +
-        row("备用模型", "<select class='dipt' data-k='jev_fallback_model' id='jev-fb'>" +
+        mcRowKeep("备用模型", "<select class='dipt' data-k='jev_fallback_model' id='jev-fb'>" +
           jevModelOpts(String(dVal("jev_fallback_model", "")), "未选择模型") + "</select>") +
         // 用户 m01978 第 1 条：这两项并成一行，名字缩短，单位（次 / 秒）搬进框里。
         pair2("失败切换", swPill("jev_fail_switch", dVal("jev_fail_switch", true)),
@@ -1118,8 +1187,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
           "</span>" +
         "</div>" +
       "</div>";
-    return "<div class='dcard' id='jev-card'>" +
-      "<div class='jev-cols'>" +
+    return "<div class='dcard mcard" + mcCls("jev-card") + "' id='jev-card'>" +
+      "<div class='jev-cols flat-cols'>" +
         // v4.85（用户 m10425 第 6 条）：左边这列不再挂「决策设置」标题。
         col("", fwBody) +
         col("", apiBody) +
@@ -1227,7 +1296,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
   }
 
   function dtoolsBlockHtml(){
-    var hint = "勾选的工具作为原生工具发送，是否写入 system 由工具模块决定；模型要调就真的去调，最多连着调几轮由「回复提示词」页的「Agent循环次数」决定。";
+    var hint = "勾选的工具作为原生工具发送，是否写入 system 由工具模块决定；模型要调就真的去调，最多连着调几轮由「回复提示词」页的「Agent循环数」决定。";
     return "<div class='dcard'><div class='dhead'>决策可用的工具" +
       "<span class='dhead-x'>最多 <b id='dec-rounds-hint'>5</b> 轮</span></div>" +
       "<input type='hidden' data-k='decision_tools' id='dec-tools' value='" + esc(JSON.stringify(dPickedRaw())) + "'>" +
@@ -1249,7 +1318,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       catalog:[], officialReference:null, nativeTemplates:null, referenceOpen:false,
       toolChoices:[], toolsSelected:[],
       revision:null, inherited:false, contextSid:"", dirty:false, saving:false,
-      editSeq:0, seq:0, modeSeq:0, timer:0, preview:null, previewPending:false, referencesPending:false, open:Object.create(null),
+      editSeq:0, seq:0, timer:0, preview:null, previewPending:false, referencesPending:false, open:Object.create(null),
       previewError:"", error:"", notice:""
     };
     return PP_STATES[key];
@@ -1534,7 +1603,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 没勾任何工具时默认展开——不然会出现「已选 0 / 4」却找不到东西可勾。
     // 用户 m04343 图3：清单默认折叠，要点开才看（summary 上一直写着「已选 N / M」）。
     return "<details class='pm-tools-fold'>" +
-      "<summary class='pm-sum'><span>工具清单</span>" +
+      "<summary class='pm-sum'><span>工具清单 " + ppTokenHtml("tools") + "</span>" +
       "<span class='pm-tools-sum' id='pp-toolsum-" + s.kind + "'" +
         (stale.length ? " title='另有 " + stale.length + " 个已勾的工具当前不可用：" + esc(stale.join("、")) + "'" : "") +
         ">已选 " + pickedOn.length + " / " + list.length + "</span></summary>" +
@@ -1599,6 +1668,40 @@ var DM_SPECIAL = { trigger_probability: 1 };
       "<button type='button' class='pm-modnotice-x' title='知道了，不再提示' aria-label='关闭提示'" +
       " data-pm-kind='" + s.kind + "' data-pm-action='notice-off' data-pm-module='" + esc(mid) + "'>✕</button></div>";
   }
+  // 用户 m2450：这几段是插件自己填的（身份 / 工具 / 记忆 / 时间），卡片上只显示占位符，
+  // 不再把整段真实内容铺出来——左边看结构，右边预览看真实请求。框架原段（角色设定 / 注意事项 /
+  // 输出要求 / 输出格式 / 表达风格）不在此列，照旧显示原文。
+  // 用户 m2238：角色扮演不挂占位符——人设文件已经能直接读，卡片照实显示注入的那段人设。
+  var PP_TOKEN_OF = {identity:"identity", tools:"tools", system_memory:"memory", system_time:"time"};
+  // 用户 m00431 图1：输出格式那一段里的标签清单（message_types / root_tags）也是框架在 assemble
+  // 阶段按当前语言与适配器现填的，跟身份 / 工具 / 记忆 / 时间一样算动态注入，卡片上要挂占位符。
+  function ppTokenOf(typ, key){
+    // key 可能是「format#2」（同一段被复制过），只认冒号前面那截。
+    if(String(typ || "") === "framework" && String(key || "").split("#")[0] === "format") return "message_types";
+    return PP_TOKEN_OF[String(typ || "")] || "";
+  }
+  function ppTokenHtml(typ, key){
+    var t = ppTokenOf(typ, key);
+    return t ? "<span class='pm-token'>{{" + t + "}}</span>" : "";
+  }
+  // 用户 m2618 第 1/2 条：输出格式段有两个框架现填的标签，摘要行要写明「存在2个占位符」并都列出来，
+  // 只读正文里也要能一眼看出这两个位置。花括号分开拼，源码里不出现连写的两对。
+  function ppTagTokens(typ, key){
+    if(String(typ || "") !== "framework") return [];
+    return String(key || "").split("#")[0] === "format" ? ["message_types", "root_tags"] : [];
+  }
+  function ppTokenSpan(name){
+    var raw = "{" + "{" + String(name || "") + "}" + "}";
+    return "<span class='pm-token'>" + raw + "</span>";
+  }
+  function ppTagBodyHtml(text, tokens){
+    var html = esc(String(text || ""));
+    for(var i = 0; i < tokens.length; i++){
+      var raw = "{" + "{" + tokens[i] + "}" + "}";
+      html = html.split(esc(raw)).join("<span class='pm-token'>" + esc(raw) + "</span>");
+    }
+    return html;
+  }
   function ppModuleHtml(s, module, index){
     var typ = String(module.type || "text");
     // 用户 m02993 图5：只标位置的那条「动态尾段」单行占位撤了——动态段现在是一块
@@ -1662,6 +1765,14 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 用户 m09506：实时窗的真实内容与「读取哪个群组」不止 JEV 页要有，决策 / 回复页也一样。
     var rtLive = isRealtime;
     if(rtLive){ body = String(s.rtText || ""); }
+    // 用户 m2450：身份 / 人格 / 工具 / 记忆 / 时间这几段是插件自己填的，卡片里只显示占位符，
+    // 不再把整段真实内容铺出来。字数仍按真实注入的那段算，右边预览照旧是完整内容。
+    var realBody = body;
+    var token = ppTokenOf(typ, module.key);
+    var tagTokens = ppTagTokens(typ, module.key);
+    var tokenOn = !!(token && String(realBody || "").trim());
+    // 用户 m00431：框架原段（输出格式）的正文就是模板本身，不能换成占位符——只在摘要行挂标签。
+    if(tokenOn && typ !== "framework"){ body = "{{" + token + "}}"; }
     // 2026-11-18（J，用户 m12261）：标题后面那个橙色「自定义」小标撤掉——来源下拉已经写了「（自定义）」。
     // 用户 m03879 图3/图7：不会变的那些段标题不需要改，描述直接写在标题右边就够了。
     var editableTitle = (typ === "text" || typ === "custom");
@@ -1707,7 +1818,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         : (typ === "custom" ? "自定义模板：保存的固定文本"
           : (ref ? String(ref.source || "引用当前原文") : "目录中没有此引用"));
     }
-    var chars = String(body ? body.length : 0);
+    var chars = String(realBody ? realBody.length : 0);
     // 用户 m23323 图3：系统段「不允许往下」——排在实时窗口上面那一条的下移键直接禁掉。
     var nextType = (index + 1 < s.layout.modules.length) ? String((s.layout.modules[index + 1] || {}).type || "") : "";
     var nextIsRt = nextType === "realtime_marker";
@@ -1778,7 +1889,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
       metaHtml +
       (isTools ? ppToolBox(s, module, index) :
       "<details class='pm-body'" + (open ? " open" : "") + " data-pm-open='" + index + "'>" +
-        "<summary class='pm-sum'>" + (isPersona ? "人格正文 " : "正文 ") + esc(chars) + " 字符" +
+        "<summary class='pm-sum'>" + (isPersona ? "人格正文 " : "正文 ") +
+        (tagTokens.length
+          ? "存在" + tagTokens.length + "个占位符 · " + tagTokens.map(ppTokenSpan).join(" ") + " · "
+          : (tokenOn ? ppTokenSpan(token) + " · " : "")) + esc(chars) + " 字符" +
         // 用户 m10866：动态段那句「拼在聊天记录最后」删掉，位置标签已经说明清楚。
         (isDynamic ? "（动态段 · 可编辑）"
           : (isRealtime ? "（真实实时窗 · 只读）"
@@ -1786,6 +1900,11 @@ var DM_SPECIAL = { trigger_probability: 1 };
               : (custom ? "（可编辑）" : (isPersona ? "（只读 · 换人设请用右上角的下拉）"
                 : (ro ? "（框架自动填写，只能看不能改）" : "（引用原文，只读）")))))) + "</summary>" +
         "<div class='pm-body-row'>" +
+        // 用户 m2618 第 2 条：输出格式段只读，正文里那两个占位符要能看出来——textarea 上不了色，
+        // 这一段换成 pre，把两个 token 包成小标签高亮。
+        (tagTokens.length
+          ? "<pre class='pm-pre' aria-label='输出格式（只读）'>" + ppTagBodyHtml(body, tagTokens) + "</pre>"
+          : (
         // 用户 m23323 图3：<textarea> 后面紧跟的第一个换行会被 HTML 解析吃掉，
         // 正文以空行开头时回填一次就少一行、越编辑越少。这里先自己补一个换行。
         "<textarea class='darea pm-content' rows='5' aria-label='" +
@@ -1799,7 +1918,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
                       : (isPlugin ? (isPluginMem ? "记忆插件注入（只读）" : "记忆插件 · 本轮上下文（只读）")
                         : "改这里会自动存成你自己的模板")))))))) +
         "' data-pm-field='content' data-pm-index='" + index + "'" +
-        (rtLive ? " readonly" : (custom || isRealtime || isDynamic ? "" : (ro ? " readonly" : " data-pm-promote='1'"))) + ">\n" + esc(body) + "</textarea>" +
+        (rtLive ? " readonly" : (custom || isRealtime || isDynamic ? "" : (ro ? " readonly" : " data-pm-promote='1'"))) + ">\n" + esc(body) + "</textarea>")) +
         // 用户 m05124 图1：这句「只标位置」挪到上面第二行（正文摘要）去了，正文行里不再重复。
         "</div>" +
         (isRealtime ? (rtLive
