@@ -11,9 +11,12 @@ import re
 import time
 from pathlib import Path
 
+from . import compat
 from .sids import bot_name, normalize_sid
 
 logger = logging.getLogger(__name__)
+# 框架 Prompt 不带 kwargs 时只提醒一次：每轮回复请求都会走到 _patch_agent_limits。
+_WARNED_PROMPT_KWARGS = False
 # 用户 m06706：JEV 是第三类提示词（jev），跟决策 / 回复各存各的，谁也覆盖不了谁。
 KINDS = {"decision", "reply", "jev"}
 
@@ -2095,6 +2098,15 @@ class PromptLayouts:
         BuildRequest 阶段就烤进 kwargs 了；这里改 kwargs，框架在 assemble 阶段渲染时
         用的就是插件的值——不用重造 Prompt，也不会丢掉它自己的 end / persist。
         """
+        global _WARNED_PROMPT_KWARGS
+        if not compat.has_prompt_kwargs():
+            # 框架升级可能把 Prompt.kwargs 拿掉：改不了渲染参数就只能沿用框架值。
+            # 每轮回复请求都会走到这里，只提醒一次，免得刷满日志。
+            if not _WARNED_PROMPT_KWARGS:
+                _WARNED_PROMPT_KWARGS = True
+                logger.warning("[multi-decision] 框架 Prompt 不带 kwargs，"
+                               "回复轮数/单轮工具数接管失效，将沿用框架值")
+            return
         try:
             limits = self.plugin.reply_tool_limits(sid) or {}
         except Exception:
@@ -2102,14 +2114,20 @@ class PromptLayouts:
             return
         loop = int(limits.get("rounds") or 5)
         calls = int(limits.get("calls_per_turn") or 5)
+        applied = {}
         for p in prompts or []:
             kw = getattr(p, "kwargs", None)
             if not isinstance(kw, dict):
                 continue
             if "max_tool_loop" in kw:
                 kw["max_tool_loop"] = loop
+                applied["max_tool_loop"] = loop
             if "max_tool_calls_per_turn" in kw:
                 kw["max_tool_calls_per_turn"] = calls
+                applied["max_tool_calls_per_turn"] = calls
+        if applied:
+            logger.debug("[multi-decision] 回复轮数/单轮工具数已接管：%s",
+                         "，".join("%s=%s" % item for item in applied.items()))
 
     def _source_label(self, sid, sample=False):
         live = self._live.get(normalize_sid(sid))
@@ -2414,7 +2432,7 @@ class PromptLayouts:
         # 必须赶在 _context 拼工具说明之前——否则第一次打开看到的是空清单，勾选框却全勾着。
         if kind == "reply":
             try:
-                self.reply_tools_for([c.get("name") for c in self.plugin.decision_phase.tool_catalog()])
+                self.reply_tools_for([c.get("name") for c in self.plugin.decision_phase.tool_catalog(refresh=True)])
             except Exception:
                 logger.exception("[multi-decision] 初始化回复工具清单失败（保持框架全量）")
         context = await self._context(context_sid, jev_opt, doc, persona=(jev_persona or None))
@@ -2528,7 +2546,7 @@ class PromptLayouts:
         try:
             # 用户 m11103：决策链与回复链各勾各的（prompt_tools.json 的 names / reply_names）。
             # 回复链第一次打开这一页时，把框架现有的工具全勾上——默认全选，升级后行为不变。
-            choices = dp.tool_catalog()
+            choices = dp.tool_catalog(refresh=True)
             if kind == "reply":
                 picked = self.reply_tools_for([c.get("name") for c in choices]) or []
             else:

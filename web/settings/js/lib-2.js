@@ -228,7 +228,7 @@
   // 用户 m04343 第 4 条：自写块/默认模板改正文后不重绘整个编辑器（会把光标弄丢、输入变卡），
   // 只就地打补丁：标题右边冒「自定义」小标、字数跟着变、来源下拉的括注也一起改。
   function ppPatchTweak(s, index){
-    var box = document.querySelector("[data-pp-editor='" + s.kind + "']");
+    var box = ppEditorEl(s.kind);
     var module = s.layout && s.layout.modules ? s.layout.modules[index] : null;
     if(!box || !module || String(module.type || "") !== "text") return;
     var sec = box.querySelector("[data-pm-module='" + index + "']");
@@ -380,13 +380,20 @@
   // 用户 m01209 图2：要改默认模板，就先自动复制成「我的模板」，绝不原地覆盖默认。
   // 用户 m02159 图3：工具是勾出来的，勾了就立即存（不用跟着提示词保存走），
   // 存的位置和决策真正能调用的工具是同一份。
+  // 用户 m01997：data-pp-editor 同时挂在左栏工具条（#pp-head-<kind>）和编辑卡
+  // （#pp-edit-<kind>）上，document.querySelector 会先命中工具条，取不到
+  // .pm-tools-sum 和模块卡，勾选后计数与 .on 样式都不动。按 id 取编辑卡才稳。
+  function ppEditorEl(kind){
+    return document.getElementById("pp-edit-" + kind) ||
+      document.querySelector("[data-pp-editor='" + kind + "']");
+  }
   function ppToggleTool(s, name, on){
     var cur = (s.toolsSelected || []).map(String), ix = cur.indexOf(name);
     if(on && ix < 0) cur.push(name);
     if(!on && ix >= 0) cur.splice(ix, 1);
     s.toolsSelected = cur;
     // 两页都有工具段，id 会重名：只改当前这一页的那一份。
-    var scope = document.querySelector("[data-pp-editor='" + s.kind + "']");
+    var scope = ppEditorEl(s.kind);
     var sum = scope ? scope.querySelector(".pm-tools-sum") : null;
     // 用户 m20823：这里也按「清单里存在的」数，跟 ppToolBox 的读数保持一致。
     if(sum){

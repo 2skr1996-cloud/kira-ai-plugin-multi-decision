@@ -34,6 +34,7 @@ from .state.user_blacklist import UserBlacklist
 from .state.band_stats import BandStats
 from .state.band_rhythm import BandRhythm
 from .state.band_tune import BandTuner
+from .state import compat
 from .state.decision_phase import (
     DEFAULT_CHAT_RULES,
     DEFAULT_DECISION_PROMPT,
@@ -58,6 +59,7 @@ from .state.jev_phase import list_api_models as jev_list_api_models
 from .state.jev_phase import load_secret as jev_load_secret
 from .state.jev_phase import load_secrets as jev_load_secrets
 from .state.link_title import LinkTitles
+from .state.github_repo import GitHubRepos
 from .state.jev_phase import make_api as jev_make_api
 from .state.jev_phase import normalize_api_id as normalize_jev_api_id
 from .state.jev_phase import parse_apis as jev_parse_apis
@@ -538,6 +540,7 @@ PER_SESSION_KEYS = (
     "retry_max",
     "retry_delay",
     "watchdog_seconds",
+    "watchdog_total_seconds",
     # 用户 m05550：重试的两个取舍开关（默认都关），跟重试参数一样按群走。
     "retry_take_pending",
     "timeout_no_retry",
@@ -756,6 +759,8 @@ _BOUNDS = {
     "retry_max": (0, 10),
     "retry_delay": (0, 600),
     "watchdog_seconds": (30, 600),
+    # 用户 m01587：整轮回复的总时长上限，60-3600 秒（默认 600）。
+    "watchdog_total_seconds": (60, 3600),
     "window_keep": (1, None),
     "history_images": (0, 500),
     # 用户 m10267：动图参数的范围跟 ui_schema 的 min/max 对齐。
@@ -1070,9 +1075,11 @@ def _record_has_mid(data, mid: str) -> bool:
         for item in data.get(key) or []:
             if not isinstance(item, dict):
                 continue
-            txt = item.get("content")
-            if not isinstance(txt, str):
-                txt = item.get("text") or ""
+            # 用户 m18902：content 有时是分片列表（[{"type": "text", "text": …}]），
+            # 以前只认字符串，这类消息永远查不到，点引用块跳不过去。
+            txt = content_text(item.get("content"))
+            if not txt:
+                txt = str(item.get("text") or "")
             if needle in str(txt):
                 return True
     return False
@@ -1240,6 +1247,13 @@ def _install_agent_limit_patch() -> bool:
 
     只在 contextvar 有值（也就是这一轮是插件的回复请求）时才改返回值，其余请求原样透传。
     """
+    if not compat.has_config_patch_target():
+        # 框架换了配置类或改了 get_config 的签名：补丁打上去也不会被调用。
+        # 与其静默失效，不如留一条 WARNING，让人知道这四项又回到框架值了。
+        logger.warning(
+            "[multi-decision] 框架配置补丁不可用，回复轮数/超时设置将沿用框架值"
+        )
+        return False
     try:
         from core.config.config_loader import KiraConfig
     except Exception:
@@ -1260,7 +1274,10 @@ def _install_agent_limit_patch() -> bool:
 
     KiraConfig.get_config = get_config
     KiraConfig._kira_md_limits_patched = True
-    logger.info("[multi-decision] 已接管框架代理设置四项（回复侧）")
+    logger.info(
+        "[multi-decision] 已接管框架代理设置四项（回复侧）："
+        + "、".join(_AGENT_LIMIT_KEYS)
+    )
     return True
 
 
@@ -1310,6 +1327,55 @@ def _skip_at_by_ts(rts: float, stamps) -> int:
     return len(stamps) if seen else -1
 
 
+#: 窗口里的历史消息只有正文开头那个 [23:25]，没有 ts（框架原文的短格式）。
+_SKIP_CLOCK_RE = re.compile(r"^\[(\d{1,2}):(\d{2})\]")
+
+
+def _skip_clock_of(item) -> int:
+    """消息自己的钟点（当天第几分钟），认不出给 -1。
+
+    用户 m16145：窗口里的历史消息没有 ts，只有正文开头的 [23:25]，虚线卡按 ts
+    找位置时这些消息全被当成「没有时间」，于是整组挂到窗口最底部。
+    """
+    if not isinstance(item, dict):
+        return -1
+    cands = [item.get("raw"), item.get("text")]
+    try:
+        cands.append(content_text(item.get("content")))
+    except Exception:
+        pass
+    for s in cands:
+        if not isinstance(s, str):
+            continue
+        m = _SKIP_CLOCK_RE.match(s.lstrip())
+        if not m:
+            continue
+        h, mi = int(m.group(1)), int(m.group(2))
+        if h <= 23 and mi <= 59:
+            return h * 60 + mi
+    return -1
+
+
+def _skip_stamp_of(item, ref_ts: float = 0.0) -> float:
+    """一条消息的时刻：有 ts 用 ts，没有就按 ref_ts 那天把 [HH:MM] 补成完整时间。
+
+    跨零点按 ±12 小时折：ref 是 00:05、消息写 [23:50] 就是前一天。
+    """
+    ts = _skip_ts_of(item)
+    if ts > 0:
+        return ts
+    cm = _skip_clock_of(item)
+    if cm < 0 or ref_ts <= 0:
+        return 0.0
+    lt = time.localtime(ref_ts)
+    d = cm - (lt.tm_hour * 60 + lt.tm_min)
+    if d > 720:
+        d -= 1440
+    elif d < -720:
+        d += 1440
+    return ref_ts + d * 60.0
+
+
 class MultiDecisionPlugin(BasePlugin):
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
@@ -1321,6 +1387,10 @@ class MultiDecisionPlugin(BasePlugin):
         # M06：接管的是「哪一个」实例。只凭布尔的话，宿主换过实例之后
         # 停用插件会把不是我们按住的新实例放开（可能是用户自己停用的）。
         self._takeover_instance = None
+        # 私有标志 _terminating 消失时的兜底：用官方 set_plugin_enabled 停掉
+        # default-chat。它会把状态写进宿主持久配置，所以要记下是我们关的。
+        self._takeover_toggled = False
+        self._takeover_task = None
         self.enabled = _as_bool(cfg.get("enabled"), True)
         self.decision_enabled = _as_bool(cfg.get("decision_enabled"), True)
         # 单会话总开关的全局默认值。这个键不进 schema（它天生是「每群各一份」），
@@ -1569,6 +1639,9 @@ class MultiDecisionPlugin(BasePlugin):
         # 30-600 秒，ui_schema.json 里的 default 必须与这里的兜底值一致（都是 180），
         # 否则前端显示的默认值和实际生效的值会对不上。
         self.watchdog_seconds = max(30, min(600, _as_int(cfg.get("watchdog_seconds"), 180)))
+        # 用户 m01587：整轮时长上限（默认 600 秒）。看门狗改成按「无进展」计时后，
+        # 单步卡住由 watchdog_seconds 兜，整轮跑太久由这个总上限兜；60-3600 秒。
+        self.watchdog_total_seconds = max(60, min(3600, _as_int(cfg.get("watchdog_total_seconds"), 600)))
         # 用户 m05550：重试的两个取舍开关，默认都关（＝保持原来的行为）。
         #  retry_take_pending：重试时把攒下的待发一起带进上下文（不积压，但可能跑题）。
         #  timeout_no_retry：看门狗超时后直接放弃、不再重试（3 分钟后再回也失真）。
@@ -1923,6 +1996,9 @@ class MultiDecisionPlugin(BasePlugin):
         # v4.87（用户 m11237 第 4 条）：裸链接卡片的真实标题，抓一次落盘缓存，
         # 之后都走缓存；只认 B 站域名，抓不到就保持卡片上的通用文案。
         self.link_titles = LinkTitles(data_dir)
+        # 用户 m18492：github.com 的裸链接画成仓库卡，描述 / star / 主语言由后端补；
+        # 只认 github.com 与 gist.github.com，抓不到就只留 owner/repo 的骨架。
+        self.github_repos = GitHubRepos(data_dir)
         self.retry_history = RetryHistory(data_dir)
         # v4.54（用户 m18227）：按会话缓冲的缓存把「有效上限」注入各自的裁剪点。
         # 单群覆盖 > 全局默认；0 = 不限。
@@ -2140,6 +2216,9 @@ class MultiDecisionPlugin(BasePlugin):
         只恢复「我们置的位」：如果加载时 default-chat 本来就是 _terminating=True
         （它自己被用户停用），那不是我们干的，动了等于擅自把它激活。
         """
+        if self._takeover_toggled:
+            self._release_toggle()
+            return
         if not self._takeover_owned:
             return
         owned = self._takeover_instance
@@ -2182,6 +2261,14 @@ class MultiDecisionPlugin(BasePlugin):
         if instance is None:
             logger.info("[multi-decision] 未找到 default-chat 实例（可能已停用）")
             return
+        if not hasattr(instance, "_terminating"):
+            # 3.2.1 起框架可能不再用这个私有标志。私有接管失效时记 ERROR，
+            # 再退到官方插件开关兜底——那条路会持久化，只在彻底没辙时才走。
+            logger.error(
+                "[multi-decision] default-chat 没有 _terminating 标志，私有接管失效，改用官方插件开关兜底"
+            )
+            self._takeover_via_toggle()
+            return
         if getattr(instance, "_terminating", False):
             logger.info("[multi-decision] default-chat 已停用，无需接管")
             return
@@ -2193,6 +2280,51 @@ class MultiDecisionPlugin(BasePlugin):
             logger.info("[multi-decision] 已接管 default-chat（置 _terminating=True）")
         except Exception:
             logger.exception("[multi-decision] 接管 default-chat 失败")
+
+    def _takeover_via_toggle(self) -> bool:
+        """私有标志消失时的兜底：用官方 set_plugin_enabled 停掉 default-chat。
+
+        它会 _save_plugin_state() 持久化，重启后仍是禁用状态，所以只在
+        _terminating 彻底不可用时才走这条路，并且记下是我们关的，
+        停用本插件时再打开。
+        """
+        if self._takeover_toggled:
+            return True
+        if not compat.has_plugin_toggle():
+            logger.error(
+                "[multi-decision] 框架也没有 set_plugin_enabled，无法接管 default-chat"
+            )
+            return False
+        mgr = getattr(self.ctx, "plugin_mgr", None)
+        setter = getattr(mgr, "set_plugin_enabled", None)
+        if not callable(setter):
+            logger.error("[multi-decision] ctx.plugin_mgr 不可用，无法接管 default-chat")
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.error("[multi-decision] 当前没有事件循环，无法停用 default-chat")
+            return False
+        self._takeover_task = loop.create_task(setter("default-chat", False))
+        self._takeover_toggled = True
+        logger.info("[multi-decision] 已用官方开关停用 default-chat")
+        return True
+
+    def _release_toggle(self) -> None:
+        """把 _takeover_via_toggle 关掉的 default-chat 重新打开。"""
+        self._takeover_toggled = False
+        mgr = getattr(self.ctx, "plugin_mgr", None)
+        setter = getattr(mgr, "set_plugin_enabled", None)
+        if not callable(setter):
+            logger.error("[multi-decision] ctx.plugin_mgr 不可用，无法恢复 default-chat")
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.error("[multi-decision] 当前没有事件循环，无法恢复 default-chat")
+            return
+        self._takeover_task = loop.create_task(setter("default-chat", True))
+        logger.info("[multi-decision] 已用官方开关恢复 default-chat")
 
     def ensure_takeover(self):
         """自愈：default-chat 被重载时 initialize() 会把 _terminating 复位。
@@ -2210,6 +2342,13 @@ class MultiDecisionPlugin(BasePlugin):
         except Exception:
             return
         if instance is None:
+            return
+        if not hasattr(instance, "_terminating"):
+            if not self._takeover_toggled:
+                logger.error(
+                    "[multi-decision] default-chat 没有 _terminating 标志，改用官方插件开关兜底"
+                )
+                self._takeover_via_toggle()
             return
         if getattr(instance, "_terminating", False):
             return
@@ -2313,6 +2452,7 @@ class MultiDecisionPlugin(BasePlugin):
     @on.llm_response(priority=Priority.SYS_HIGH)
     async def _on_llm_response(self, event, llm_resp):
         await self.engine.guard_reply_response(event, llm_resp)
+        self._touch_reply_progress(event)
         # 先记轨迹：轨迹里留模型的原样输出，收口之后也能看出是它自己写了两遍。
         if self.tracer is not None:
             try:
@@ -2368,9 +2508,18 @@ class MultiDecisionPlugin(BasePlugin):
             sid = getattr(getattr(event, "session", None), "sid", "") or ""
         return str(sid)
 
+    def _touch_reply_progress(self, event) -> None:
+        """用户 m01587：模型返回 / 工具结果都算「有进展」，把看门狗的无进展窗口往后推。"""
+        try:
+            self.engine._touch_reply_progress(self._sid_of(event),
+                                              getattr(event, "_mdp_reply_round", None))
+        except Exception:
+            logger.debug("[multi-decision] 续期看门狗失败（已吞掉）", exc_info=True)
+
     @on.tool_result(priority=Priority.LOW)
     async def _on_tool_result(self, event, tool_result):
         await self.engine._check_reply_round(getattr(event, "_mdp_reply_round", None))
+        self._touch_reply_progress(event)
         if self.tracer is None:
             return
         try:
@@ -2557,6 +2706,23 @@ class MultiDecisionPlugin(BasePlugin):
                          "mime_type": r["mime"]} for r in live],
         )
 
+    def _default_llm_client(self, session=None):
+        """框架默认 LLM 客户端；3.2.1 起可以按会话取（会话自己选了模型就用它）。
+
+        取不到返回 None，调用方自己决定怎么兜底。会话选的模型被删了框架会抛错，
+        这里一并吞掉，让调用方退回自己的顺序。
+        """
+        fn = getattr(self.ctx, "get_default_llm_client", None)
+        if not callable(fn):
+            return None
+        try:
+            if session is not None and compat.has_session_llm():
+                return fn(session=session)
+            return fn()
+        except Exception:
+            logger.debug("[multi-decision] 取默认 LLM 客户端失败（已吞掉）", exc_info=True)
+            return None
+
     def _trace_model_hint(self, event) -> str:
         """这一轮真正拿去发请求的模型名（用户 m02939 第 2 条）。
 
@@ -2573,6 +2739,13 @@ class MultiDecisionPlugin(BasePlugin):
             group = []
         for one in group:
             name = str(getattr(getattr(one, "model", None), "model_name", "") or "").strip()
+            if name:
+                return name[:80]
+        # 3.2.1 起框架自己会按「会话覆盖 → 全局默认」解析（get_default_llm(session=)），
+        # 直接问它最准；会话选的模型被删了它会抛错，那就退回下面那套手工顺序。
+        if compat.has_session_llm():
+            client = self._default_llm_client(getattr(event, "session", None))
+            name = str(getattr(getattr(client, "model", None), "model_name", "") or "").strip()
             if name:
                 return name[:80]
         # 3.2.0 起会话可以单独选模型：BuildRequestStage 的顺序是 event.model_group →
@@ -2593,13 +2766,7 @@ class MultiDecisionPlugin(BasePlugin):
             name = str(getattr(getattr(picked, "model", None), "model_name", "") or "").strip()
             if name:
                 return name[:80]
-        client = None
-        try:
-            fn = getattr(self.ctx, "get_default_llm_client", None)
-            if callable(fn):
-                client = fn()
-        except Exception:
-            client = None
+        client = self._default_llm_client()
         if client is None:
             try:
                 mgr = getattr(self.ctx, "provider_mgr", None)
@@ -3312,7 +3479,7 @@ class MultiDecisionPlugin(BasePlugin):
                         "不会当成 0% 或 50%）。")
             _model = str(g("jev_model") or "").strip()
             _fb = str(g("jev_fallback_model") or "").strip()
-            if not _model:
+            if not _model and not compat.has_default_decision():
                 add("error", "jev_model",
                     "JEV 决策开着但没选模型：框架没有默认 decision 模型，必须自己挑一个。")
             for _nm, _val in (("jev_model", _model), ("jev_fallback_model", _fb)):
@@ -3906,7 +4073,7 @@ class MultiDecisionPlugin(BasePlugin):
             "ok": True,
             "sid": sid,
             "personas": personas,
-            "tools": dp.tool_catalog(),
+            "tools": dp.tool_catalog(refresh=True),
             "models": self._decision_models(),
             "config": {
                 "persona": "",
@@ -3970,7 +4137,7 @@ class MultiDecisionPlugin(BasePlugin):
             })
         if mode == "jev":
             jm = _val("jev_model")
-            if not jm:
+            if not jm and not compat.has_default_decision():
                 missing.append({
                     "key": "jev_model", "page": "prompt", "pane": "jev",
                     "label": "JEV 模型",
@@ -4270,10 +4437,7 @@ class MultiDecisionPlugin(BasePlugin):
             logger.exception("[multi-decision] 回复测试取回复模型失败（改用框架默认模型）")
             clients = []
         if not clients:
-            try:
-                client = self.ctx.get_default_llm_client()
-            except Exception:
-                client = None
+            client = self._default_llm_client()
             if client is not None:
                 clients = [client]
         if not clients:
@@ -4823,6 +4987,51 @@ class MultiDecisionPlugin(BasePlugin):
 
 
 
+    def _quote_rounds_for(self, sid: str, mids, limit: int = 400, deadline: float = 1.2) -> list:
+        """按 message_id 往更早的快照里捞记录（字节预筛，命中才解析）。
+
+        用户 m18902：一轮一个快照，最近 80 轮有时只覆盖几十分钟，引用要的正文早就
+        落到更早的记录里了，于是引用块只剩图、正文退化成「内容未获取」。这里和
+        /quote-where 一个口径：从新到旧扫，先按原始字节做子串预筛（不解析 JSON），
+        命中再解析；解析结果仍由调用方按外层 owner 确认，免得被嵌套引用骗到。
+        """
+        out: list = []
+        mids = [str(m) for m in (mids or []) if str(m)]
+        if self.request_log is None or not mids:
+            return out
+        try:
+            folder = Path(self.request_log.dir) / _safe_sid(sid)
+            entries = [ent.name for ent in os.scandir(folder) if ent.name.endswith(".json")]
+        except Exception:
+            return out
+        # 文件名就是毫秒时间戳，倒序即从新到旧。
+        entries.sort(reverse=True)
+        entries = entries[: max(1, int(limit or 400))]
+        needles = []
+        for mid in mids:
+            needles.append(("[message_id: %s]" % mid).encode("utf-8"))
+            needles.append(('message_id="%s"' % mid).encode("utf-8"))
+            needles.append(("message_id='%s'" % mid).encode("utf-8"))
+            # 快照里 message_id 常嵌在 JSON 字符串中，引号被转义成 \"，所以要连转义形态一起筛。
+            needles.append(('message_id=\\"%s\\"' % mid).encode("utf-8"))
+            needles.append(("message_id=\\'%s\\'" % mid).encode("utf-8"))
+        end = time.monotonic() + max(0.1, float(deadline or 1.2))
+        for name in entries:
+            if time.monotonic() > end:
+                break
+            try:
+                raw = (folder / name).read_bytes()
+            except Exception:
+                continue
+            if not any(needle in raw for needle in needles):
+                continue
+            try:
+                out.append(json.loads(raw))
+            except Exception:
+                continue
+        return out
+
+
     @_api("GET", "/quote-lookup")
     async def api_quote_lookup(self, sid: str = "", ids: str = ""):
         """One-level Web quote projection, preferring the target's native own chain."""
@@ -4875,13 +5084,19 @@ class MultiDecisionPlugin(BasePlugin):
                 ts = ""
             return str(row.get("sender_name") or ""), ts
 
+        # 用户 m18902：原生投影只按 message_id 认回了图（source=media_index）时 own_body 是空串，
+        # 以前照样当命中收下，正文就再也不会去快照里补——引用块于是「图都在、内容未获取」。
+        # 正文为空的命中降级成待补：下面的快照扫描找到真正文就覆盖它，找不到再退回这份只有图的。
+        bodyless = set()
         for mid in want:
             display = native_display[mid]
             if display["own_media_known"] and "own_body" in display:
                 who, ts = native_meta(mid)
                 out[mid] = {"who": who, "ts": ts, "body": display.get("own_body", ""),
                             "media": display["own_media"], "display": display}
-        left = set(want) - set(out)
+                if not str(display.get("own_body") or "").strip():
+                    bodyless.add(mid)
+        left = (set(want) - set(out)) | bodyless
         try:
             # v4.88：以前这里用不带缓存的 list_rounds（每次读 81 份快照、约 8MB），
             # 一次点击打 4~6 次引用查询就是几百毫秒。换成带目录指纹缓存的版本。
@@ -4894,16 +5109,44 @@ class MultiDecisionPlugin(BasePlugin):
             r'<msg\s+message_id=["\']([^"\']+)["\'][^>]*>\s*\[([^\]]*)\]\s*<text>([\s\S]*?)</text>',
             re.I,
         )
-        for row in rounds or []:
-            if not left:
-                break
-            name = str((row or {}).get("name") or "")
-            if not name:
-                continue
-            try:
-                rec = self.request_log.read_round(sid, name) or {}
-            except Exception:
-                continue
+        def snapshot_row(rec, mid):
+            """记录里同一 mid 的 display_messages 那行：请求当时算好的展示投影。"""
+            rows = rec.get("display_messages") or []
+            if not isinstance(rows, list):
+                return None
+            for row in rows:
+                if isinstance(row, dict) and display_message_id(row, text_of_content=content_text) == mid:
+                    return row
+            return None
+
+        def owner_body_of(row):
+            """展示行里的正文：去掉「[时间] [message_id: …] [user_nickname: …] | 」这层头。"""
+            txt = content_text(row.get("text")) or content_text(row.get("raw"))
+            if not txt:
+                return ""
+            split = re.split(r"\]\s*\|\s*", txt, maxsplit=1)
+            return (split[1] if len(split) == 2 else txt).strip()
+
+        def row_refs(row):
+            """展示行的图集转成页面能直接用的引用（缺图的跳过）。"""
+            got = []
+            refs = row.get("media") or []
+            for ref in refs[:4096] if isinstance(refs, list) else []:
+                if not isinstance(ref, dict):
+                    continue
+                path = str(ref.get("path") or ref.get("url") or "")
+                try:
+                    ready = quote_public_media(path, str(ref.get("mime") or ""), raw_sid) if path else dict(ref)
+                except Exception:
+                    ready = {"missing": 1, "path": path, "mime": str(ref.get("mime") or "")}
+                if ready and (ready.get("path") or ready.get("url")) and not ready.get("missing"):
+                    got.append(ready)
+            return got
+
+        def absorb(rec):
+            """把一份快照里命中的 mid 补进 out；只认外层 owner，嵌套引用的 id 不算。"""
+            if not isinstance(rec, dict):
+                return
             for original in rec.get("messages") or []:
                 item = original if isinstance(original, dict) else {"content": getattr(original, "content", "")}
                 # Only the explicit/outer owner may match; a nested quoted id never does.
@@ -4917,14 +5160,22 @@ class MultiDecisionPlugin(BasePlugin):
                         break
                 # 昵称里可能带「]」（用户 m00456 的 [%ĀĀ␇Ö]我在未来，等你）：先按
                 # 「, user_id:」切，没有这个字段再退回「] |」；以前 [^,\]]+ 会截成半个名字。
-                nm = (re.search(r"\[user_nickname:\s*(.*?),\s*user_id:", txt)
+                # 3.3.0 起群消息头多了 group_nickname 字段，展示行只留昵称。
+                nm = (re.search(r"\[user_nickname:\s*(.*?),\s*(?:group_nickname:\s*([^,\]]*),\s*)?user_id:", txt)
                       or re.search(r"\[user_nickname:\s*([^\]\r\n]+)\]", txt))
-                tm = re.match(r"\s*\[(\d{1,2}:\d{2})\]", txt)
+                # 快照里的时间头有三种写法：[08:44]、[Nov 23 2026 08:44 Mon]、[2026-11-23 08:41:05]。
+                tm = (re.match(r"\s*\[(\d{1,2}:\d{2})\]", txt)
+                      or re.match(r"\s*\[[A-Za-z]{3} \d{1,2} \d{4} (\d{1,2}:\d{2})", txt)
+                      or re.match(r"\s*\[(?:\d{4}-\d{2}-\d{2} )?(\d{1,2}:\d{2})(?::\d{2})?\]", txt))
                 xm = xml_pat.search(txt)
                 if xm and xm.group(1) == mid:
                     who, body = xm.group(2).strip(), xm.group(3).strip()
                 else:
                     who = nm.group(1).strip() if nm else ""
+                    if nm is not None and nm.re.groups >= 2:
+                        gn = (nm.group(2) or "").strip()
+                        if gn and gn != who:
+                            who = who + " · " + gn
                     split = re.split(r"\]\s*\|\s*", txt, maxsplit=1)
                     body = split[1] if len(split) == 2 else txt
                 med = []
@@ -4944,7 +5195,7 @@ class MultiDecisionPlugin(BasePlugin):
                     [fallback], raw_sid, native_rows, public_media=quote_public_media,
                     text_of_content=content_text, forward_display_proof_for_mid=forward_display_proof_for_mid,
                     forward_proof_items=[item],
-                    # 用户 m09904：引用里的转发卡要画全所有图，快照兜底这条路径也得给完整图集，
+                    # 用户 m09904：引用里的转发卡也要画全所有图，快照兜底这条路径也得给完整图集，
                     # 否则只有模型侧那几张，卡片上会挂「（已发 N）」。
                     forward_media_for_mid=forward_media_for_mid,
                 )[0]["display"]
@@ -4954,9 +5205,45 @@ class MultiDecisionPlugin(BasePlugin):
                     who, ts = native_meta(mid)
                     body = display.get("own_body", body)
                     med = display["own_media"]
+                else:
+                    # 用户 m18902：模型侧那行常常没有图（图只记在请求当时的展示投影里），
+                    # 或者正文只剩一个 [Forward] 空壳；记录里那行 display_messages 两者都有。
+                    if not body.strip() or not med:
+                        shown = snapshot_row(rec, mid)
+                        if shown is not None:
+                            if not body.strip():
+                                shown_body = owner_body_of(shown)
+                                if shown_body:
+                                    body = shown_body
+                                    who = str(shown.get("name") or who)
+                            if not med:
+                                med = row_refs(shown)
+                            if med or body.strip():
+                                display = {"own_media_known": bool(med), "own_media": med,
+                                           "unassigned_media": [], "direct_reply": None,
+                                           "source": "snapshot_display", "own_body": body}
                 out[mid] = {"who": who, "ts": ts, "body": body.strip(),
                             "media": med, "display": display}
                 left.discard(mid)
+
+        for row in rounds or []:
+            if not left:
+                break
+            name = str((row or {}).get("name") or "")
+            if not name:
+                continue
+            try:
+                rec = self.request_log.read_round(sid, name) or {}
+            except Exception:
+                continue
+            absorb(rec)
+        # 用户 m18902：一轮一个快照，最近 80 轮有时只覆盖几十分钟，引用要的正文早就
+        # 落到更早的记录里了。这里按 message_id 往更早的快照再捞一遍。
+        if left and self.request_log is not None:
+            for rec in self._quote_rounds_for(sid, sorted(left)):
+                if not left:
+                    break
+                absorb(rec)
         for mid in want:
             if mid not in out and mid in native_rows:
                 who, ts = native_meta(mid)
@@ -4979,6 +5266,9 @@ class MultiDecisionPlugin(BasePlugin):
         # 找不到它，引用块就只剩一个「图片」灰块。插件自己的媒体索引按 message_id 记着
         # 当年收消息时留的副本，这里兜底认回来——只给图，正文/昵称仍用引用里那行原文。
         for mid in list(left):
+            if mid in out:
+                # 正文没补到，但原生已按 message_id 认回了图：保留那份（还带着昵称/时间）。
+                continue
             try:
                 _raw = original_media_for_mid(mid) or []
             except Exception:
@@ -5162,16 +5452,7 @@ class MultiDecisionPlugin(BasePlugin):
         # 页面底部（用户看到「未进入上下文」里躺着两条早就不在窗口里的视频）。
         # 只留还在窗口时间范围内的那些——窗口裁掉之后它们也该跟着消失。
         skipped = self.window.skipped_of(sid)
-        oldest_ts = 0.0
-        for _m in messages:
-            try:
-                _t = float(_m.get("ts") or 0.0)
-            except Exception:
-                _t = 0.0
-            if _t > 0 and (oldest_ts <= 0 or _t < oldest_ts):
-                oldest_ts = _t
-        if oldest_ts > 0:
-            skipped = [s for s in skipped if float(s.get("ts") or 0.0) >= oldest_ts]
+        skipped = self._window_skips_of(messages, skipped)
         # 用户 m32048 / m13127：虚线卡按它自己的时间插回原位——在 messages + pending 的
         # 时间序列里找第一个比它晚的位置。以前按 after_mid（挡下那一刻窗口的最后一条），
         # 文件到达时对应消息还在待发，锚点就落到更早的历史消息后面（用户 m13127 图1/图3）。
@@ -5354,6 +5635,19 @@ class MultiDecisionPlugin(BasePlugin):
             return await asyncio.to_thread(self.link_titles.title_of, url)
         except Exception as exc:
             logger.debug("[multi-decision] 取链接标题失败 %s：%s: %s", url, type(exc).__name__, exc)
+            return {"ok": False, "detail": "%s: %s" % (type(exc).__name__, exc)}
+
+    @_api("GET", "/github")
+    async def api_github(self, url: str = ""):
+        """GitHub 链接卡片要的仓库信息（用户 m18492）。
+
+        前端先把卡片骨架画出来，渲染完再回来问一次，填描述、star 和主语言；
+        取不到就返回 ok=False，卡片只留 owner/repo 和链接。
+        """
+        try:
+            return await asyncio.to_thread(self.github_repos.info_of, url)
+        except Exception as exc:
+            logger.debug("[multi-decision] 取 GitHub 信息失败 %s：%s: %s", url, type(exc).__name__, exc)
             return {"ok": False, "detail": "%s: %s" % (type(exc).__name__, exc)}
 
     @_api("GET", "/context-sessions")
@@ -7797,7 +8091,10 @@ class MultiDecisionPlugin(BasePlugin):
                   or getattr(self.ctx, "session_manager", None))
             if sm is not None:
                 try:
-                    got = sm.get_sessions(include_content=False)
+                    if compat.has_sessions_kind():
+                        got = sm.get_sessions(include_content=False, kind="im")
+                    else:
+                        got = sm.get_sessions(include_content=False)
                     if inspect.isawaitable(got):
                         got = await got
                     for item in got or []:
@@ -9261,6 +9558,14 @@ class MultiDecisionPlugin(BasePlugin):
         new_msgs = expand_packed_messages(new_msgs)
         rec["history_display_messages"] = view_of(history, bot_name=who, raw_sid=raw_sid)
         rec["incoming_display_messages"] = view_of(new_msgs, bot_name=who, raw_sid=raw_sid)
+        # 用户 m17434：被拉黑的消息没进上下文，别混进「本轮消息」；顶部那条「未进入上下文」
+        # 也只列这一轮范围内的，且不列被拉黑的。
+        rec["incoming_messages"] = self._drop_blacklist_rows(rec.get("incoming_messages"), rec.get("skipped"))
+        rec["skipped_view"] = self._apply_skips(
+            self._reply_skips_view(rec.get("messages") or [], rec.get("skipped"),
+                                   float(rec.get("ts") or 0.0)),
+            rec["history_display_messages"] + rec["incoming_display_messages"],
+            float(rec.get("ts") or 0.0))
         # One-to-one display aliases keep original request indexes stable in the UI.
         rec["display_messages"] = view_of(data.get("messages") or [], bot_name=who, raw_sid=raw_sid)
         rec["display_user_prompt_parts"] = view_of([{"role": "user", "content": (p.get("text") if isinstance(p, dict) else p) or ""}
@@ -9313,31 +9618,123 @@ class MultiDecisionPlugin(BasePlugin):
                 "history": history, "new_msgs": new_msgs}
 
     @staticmethod
+    def _window_skips_of(messages, skipped, ref_ts: float = 0.0) -> list:
+        """只留还在窗口时间范围内的虚线记录（用户 m17018 图2、m16145）。
+
+        跳过记录不随窗口裁切清理，窗口早就翻过去的老消息会一直挂在页面底部。
+        窗口里的历史消息没有 ts，只有正文开头的 [23:25]，所以按钟点补成完整时间
+        再比；只按 ts 会算成第一条 assistant 回复，比窗口实际起点晚得多，落在起点
+        附近的虚线卡就被误删了。留 10 分钟余量。
+        记录页的消息没有 ts，调用方用 ref_ts 传这一轮的记录时刻（用户 m17434）。
+        """
+        rows = [s for s in (skipped or []) if isinstance(s, dict)]
+        if not rows:
+            return []
+        base = 0.0
+        # 用户 m45914：参考时刻只从窗口消息里取，别把虚线记录自己的 ts 算进来，
+        # 否则一条昨天的记录会把整窗消息都补成昨天，它自己反而留在范围内。
+        for it in messages or []:
+            try:
+                t = float(it.get("ts") or 0.0)
+            except Exception:
+                t = 0.0
+            if t > base:
+                base = t
+        if base <= 0:
+            base = float(ref_ts or 0.0)
+        if base <= 0:
+            base = time.time()
+        ref_ts = base
+        oldest_ts = 0.0
+        for it in messages or []:
+            t = _skip_stamp_of(it, ref_ts)
+            if t > 0 and (oldest_ts <= 0 or t < oldest_ts):
+                oldest_ts = t
+        if oldest_ts <= 0:
+            return rows
+        return [s for s in rows if _skip_stamp_of(s, ref_ts) >= oldest_ts - 600]
+
+    def _reply_skips_view(self, messages, skipped, ts: float = 0.0) -> list:
+        """回复记录页顶部那条「未进入上下文」：只留这一轮范围内的，且不列被拉黑的（用户 m17434）。"""
+        rows = self._window_skips_of(messages, skipped, ts)
+        return [s for s in rows if str(s.get("reason") or "") != "blacklist"]
+
+    @staticmethod
+    def _drop_blacklist_rows(rows, skipped) -> list:
+        """被拉黑的消息没进上下文，别混进回复记录的「本轮消息」（用户 m17434）。"""
+        mids = {str(s.get("mid") or "") for s in (skipped or [])
+                if isinstance(s, dict) and str(s.get("reason") or "") == "blacklist"}
+        mids.discard("")
+        if not mids or not isinstance(rows, list):
+            return rows
+        return [m for m in rows
+                if display_message_id(m, text_of_content=content_text) not in mids]
+
+
+    @staticmethod
     def _skip_rows_at(rows, items, ts: float = 0.0) -> list:
         """把「没进上下文」的记录按时间算成快照里的插入位置（用户 m32048 第 1 条、m13127）。
 
         at = 插到 items 的第几条之前。优先按记录自己的 ts 找位置——挡下来那一刻对应
         消息可能还在待发，after_mid 只指向当时窗口的最后一条，会把它插到更早的地方
         （用户 m13127 图1/图3）。没有 ts 才退回 after_mid。
+        锚点跟它落在同一分钟时以锚点为准（用户 m17770）：窗口里的历史消息只有 [HH:MM]，
+        补出来的秒数跟着参考时刻走，同一分钟里比不出先后，按 ts 会排到整分钟那批前面。
         锚点已经不在这一份里就整条丢掉——那是别的轮次挡下来的，画到这一轮只会让人
         以为这轮又丢了一条。
+        拉黑行例外（用户 m16754）：它的 ts 只有分钟粒度，按 ts 会插到同一分钟所有消息
+        前面，所以先用前后两条放行消息的编号定位，锚点都不在才退回 ts。
         """
         if not rows:
             return []
         items = list(items or [])
-        stamps = [_skip_ts_of(it) for it in items]
         pos = {}
         for i, it in enumerate(items):
             mid = display_message_id(it, text_of_content=content_text)
             if mid and mid not in pos:
                 pos[mid] = i
+        # 用户 m45914：补钟点要用「这一份窗口自己的参考时刻」，不能拿每条虚线记录
+        # 自己的 ts 当参考日。否则一条昨天的记录会把整窗消息都补成昨天，它自己
+        # 反而落进范围、堆到窗口最底部。
+        ref_ts = 0.0
+        for it in items:
+            v = _skip_ts_of(it)
+            if v > ref_ts:
+                ref_ts = v
+        if ref_ts <= 0:
+            ref_ts = float(ts or 0.0) or time.time()
+        stamps = [_skip_stamp_of(it, ref_ts) for it in items]
         first_ts = min([s for s in stamps if s > 0], default=0.0)
         out = []
         for r in rows:
             if not isinstance(r, dict):
                 continue
-            rts = _skip_ts_of(r)
-            at = _skip_at_by_ts(rts, stamps)
+            rts = _skip_stamp_of(r, ref_ts)
+            at = -1
+            anchored = False
+            # 用户 m16754：拉黑那条的 ts 只有分钟粒度（raw 行头只到分），按 ts 插会落到
+            # 同一分钟所有消息的前面。它一定还在窗口里，改用前后两条放行消息的编号定位：
+            # 先看前面那条（紧挨着它，位置最准），前面那条不在快照里才退回后面那条。
+            if str(r.get("reason") or "") == "blacklist":
+                am = str(r.get("after_mid") or "")
+                bm = str(r.get("before_mid") or "")
+                if am and am in pos:
+                    at = pos[am] + 1
+                    anchored = True
+                elif bm and bm in pos:
+                    at = pos[bm]
+                    anchored = True
+            if not anchored:
+                at = _skip_at_by_ts(rts, stamps)
+                # 用户 m17770：同一分钟里虚线卡自己带秒（00:50:09），窗口消息补出来的秒数
+                # 跟着参考时刻走（00:50:37），按 ts 就排到了整分钟那批前面。锚点落在同一
+                # 分钟时以锚点为准——它才是这条消息真正的前一条。
+                am = str(r.get("after_mid") or "")
+                if at >= 0 and am and am in pos and rts > 0:
+                    ast = stamps[pos[am]]
+                    if ast > 0 and int(ast // 60) == int(rts // 60):
+                        at = pos[am] + 1
+                        anchored = True
             if at < 0:
                 am = str(r.get("after_mid") or "")
                 if am:
@@ -9349,7 +9746,7 @@ class MultiDecisionPlugin(BasePlugin):
                     if not ts or not rts or ts - rts > 3600:
                         continue
                     at = 0
-            elif first_ts > 0 and rts < first_ts - 60:
+            elif not anchored and first_ts > 0 and rts < first_ts - 60:
                 # 比这一份里最早的消息还早一分钟以上：窗口已经翻过去了，画在最前面
                 # 会让人以为这一轮又丢了一条（用户 m13127 图4）。
                 continue

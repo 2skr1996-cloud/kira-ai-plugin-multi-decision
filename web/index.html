@@ -802,6 +802,31 @@ html[data-theme="dark"] .mc-bd .at{background:rgba(59,130,246,.26);color:#93c5fd
       font-size:11px;color:var(--muted);background:var(--soft);}
     .mc-bd .qcard .qc-src{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     .mc-bd .qcard .qc-open{flex:none;color:var(--accent);font-weight:500;}
+    /* 用户 m19755：转发条目里的分享卡现在画在弹层（.fwd-pop）里，上面这套只写在 .mc-bd 下，
+       这里补一份，免得卡片进弹层只剩一行裸文字。 */
+    .fwd-pop .fp-tx .qcard{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:11px;
+      background:var(--card);padding:0;margin:6px 0 0;text-decoration:none;color:inherit;overflow:hidden;
+      max-width:420px;box-shadow:0 1px 2px rgba(16,24,40,.04);transition:border-color .15s,box-shadow .15s;}
+    .fwd-pop .fp-tx a.qcard:hover{border-color:var(--accent);box-shadow:0 3px 10px rgba(16,24,40,.10);}
+    .fwd-pop .fp-tx .qcard .qc-row{display:flex;align-items:flex-start;gap:9px;min-width:0;padding:9px 11px;}
+    .fwd-pop .fp-tx .qcard .qc-main{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 auto;}
+    .fwd-pop .fp-tx .qcard .qc-t{font-size:13px;font-weight:600;color:var(--text);line-height:1.45;text-decoration:none;
+      display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+    .fwd-pop .fp-tx a.qcard:hover .qc-t{color:var(--accent);}
+    .fwd-pop .fp-tx .qcard .qc-d{font-size:12px;color:var(--muted);line-height:1.55;word-break:break-word;
+      display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
+    .fwd-pop .fp-tx .qcard .qc-logo{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;
+      border-radius:9px;background:var(--soft);border:1px solid var(--line);color:var(--text);
+      font-size:13px;font-weight:700;flex:none;overflow:hidden;}
+    .fwd-pop .fp-tx .qcard .qc-logo > img{width:100%;height:100%;object-fit:contain;display:block;}
+    .fwd-pop .fp-tx .qcard .qc-logo.fav{position:relative;overflow:hidden;font-size:14px;font-weight:600;}
+    .fwd-pop .fp-tx .qcard .qc-logo.fav > img{position:absolute;left:2px;top:2px;width:calc(100% - 4px);
+      height:calc(100% - 4px);object-fit:contain;border-radius:4px;background:transparent;}
+    .fwd-pop .fp-tx .qcard .qc-go{flex:none;color:var(--muted);font-size:12px;opacity:.55;line-height:1.5;}
+    .fwd-pop .fp-tx .qcard .qc-ft{display:flex;align-items:center;gap:8px;padding:5px 11px 6px;border-top:1px solid var(--line);
+      font-size:11px;color:var(--muted);background:var(--soft);}
+    .fwd-pop .fp-tx .qcard .qc-src{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+    .fwd-pop .fp-tx .qcard .qc-open{flex:none;color:var(--accent);font-weight:500;}
     /* 用户 m02993 图9：直播间卡片。以前直播间和视频卡一模一样（同款粉色 B + 同款边框），
        只在脚注多四个字，点开才知道是直播。现在左边是红底 LIVE 牌、标题后钉红色「直播」
        徽标、脚注写「进入直播间」，扫一眼就分得开。 */
@@ -825,6 +850,14 @@ html[data-theme="dark"] .mc-bd .at{background:rgba(59,130,246,.26);color:#93c5fd
     .mc-bd .qcard .qc-logo.tw{background:#111;border-color:#111;color:#fff;padding:8px;}
     .mc-bd .qcard .qc-logo.tw svg{width:100%;height:100%;}
     html[data-theme="dark"] .mc-bd .qcard .qc-logo.tw{background:#000;border-color:#3a3a3a;color:#fff;}
+    /* 用户 m18492：GitHub 链接卡。左上是官方 octocat（内嵌 SVG，离线/内网也照样显示），
+       标题是 owner/repo，脚注补 star 与主语言（带语言色点）。取不到仓库信息时留骨架、虚线边。 */
+    .mc-bd .qcard .qc-logo.gh{background:#24292f;border-color:#24292f;color:#fff;padding:7px;}
+    .mc-bd .qcard .qc-logo.gh svg{width:100%;height:100%;display:block;}
+    html[data-theme="dark"] .mc-bd .qcard .qc-logo.gh{background:#161b22;border-color:#30363d;color:#fff;}
+    .mc-bd .qcard .qc-dot{display:inline-block;width:7px;height:7px;border-radius:50%;
+      margin-right:4px;vertical-align:1px;background:#8b949e;}
+    .mc-bd .qcard.gh-bad{border-style:dashed;}
     .mc-bd .qcard.tw .tw-hd{display:flex;align-items:center;gap:8px;padding:10px 11px 0;}
     .mc-bd .qcard.tw .tw-av{width:34px;height:34px;border-radius:50%;object-fit:cover;flex:none;background:var(--soft);}
     .mc-bd .qcard.tw .tw-av.ph{display:inline-flex;align-items:center;justify-content:center;

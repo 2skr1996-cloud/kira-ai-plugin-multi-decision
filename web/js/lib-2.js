@@ -301,6 +301,26 @@
     return t || raw;   // 剥干净了也不吞，宁可难看
   }
 
+  // 3.3.0 起群消息头多了 group_nickname（群名片），真实格式：
+  //   [user_nickname: Alice, group_nickname: Team Lead, user_id: u1]
+  // 群名片为空时整段不出现，老格式必须完全按原样解析。
+  // 昵称和群名片一起显示，分隔符统一用「 · 」；群名片为空、或跟昵称一样时只显示昵称。
+  function dispNameOf(nm, gn){
+    var a = String(nm == null ? "" : nm).trim();
+    var b = String(gn == null ? "" : gn).trim();
+    if(!b || b === a) return a;
+    return a ? (a + " · " + b) : b;
+  }
+  // 从一段消息头里取群名片（没有就返回空串）。老格式没有这一段，返回空。
+  // 群名片里可能有逗号（后端 window/manager.py 的 _NICK_LINE_RE 也是按 ", user_id:" 锚定的），
+  // 所以不能按逗号截断：先取到右括号/行尾，再把后面的 user_id 段剥掉。
+  function gnickOfRaw(raw){
+    var s = String(raw == null ? "" : raw);
+    var m = s.match(/group_nickname:\s*([^\]\n]{1,64})/);
+    if(!m) return "";
+    return cleanNick(m[1].replace(/,\s*user_id:[\s\S]*$/, "").trim());
+  }
+
   // 括号配平：从 s[pos]（必须指向 [）找到配对的 ]，任意层嵌套都认。
   // 转发消息是 [Reply ID: x content: [Forward [时间] 人: [Video name: …]]]，套了三层，
   // 原来那个只认一层的正则整块匹配不上，全漏进正文了（用户 m33994 图1）。
@@ -347,7 +367,7 @@
   }
 
   function splitMeta(t){
-    var rest = String(t || ""), m = { ts: "", mid: "", name: "", uid: "", at: [] };
+    var rest = String(t || ""), m = { ts: "", mid: "", name: "", gnick: "", disp: "", uid: "", at: [] };
     // 括号里可能还套一层括号（Reply ID 的 content 自己带 [时间]），
     // 所以允许一层嵌套，否则 `[Reply ID: x content: [..] 某人: 话]` 会被切半
     var re = /^\[((?:[^\[\]]|\[[^\[\]]*\]){1,600})\]\s*/;
@@ -393,10 +413,23 @@
         m.mid = inner.slice(11).trim(); rest = rest.slice(x[0].length); continue;
       }
       if(inner.indexOf("user_nickname:") >= 0){
-        var nm0;
-        var g = inner.match(/user_nickname:\s*([\s\S]*?),\s*user_id:\s*([\s\S]*)$/);
-        if(g){ nm0 = cleanNick(g[1].trim()); m.uid = g[2].trim(); }
-        else { nm0 = cleanNick(inner.slice(inner.indexOf("user_nickname:") + 14).trim()); }
+        var nm0, gn0 = "";
+        // 3.3.0 群消息头是三段：user_nickname / group_nickname / user_id。
+        // 群名片为空时 group_nickname 整段不出现，老格式走第二条，行为跟以前完全一样。
+        var g = inner.match(/user_nickname:\s*([\s\S]*?),\s*group_nickname:\s*([\s\S]*?),\s*user_id:\s*([\s\S]*)$/);
+        if(g){
+          nm0 = cleanNick(g[1].trim()); gn0 = cleanNick(g[2].trim()); m.uid = g[3].trim();
+        } else {
+          var g1 = inner.match(/user_nickname:\s*([\s\S]*?),\s*user_id:\s*([\s\S]*)$/);
+          if(g1){ nm0 = cleanNick(g1[1].trim()); m.uid = g1[2].trim(); }
+          else {
+            // 连 user_id 都没有：整段当昵称，但别把后面的群名片一起吞进名字
+            var rest0 = inner.slice(inner.indexOf("user_nickname:") + 14);
+            var gn1 = rest0.match(/,\s*group_nickname:\s*([\s\S]*)$/);
+            if(gn1){ gn0 = cleanNick(gn1[1].trim()); rest0 = rest0.slice(0, gn1.index); }
+            nm0 = cleanNick(rest0.trim());
+          }
+        }
         // 用户 m04917 第 1 条：有人把群头衔/装饰混进昵称，落下来就是
         // 「[%ĀĀ␇Ö] [@你]我在未来，等你」——那个 [@你] 是昵称里的字，不是插件标记。
         // 留在名字里既不高亮、位置也不在名字后面；收进头部徽章 + 从名字里剥掉。
@@ -406,6 +439,9 @@
           nm0 = nm0.replace(/\[\s*@你\s*\]\s*/g, "").trim();
         }
         m.name = nm0;
+        m.gnick = gn0;
+        m.disp = dispNameOf(nm0, gn0);
+        // @ 补全池里只放纯昵称：群名片是「在这个群里叫什么」，不是这个人的名字
         atPoolAdd(nm0);
         rest = rest.slice(x[0].length); continue;
       }
@@ -520,7 +556,7 @@
     for(var i = 0; i < s.length; i++){
       if(s.charAt(i) === "["){
         var end = bracketEnd(s, i), token = end >= 0 ? s.slice(i + 1, end) : "";
-        if(end >= 0 && /^(?:Reply ID:|Forward\b|message_id:|user_nickname:|user_id:|group_name:|group_id:|Json card\b|File name:|@你$|\d{1,2}:\d{2}|\d{1,2}-\d{1,2} \d{1,2}:\d{2}|[A-Z][a-z]{2} \d{1,2} \d{4} \d{1,2}:\d{2})/.test(token)){
+        if(end >= 0 && /^(?:Reply ID:|Forward\b|message_id:|user_nickname:|group_nickname:|user_id:|group_name:|group_id:|Json card\b|File name:|@你$|\d{1,2}:\d{2}|\d{1,2}-\d{1,2} \d{1,2}:\d{2}|[A-Z][a-z]{2} \d{1,2} \d{4} \d{1,2}:\d{2})/.test(token)){
           i = end; continue;
         }
       }
@@ -529,10 +565,15 @@
     return out.replace(sharePattern(), "")
       .replace(/点击链接直接打开[。.!！]?/g, "")
       // @昵称是元数据，不是他说的话（用户 m51324 图6：「@Mcp_management service …」多算 15 字）
-      // 用户 m05861：昵称里可能带空格，先整段吃掉「@ + 最多两个英文词」，
-      // 再兜底吃「@ + 一个不含空格的昵称」；最多吃两个词，再多就可能把真话一起吞掉。
-      .replace(/(^|[\s。，,、；;：:])@[A-Za-z0-9_\-]{1,32}(?:[ \t]+[A-Za-z0-9_\-]{1,32})?/g, "$1")
-      .replace(/(^|[\s。，,、；;：:])@[\u4e00-\u9fa5A-Za-z0-9_\-]{1,16}/g, "$1")
+      // 用户 m05861：昵称里可能带空格，先整段吃掉「@ + 昵称」，后面再跟最多两个英文词；
+      // 最多吃两个词，再多就可能把真话一起吞掉。
+      // 用户 m17972：昵称以数字/字母开头、后面接着中文时（`@10月绝不摆烂`），原来
+      // 「@ + 最多两个英文词」那条先命中，只吃掉 `@10`，剩下的「月绝不摆烂」被算成字。
+      // 现在中文和英文并成一条，跟徽章渲染（lib-1 的 richText）认的整段一致。
+      // 用户本轮：可选组会把「@某人 https://…」里的「 https」吃掉，剩下「://…」不再被
+      // 后面的 URL 正则认出来，字数从 10 变 33，拉黑按钮就不挂了。URL 协议头/域名前面
+      // 不许再吃空格；i 只影响 https/www 这两个字面量，别的行为不变。
+      .replace(/(^|[\s。，,、；;：:])@[\u4e00-\u9fa5A-Za-z0-9_\-]{1,32}(?:[ \t]+(?!https?:\/\/|www\.)[A-Za-z0-9_\-]{1,32})?/gi, "$1")
       // 用户 m22683：QQ 的 @ 昵称是「@[编码]昵称」两截（`@[%ĀĀ␇Ö]我在未来，等你`），
       // 上面两条都从 `[` 就断了，昵称整段留在正文里，一句话被算成十几个字。
       .replace(/(^|[\s。，,、；;：:])@\[[^\]]{0,64}\][^\s]{0,32}/g, "$1")
@@ -591,7 +632,7 @@
     var lines = String(t || "").replace(/\r\n?/g, "\n").split("\n"), blocks = [], cur = [];
     // 用户第 2 条：引用原话里可能拼着好几条，每段自带 [2026-10-23 21:01:00]（ISO）这种头，
     // 不认它就整段铺在一起，第二条的时间/昵称全糊进正文
-    var head = /^\s*\[(?:[A-Z][a-z]{2} \d{1,2} \d{4} \d{1,2}:\d{2}|\d{4}-\d{1,2}-\d{1,2}[ T]\d{1,2}:\d{2}|\d{1,2}-\d{1,2} \d{1,2}:\d{2}|\d{1,2}:\d{2}|message_id:|user_nickname:)/;
+    var head = /^\s*\[(?:[A-Z][a-z]{2} \d{1,2} \d{4} \d{1,2}:\d{2}|\d{4}-\d{1,2}-\d{1,2}[ T]\d{1,2}:\d{2}|\d{1,2}-\d{1,2} \d{1,2}:\d{2}|\d{1,2}:\d{2}|message_id:|user_nickname:|group_nickname:)/;
     // 反过来也要防：一整段 [Forward …] 内部每条本身就以 [ISO 时间] 打头，
     // 按 head 切就会把一张转发卡腰斩成两条普通气泡——正文露出「[Forward [时间] 人:」、
     // 第二条只剩「人: 链接]」尾巴多一个 ]、字数还各算一份（用户截图：一条合并转发拆成 33 字 + 5 字）。
@@ -1067,7 +1108,8 @@
     // 用户 m00942 图1：引用里的转发卡也要画全所有图，这里必须把完整图集带过去，
     // 否则 quoteEntryOf 重建的 projected 会把它丢掉，引用里又只剩前几张。
     if(d.all && d.all.length) projected.forward_media_all = d.all;
-    return { body: body, name: String(m.name || m.who || ""), who: String(m.who || m.name || ""),
+    // name 是展示名（昵称 · 群昵称），who 仍是纯昵称：引用块标题用前者，身份判定用后者
+    return { body: body, name: dispNameOf(m.name || m.who, m.gnick), who: String(m.who || m.name || ""),
       ts: String(m.ts || ""), media: quoteMedia, display: projected };
   }
   function unassignedMediaHtml(refs, mode){
@@ -1127,6 +1169,7 @@
         if(!mts && m.ts) mts = fmtTime(m.ts).slice(6, 11);
         var fallback = (meta.fwd || "") + (meta.card ? "[Json card " + JSON.stringify(meta.card) + "]" : "") + (meta.file ? "[File name: " + meta.file.name + (meta.file.path ? ", file_path: " + meta.file.path : "") + "]" : "") + String(p.body || "");
         idx[mid] = quoteEntryOf({ name: String(meta.name || m.name || "").replace(/\s+/g, " ").trim(),
+          gnick: String(meta.gnick || m.gnick || "").trim(),
           ts: mts, display: parts.length === 1 ? m.display : null }, fallback);
       });
     }
@@ -1160,8 +1203,8 @@
     var m = t.match(/^\[(?!Forward\b)([^\]]{4,40})\]\s*([^:：]{1,40})[:：]\s*([\s\S]*)$/);
     var who = String((hit && (hit.name || hit.who)) || q.who || (m ? m[2] : ""));
     if(!who){
-      var nm = String(outerText || q.text || "").match(/user_nickname:\s*([^,\]]+)/);
-      if(nm) who = nm[1].trim();
+      var nm = String(outerText || q.text || "").match(/user_nickname:\s*([^,\]]+)(?:,\s*group_nickname:\s*([^,\]]+))?/);
+      if(nm) who = dispNameOf(nm[1], nm[2]);
     }
     var when = shortTs(String((hit && hit.ts) || q.ts || (m ? m[1] : "")));
     var body = stripReplyTokens(m ? m[3] : t);
@@ -1251,7 +1294,7 @@
       // 多段原话（拼了好几条）或者外层没解析出「昵称:」时，把这段自己的时间/昵称
       // 用小字标一行；否则 ISO 时间戳会混进正文，看着像他说的原话
       if((parts.length > 1 && pi > 0) || !hasHead){
-        var nm2 = String(mt.name || "").trim(), wh2 = mt.ts ? shortTs(mt.ts) : "";
+        var nm2 = dispNameOf(mt.name, mt.gnick), wh2 = mt.ts ? shortTs(mt.ts) : "";
         // 外层已经写了「引用」两个字，这段没昵称时就只补时间，别再重复一遍
         if(nm2 || wh2){
           head = "<span class='qwho'>" + (nm2 ? esc(nm2) : "") +
@@ -1327,6 +1370,37 @@
     if(!m) return null;
     return { n: m[1] ? (parseInt(m[1], 10) || 0) : 0, pre: String(m[2] || "").trim(), lost: false };
   }
+  // 用户 m19755：转发条目里的分享卡（夸克网盘这类）在框架原文里只是一段裸 JSON，
+  // 以前整段铺在条目里，看着像一坨代码。这里认出「[Json card {...}]」与裸 JSON 两种
+  // 形态，交给 cardHtml 画成跟正文一样的分享卡。
+  function fwdCardOf(t){
+    var s = String(t == null ? "" : t).trim();
+    if(!s) return null;
+    if(s.indexOf("[Json card") === 0){
+      var p = s.indexOf("{");
+      if(p < 0) return null;
+      var pe = bareJsonEnd(s.slice(p));
+      if(pe <= 0) return null;
+      try {
+        var po = JSON.parse(s.slice(p, p + pe + 1));
+        if(po && typeof po === "object" && !(po instanceof Array)) return po;
+      } catch(e0){}
+      return null;
+    }
+    if(s.charAt(0) !== "{") return null;
+    var e = bareJsonEnd(s);
+    if(e <= 0) return null;
+    try {
+      var o = JSON.parse(s.slice(0, e + 1));
+      if(looksLikeCard(o)) return o;
+    } catch(e1){}
+    return null;
+  }
+  // 预览行只有一行、还是省略号截断，放不下整张卡：只画链接小图标 + 标题。
+  function fwdCardChip(c){
+    var t = String(c.title || c.prompt || c.desc || c.app || "").trim();
+    return "<span class='fw-pic' title='分享卡片'>🔗</span>" + esc(t || "分享卡片");
+  }
   function fwdSubChip(sub){
     var label = "合并转发" + (sub.n ? " " + sub.n + " 条" : "");
     var note = sub.pre || (sub.lost ? "内容未展开" : "");
@@ -1380,6 +1454,12 @@
       tx = tx.replace(/(\[(?:图片|表情|语音)\])(?:\1)+/g, function(m, one){
         return one + " ×" + (m.length / one.length);
       });
+      // 用户 m19755：这一条整段就是一张分享卡时，别把 JSON 当正文铺出来。
+      var fcard = fwdCardOf(tx);
+      if(fcard){
+        rows.push({ who: who, when: when, text: "", sub: null, card: fcard, n: 1, slotN: slotN });
+        return;
+      }
       // 空正文不是「只有图」，而是框架把嵌套 Forward 从链里剔掉了（见上面 CSS 注释）：
       // 画成「合并转发 · 内容未展开」小卡，别补 [图片] 去抢后面条目的图。
       if(!tx){
@@ -1512,7 +1592,9 @@
       var _left = Math.max(0, _need - Math.min(_shown, _need)) + Math.max(0, _shown - FWD_MINI_MAX);
       var _zh = /^(?:\[视频\]\s*)+$/.test(String(r.text || "").trim());
       var body, tail = "";
-      if(r.sub){
+      if(r.card){
+        body = fwdCardChip(r.card);
+      } else if(r.sub){
         body = fwdSubChip(r.sub);
       } else if(_mini){
         var _rest = stripFwdKind(pre, "图片");
@@ -1527,7 +1609,9 @@
     });
     var full = merged.map(function(r, idx){
       var got = claims[idx] || [], body = "";
-      if(r.sub){
+      if(r.card){
+        body = "<div class='fp-tx'>" + cardHtml(r.card) + "</div>";
+      } else if(r.sub){
         body = "<div class='fp-tx'>" + fwdSubChip(r.sub) + "</div>";
       } else {
         var _needF = fwdNeed(r);

@@ -731,6 +731,9 @@ class DecisionPhase:
         还没收到消息的话，note_tool_set 里一份都没有，页面就是张空表。
         真机探到的 FuncToolManager 只有这几个口子：tool_set / build_tool_set /
         register_tool / unregister_tool / execute_tool。
+
+        用户 m01997：宿主关掉插件（比如内置记忆）后工具会消失，目录必须跟着删。
+        以前只加不删，关掉的工具会一直留在设置页里，直到插件重载。
         """
         ctx = getattr(self.plugin, "ctx", None)
         mgr = getattr(ctx, "tool_mgr", None)
@@ -746,7 +749,12 @@ class DecisionPhase:
                     boxes.append(list(getattr(made, "tools", []) or []))
                 except Exception:
                     logger.debug("[multi-decision] build_tool_set() 调用失败", exc_info=True)
-        got = 0
+        if not boxes:
+            # 一个盒子都没读到（没有 tool_mgr，或两个口子都取不到）：保留旧目录，
+            # 别因为一次瞬时失败把设置页的工具清单清空。
+            self._probe_at = time.time()
+            return 0
+        fresh = {}
         for items in boxes:
             for item in items:
                 if isinstance(item, dict):
@@ -755,20 +763,27 @@ class DecisionPhase:
                 else:
                     name = str(getattr(item, "name", "") or "").strip()
                     desc = str(getattr(item, "description", "") or "").strip()
-                if not name or name in self._catalog:
+                if not name or name in fresh:
                     continue
-                self._catalog[name] = {
+                fresh[name] = {
                     "name": name,
                     "description": desc[:200],
                     "tool": item if hasattr(item, "execute") else None,
                 }
-                got += 1
+        if not fresh:
+            # 盒子读到了但一个工具都没有：可能是框架刚启动还没装好，保留旧目录。
+            self._probe_at = time.time()
+            return 0
+        # 读到盒子就以这次探测为准整份替换：关掉的工具要消失，新装的要出现。
+        self._catalog = fresh
         self._probe_at = time.time()
-        return got
+        return len(fresh)
 
-    def tool_catalog(self) -> list:
+    def tool_catalog(self, *, refresh: bool = False) -> list:
         # 目录空 = 还没见过真实请求，试着从框架那边捞一次（60 秒最多捞一次）。
-        if not self._catalog or (time.time() - float(getattr(self, "_probe_at", 0.0) or 0.0)) > 60.0:
+        # 用户 m01997：设置页每次打开都要跟宿主当前工具表对齐，refresh=True 跳过节流。
+        stale = (time.time() - float(getattr(self, "_probe_at", 0.0) or 0.0)) > 60.0
+        if refresh or not self._catalog or stale:
             try:
                 self._probe_ctx_tools()
             except Exception:

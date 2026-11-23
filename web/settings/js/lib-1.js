@@ -33,7 +33,7 @@
     // 没等到结算就当这轮失败」，是重试链的起点；写死 180 秒时卡一次要等到 3 分钟才重试。
     // 用户 m07859：重试 / 重试间隔 / 单次超时只留这一份，决策链和回复链都读它，
     // 提示词页那两张卡里不再各留一份。
-    { p: "basic", t: "API 重试", split: 2, col: "left", keys: ["watchdog_seconds", "retry_max", "retry_delay"] },
+    { p: "basic", t: "API 重试", split: 2, col: "left", keys: ["watchdog_seconds", "watchdog_total_seconds", "retry_max", "retry_delay"] },
     // 用户 m05550：重试的两个取舍开关都是双刃剑（开了可能跑题 / 开了可能漏掉一条），
     // 单独一组、默认都关，组名右边挂警告色胶囊提醒一句。
     { p: "basic", t: "重试取舍", split: 2, col: "left", warn: ["双刃剑", "未经充分测试"],
@@ -613,7 +613,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // 框内单位：计数类（条数）是「次」，成对参数按数值键推（秒 / 分钟，见 pairUnitOf）。
   // v3.92（用户 m00697 第 8 / 9 条）：重试那三个框、窗口显示那三行也带单位，单位写在框里。
   var UNIT_TEXT = { trigger_threshold: "次",
-    watchdog_seconds: "秒", retry_max: "次", retry_delay: "秒",
+    watchdog_seconds: "秒", watchdog_total_seconds: "秒", retry_max: "次", retry_delay: "秒",
     trace_keep: "条", trace_keep_dm: "条", decision_keep: "条", decision_keep_dm: "条",
     window_show: "条", window_show_dm: "条",
     // 用户 m10267：动图派生参数的单位（质量走 %，跟图片质量一个写法）。
@@ -1028,8 +1028,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
     JEV_MODEL_ERR = "";
     jevRerenderCard();
   }
-  function jevModelOpts(cur, emptyText){
-    var h = "<option value=''" + (cur ? "" : " selected") + ">" + esc(emptyText) + "</option>";
+  function jevModelOpts(cur, emptyText, emptyTitle){
+    var h = "<option value=''" + (cur ? "" : " selected") +
+      (emptyTitle ? " title='" + esc(emptyTitle) + "'" : "") + ">" + esc(emptyText) + "</option>";
     var list = (JEVOPT && JEVOPT.models) || [];
     var seen = false;
     list.forEach(function(m){
@@ -1053,7 +1054,17 @@ var DM_SPECIAL = { trigger_probability: 1 };
     if(JEVOPT && JEVOPT.status && JEVOPT.status.available === false && !(JEVOPT.models || []).length){
       return "当前宿主不支持 decision 模型";
     }
+    // 用户 C1/O5：宿主有默认决策槽时，留空就是「跟随官方默认决策模型」，不是「没选」。
+    if(JEVOPT && JEVOPT.status && JEVOPT.status.default_decision){
+      return "跟随官方默认决策模型";
+    }
     return "请选择模型";
+  }
+
+  // 用户 C1/O5：留空到底跟的是哪个模型，写在选项的悬浮说明里（这一行没有常驻说明位）。
+  function jevEmptyHint(){
+    return (JEVOPT && JEVOPT.status && JEVOPT.status.default_decision)
+      ? "留空则使用 KiraAI 设置里的默认决策模型" : "";
   }
 
   // 用户 m08755：接口地址只填到 api 前缀，真正要打的那条由插件补路径。
@@ -1127,7 +1138,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // ---- 左边：模型与不确定区间 ----
     var fwBody = "<div class='drows'>" +
         mcRowKeep("JEV 模型", "<select class='dipt' data-k='jev_model' id='jev-model'>" +
-          jevModelOpts(String(dVal("jev_model", "")), jevEmptyText()) + "</select>") +
+          jevModelOpts(String(dVal("jev_model", "")), jevEmptyText(), jevEmptyHint()) + "</select>") +
         mcRowKeep("备用模型", "<select class='dipt' data-k='jev_fallback_model' id='jev-fb'>" +
           jevModelOpts(String(dVal("jev_fallback_model", "")), "未选择模型") + "</select>") +
         // 用户 m01978 第 1 条：这两项并成一行，名字缩短，单位（次 / 秒）搬进框里。
@@ -1209,7 +1220,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
   function jevRefresh(){
     if(!JEVOPT) return;
     var ms = document.getElementById("jev-model");
-    if(ms) ms.innerHTML = jevModelOpts(ms.value || String(dVal("jev_model", "")), jevEmptyText());
+    if(ms) ms.innerHTML = jevModelOpts(ms.value || String(dVal("jev_model", "")), jevEmptyText(), jevEmptyHint());
     var fs = document.getElementById("jev-fb");
     if(fs) fs.innerHTML = jevModelOpts(fs.value || String(dVal("jev_fallback_model", "")), "未选择模型");
   }

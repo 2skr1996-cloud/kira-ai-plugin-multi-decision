@@ -34,6 +34,7 @@ from ..state.session_state import SessionState
 from ..state.sids import normalize_sid
 from ..state.retry_history import RETRY_META
 from ..state.reply_media import ReplyMediaAdapter
+from ..state.media_rescue import apply_placeholder, needs_rescue, rescue_in_background
 from ..state.reply_delivery import REPLY_ATTEMPT, ReplyDeliveryGuard
 from ..state.reply_publication import REPLY_PUBLICATION, ReplyPublicationGuard
 from ..window.buffer import ids_of
@@ -176,7 +177,11 @@ from ..window.manager import (
 logger = get_logger("multi_decision", "orange")
 
 # 投递后多久还没结算就强制解锁。正常一轮 5 步以内几十秒，180s 足够宽裕。
+# 投递后多久还没结算就强制解锁。正常一轮 5 步以内几十秒，180s 足够宽裕。
 BUSY_WATCHDOG = 180.0
+# 用户 m01587：整轮回复的总时长上限（默认 10 分钟）。看门狗改成按「无进展」计时后，
+# 单步卡住由 watchdog_seconds 兜，整轮跑太久由这个总上限兜。
+BUSY_WATCHDOG_TOTAL = 600.0
 # 用户 m26142 第 1 条：「判要回后等回复跑完再裁」的兜底时限。超过这个秒数还没等到
 # 收束（异常 / 看门狗没兜住），就当那一轮已经结束，裁切照常走，免得把裁切永久锁死。
 _TRIM_AFTER_TTL = 180.0
@@ -448,6 +453,13 @@ def _fw_elements_text(chain, depth: int = 0) -> str:
             if isinstance(el, Emoji):
                 out.append(emoji_repr(el))
                 continue
+            # 用户 m19755：转发条目里的分享卡（夸克网盘这类）框架只给一段 JSON，落到下面
+            # 的 repr 兜底就是单引号 Python dict，前端认不出卡、整段铺成了代码。
+            if _looks_json_card(el):
+                _card = _json_card_text(el)
+                if _card:
+                    out.append(_card)
+                    continue
             if _looks_forward(el):
                 if depth >= 1:
                     out.append(_forward_brief(el))
@@ -593,6 +605,33 @@ def _media_targets(chain) -> Optional[list]:
         return None
 
 
+_JSON_CARD_KEYS = ("app", "view", "title", "prompt", "desc", "jumpUrl", "qqdocurl", "url", "tag")
+
+
+def _json_card_body(text: str) -> str:
+    """转发条目正文整段就是一张分享卡的裸 JSON 时，包成框架同款的 [Json card {...}]。
+
+    用户 m19755：夸克网盘的分享卡在转发里只是一段 json.dumps 出来的正文，前端只认
+    [Json card …] 这个前缀，裸 JSON 就整段铺成了代码。只有「整段就是一个对象、还带着
+    卡片字段」时才包，普通正文一个字都不动。
+    """
+    s = (text or "").strip()
+    if not s.startswith("{") or not s.endswith("}"):
+        return text
+    try:
+        obj = json.loads(s)
+    except Exception:
+        return text
+    if not isinstance(obj, dict):
+        return text
+    if not any(obj.get(k) for k in _JSON_CARD_KEYS):
+        return text
+    try:
+        return "[Json card %s]" % json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        return text
+
+
 def _fw_body(item, depth: int = 0) -> str:
     if _fw_is_chain(item):
         # MessageChain：message_list 第一段就是「[时间] 昵称: 」，正文直接带上它，
@@ -602,18 +641,18 @@ def _fw_body(item, depth: int = 0) -> str:
         for key in ("message_str", "text", "content", "message"):
             val = item.get(key)
             if isinstance(val, str) and val.strip():
-                return val.strip()
+                return _json_card_body(val.strip())
         chain = item.get("chain") or item.get("message_chain") or item.get("message_list")
         return _fw_elements_text(chain, depth)
     if isinstance(item, str):
-        return item.strip()
+        return _json_card_body(item.strip())
     for attr in ("message_str", "text"):
         try:
             val = getattr(item, attr, None)
         except Exception:
             val = None
         if isinstance(val, str) and val.strip():
-            return val.strip()
+            return _json_card_body(val.strip())
     for attr in ("chain", "message_chain", "message_list"):
         try:
             chain = getattr(item, attr, None)
@@ -626,7 +665,7 @@ def _fw_body(item, depth: int = 0) -> str:
     except Exception:
         content = None
     if isinstance(content, str):
-        return content.strip()
+        return _json_card_body(content.strip())
     if isinstance(content, (list, tuple)):
         return _fw_elements_text(content, depth)
     return ""
@@ -1266,7 +1305,21 @@ def raw_line_of(message, text: str, sender: str, name: str, ts: float = 0.0, loo
         parts.append("[message_id: %s]" % mid)
     who = str(name or sender or "")
     if who:
-        parts.append("[user_nickname: %s, user_id: %s]" % (who, sender or ""))
+        # 3.3.0 起群消息头里昵称后面还有群名片：`[user_nickname: 昵称,
+        # group_nickname: 群名片, user_id: 号]`。自拼的头必须和框架原样一致，
+        # 否则下一轮真进记忆时按 message_id 对不上、窗口里会多一条。
+        # 老宿主没有这个字段（getattr 兜住）；群名片为空或与昵称相同时框架也不写。
+        card = ""
+        try:
+            card = str(getattr(getattr(message, "sender", None),
+                               "group_nickname", "") or "").strip()
+        except Exception:
+            card = ""
+        if card and card != who:
+            parts.append("[user_nickname: %s, group_nickname: %s, user_id: %s]"
+                         % (who, card, sender or ""))
+        else:
+            parts.append("[user_nickname: %s, user_id: %s]" % (who, sender or ""))
     body = str(text or "").strip()
     head = " ".join(p for p in parts if p)
     if not body:
@@ -1744,9 +1797,14 @@ class DecisionEngine:
             if not st.busy:
                 st.busy = True
                 st.busy_since = time.time()
-            remaining = st.busy_since + self._watchdog_seconds(sid) - time.time()
+            idle = self._watchdog_seconds(sid)
+            total = self._watchdog_total_seconds(sid)
+            now = time.time()
+            loop = asyncio.get_running_loop()
             attempt = SimpleNamespace(owner=owner, event=event, task=None, tasks=set(),
-                deadline=asyncio.get_running_loop().time() + max(0.0, remaining), expired=False)
+                deadline=loop.time() + max(0.0, st.busy_since + idle - now),
+                hard_deadline=loop.time() + max(0.0, st.busy_since + total - now),
+                last_progress=loop.time(), expired=False)
             self._reply_attempts[sid] = attempt
             # Rebind the timer to this epoch without extending the original budget.
             self._arm_watchdog(sid, st)
@@ -1865,9 +1923,23 @@ class DecisionEngine:
                     task.cancel()
         self.health["watchdog"] += 1
         wd = self._watchdog_seconds(sid)
-        st.last_error = "投递后 %d 秒没有任何结算，本次请求已作废" % int(wd)
+        total = self._watchdog_total_seconds(sid)
+        # 用户 m01587：两种超时分开说——「多久没动静」还能靠重试救，
+        # 「整轮跑太久」说明这一轮本身就不该再等。
+        hit_total = bool(attempt is not None
+                         and getattr(attempt, "hard_deadline", None) is not None
+                         and asyncio.get_running_loop().time() >= attempt.hard_deadline)
+        if hit_total:
+            st.last_error = "整轮超过 %d 秒总时长上限，本次请求已作废" % int(total)
+            logger.warning(
+                "[multi-decision] %s 整轮超过 %.1fs 总时长上限，本次请求作废并取消，迟到结果不再接受",
+                sid, total)
+        else:
+            st.last_error = "投递后 %d 秒没有任何结算，本次请求已作废" % int(wd)
+            logger.warning(
+                "[multi-decision] %s 超过 %.1fs 没有任何进展，本次请求作废并取消，迟到结果不再接受",
+                sid, wd)
         st.last_error_at = time.time()
-        logger.warning("[multi-decision] %s 超过 %.1fs，本次请求作废并取消，迟到结果不再接受", sid, wd)
         self._watchdog_record_failure(sid, st)
         # 用户 m08153：看门狗超时也算一次失败——以前这里不记账，超时轮永远
         # 攒不到「连续失败切换」的阈值，重试完就结束了，一次备用模型都没用上。
@@ -1964,6 +2036,8 @@ class DecisionEngine:
             delattr(request, "_mdp_retained_ready")
         epoch = flow.epoch
         self._bind_reply_attempt(sid, eid, epoch, event, request)
+        # 用户 m01587：每发起一次模型调用都算「有进展」，把无进展窗口往后推。
+        self._touch_reply_progress(sid, request._mdp_reply_round)
         media_by_id = await self._incoming_media(event, request, sid)
         await self._check_reply_round(request._mdp_reply_round)
         framework = list(getattr(request, "messages", None) or [])
@@ -3513,6 +3587,18 @@ class DecisionEngine:
             media_list(getattr(message, "content", None), self._raw_sids.get(_sid0, "") or _sid0)
         except Exception:
             logger.debug("[multi-decision] 消息入库时预复制图片失败（已忽略）", exc_info=True)
+
+        # 用户截图那条 19:27 的 QQ 表情包（mid 1232530657）：框架归档失败，chain 里只剩
+        # {"type":"image","file_type":"unavailable"}（没有 file 键），图彻底丢了，正文只剩
+        # 表情名 "[不对不对]"。这里自己把图下回来并按 message_id 登记，让页面按 id 反查得到；
+        # 救不回来就把表情名换成 [表情]/[图片]。下载走后台 task，不 await——绝不阻塞消息流。
+        try:
+            _rescue_sid = self._raw_sids.get(_sid0, "") or _sid0
+            apply_placeholder(message, _rescue_sid)
+            if needs_rescue(message, _rescue_sid):
+                rescue_in_background(message, _rescue_sid)
+        except Exception:
+            logger.debug("[multi-decision] 表情包抢救/占位失败（已忽略）", exc_info=True)
 
         # 机器人自己的名字：优先用适配器里的真实昵称（QQ 里别人看到的名字），
         # 而不是人格文件名。@ 消息里是 `[At 1429260473(nickname: 桃华)]`，
@@ -6775,6 +6861,14 @@ class DecisionEngine:
         """
         if not st.busy or not st.busy_since:
             return False
+        # 用户 m01587：有 attempt 时以它的 deadline 为准——那是「无进展」窗口，
+        # 每步模型 / 工具回来都会往后推；没有 attempt 的轮（轮次起点）仍按整轮算。
+        attempt = self._reply_attempts.get(sid)
+        if attempt is not None and not attempt.expired:
+            try:
+                return asyncio.get_running_loop().time() >= attempt.deadline
+            except RuntimeError:
+                pass
         return (now - st.busy_since) > self._watchdog_seconds(sid)
 
     def _watchdog_seconds(self, sid: str = "") -> float:
@@ -6794,24 +6888,82 @@ class DecisionEngine:
             value = BUSY_WATCHDOG
         return max(1.0, value)
 
+    def _watchdog_total_seconds(self, sid: str = "") -> float:
+        """整轮回复的总时长上限（设置页的「整轮时长上限」，用户 m01587）。
+
+        无进展窗口只保证「一直在动就不会被掐」，但一轮要是无限多步，总得有个头。
+        默认 600 秒；比单步窗口还小时按单步窗口算，否则正常一轮刚起步就被总上限掐掉。
+        """
+        try:
+            raw = self._c("watchdog_total_seconds", sid)
+        except Exception:
+            raw = None
+        try:
+            value = float(raw if raw is not None else BUSY_WATCHDOG_TOTAL)
+        except (TypeError, ValueError):
+            value = BUSY_WATCHDOG_TOTAL
+        return max(1.0, value, self._watchdog_seconds(sid))
+
+    def _touch_reply_progress(self, sid: str, owner=None) -> None:
+        """有进展就续期：模型返回、工具结果、下一次模型调用都算（用户 m01587）。
+
+        多步搜索每步 30~70 秒，按整轮 180 秒算必然被掐；改成按「多久没动静」算，
+        真卡住仍然会释放。整轮另有总时长上限，不会无限续下去。
+        """
+        sid = normalize_sid(sid)
+        attempt = self._reply_attempts.get(sid)
+        if attempt is None or attempt.expired:
+            return
+        if owner is not None and attempt.owner != owner:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        now = loop.time()
+        attempt.last_progress = now
+        deadline = now + self._watchdog_seconds(sid)
+        hard = getattr(attempt, "hard_deadline", None)
+        if hard is not None and deadline > hard:
+            deadline = hard
+        attempt.deadline = deadline
+
     def _arm_watchdog(self, sid: str, st) -> None:
-        """Expire the owning round at the configured deadline, not merely unlock it."""
+        """Expire the owning round at the configured deadline, not merely unlock it.
+
+        用户 m01587：deadline 会被 _touch_reply_progress 往后推，所以这里不能只睡一次——
+        醒来先看 deadline 有没有变，变了就接着睡到新的点。
+        """
         started = st.busy_since
         flow = self._input_flow(sid)
         epoch = flow.epoch
-        remaining = max(0.0, started + self._watchdog_seconds(sid) - time.time())
+        idle = self._watchdog_seconds(sid)
+        fallback = asyncio.get_running_loop().time() + max(0.0, started + idle - time.time())
         previous = self._watchdogs.pop(sid, None)
         if previous is not None and previous is not asyncio.current_task() and not previous.done():
             previous.cancel()
 
         async def _wait():
             try:
-                await asyncio.sleep(remaining)
-                async with flow.lock:
-                    if (self._closed or not st.busy or st.busy_since != started
-                            or flow.epoch != epoch):
-                        return
-                    await self._expire_reply_locked(sid, flow, st)
+                while True:
+                    attempt = self._reply_attempts.get(sid)
+                    deadline = getattr(attempt, "deadline", None) if attempt is not None else None
+                    if deadline is None:
+                        deadline = fallback
+                    delay = deadline - asyncio.get_running_loop().time()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                        continue
+                    async with flow.lock:
+                        if (self._closed or not st.busy or st.busy_since != started
+                                or flow.epoch != epoch):
+                            return
+                        attempt = self._reply_attempts.get(sid)
+                        if (attempt is not None and not attempt.expired
+                                and asyncio.get_running_loop().time() < attempt.deadline):
+                            continue
+                        await self._expire_reply_locked(sid, flow, st)
+                    return
             except asyncio.CancelledError:
                 raise
             except Exception:

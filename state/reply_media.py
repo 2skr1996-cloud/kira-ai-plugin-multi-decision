@@ -2,6 +2,9 @@
 
 Prompts/persistent memory are never changed. Install before clients are selected;
 stage also covers pre-existing event model groups. No model is instantiated here.
+
+这些是框架私有依赖（ProviderManager.get_model_client、客户端的 chat/chat_stream），
+框架升级后必须复查：探测不到时只记一条 WARNING 跳过，不能让回复媒体投影静默失效。
 """
 from asyncio import CancelledError
 from contextlib import aclosing
@@ -117,6 +120,8 @@ class ReplyMediaAdapter:
         self._factory = None
         self._clients = []  # Weak refs only; bound originals live on each client.
         self._closed = False
+        # 探测失败只提醒一次：stage() 每轮都会再调 install()，不能每轮刷同一条。
+        self._warned_unavailable = False
 
     def install(self) -> bool:
         if self._closed:
@@ -124,7 +129,14 @@ class ReplyMediaAdapter:
         manager = getattr(self.ctx, "provider_mgr", None)
         previous = getattr(manager, "get_model_client", None)
         if not callable(previous):
+            # 框架升级可能换掉 provider_mgr / get_model_client：这里失效是静默的，
+            # 只提醒一次，免得每轮请求都刷同一条。
+            if not self._warned_unavailable:
+                self._warned_unavailable = True
+                if self.logger is not None:
+                    self.logger.warning("[multi-decision] 框架 provider_mgr 不可用，回复媒体投影失效")
             return False
+        self._warned_unavailable = False
         if previous is self._factory or _contains(previous, self):
             return True
         owned = "get_model_client" in vars(manager)
@@ -147,19 +159,27 @@ class ReplyMediaAdapter:
         if getattr(kind, "value", kind) != "llm":
             return False
         changed = False
+        wrapped = False
         for name in ("chat", "chat_stream"):
+            # 框架升级可能删掉其中一个方法：缺哪个跳哪个，不能因为少一个就整条包装失败。
+            if not hasattr(client, name):
+                continue
             previous = getattr(client, name, None)
-            if not callable(previous) or _contains(previous, self):
+            if not callable(previous):
+                continue
+            if _contains(previous, self):
+                wrapped = True
                 continue
             owned = name in vars(client)
             wrapper = self._call_wrapper(previous, stream=name == "chat_stream")
             setattr(client, name, _remember(wrapper, self, previous, owned))
             changed = True
+            wrapped = True
         if changed:
             self._clients = [ref for ref in self._clients if ref() is not None]
             if not any(ref() is client for ref in self._clients):
                 self._clients.append(weakref.ref(client))
-        return callable(getattr(client, "chat", None))
+        return wrapped
 
     def _call_wrapper(self, previous, *, stream):
         async def arguments(args, kwargs):

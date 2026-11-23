@@ -457,7 +457,8 @@
           sst.open[smi] = true;
           ppSetPane(smk);
           setTimeout(function(){
-            var card = document.querySelector("[data-pp-editor='" + smk + "'] [data-pm-module='" + smi + "']");
+            var ed = ppEditorEl(smk);
+            var card = ed ? ed.querySelector("[data-pm-module='" + smi + "']") : null;
             if(card && card.scrollIntoView) card.scrollIntoView({block:"center"});
           }, 80);
         }

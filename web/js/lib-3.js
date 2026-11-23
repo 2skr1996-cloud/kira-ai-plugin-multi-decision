@@ -281,6 +281,25 @@
       end = m.index + raw.length - tail.length;
       hit = true;
     }
+    // 用户 m18492：GitHub 链接也抽成卡。留在 .mono 里它同样会掉到文字下面，
+    // 还多挂一行「N 字」，跟 B 站链接一个毛病。
+    if(rest && /github\.com/i.test(rest)){
+      var ghRe = new RegExp(GH_RE.source, "gi"), ghM, ghTxt = "", ghCards = "", ghEnd = 0;
+      while((ghM = ghRe.exec(rest))){
+        var gRaw = ghM[0], gUrl = gRaw, gTail = "";
+        var gCut = gUrl.match(/[，。、；：）】」』！？,.;:!?]+$/);
+        if(gCut){ gTail = gCut[0]; gUrl = gUrl.slice(0, gUrl.length - gTail.length); }
+        var gHref = safeWebUrl(gUrl);
+        if(!gHref) continue;
+        var gp = ghParse(gHref);
+        if(!gp) continue;
+        ghTxt += rest.slice(ghEnd, ghM.index);
+        ghCards += ghFromUrl(gp, gHref, "");
+        ghEnd = ghM.index + gRaw.length - gTail.length;
+        hit = true;
+      }
+      if(ghEnd){ ghTxt += rest.slice(ghEnd); rest = ghTxt; html += ghCards; }
+    }
     if(!hit) return null;
     rest += src.slice(end);
     rest = rest.replace(/[ \t]+$/gm, "").replace(/\n{2,}/g, "\n").replace(/^\s+|\s+$/g, "");
@@ -450,9 +469,159 @@
     var timer = null;
     ltObs = new MutationObserver(function(){
       if(timer) return;
-      timer = setTimeout(function(){ timer = null; fillLinkTitles(); }, 150);
+      timer = setTimeout(function(){ timer = null; fillLinkTitles(); fillGitHub(); }, 150);
     });
     ltObs.observe(document.body, {childList: true, subtree: true});
+  }
+  // 用户 m18492：正文里的 github.com 链接以前就是一行裸网址，看不出是仓库、issue 还是文件。
+  // 跟推文卡一套做法：先按 URL 画 owner/repo 骨架，整段渲染完由 fillGitHub() 向后端要一次
+  // 仓库信息（描述、star、主语言）再重画成完整卡片；取不到就一直留着骨架，不闪、不空转。
+  // blob / tree / commit / releases / 用户主页没什么可展示的，直接按路径画完，不发请求。
+  var GH_LOGO = "<svg viewBox='0 0 16 16' width='16' height='16' aria-hidden='true'>" +
+    "<path fill='currentColor' d='M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8z'/></svg>";
+  var GH_RE = /https?:\/\/(?:www\.)?(?:github\.com|gist\.github\.com)\/[^\s<>"'「」【】\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]+/gi;
+  function ghParse(url){
+    var s = String(url || ""), m;
+    m = /^https?:\/\/(?:www\.)?gist\.github\.com\/(?:[^\/?#\s]+\/)?([0-9a-fA-F]{5,})/.exec(s);
+    if(m) return { kind: "gist", id: m[1] };
+    m = /^https?:\/\/(?:www\.)?github\.com\/([^\/?#\s]+)(?:\/([^\/?#\s]+))?([^?#\s]*)/i.exec(s);
+    if(!m) return null;
+    var owner = m[1] || "";
+    var repo = String(m[2] || "").replace(/\.git$/i, "");
+    var segs = String(m[3] || "").split("/").filter(function(x){ return !!x; });
+    var kind = "repo";
+    if(!repo) kind = "user";
+    else if(segs.length){
+      var head = segs[0].toLowerCase();
+      if((head === "issues" || head === "pull") && segs[1] && /^\d+$/.test(segs[1])) kind = (head === "pull") ? "pull" : "issue";
+      else if(head === "releases") kind = "releases";
+      else if(head === "commit") kind = "commit";
+      else kind = "path";
+    }
+    return { kind: kind, owner: owner, repo: repo, segs: segs };
+  }
+  // 这几种才需要问后端；其余本地就能画完
+  function ghFillable(p){
+    return !!p && (p.kind === "repo" || p.kind === "issue" || p.kind === "pull" || p.kind === "gist");
+  }
+  function ghLocalTitle(p){
+    if(p.kind === "repo") return p.owner + "/" + p.repo;
+    if(p.kind === "issue" || p.kind === "pull") return (p.kind === "pull" ? "Pull request" : "Issue") + " #" + p.segs[1];
+    if(p.kind === "gist") return "Gist " + String(p.id).slice(0, 8);
+    if(p.kind === "user") return p.owner;
+    if(p.kind === "releases") return "Releases";
+    if(p.kind === "commit") return "提交 " + String(p.segs[1] || "").slice(0, 7);
+    return p.segs.length ? p.segs[p.segs.length - 1] : (p.owner + "/" + p.repo);
+  }
+  function ghLocalDesc(p){
+    if(p.kind === "repo") return "GitHub 仓库";
+    if(p.kind === "issue") return p.owner + "/" + p.repo + " · Issue";
+    if(p.kind === "pull") return p.owner + "/" + p.repo + " · Pull request";
+    if(p.kind === "gist") return "GitHub Gist";
+    if(p.kind === "user") return "GitHub 用户";
+    if(p.kind === "commit") return p.owner + "/" + p.repo;
+    if(p.kind === "releases") return p.owner + "/" + p.repo;
+    return p.segs.slice(1).join("/") || (p.owner + "/" + p.repo);
+  }
+  // o.foot 已经是拼好的 HTML（里面的文字自己 esc 过），这里不再整体转义
+  function ghCard(o){
+    var head = "<span class='qc-row'><span class='qc-logo gh'>" + GH_LOGO + "</span>" +
+      "<span class='qc-main'><span class='qc-t'>" + esc(o.title) + "</span>" +
+      (o.desc ? "<span class='qc-d'>" + esc(o.desc) + "</span>" : "") +
+      "</span><span class='qc-go'>↗</span></span>";
+    var foot = "<span class='qc-ft'><span class='qc-src'>" + (o.foot || "GitHub") + "</span>" +
+      "<span class='qc-open'>打开</span></span>";
+    return "<a class='qcard gh'" + (o.fill ? " data-gh='" + esc(o.href) + "'" : "") +
+      (o.pre ? " data-gh-t='" + esc(o.pre) + "'" : "") +
+      " href='" + esc(o.href) + "' target='_blank' rel='noopener noreferrer'" +
+      " title='" + esc((o.pre || o.title) + " · GitHub") + "'>" + head + foot + "</a>";
+  }
+  function ghFromUrl(p, href, preTitle){
+    return ghCard({ href: href, title: preTitle || ghLocalTitle(p), desc: ghLocalDesc(p),
+                    foot: "GitHub", fill: ghFillable(p), pre: preTitle || "" });
+  }
+  // 后端数据到了：仓库补 star / 主语言，issue 补编号与状态，标题描述都换真的
+  function ghCardFromData(d, href, preTitle){
+    var title = String(d.title || ""), desc = String(d.desc || ""), foot = "GitHub";
+    if(d.kind === "repo"){
+      if(preTitle) title = preTitle;
+      var bits = ["GitHub"];
+      if(d.stars) bits.push("★ " + twNum(d.stars));
+      if(d.lang) bits.push("<i class='qc-dot' style='background:" + esc(d.color || "#8b949e") + "'></i>" + esc(d.lang));
+      if(d.archived) bits.push("已归档");
+      foot = bits.join(" · ");
+      if(!desc && d.repo_full) desc = d.repo_full + " · GitHub 仓库";
+    } else if(d.kind === "issue" || d.kind === "pull"){
+      var b2 = [];
+      if(d.repo_full) b2.push(esc(d.repo_full));
+      b2.push("#" + esc(String(d.no || "")) + (d.state ? " " + esc(d.state) : ""));
+      if(d.comments) b2.push(esc(String(d.comments)) + " 条评论");
+      foot = b2.join(" · ");
+    } else if(d.kind === "gist"){
+      foot = "GitHub Gist";
+    }
+    return ghCard({ href: href, title: title || preTitle || href, desc: desc, foot: foot });
+  }
+  var GH_CACHE = Object.create(null);   // href -> 数据 | {ok:false} | null（请求中）
+  function ghPaint(url){
+    var d = GH_CACHE[url];
+    if(!d) return;
+    var nodes = [].slice.call(document.querySelectorAll(".qcard.gh[data-gh]"));
+    nodes.forEach(function(a){
+      if(a.getAttribute("data-gh") !== url) return;
+      if(!d.ok){ a.classList.add("gh-bad"); return; }
+      a.outerHTML = ghCardFromData(d, a.getAttribute("href") || url, a.getAttribute("data-gh-t") || "");
+    });
+  }
+  function fillGitHub(){
+    var nodes = [].slice.call(document.querySelectorAll(".qcard.gh[data-gh]"));
+    if(!nodes.length) return;
+    var seen = Object.create(null);
+    nodes.forEach(function(a){
+      var url = a.getAttribute("data-gh") || "";
+      if(!url || seen[url]) return;
+      seen[url] = 1;
+      var got = GH_CACHE[url];
+      if(got === null) return;              // 已经在请求里了
+      if(got){ ghPaint(url); return; }
+      GH_CACHE[url] = null;
+      fetch(API + "/github?url=" + encodeURIComponent(url))
+        .then(function(r){ return r.json(); })
+        .then(function(d){ GH_CACHE[url] = (d && d.ok) ? d : { ok: false }; })
+        .catch(function(){ GH_CACHE[url] = { ok: false }; })
+        .then(function(){ GH_CACHE[url] && ghPaint(url); });
+    });
+  }
+  // 跟 tweetHtml 一样每调用一次新建正则：renderText 就是 richText，它会递归回到这里，
+  // 共用一个全局正则的话 lastIndex 被内层重置，外层 while 永远走不完。
+  function githubHtml(text, renderText){
+    var src = String(text || ""), out = "", end = 0, m;
+    var re = new RegExp(GH_RE.source, "gi");
+    while((m = re.exec(src))){
+      var raw = m[0], url = raw, tail = "";
+      // 用户本轮（G6）：正文里「来源：事件复盘(https://github.com/…)」这种 URL 被 ASCII
+      // 圆括号包住的写法，GH_RE 的字符类不排除 ASCII 括号，右括号会被一起吞进 URL，
+      // 左括号留在正文里，渲染成「事件复盘(」+ 卡片。成对时整对括号一起吃掉、只留卡片；
+      // 只有单边括号时也不留半个。
+      var leadP = (m.index > 0 && src.charAt(m.index - 1) === "(");
+      var cutP = url.match(/[，。、；：）】」』！？,.;:!?]+$/);
+      if(cutP){ tail = cutP[0]; url = url.slice(0, url.length - tail.length); }
+      // 先剥句末标点再配平括号：(url). 这种也能把右括号吃掉，不留半个
+      var closeP = /\)+$/.exec(url);
+      if(closeP){
+        // URL 自己配平的括号（foo_(bar)）不动，只吃多出来的右括号
+        var nOpen = (url.match(/\(/g) || []).length, nClose = (url.match(/\)/g) || []).length;
+        if(nClose > nOpen) url = url.slice(0, url.length - (nClose - nOpen));
+      }
+      var href = safeWebUrl(url);
+      if(!href) continue;
+      var p = ghParse(href);
+      if(!p) continue;
+      var cut = biliTitle(src.slice(end, leadP ? m.index - 1 : m.index));
+      out += renderText(cut.pre) + ghFromUrl(p, href, cut.title);
+      end = m.index + raw.length - tail.length;
+    }
+    return end ? out + renderText(src.slice(end)) : null;
   }
   // 卡片/转发/文件已经单独画出来了，正文里残留的分享模板要剥掉，
   // 否则卡片下面还挂一行「点击链接直接打开」（用户 m51324 图5）
@@ -600,7 +769,7 @@
     var hd = "";
     if(!grp){
       hd = "<span class='rq bot'>bot</span>" + (extra || "") + ats;
-      hd += "<span class='k nm'>" + esc(meta.name || "机器人") + "</span>";
+      hd += "<span class='k nm'>" + esc(dispNameOf(meta.name, meta.gnick) || "机器人") + "</span>";
       if(meta.you) hd += "<span class='k you'>@你</span>";
       if(meta.ts) hd += "<span class='k weak' title='" + esc(meta.ts) + "'>" + esc(shortTs(meta.ts)) + "</span>";
       hd += "<span class='grow'></span>";
@@ -769,7 +938,7 @@
         // 只写「N 条消息」看不出是几个人说的（用户 m29241 图2）
         var names = [];
         parts.forEach(function(q){
-          var nm2 = String(q.meta.name || "").trim();
+          var nm2 = dispNameOf(q.meta.name, q.meta.gnick);
           if(nm2 && names.indexOf(nm2) < 0) names.push(nm2);
         });
         h2 += "<span class='k'>" + parts.length + " 条</span>";
@@ -779,7 +948,8 @@
         }
       } else {
         if(p.meta.ts) h2 += "<span class='k' title='" + esc(p.meta.ts) + "'>" + esc(shortTs(p.meta.ts)) + "</span>";
-        if(p.meta.name) h2 += "<span class='k'>" + esc(p.meta.name) + "</span>";
+        var pn = dispNameOf(p.meta.name, p.meta.gnick);
+        if(pn) h2 += "<span class='k'>" + esc(pn) + "</span>";
         if(p.meta.you) h2 += "<span class='k you'>@你</span>";
       }
       if(m.chars) h2 += "<span class='k weak'>" + m.chars + " 字</span>";
@@ -868,7 +1038,8 @@
         parts.forEach(function(q, qi){
           var lab = "";
           if(q.meta.ts) lab += "<span class='k' title='" + esc(q.meta.ts) + "'>" + esc(shortTs(q.meta.ts)) + "</span>";
-          if(q.meta.name) lab += "<span class='k'>" + esc(q.meta.name) + "</span>";
+          var qn = dispNameOf(q.meta.name, q.meta.gnick);
+          if(qn) lab += "<span class='k'>" + esc(qn) + "</span>";
           if(q.meta.you) lab += "<span class='k you'>@你</span>";
           var segOwn = segMedia[qi].own;
           // 用户 m03014 第 1 条：这一段本身是合并转发时，图片归转发卡（折叠时跟着藏起来），
@@ -1133,6 +1304,18 @@
     }
     return "";
   }
+  // 用户本轮（G3）：群名片（group_nickname）只用于展示，不参与分组键、也不进拉黑名单。
+  // 取不到就返回空串，展示名退回纯昵称（旧文本行为完全不变）。
+  function gnickOf(m){
+    if(!m) return "";
+    var g0 = String(m.gnick || "").trim();
+    if(g0) return g0;
+    if(m.role !== "user") return "";
+    var parts = splitMetaAll(tidyBody(m.text || ""));
+    if(parts.length && parts[0].meta && parts[0].meta.gnick) return String(parts[0].meta.gnick).trim();
+    return gnickOfRaw(rawOf(m));
+  }
+  function whoDispOf(m){ return dispNameOf(whoOf(m), gnickOf(m)); }
   function uidOf(m){
     if(!m || m.role !== "user") return "";
     var parts = splitMetaAll(tidyBody(m.text || ""));
@@ -1160,6 +1343,7 @@
     // 按发言人分组会把上一次和这一次的判定并进同一张卡（图3 那样「两次判定并排」），
     // 看着像同一次判了两遍。注记是「那一次」的结论，本来就该一条一张卡。
     if(r === "assistant" && noteNameOf(m) === DEC_NOTE_NAME) return "note#" + idx;
+    // 用户本轮（G3）：分组键只用纯昵称（whoOf），群名片变化不能把同一个人拆成两组。
     return r + "|" + whoOf(m) + "|" + uidOf(m);
   }
   // 圆形头像：user 有 QQ 号就走 qlogo，assistant 没有就用名字首字
@@ -1220,16 +1404,19 @@
   }
   // 名单按会话缓存 30 秒：窗口每 5 秒重画一次，不能每次都打接口；
   // 但设置页那边刚拉黑的人，切回来最多半分钟就能看到。
-  function grpHeadHtml(role, who, uid, you, note, tools){
-    var nm = who ? esc(who) : (role === "assistant" ? "assistant" : "user");
+  function grpHeadHtml(role, who, uid, you, note, tools, forcedBlk, gnick){
+    // 用户本轮（G3）：组头显示「昵称 · 群昵称」；who 本身仍是纯昵称（分组键、拉黑名单都用它）。
+    var nm = who ? esc(dispNameOf(who, gnick)) : (role === "assistant" ? "assistant" : "user");
     var decName = role === "assistant" && who === DEC_NOTE_NAME;
     var tcChip = (tools === 0 || tools === null || tools === undefined || tools === "") ? ""
       : "<span class='chb'>工具 ×" + tools + "</span>";
     // 用户 m06193：真人名字后面挂「拉黑」（鼠标移上去才显示）。已经拉黑的换成
     // 「已拉黑」常驻胶囊 + 展开/折叠，点开还能看这一组的内容。
     var blkChip = "";
-    if(role === "user" && uid && UBLK_ON){
-      blkChip = UBLK[uid]
+    // 用户 m16754：快照里那条拉黑消息按「当时被拉黑」画，不看现在的名单——
+    // 事后解黑了，历史记录也不该变回普通消息。
+    if(role === "user" && uid && (UBLK_ON || forcedBlk)){
+      blkChip = (forcedBlk || UBLK[uid])
         ? ("<span class='gh-blk on'>已拉黑</span>" +
            "<button type='button' class='gh-exp' data-blk-exp='" + esc(uid) + "'>" +
            (UBLK_OPEN[uid] ? "折叠" : "展开") + "</button>")
@@ -1404,6 +1591,19 @@
                  : (kind ? "<span class='chb'>" + esc(MEDIA_LABEL[kind] || kind) + "</span>" : ""));
     var h = mcHtml(vm, idx, mode, grp ? "" : tags, null, grp ? full : full.slice(6, 11), grp, grp ? tags : "");
     return h.replace(/^<div class='mc /, "<div class='mc skip ");
+  }
+
+  // 用户 m16754：被拉黑挡下来的那条在快照里要跟实时窗一样——组头（头像 + 昵称）
+  // + 虚线卡 + 「已拉黑」胶囊 + 默认折叠。它的 raw 就是框架原文
+  // （[时间] [message_id: …] [user_nickname: …, user_id: …] | 正文），交给 msgCards
+  // 走正常消息那条路，时间/正文/图片都能自己解析出来，不用在这里再拼一遍。
+  function blkSkipMsg(s){
+    var raw = String((s && s.raw) || "");
+    var body = String((s && s.text) || "");
+    var text = raw || body;
+    return { role: "user", text: text, raw: text, media: [], display: null,
+             chars: visLen(body), tools: 0, tool_call_id: "",
+             skip: true, skip_reason: "blacklist" };
   }
 
   // 原文档只做视觉排版，文本一律原样：后端给了 raw 就用 raw

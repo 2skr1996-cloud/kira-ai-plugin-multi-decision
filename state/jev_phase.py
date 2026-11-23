@@ -41,6 +41,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import compat
 from .sids import bot_name
 
 try:  # 离线测试里 core 不一定在
@@ -1009,6 +1010,8 @@ class JevPhase:
             "models": len(self.models()),
             "error": self._last_error,
             "fail_streak": self._streak_of(self._fail_model_key),
+            # 用户 C1/O5：页面靠这个决定空选项写「跟随官方默认决策模型」还是「请选择模型」。
+            "default_decision": compat.has_default_decision(),
         }
 
     def models(self) -> list:
@@ -1021,7 +1024,11 @@ class JevPhase:
         """按 provider:model_id 取 decision 客户端。失败返回 (None, 原因)。"""
         if not self.available():
             return None, "当前宿主不支持 decision 类模型（需要 KiraAI 3.1.1 及以上）"
-        pid, mid = split_model_key(key)
+        text = str(key or "").strip()
+        if not text:
+            # 用户 C1/O5：留空 = 跟随官方默认决策槽，不再当成「没选模型」直接报错。
+            return self._default_client()
+        pid, mid = split_model_key(text)
         if not pid or not mid:
             return None, "没有选择 JEV 决策模型"
         ctx = getattr(self.plugin, "ctx", None)
@@ -1036,6 +1043,33 @@ class JevPhase:
             return None, "模型 %s 不存在，或不是 decision 类型" % key
         if not callable(getattr(client, "choice", None)):
             return None, "模型 %s 不支持 choice()" % key
+        return client, ""
+
+    def _default_client(self):
+        """jev_model 留空时跟随官方默认决策槽（KiraAI 3.2.1 起才有）。
+
+        用户 C1/O5：留空是「跟随」，不是「没配」。宿主没这个槽时仍按没选模型报；
+        有这个槽但槽里空着时要说清是槽空着，否则用户不知道该去插件里选还是去
+        KiraAI 设置里配。
+        """
+        if not compat.has_default_decision():
+            return None, "没有选择 JEV 决策模型"
+        ctx = getattr(self.plugin, "ctx", None)
+        mgr = getattr(ctx, "provider_mgr", None)
+        if mgr is None:
+            return None, "宿主没有 provider_mgr，取不到默认决策模型"
+        try:
+            client = mgr.get_default_decision()
+        except (TypeError, ValueError) as exc:
+            logger.warning("[multi-decision] 取官方默认决策模型失败：%s: %s",
+                           type(exc).__name__, exc)
+            return None, ("官方默认决策槽没有配置决策模型（%s: %s），"
+                          "请在 KiraAI 设置里配置默认决策模型，或在插件里选一个"
+                          % (type(exc).__name__, exc))
+        if client is None:
+            return None, "官方默认决策槽没有返回决策模型，请在插件里选一个 JEV 决策模型"
+        if not callable(getattr(client, "choice", None)):
+            return None, "官方默认决策槽的模型不支持 choice()，请在插件里选一个 JEV 决策模型"
         return client, ""
 
     async def _one_call(self, key: str, state_text: str, instructions: str,
@@ -1092,7 +1126,7 @@ class JevPhase:
         out = {
             "ok": not err,
             "error": err,
-            "key": key,
+            "key": key or model_ref,
             "model": str(getattr(resp, "model", "") or model_ref),
             "model_ref": model_ref,
             "choice": choice,
@@ -1258,7 +1292,8 @@ class JevPhase:
                 return {"kind": "custom", "id": "1", "protocol": opt.protocol,
                         "base": opt.api_base, "model": opt.api_model,
                         "api_key": opt.api_key}, ""
-            return None, "没有选择 JEV 决策模型"
+            # 用户 C1/O5：framework 后端留空 = 跟随官方默认决策槽，交给 _client_for 去取。
+            return {"kind": "host", "key": "", "provider": "", "model": ""}, ""
         pid, mid = split_model_key(text)
         if not pid or not mid:
             return None, "模型 %s 不完整（要 provider:model）" % text
@@ -1332,8 +1367,11 @@ class JevPhase:
         attempts = 0
         usage_all = []
         for kind, key in order:
-            if not str(key or "").strip() and not (kind == "main" and opt.is_custom()):
-                continue
+            if not str(key or "").strip():
+                # 用户 C1/O5：framework 后端留空 = 跟随官方默认决策槽，主模型这一格要放行；
+                # 宿主没有这个槽（3.2.1 以前）时照旧跳过，错误文案还是「没有可用的 JEV 决策模型」。
+                if kind != "main" or not (opt.is_custom() or compat.has_default_decision()):
+                    continue
             target, why = self._resolve_target(opt, key)
             if target is None:
                 last = dict(last, error=why, key=str(key or ""))

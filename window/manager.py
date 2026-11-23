@@ -200,7 +200,28 @@ def visible_chars(text, names=None) -> int:
 
 
 #: 窗口里每条消息都带 `[user_nickname: 昵称, user_id: 号]`，昵称池从这里收。
-_NICK_LINE_RE = re.compile(r"\[user_nickname:\s*([^,\]]{1,40}),\s*user_id:")
+#: 3.3.0 起发送者有群名片时中间会多一段 `group_nickname: …`，不认这段整条就抓不到，
+#: 昵称池漏人、@ 昵称被算进字数。昵称本身可能带 `]`（`[%ĀĀ␇Ö]我在未来，等你`），
+#: 所以不能按 `]` 截断，只按结尾的 `, user_id:` 锚定；群名片里可能有逗号甚至 `]`，
+#: 同样按 `, user_id:` 锚定，用 `[^\r\n]*?` 免得跨行或把后面的字段一起吞掉。
+#: 两个捕获组：1 是昵称，2 是群名片（没有群名片时是 None）。
+_NICK_LINE_RE = re.compile(
+    r"\[user_nickname:\s*([^,\r\n]{1,40}),\s*"
+    r"(?:group_nickname:[ \t]*([^\r\n]*?),[ \t]*)?"
+    r"user_id:"
+)
+
+
+def nick_parts(raw) -> tuple:
+    """从一行消息头里取 `(昵称, 群名片)`；没有群名片时第二项是空串。
+
+    3.3.0 的群消息头是 `[user_nickname: 昵称, group_nickname: 群名片, user_id: 号]`，
+    群名片为空时整段不出现。展示名仍旧用昵称，群名片只用来把消息头拼回框架原样。
+    """
+    m = _NICK_LINE_RE.search(str(raw or ""))
+    if not m:
+        return "", ""
+    return (m.group(1) or "").strip(), (m.group(2) or "").strip()
 
 
 def _nick_pool_of(msgs) -> list:
@@ -208,12 +229,13 @@ def _nick_pool_of(msgs) -> list:
 
     @ 昵称在页面上是一个徽章，不是他说的话；昵称里可能带空格，通用 @ 正则
     只吃两个词，剩下的会被算成字。这里把窗口里见过的昵称整段列出来。
+    只收昵称（第 1 组）：群名片不是他说话时用的名字，@ 也不会 @ 群名片。
     """
     seen = set()
     for msg in msgs or []:
         content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
-        for nm in _NICK_LINE_RE.findall(str(text_of_content(content) or "")):
-            nm = nm.strip()
+        for m in _NICK_LINE_RE.finditer(str(text_of_content(content) or "")):
+            nm = (m.group(1) or "").strip()
             if nm:
                 seen.add(nm)
     return sorted(seen, key=len, reverse=True)
@@ -389,12 +411,17 @@ _NO_TEXT_URL_RE = re.compile(
 def _text_without_noise(text: str, keep_links: bool = False) -> str:
     """剥掉链接、转发 / 引用 / 卡片 / 表情整段、媒体占位，剩下的才算正文。
 
-    keep_links=True 时链接留着，只剥整段与占位——判断「这条里有没有链接」用。
+    keep_links=True 时链接留着，只剥转发 / 引用 / 表情整段与占位——判断「这条里
+    有没有链接」用。卡片段（[Json card …]）这时也不剥：卡片里的 qqdocurl /
+    jumpUrl 就是用户看到的那个链接，剥掉会让卡片消息漏出「任意链接」过滤
+    （用户 m25442）。
     """
     out = str(text or "")
     if not out:
         return ""
     for opener in _NO_TEXT_SPAN_OPENERS:
+        if keep_links and opener == "[Json card":
+            continue
         while True:
             at = out.find(opener)
             if at < 0:
@@ -423,12 +450,13 @@ def _text_without_noise(text: str, keep_links: bool = False) -> str:
 #: 短句按「去掉空白与标点之后还剩几个字」算，标点不算字。
 _SHORT_STRIP_RE = re.compile(r"[\s\u3000-\u303f\uff00-\uffef!-/:-@\[-\x60{-~]+")
 #: 用户 m05861：@ 昵称是元数据，不是他说的话。昵称里可能带空格
-#: （「@Mcp_management service 好吧」），所以先整段吃掉「@ + 最多两个英文词」，
-#: 再兜底吃「@ + 一个不含空格的昵称」。最多吃两个词——昵称里可能带空格，
-#: 再多就可能把真话一起吞掉。
+#: （「@Mcp_management service 好吧」），所以昵称字符集里中文和英文一起收，
+#: 后面再跟最多两个英文词。最多吃两个词——昵称里可能带空格，再多就可能把真话一起吞掉。
+#: 用户 m17972：昵称以数字/字母开头、后面接着中文时（`@10月绝不摆烂`），原来
+#: 「@ + 最多两个英文词」那条先命中，只吃掉 `@10`，剩下的「月绝不摆烂」被算成字。
+#: 现在并成一条，跟徽章渲染（lib-1 的 richText）认的整段一致。
 _AT_MENTION_RE = re.compile(
-    r"@[A-Za-z0-9_\-]{1,32}(?:[ \t]+[A-Za-z0-9_\-]{1,32})?"
-    r"|@[\u4e00-\u9fa5A-Za-z0-9_\-]{1,16}"
+    r"@[\u4e00-\u9fa5A-Za-z0-9_\-]{1,32}(?:[ \t]+[A-Za-z0-9_\-]{1,32})?"
     #: 用户 m05993 第 3 条：QQ 的 @ 昵称是「@[编码]昵称」两截（`@[%ĀĀ␇Ö]我在未来，等你`），
     #: 上面两条都从 `[` 就断了，昵称整段留在正文里，一句话被算成十几个字、判不成短句。
     #: 这里整段吃掉「@ + [编码] + 紧跟的昵称」，昵称到空白为止。
@@ -3560,7 +3588,13 @@ _VIEW_HINT_RE = re.compile(
 # 用户 m08415：引用块里只剩 [Image N] 占位，被引消息又被裁出窗口时，模型看不到图。
 # 这里只认「[Reply ID: xxx」和引用块里的图片占位，判断都在 prepare_messages 里做。
 _QUOTE_ID_RE = re.compile(r"\[Reply ID:\s*(-?\d+)")
-_QUOTE_IMG_RE = re.compile(r"\[Image(?:\s*\d+| attached)?\]")
+# vlm_description 模式下框架给图片占位带上说明和落盘路径
+# （`[Image 一只猫, file_path: data/…]`），只认 `[Image N]` / `[Image attached]`
+# 就漏了这种引用块。说明段只允许出现在 `, file_path:` 前面，且不跨中括号/换行，
+# 免得把正文里随便一句 `[Image …` 当成占位。
+_QUOTE_IMG_RE = re.compile(
+    r"\[Image(?:\s*\d+|\s*attached)?(?:[^\[\]\r\n]*?,\s*file_path:[^\[\]\r\n]*)?\]"
+)
 
 
 def _quote_id_of(text: str) -> str:
@@ -6430,6 +6464,9 @@ class WindowManager:
     _BL_UID_RE = re.compile(r"user_id:\s*([^,\]\n]+)")
     _BL_MID_RE = re.compile(r"\[message_id:\s*([^\]\n]+)")
     _NICK_RE = re.compile(r"\[user_nickname:\s*([^,\]\n]+)")
+    # 用户 m16754：拉黑消息要能定位到「后面那条放行消息」。assistant 的编号在
+    # <msg message_id="…"> 里，跟 user 的 [message_id: …] 不是一种写法，两种都认。
+    _ANY_MID_RE = re.compile(r"\[message_id:\s*([^\]\n]+)|<msg\b[^>]*\bmessage_id\s*=\s*[\"']([^\"']+)[\"']")
 
     def _blacklist_map(self, sid: str = "") -> dict:
         """uid -> 放行的 message_id 集合（拉黑那一刻已经在窗口里的历史）。
@@ -6476,6 +6513,14 @@ class WindowManager:
     def _bl_mid_of(cls, content) -> str:
         m = cls._BL_MID_RE.search(str(content or ""))
         return m.group(1).strip() if m else ""
+
+    @classmethod
+    def _any_mid_of(cls, content) -> str:
+        """user 的 [message_id: …] 和 assistant 的 <msg message_id="…"> 都取。"""
+        m = cls._ANY_MID_RE.search(str(content or ""))
+        if not m:
+            return ""
+        return (m.group(1) or m.group(2) or "").strip()
 
     @classmethod
     def _bl_keep(cls, bl, uid, mid) -> bool:
@@ -6545,7 +6590,9 @@ class WindowManager:
 
         窗口本体不动（页面照常显示），只是这些消息不进请求上下文。快照里它们
         整条不在，所以补一条虚线卡：事后还能看到「这条收到了，但没给模型看」。
-        after_mid 取它前面最后一条**放行**的消息，快照里才找得到锚点。
+        after_mid / before_mid 取它前后最近一条**放行**的消息，快照里才找得到锚点。
+        用户 m16754：raw 行头的时间只到分钟，按 ts 插会落到同一分钟所有消息的前面，
+        所以快照那边优先用这两个锚点定位。
         """
         st = self._states.get(sid)
         if st is None:
@@ -6554,15 +6601,17 @@ class WindowManager:
         if not bl:
             return []
         out = []
+        blocked = []
         prev_mid = ""
-        for m in list(getattr(st, "messages", []) or []):
+        msgs = list(getattr(st, "messages", []) or [])
+        for i, m in enumerate(msgs):
             content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
             mid = self._bl_mid_of(content)
             uid = self._bl_uid_of(content)
             if uid and uid in bl and not self._bl_keep(bl, uid, mid):
                 raw = text_of_content(content)
                 nick = self._NICK_RE.search(raw)
-                out.append({
+                row = {
                     "ts": raw_line_ts(content),
                     "sender": uid,
                     "name": nick.group(1).strip() if nick else "",
@@ -6573,10 +6622,25 @@ class WindowManager:
                     "reason": "blacklist",
                     "mid": mid,
                     "after_mid": prev_mid,
-                })
+                    "before_mid": "",
+                }
+                out.append(row)
+                blocked.append((i, row))
                 continue
             if mid:
                 prev_mid = mid
+        # 后面那条放行的消息：拉黑消息后面常跟着决策注记（没有编号），只按 after_mid
+        # 会插到注记前面，看着像「注记之前就收到了」。
+        for i, row in blocked:
+            for m2 in msgs[i + 1:]:
+                c2 = m2.get("content") if isinstance(m2, dict) else getattr(m2, "content", "")
+                uid2 = self._bl_uid_of(c2)
+                if uid2 and uid2 in bl and not self._bl_keep(bl, uid2, self._bl_mid_of(c2)):
+                    continue
+                mid2 = self._any_mid_of(c2)
+                if mid2:
+                    row["before_mid"] = mid2
+                    break
         if len(out) > 20:
             del out[:len(out) - 20]
         return out
@@ -6682,7 +6746,13 @@ class WindowManager:
                 except Exception:
                     stamp = ""
                 who = str(it.get("name") or it.get("sender") or "")
-                raw = "%s [user_nickname: %s] | %s" % (stamp, who, body)
+                # 3.3.0 群消息头带群名片：待发项记了 group_nickname 就按框架格式拼回去
+                card = str(it.get("group_nickname") or "").strip()
+                if card and card != who:
+                    raw = "%s [user_nickname: %s, group_nickname: %s] | %s" % (
+                        stamp, who, card, body)
+                else:
+                    raw = "%s [user_nickname: %s] | %s" % (stamp, who, body)
             content = with_owned_images(raw, it.get("media_refs"), self.raw_sid(st.sid))
             _backup_media(content, self.raw_sid(st.sid))
             msg = {"role": "user", "content": content}

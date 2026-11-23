@@ -1621,6 +1621,10 @@ var ctxSnapRequest = 0;
     // 这里画成和分享卡同一套的小卡，整块可点（raw 档走 esc，不受影响）
     var bili = biliHtml(t, richText);
     if(bili !== null) return bili;
+    // 用户 m18492：GitHub 链接（仓库 / issue / PR / gist / 文件）也画成同款小卡，
+    // 骨架先出、fillGitHub() 拿到仓库信息再填描述与 star。
+    var gh = githubHtml(t, richText);
+    if(gh !== null) return gh;
     // 用户 m12833 第 2 条：推文链接画成卡片（骨架先出，数据到了再填）
     var tw = tweetHtml(t, richText);
     if(tw !== null) return tw;

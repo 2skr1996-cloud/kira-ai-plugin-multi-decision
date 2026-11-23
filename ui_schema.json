@@ -206,7 +206,7 @@
     "name": "JEV 决策模型",
     "type": "string",
     "default": "",
-    "hint": "只列启用提供商里的 decision 类模型；框架没有默认 decision 模型，必须自己选。"
+    "hint": "留空则使用 KiraAI 设置里的默认决策模型；只列启用提供商里的 decision 类模型。"
   },
   "jev_fallback_model": {
     "name": "JEV 备用模型",
@@ -944,6 +944,12 @@
     "type": "integer",
     "default": 180,
     "hint": "发起请求后没等到回复，就强制走重试流程。"
+  },
+  "watchdog_total_seconds": {
+    "name": "整轮时长上限",
+    "type": "integer",
+    "default": 600,
+    "hint": "一轮回复最多跑多久，超了就作废。"
   },
   "retry_take_pending": {
     "name": "处理排队消息",

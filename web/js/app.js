@@ -518,7 +518,17 @@
         if(_th && _who){
           var _ph = n.querySelector(".qpic-ph");
           if(_ph) _ph.parentNode.removeChild(_ph);
-          _who.insertAdjacentHTML("afterend", _th);
+          // 用户 m18902：以前只把图插在 .qwho 后面，卡里那句「合并转发 · 内容未获取」照旧留着，
+          // 引用块就成了「一排图 + 内容未获取」。图既然认回来了，那张空壳卡就该换成只有图的转发卡。
+          var _note = n.querySelector(".fwd .fwd-note");
+          var _shell = _note && _note.closest ? _note.closest(".fwd") : null;
+          if(_shell){
+            _shell.outerHTML = "<div class='fwd' data-fwd='1'><div class='fwd-hd'>合并转发 · " +
+              (hit.media || []).length + " 张图</div><div class='fwd-b'>" + _th + "</div></div>";
+          } else if(!n.querySelector(".thumbs") && !n.querySelector(".fwd")){
+            // 已经有真转发卡（或已经补过图）时不再插第二排，免得同一条转发出现两遍图。
+            _who.insertAdjacentHTML("afterend", _th);
+          }
           n.removeAttribute("data-qpic"); n.removeAttribute("data-qmiss");
           fitForwardCards(n);
           return true;
@@ -672,6 +682,7 @@
       revealTrendSel(box.querySelector(".trend"));
       fillQuoteMiss();
       fillTweets();
+      fillGitHub();
       return box;
     }
     var node = hd.nextSibling;
@@ -681,6 +692,7 @@
     revealTrendSel(box.querySelector(".trend"));
     fillQuoteMiss();
     fillTweets();
+    fillGitHub();
     return box;
   }
 
@@ -1000,7 +1012,7 @@
       // 连续同一个发言人并成一块（用户 m31327 / m31526）：组头只留一份头像 + 名字，
       // 组内每条只剩「左时间 / 正文 / 右字数」。分组键是 role + 发言人，不是纯 role——
       // 一条 user 消息里常拼着好几个人，按 role 并会把不同人合成一组、名字只剩一个。
-      var grpKey = null, grpRole = null, grpUid = "", grpBuf = "", grpHead = "", grpNote = "", grpTools = 0, grpSkip = false;
+      var grpKey = null, grpRole = null, grpUid = "", grpBuf = "", grpHead = "", grpNote = "", grpTools = 0, grpSkip = false, grpBlk = false;
       // v3.94（用户 m08398 图2/图3）：还没有对应回复的决策记录（判定不回那种）要画在
       // 待发区之后——它判的就是那几条待发，画在前面像在事前预言。
       var flushGrp = function(){
@@ -1011,7 +1023,8 @@
                           : grpHead.replace("<span class='chb'>工具 ×\u0001</span>", ""))
           : "";
         // 用户 m06193：拉黑的人整组默认折叠（只留组头），点「展开」才看内容
-        var blkCls = (UBLK_ON && grpRole === "user" && grpUid && UBLK[grpUid])
+        // 用户 m16754：快照里那条拉黑消息按「当时被拉黑」折叠，不看现在的名单。
+        var blkCls = ((grpBlk || (UBLK_ON && grpRole === "user" && grpUid && UBLK[grpUid])))
           ? (" blk" + (UBLK_OPEN[grpUid] ? " open" : "")) : "";
         // 用户 m32048 第 3 条：整组都是被拉黑挡下来的消息时，折叠后只剩组头，
         // 「未进入上下文」得挂在组头上，不然点开才知道这组没给模型看。
@@ -1020,7 +1033,7 @@
             "<span class='chb tag skiptag'>未进入上下文</span></span></div>");
         }
         html += "<div class='mgrp " + esc(grpRole || "user") + blkCls + "'>" + ghead + grpBuf + "</div>";
-        grpBuf = ""; grpHead = ""; grpTools = 0; grpUid = ""; grpSkip = false;
+        grpBuf = ""; grpHead = ""; grpTools = 0; grpUid = ""; grpSkip = false; grpBlk = false;
       };
       // 用户 m17018 图2：被「文件/视频不进上下文」挡下来的消息不再单独挂在末尾，
       // 按时间插回上下文原位——虚线框 + 斜纹遮罩 + 「未进入上下文」标签，
@@ -1051,6 +1064,24 @@
         grpKey = null; grpRole = null; grpUid = "";
         list.forEach(function(s){
           skipNo++;
+          // 用户 m16754：拉黑那条在快照里要跟实时窗一样——组头（头像 + 昵称）+
+          // 「已拉黑」胶囊 + 默认折叠 + 虚线卡。它整条不在快照消息里，只能靠这里的
+          // raw 原文自己解析，所以走 msgCards 的正常消息那条路，不另拼一张裸卡。
+          if(String((s && s.reason) || "") === "blacklist"){
+            var bm = blkSkipMsg(s);
+            grpKey = "\u0000blk" + skipNo;
+            grpRole = "user";
+            grpUid = String((s && s.sender) || "");
+            grpHead = grpHeadHtml("user", String((s && s.name) || ""), grpUid, false, "", "\u0001", true);
+            grpSkip = true;
+            grpBlk = true;
+            var bc = msgCards(bm, skipNo, VIEW, "", true, "");
+            bc = String(bc).replace(/<div class='mc (user|assistant|summary)/g, "<div class='mc skip $1");
+            grpBuf += bc;
+            flushGrp();
+            grpKey = null; grpRole = null; grpUid = "";
+            return;
+          }
           grpBuf += skipCards(Object.assign({}, s, { __skip: true }), skipNo, VIEW, true);
         });
         flushGrp();
@@ -1081,7 +1112,7 @@
           grpNote = (VIEW === "mixed" && (m.role === "user" || m.role === "assistant") && !multiOf(m))
             ? mixNoteOf(m) : "";
           grpHead = ((m.role === "user" || m.role === "assistant") && !multiOf(m))
-            ? grpHeadHtml(m.role, whoOf(m), uidOf(m), youOf(m), grpNote, "\u0001") : "";
+            ? grpHeadHtml(m.role, whoOf(m), uidOf(m), youOf(m), grpNote, "\u0001", false, gnickOf(m)) : "";
         }
         if(m.tools) grpTools += Number(m.tools) || 0;
         // v3.89（用户 m05321 第 1 条）：裁切快照里的待发要标出来——卡尾挂「待发」，
@@ -1124,7 +1155,7 @@
         if(gk2 !== grpKey){
           flushGrp();
           grpKey = gk2; grpRole = prole; grpUid = puid;
-          grpHead = grpHeadHtml(prole, pwho, puid, false);
+          grpHead = grpHeadHtml(prole, pwho, puid, false, "", "", false, gnickOfRaw(rawOf(m)));
         }
         grpBuf += pendCards(m, msgs.length + j + 1, VIEW, true);
       });
@@ -1324,7 +1355,7 @@
         var dm = projected.view;
         var t = typeof dm.text === "string" ? dm.text : contentText(m.content);
         return { role: m.role || "user", text: t, raw: rawContent(m.content), chars: t.length, media: dm.media || m.media || [],
-                 display: projected.display, name: m.name || "",
+                 display: projected.display, name: m.name || "", gnick: m.gnick || "",
                  tools: (m.tool_calls || []).length, tool_call_id: m.tool_call_id || "",
                  // v3.89（用户 m05321 第 1 条）：裁切快照里带「待发」标记的项要一眼认出
                  pending: !!dm.pending,
@@ -1721,7 +1752,9 @@
       }
       // 用户 m32048 第 1 条：这一轮被挡在上下文之外的消息也存进了快照。它们不在
       // ①②③ 任何一段里（本来就没发出去），明细页单独列一行，事后能查到当时收到了什么。
-      var skipRows = Array.isArray(r.skipped) ? r.skipped : [];
+      // 用户 m17434：只列这一轮范围内的，且不列被拉黑的（后端算好放在 skipped_view）。
+      var skipRows = Array.isArray(r.skipped_view) ? r.skipped_view
+        : (Array.isArray(r.skipped) ? r.skipped : []);
       if(skipRows.length){
         h += "<div class='hint skipnote'><b>未进入上下文 " + skipRows.length + " 条</b>" +
              skipRows.map(function(s){
@@ -1895,7 +1928,7 @@
         // raw 直接给 content：displayTextOf 只挑 text 段，不会把 JSON 串当引用正文。
         return {role: m.role, text: t5, raw: m.content, chars: t5.length,
                 media: d5.media || m.media || [], display: pj5.display,
-                who: m.who || "", name: m.name || ""};
+                who: m.who || "", name: m.name || "", gnick: m.gnick || ""};
       }), []);
       Object.keys(histIdx2).forEach(function(k){
         if(QUOTE_IDX[k]) return;
@@ -1943,7 +1976,7 @@
         if(orig2) c = stripDeriveNote(c);
         var media2 = orig2 || dm.media || m.media || [];
         var mm = {role: m.role, text: c, raw: rawContent(m.content), chars: c.length, media: media2, origMedia: !!orig2,
-                  display: projected.display, who: m.who || "", name: m.name || "",
+                  display: projected.display, who: m.who || "", name: m.name || "", gnick: m.gnick || "",
                   tools: dm.tools === undefined ? (m.tool_calls || []).length : dm.tools, tool_call_id: m.tool_call_id || "",
                   files: m.files || (dm && dm.files) || [],
                   tc: dm.tc || tcOf(m)};
@@ -1957,7 +1990,7 @@
           // 对照档每条都要有「角色 · N 字 · 原文」表头；一条里拼了好几条群消息时
           // 名字不止一个，就只写角色（用户 m51324 ⑧：②③ 缺表头）
           grpHead2 = ((m.role === "user" || m.role === "assistant") && (VIEW === "mixed" || !multi2))
-            ? grpHeadHtml(m.role, multi2 ? "" : whoOf(mm), multi2 ? "" : uidOf(mm), multi2 ? false : youOf(mm), grpNote2, "\u0001") : "";
+            ? grpHeadHtml(m.role, multi2 ? "" : whoOf(mm), multi2 ? "" : uidOf(mm), multi2 ? false : youOf(mm), grpNote2, "\u0001", false, multi2 ? "" : gnickOf(mm)) : "";
         }
         if(mm.tools) grpTools2 += Number(mm.tools) || 0;
         drawnChars2 += (c || "").length;
@@ -2004,7 +2037,7 @@
             disp3 = {own_media_known:true, own_media:media3, unassigned_media:[],
                      own_body:text3, direct_reply:null, source:"tool_note"};
           }
-          var mm3 = {role:role3,who:tool3 ? String(m.name || "") : (m.who || m.name || ""),name:m.name || "",text:text3,
+          var mm3 = {role:role3,who:tool3 ? String(m.name || "") : (m.who || m.name || ""),name:m.name || "",gnick:m.gnick || "",text:text3,
             raw:raw3,media:media3,display:disp3,chars:text3.length,origMedia:!!orig3,
             files:m.files || [],
             tools:(m.tool_calls || []).length,tool_call_id:m.tool_call_id || "",tc:tcOf(m)};
@@ -2012,7 +2045,7 @@
           if(gk3 !== grpKey3){
             flushGrp3(); grpKey3 = gk3; grpRole3 = role3;
             var multi3 = multiOf(mm3);
-            grpHead3 = grpHeadHtml(role3,multi3?"":whoOf(mm3),multi3?"":uidOf(mm3),multi3?false:youOf(mm3),VIEW==="mixed"?mixNoteOf(mm3):"");
+            grpHead3 = grpHeadHtml(role3,multi3?"":whoOf(mm3),multi3?"":uidOf(mm3),multi3?false:youOf(mm3),VIEW==="mixed"?mixNoteOf(mm3):"","\u0001",false,multi3?"":gnickOf(mm3));
           }
           grpBuf3 += msgCards(mm3, idx + 1, VIEW, "", true);
         });

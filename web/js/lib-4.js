@@ -1233,7 +1233,10 @@
         var nm2 = raw.match(/user_nickname:\s*([^,\]]+)/);
         if(nm2) nm = nm2[1].trim();
       }
-      QUOTE_IDX[mid] = quoteEntryOf({name: nm, ts: ts,
+      // 用户本轮（G3）：引用卡头也显示「昵称 · 群昵称」；nm 本身保持纯昵称。
+      var gn = String((vm && vm.gnick) || m.gnick || "").trim();
+      if(!gn) gn = gnickOfRaw(raw);
+      QUOTE_IDX[mid] = quoteEntryOf({name: nm, gnick: gn, ts: ts,
         display: {own_media_known: false, own_media: [], unassigned_media: media, direct_reply: null, source: "incoming"}},
         body);
     });
