@@ -1380,6 +1380,8 @@ class DecisionPhase:
                 last["attempts"] = attempts
                 last["model"] = last.get("model") or model or "fast"
                 last["via"] = kind
+                # 用户 m06215：记录页要显示这一轮实际带的思考等级（主/备各一档）。
+                last["effort"] = effort
                 last["tool_messages"] = msg_copy
                 budget["in"] += last.get("in", 0)
                 budget["out"] += last.get("out", 0)
@@ -1544,6 +1546,8 @@ class DecisionPhase:
             "error": str(got.get("error") or ""),
             "model": str(got.get("model") or ""),
             "via": str(got.get("via") or ""),
+            # 用户 m06215：这一轮真正下发的思考等级（空 = 跟随模型自己的设置）。
+            "effort": str(got.get("effort") or ""),
             "attempts": int(got.get("attempts") or 0),
             "elapsed": round(time.time() - started, 3),
             "input_tokens": sum(int(item.get("input") or 0) for item in usage),

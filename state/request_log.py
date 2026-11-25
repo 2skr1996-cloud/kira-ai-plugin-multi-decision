@@ -781,6 +781,10 @@ class RequestLog:
             except Exception:
                 logger.exception("[multi-decision] 无法创建在飞记录目录")
         self._pending: dict[tuple[str, str], dict] = {}
+        # 用户 m24756：快照在钩子那一刻就 to_string() 定格了，框架之后还会往
+        # format 段补 message_types / root_tags。这里留着这一轮的 system Prompt
+        # 对象，等模型回话时再渲染一遍写回去（见 late_render）。
+        self._late: dict[tuple[str, str], dict] = {}
         # (sid, event_id) -> 落盘文件名。重试成功要把结果补写回「原错误那一轮」的
         # 记录，得先能按事件号找回那份文件；重启后索引是空的，_find_name 兜底扫盘。
         self._names: dict[tuple[str, str], str] = {}
@@ -1609,6 +1613,10 @@ class RequestLog:
         for key, pending in list(self._pending.items()):
             if now - pending.get("ts", now) > 900:
                 self._pending.pop(key, None)
+        # 用户 m24756：待补渲染的 Prompt 对象也按同样的时限清掉，别一直攥着。
+        for key, late in list(self._late.items()):
+            if now - late.get("ts", now) > 900:
+                self._late.pop(key, None)
         record = {
             "ts": now,
             "sid": sid,
@@ -1692,6 +1700,19 @@ class RequestLog:
         self._pending[(sid, str(event_id or ""))] = record
         # 用户 m18435 第 1 条：同时落一份在飞记录，热重载后 flush 能捞回来。
         self._save_inflight(sid, event_id, record)
+        # 用户 m24756：把这一轮的 system Prompt 对象留到响应时再渲染一遍。
+        # 框架在钩子之后才往 format 段填 message_types / root_tags，而
+        # Prompt.to_string() 不缓存，所以晚一点再渲染就能拿到最终文本。
+        try:
+            self._late[(sid, str(event_id or ""))] = {
+                "ts": now,
+                "prompts": list(raw_list),
+                "dynamic_position": dynamic_position,
+                "memory_position": memory_position,
+                "tail_body": [[nm, t] for nm, t in tail_body],
+            }
+        except Exception:
+            logger.exception("[multi-decision] 记录待补渲染的提示词失败（不影响本轮请求）")
 
     # ------------------------------------------------------------------ 落盘
 
@@ -1744,6 +1765,8 @@ class RequestLog:
         # reply_channel 仍留着（QQ / webchat），前端挪到 title 里当补充说明。
         record.setdefault("reply_provider", "")
         record.setdefault("reply_channel", "")
+        # 用户 m06215：这一轮回复实际带的思考等级（空串 = 跟随模型自己的设置）。
+        record.setdefault("reply_effort", "")
         # v4.85（用户 m10425 第 8 条）：回复记录表要显示这一轮真正发出去的正文。
         # 引擎从 final_result 的 raw_output 里抽好传进来；没传（出错轮、看门狗
         # 结算）就补空串，前端按「—」显示。
@@ -1809,6 +1832,102 @@ class RequestLog:
             return path.name
         return None
 
+    def late_render(self, sid: str, event_id: str = "") -> bool:
+        """模型回话时把 system 段再渲染一遍，补上框架后填的值（用户 m24756）。
+
+        快照是在 ON_LLM_REQUEST 那一刻 `to_string()` 定格的，而框架在钩子之后
+        才往 format 段塞 `message_types` / `root_tags`（assemble 阶段）。Prompt
+        的 `to_string()` 不缓存，所以只要还握着同一批对象，晚一点再渲染就能拿到
+        模型真正看到的那份文本。这里只换文本，不动 ②/③ 的切分与其它字段。
+        """
+        key = (str(sid or ""), str(event_id or ""))
+        late = self._late.pop(key, None)
+        if late is None or not self.enabled:
+            return False
+        record = self._pending.get(key)
+        if not isinstance(record, dict):
+            return False
+        dynamic_position = str(late.get("dynamic_position") or "latest_user")
+        memory_position = str(late.get("memory_position") or "system")
+        static_names: list[str] = []
+        relocated_names: list[str] = []
+        static_parts: list[str] = []
+        relocated_parts: list[str] = []
+        sys_parts: list[dict] = []
+        errors: list[str] = []
+        parts: list[str] = []
+        for idx, p in enumerate(late.get("prompts") or []):
+            try:
+                nm = getattr(p, "name", "") or ""
+            except Exception:
+                nm = "?"
+            try:
+                to_string = getattr(p, "to_string", None)
+                text = to_string() if callable(to_string) else str(p)
+            except Exception as exc:
+                errors.append(f"{idx}:{nm} {type(exc).__name__}: {exc}")
+                text = ""
+            parts.append(text)
+            moved = _relocated(nm, dynamic_position, memory_position)
+            sys_parts.append({"name": nm, "chars": len(text), "relocated": moved})
+            if moved:
+                relocated_names.append(nm)
+                relocated_parts.append(text)
+            else:
+                static_names.append(nm)
+                static_parts.append(text)
+        tail_body = [(str(nm), str(t)) for nm, t in (late.get("tail_body") or [])]
+        for nm, text in tail_body:
+            if nm not in relocated_names:
+                relocated_names.append(nm)
+            sys_parts.append({"name": nm, "chars": len(text), "relocated": True})
+        system_text = "".join(parts)
+        old_text = str(record.get("system_prompt") or "")
+        if system_text == old_text:
+            return False
+        static_text = "".join(static_parts)
+        relocated_text = _join_reloc_blocks([t for _, t in tail_body] + relocated_parts)
+        record["system_prompt"] = system_text
+        record["system_static"] = static_text
+        record["system_static_names"] = static_names
+        record["system_relocated"] = relocated_text
+        record["system_relocated_names"] = relocated_names
+        record["system_parts"] = sys_parts
+        record["system_prompt_errors"] = errors
+        # 用户 m24756：标一下这份快照是模型回话之后补渲染的，不是钩子那一刻的定格。
+        record["late_bound"] = True
+        record["late_bound_at"] = time.time()
+        sections = record.get("sections")
+        if isinstance(sections, list):
+            for sec in sections:
+                if not isinstance(sec, dict):
+                    continue
+                if sec.get("key") == "system":
+                    sec["chars"] = len(static_text)
+                elif sec.get("key") == "relocated":
+                    sec["chars"] = len(relocated_text)
+            record["total_chars"] = sum(
+                int(s.get("chars") or 0) for s in sections if isinstance(s, dict))
+        for field in ("assembled", "assembled_with_native"):
+            rows = record.get(field)
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if isinstance(row, dict) and str(row.get("role") or "") == "system":
+                    row["content"] = system_text
+                    break
+        try:
+            record["payload_bytes"] = len(json.dumps(
+                [{"role": a.get("role"), "content": a.get("content")}
+                 for a in (record.get("assembled") or [])],
+                ensure_ascii=False).encode("utf-8"))
+        except Exception:
+            pass
+        self._save_inflight(sid, event_id, record)
+        logger.info(
+            "[multi-decision] %s 快照补渲染：system %d → %d 字符（框架后填的段已补上）",
+            sid or "?", len(old_text), len(system_text))
+        return True
     # ------------------------------------------------------- 在飞记录（热重载兜底）
 
     def _inflight_path(self, sid: str, event_id: str) -> Path:
@@ -2298,6 +2417,8 @@ class RequestLog:
             "decision_source": str(data.get("trigger_reason") or ""),
             "decision_raw": str(data.get("raw") or "")[:4000],
             "decision_model": str(data.get("model") or ""),
+            # 用户 m06215：这一轮决策实际带的思考等级（空串 = 跟随模型自己的设置）。
+            "decision_effort": str(data.get("effort") or ""),
             "decision_via": str(data.get("via") or ""),
             "decision_attempts": int(data.get("attempts") or 0),
             # v4.39（用户 m20816）：这一轮决策带了几张图。0 张 = 那会儿没图、或者
@@ -2962,6 +3083,10 @@ class RequestLog:
             # 用户 m00375 第 8 条：API 渠道（供应商实例名）。老快照没有这个键，给空串。
             "reply_provider": str(data.get("reply_provider") or ""),
             "reply_channel": str(data.get("reply_channel") or ""),
+            # 用户 m06215：这一轮回复实际带的思考等级。老快照没有这个键就给 null，
+            # 前端显示「—」；空串表示「跟随模型自己的设置」，两者要分得开。
+            "reply_effort": (str(data.get("reply_effort") or "")
+                             if "reply_effort" in data else None),
             # v4.85（用户 m10425 第 8 条）：回复表的「回复内容」列。老快照没有这个
             # 键，给空串，前端显示「—」。
             "reply_text": str(data.get("reply_text") or ""),
@@ -3066,6 +3191,9 @@ class RequestLog:
             "decision_say": data.get("decision_say") or "",
             "decision_source": data.get("decision_source") or "",
             "decision_model": data.get("decision_model") or "",
+            # 用户 m06215：决策这一轮实际带的思考等级（老快照没有这个键就给 null）。
+            "decision_effort": ((data.get("decision_effort") or "")
+                                if "decision_effort" in data else None),
             # 用户 m00375 第 8 条：走第三方接口时决策模型只有模型名，渠道要另标。
             # 只带 backend 这一个短字段，不把整块 jev 塞进列表。
             "decision_backend": str((data.get("decision_jev") or {}).get("backend") or "")

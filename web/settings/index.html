@@ -780,8 +780,11 @@ html[data-theme="dark"] .setgrp:not([data-split]){background:rgba(255,255,255,.0
   border-color:rgba(255,255,255,.11);box-shadow:none;}
 html[data-theme="dark"] .setgrp:not([data-split]) .setrow{border-bottom-color:rgba(255,255,255,.075);}
 /* 模式卡：标题后跟「使用中」徽标 */
-.h3use{margin-left:8px;padding:1px 7px;border-radius:6px;background:var(--soft);color:var(--accent);
-  font-size:11.5px;font-weight:500;vertical-align:1px;white-space:nowrap;}
+/* 用户 m04711：标题右边的小标统一压到 20px（正好等于标题行高），
+   否则带标的组标题会被撑高 2–4px，两栏组标题下的横线就对不齐。 */
+.h3use{margin-left:8px;padding:0 7px;height:20px;box-sizing:border-box;display:inline-flex;
+  align-items:center;border-radius:6px;background:var(--soft);color:var(--accent);
+  font-size:11.5px;font-weight:500;line-height:18px;white-space:nowrap;}
 .h3use.dev{background:var(--line);color:var(--muted);}
 /* v3.86（用户 m04620）：功能没做完的组，标题右边挂个琥珀色小标，做完再删 */
 .h3use.todo{background:rgba(245,158,11,.14);color:#b45309;border:1px solid rgba(245,158,11,.4);}
@@ -789,7 +792,9 @@ html[data-theme="dark"] .h3use.todo{background:rgba(251,191,36,.15);color:#fbbf2
   /* v3.91（用户 m05749）：提示词页——每块一张卡，标签在左、控件在右，长文本独占一行。 */
   .dcard{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:0 0 10px;background:var(--bg,#fff);}
   /* 用户 m3096 追加：折叠开关挪到左栏工具条「恢复默认」右边，卡片顶上不再单独占一行。 */
-  .pp-mc{display:inline-flex;align-items:center;gap:5px;}
+  /* 用户 m09986 第 5 条：状态位一长（比如「版本冲突…」那种长句），工具条里的按钮会被挤到换行、
+     按钮里的字也跟着折行。按钮一律不参与收缩、文字不折行，长句交给状态位自己省略。 */
+  .pp-mc{display:inline-flex;align-items:center;gap:5px;flex:0 0 auto;white-space:nowrap;}
   .pp-mc .pp-mc-chev{flex:0 0 auto;width:0;height:0;
     border-left:4px solid transparent;border-right:4px solid transparent;
     border-top:5px solid currentColor;transition:transform .15s;}
@@ -1110,12 +1115,10 @@ html.booting .msw .tr,html.booting .msw .tr:after{transition:none;}
 /* 用户 m05570：卡片里的说明一律单行，放不下就省略号，不再把行撑成两行高。 */
 .setgrp[data-split="3"] .setrow.inline .ds:not(.dsw),
 .setgrp[data-split="band"] .setrow.inline .ds:not(.dsw){white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-/* 用户 m15473：拼图帧数的说明最长（格数 + 像素 + token），右栏窄的时候会折成两行；
-   让它独占第二行、按整行宽度排，任何窗口宽度都保持一行。 */
-.setrow.inline.ds2{grid-template-columns:auto minmax(0,1fr) auto;row-gap:1px;}
-.setrow.inline.ds2 .nm{grid-column:1;grid-row:1;}
-.setrow.inline.ds2 .ctl{grid-column:3;grid-row:1;}
-.setrow.inline.ds2 .ds{grid-column:1/-1;grid-row:2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* 用户 m03889 图2：拼图帧数的说明曾经从行里拿出来单独成行（.gifnote），
+   原来那套「说明独占第二行」的 .ds2 规则没人用了，一并删掉。 */
+/* 用户 m13968：说明加回「拼图帧数」行，token 预估单独一行、标题「消耗预估」。
+   两行都是普通 .setrow.inline，不再需要 .gifnote 的单列覆盖。 */
 .setrow.inline .ctl{width:auto;justify-self:end;}
 .setrow.inline .ctl > input[type=text]{width:200px;}
 /* 外号这类列表：控件列限宽、靠右，空的时候只有一个「+」，行高和别的行一样高 */
@@ -1560,6 +1563,8 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .ptable .puc{display:inline-block;text-align:left;vertical-align:top;max-width:100%;}
   .ptable .pl{display:block;font-size:11px;line-height:1.35;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  /* 用户 m14599：请求列里「别的插件调过这个模型」的那几行，用强调色跟自己的请求/决策/回复分开。 */
+  .ptable .pu .pl.pplug{color:var(--accent);}
   .ptable .pt .pl{color:var(--muted);}
   .ptable .pt .pl .plt{font-style:normal;font-weight:600;margin-right:2px;}
   .ptable .pt .pl .plt-in{color:#3b82f6;}
@@ -1682,6 +1687,11 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .pbl-sep{width:1px;height:11px;background:var(--line);margin:0 2px;}
   .pbl-more{color:var(--muted);}
   .pbl-l{width:14px;height:2px;border-radius:1px;flex:none;display:inline-block;background:#f97316;opacity:.95;}
+  /* 用户第 ⑦ 条：图例点一下隐藏那一类柱子（再点回来），隐藏的变淡；卡头区间按钮右边加「简化模式」开关。 */
+  .pbl[data-fnkey]{cursor:pointer;user-select:none;}
+  .pbl[data-fnkey]:hover{color:var(--text);}
+  .pbl.off{opacity:.4;}
+  .pchart-simple{height:20px;padding:0 9px;font-size:11.5px;margin-left:2px;}
   .pchart-empty{color:var(--muted);font-size:12px;padding:30px 4px;text-align:center;}
   /* 用户 m23442：每张饼右上角点开是区间选择——六个快捷 + 两个日历框。 */
   .pdp{position:absolute;left:50%;right:auto;top:100%;margin-top:6px;transform:translateX(-50%);z-index:40;display:flex;flex-direction:column;gap:8px;
@@ -1704,12 +1714,16 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
 .pcal-pair .pcal-h b{font-size:12px;}
 .pcal-pair .pcal-d{height:22px;font-size:11.5px;}
 /* 用户 m29947：翻窗口改成整块平移一天的距离，坐标轴和网格不动。 */
-.pplot.pan{animation:ppan .52s cubic-bezier(.2,.7,.3,1) both;}
+/* 用户 m15963 第 7 条：动画改成匀速、时长压到 180ms——以前 520ms 的缓出动画还没走完
+   就被下一格接上，剩下的距离叠进去，看着像一次跳了两天。 */
+/* 用户 m17464：一次滚几格就一口气走完，时长按格数放大（--pdur 由 lib-4.js 写），
+   中间不再一格一格停。 */
+.pplot.pan{animation:ppan var(--pdur,.18s) linear both;}
 @keyframes ppan{from{transform:translateX(var(--pdx,0px));}to{transform:none;}}
-/* 用户 m30335：翻窗口时上一帧的柱线层跟着一起滑出去，两层叠着走才像真的在滚，
-   而不是新图凭空从边上滑进来。 */
-.pghost{animation:ppanOut .52s cubic-bezier(.2,.7,.3,1) both;pointer-events:none;}
-@keyframes ppanOut{from{transform:translateX(var(--pdx0,0px));}to{transform:translateX(var(--pdx2,0px));}}
+/* 用户 m18000：pad 天是「离开窗口」的那几天，跟可见窗口画在同一层，滑完整组推出裁切框，
+   边上不会留半根柱子；整块只有一层，也就没有「重叠画面」。 */
+.ppad{animation:ppadOut var(--pdur,.18s) linear both;}
+@keyframes ppadOut{from{transform:translateX(0);}to{transform:translateX(var(--pdx,0px));}}
 /* 用户 m29947：记分牌式翻字——只让变了的那个字上下滚，没变的原地不动。 */
 .droll{display:inline-block;transform-box:fill-box;transform-origin:50% 50%;
   animation:drollUp .3s cubic-bezier(.2,.7,.3,1) both;}
@@ -1743,21 +1757,24 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   /* 用户 m04883：饼图改成「图在左、数据在右」，每个扇区拉一根细线连到自己那行数据。 */
   /* 用户 m06437：双环改成左右两个饼——左饼按功能、右饼按模型，功能图例贴左、模型图例贴右。 */
   /* 用户 m06710：引线要回来、模型图例要带百分比、图例一列不能高过饼。 */
-  .ppie-wrap{position:relative;display:flex;align-items:center;justify-content:center;width:100%;max-width:520px;margin:0 auto;padding:2px 0;}
+  /* 用户 m03889 图1：引线最外一圈半径 78（PIE_R 58 + 5 + 5×3），饼心在正中，
+     这块至少要 156px 高才画得下；以前只有 136px，底部那截弧线被 .pchart-body 的
+     overflow:hidden 裁掉了。这里给足高度，饼自然居中，也不再贴着左上角的区间按钮。 */
+  .ppie-wrap{position:relative;display:flex;align-items:center;justify-content:center;width:100%;max-width:600px;margin:0 auto;height:158px;padding:0;}
   /* 用户 m29560 第 1 条：三张饼并排以后，饼要顶对齐，不然三张卡里的饼高低不齐。 */
   /* 用户 m08731：按钮压到 20px 高以后，卡顶留白从 20 收到 10，饼能往上顶。 */
-  .pchart-pie .pchart-body{justify-content:flex-start;padding-top:10px;}
+  .pchart-pie .pchart-body{justify-content:flex-start;padding-top:0;}
   /* 引线画在覆盖整块的 svg 里：压在饼下面、图例上面，不挡点击。 */
   .ppie-leads{position:absolute;left:0;top:0;pointer-events:none;z-index:1;overflow:visible;color:var(--muted);}
   .ppie-svg{flex:0 0 auto;position:relative;z-index:2;}
-  .ppie-svg + .ppie-svg{margin-left:6px;}
+  .ppie-svg + .ppie-svg{margin-left:2px;}
   /* 饼心文字：左饼放标题、右饼放总数，字号要能塞进内圈（直径 68px）。 */
   /* 用户 m07837：饼保持 120px，标题 13px、副行 11.5px。用户 m08731：饼放到 132px。 */
   .ppie-t1{font-size:13px;font-weight:600;fill:var(--text);}
   .ppie-t2{font-size:11.5px;fill:var(--muted);}
   /* 左图例贴左饼：名字 + 占比 + 色点，色点在最右边挨着饼。 */
   .plegend{display:flex;flex-direction:column;justify-content:center;z-index:3;}
-  .pleg-left{flex:0 0 auto;width:72px;margin-right:4px;}
+  .pleg-left{flex:0 0 auto;width:132px;margin-right:4px;}
   /* 右图例一列最多跟饼一样高（6 行 × 17px = 102px，饼 132px），名字放不下就省略。 */
   .pleg-right{flex:1 1 auto;min-width:0;margin-left:8px;}
   /* 用户 m08360：值列（元 / 轮）右对齐、百分比列定宽——每行是独立 grid，
@@ -1790,6 +1807,43 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
     .pcharts{grid-template-columns:1fr;}
     .pchart-pie{grid-column:auto;}
   }
+  /* 用户本轮第 2 条：饼图左侧图例改成「插件名 + 功能名」，名字长了交给 CSS 省略号截断，
+    完整名字写在 title 里，鼠标停上去能看全；宽度只加到这里，再多就把右边的模型图例挤没了。 */
+  /* 三列最窄那一段（1551–1720px）卡片内宽只有 470–525px，左图例按 132px 会把右边的模型图例
+     挤到 60px 以下、被卡身的 overflow 裁掉——这一段收窄到 96px，名字照样省略号截断、title 里还是全名。
+     宽屏（>1720px）和两列（≤1550px）都还是 132px。 */
+  @media(min-width:1551px) and (max-width:1720px){
+    .pleg-left{width:96px;}
+  }
+  /* 用户本轮第 4 条：设置页「统计」组下面加一块插件命名——先按插件自己报的名字自动命名，
+     想改的在这里单独覆盖，留空就是恢复自动。 */
+  .pm-probe{margin:10px 0 4px;padding:10px 12px 11px;border:1px solid var(--line);border-radius:12px;
+    background:var(--soft);grid-column:1/-1;}
+  .pm-probe[hidden]{display:none;}
+  .pm-probe-hd{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px;}
+  .pm-probe-t{font-size:13px;font-weight:600;color:var(--text);}
+  .pm-probe-hint{font-size:11.5px;color:var(--muted);line-height:1.5;}
+  .pm-probe-list{display:flex;flex-direction:column;gap:6px;}
+  .pm-probe-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,220px) auto;
+    align-items:center;column-gap:8px;min-width:0;}
+  .pm-probe-id{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font-size:12px;color:var(--muted);}
+  .pm-probe-in{width:100%;height:28px;min-width:0;padding:0 9px;border-radius:9px;
+    border:1px solid var(--line);background:var(--card);color:var(--text);font-size:12.5px;}
+  .pm-probe-in:focus{outline:none;border-color:var(--accent);}
+  .pm-probe-in::placeholder{color:var(--muted);opacity:.7;}
+  .pm-probe-reset{height:28px;padding:0 10px;border-radius:9px;border:1px solid var(--line);
+    background:var(--card);color:var(--text);font-size:12px;cursor:pointer;white-space:nowrap;}
+  .pm-probe-reset:hover{border-color:var(--accent);color:var(--accent);}
+  .pm-probe-reset[disabled]{opacity:.45;cursor:default;}
+  .pm-probe-msg{font-size:11.5px;line-height:1.5;margin-top:7px;color:var(--muted);}
+  .pm-probe-msg:empty{display:none;}
+  .pm-probe-msg.ok{color:var(--ok);}
+  .pm-probe-msg.bad{color:var(--bad);}
+  html[data-theme="dark"] .pm-probe{background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.10);}
+  html[data-theme="dark"] .pm-probe-in,
+  html[data-theme="dark"] .pm-probe-reset{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.12);}
+  html[data-theme="dark"] .pm-probe-reset:hover{border-color:var(--accent);}
   /* v3.54（用户本轮第 4 条）：记录页的「缓存记录」——按类型一张账本表 + 合计 + 各会话小表。
      表格沿用全局 table 的观感（见上面 th,td 那段），这里只补列宽、数字右对齐、内联数字框和清空按钮。 */
   /* 用户 m07418：黑名单页两个清单都改成页内胶囊（跟外号 / 管理员一个手感）——
@@ -1972,8 +2026,9 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
 /* v4.36（用户 m02314）：说明和胶囊都压短后，这一行又回到一行装下；折行只是窄屏兜底。 */
 .setrow.inline .ds.dsw{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;overflow:visible;white-space:normal;}
 .setrow.inline .ds.dsw .dtxt{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.warnpill{display:inline-flex;align-items:center;flex:0 0 auto;padding:2px 9px;
-  border-radius:7px;font-size:11.5px;line-height:1.55;white-space:nowrap;
+/* 用户 m04711：和 .h3use 一样压到 20px，别把组标题撑高。 */
+.warnpill{display:inline-flex;align-items:center;flex:0 0 auto;padding:0 9px;
+  height:20px;box-sizing:border-box;border-radius:7px;font-size:11.5px;line-height:18px;white-space:nowrap;
   color:#b45309;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.38);}
 html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
   border-color:rgba(251,191,36,.35);}
@@ -2083,7 +2138,7 @@ html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
 .pm-toolbar .dipt{height:26px;font-size:12px;min-width:0;}
 .pm-toolbar .pm-state{flex:1 1 auto;min-width:0;padding:0;text-align:right;font-size:11px;line-height:1.4;
   color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.pm-toolbar .dmini{margin-left:0;height:26px;}
+.pm-toolbar .dmini{margin-left:0;height:26px;flex:0 0 auto;white-space:nowrap;}
 .pm-secondary{justify-content:flex-start;margin:6px 0 2px;}
 .pm-modules{display:flex;flex-direction:column;gap:5px;margin:4px 0 8px;}
 .pm-module{min-width:0;padding:0;border:1px solid var(--line);border-radius:9px;background:var(--soft);overflow:hidden;}
@@ -2097,14 +2152,28 @@ html[data-theme="dark"] .warnpill{color:#fbbf24;background:rgba(251,191,36,.13);
 .pm-label:hover{border-color:var(--line);background:var(--card);}
 .pm-label:focus{outline:none;border-color:var(--accent);background:var(--card);}
 .pm-chars{flex:none;font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums;}
-.pm-move{flex:none;width:74px;display:flex;gap:2px;margin-left:0;justify-content:flex-end;}
+.pm-move{flex:none;width:116px;display:flex;gap:2px;margin-left:0;justify-content:flex-end;}
 .pm-ico{flex:none;width:21px;height:21px;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;
   color:var(--muted);font-size:12px;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;}
 .pm-ico:hover{border-color:var(--line);background:var(--card);color:var(--accent);}
 .pm-ico:disabled{opacity:.3;cursor:not-allowed;}
+/* 用户 m12780 第 6 条：折叠按钮要看得见是按钮，不能挤成竖排两行 */
+.pm-foldbtn{width:auto;min-width:0;padding:0 7px;gap:3px;font-size:11px;line-height:19px;
+  border-color:var(--line);background:var(--soft);color:var(--text);}
+.pm-foldbtn:hover{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);}
+.pm-foldbtn-folded{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);font-weight:600;}
 .pm-meta{display:flex;align-items:center;gap:6px;padding:0 7px 3px 26px;font-size:11px;color:var(--muted);}
 .pm-src{height:21px;font-size:11.5px;min-width:0;max-width:260px;border-radius:6px;padding:0 3px;}
 .pm-src-note{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* 用户 m09986 第 1 条：插件注入段的说明并进摘要行，跟在括号后面（摘要本身是 flex，gap 自动隔开）。 */
+.pm-sum-note{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.85;}
+/* 用户 m09986 第 8 条：卡片折叠后只留第一行（标题那行），正文 / 说明 / 提示全收起来。 */
+.pm-module.pm-collapsed .pm-meta,
+.pm-module.pm-collapsed .pm-body,
+.pm-module.pm-collapsed .pm-tools-fold,
+.pm-module.pm-collapsed .pm-modnotice,
+.pm-module.pm-collapsed .pm-reference{display:none;}
+.pm-module.pm-collapsed .pm-module-head{padding-bottom:3px;}
 .pm-body{margin:0 6px 4px 26px;}
 .pm-body>summary{display:flex;align-items:center;gap:6px;padding:1px 0;font-size:11px;color:var(--muted);cursor:pointer;list-style:none;}
 .pm-body>summary::-webkit-details-marker{display:none;}
@@ -2492,8 +2561,9 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
   .pm-module-head .pm-end .pm-pos{width:50px;text-align:center;padding:0;}
   .pm-module-head .pm-end .pm-pos-none{visibility:hidden;}
   .pm-module-head .pm-chars{width:46px;}
-  /* 用户 m25796：↑↓ + 锁定三个按钮要 94px，原来定宽 62px 装不下，箭头被压进「N 字」里。 */
-  .pm-module-head .pm-move{width:auto;min-width:94px;justify-content:flex-end;}
+  /* 用户 m25796：↑↓ + 锁定三个按钮要 94px，原来定宽 62px 装不下，箭头被压进「N 字」里。
+     用户 m09986 第 8 条：最前面又加了一个折叠键，再放宽到 116px。 */
+  .pm-module-head .pm-move{width:auto;min-width:116px;justify-content:flex-end;}
   .pm-module-head .pm-lock{width:40px;}
   .pm-module-head .pm-desc{max-width:34%;}
   @media (max-width:820px){

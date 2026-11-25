@@ -88,6 +88,8 @@
   // v4.87 手机适配：窄屏把表格画成卡片，每格用 ::before 显示列名。
   // 列名直接从表头 <th> 的文本取，不另写一份文案——表头改了这里自动跟着变。
   // 桌面端不读 data-label，渲染结果一个字都不变。
+  // 性能：两张记录表（renderCtxDecisions / renderCtxRounds）现在拼 HTML 时就把
+  // data-label 写进每个 <td>，不再渲染完再遍历一遍；这个函数保留给别处按需调用。
   function labelTableCells(box){
     if(!box) return;
     var table = box.querySelector(".tbl table");
@@ -135,18 +137,38 @@
   // 用户 m01379：命中预估 / 缓存命中 两格以前在 1568 宽就折成「2 步 / 58.9%」两行，
   // 而旁边好几列还有 20–46px 空隙。规则改成：先把所有列的空隙（≥3px 才算）收回来补给
   // 装不下的列，收光了还装不下才隐藏「N 步」前缀——窄屏顶多省略步数，不换行。
-  function _padOf(td){
+  // 同一次 fitCols 里同一列的内边距必然一样（CSS 按列统一），按列下标缓存，
+  // 免得每个格子都调一次 getComputedStyle。缓存只在单次 fitCols 内有效——
+  // 换主题 / 字号会改内边距，跨调用缓存会读到旧值。
+  var _fitPadCache = null;
+  function _padOf(td, col){
+    if(_fitPadCache && col !== undefined && _fitPadCache[col] !== undefined) return _fitPadCache[col];
     var s = getComputedStyle(td);
-    return (parseFloat(s.paddingLeft) || 0) + (parseFloat(s.paddingRight) || 0);
+    var p = (parseFloat(s.paddingLeft) || 0) + (parseFloat(s.paddingRight) || 0);
+    if(_fitPadCache && col !== undefined) _fitPadCache[col] = p;
+    return p;
   }
   // 每一列所有行里最宽的那条自然宽（含内边距）。量的时候给整张表挂 .measuring，
   // 让所有格子连同里面的小标签（token 格的「N 步」胶囊）都按 nowrap 排：
   // 已经折行的格子直接量出来就是格子宽，看不出「其实装不下」。
+  // 同一次 fitCols 里，表格挂的类（steps-off / tprob-off / hide-date / vol-wrap / res-wrap）
+  // 没变时，14 列的自然宽完全一样——算一次就够，别每问一次都重排 N 行 × 14 格。
+  var _fitNeedCache = null;
   function _needAll(rows, n){
     // .tbl 是包着 <table> 的滚动容器，类要挂在它身上 CSS 才匹配得到。
     var tbl = rows[0].closest(".tbl") || rows[0].closest("table");
     var need = [], i, k;
     if(!tbl) return need;
+    var sig = "";
+    if(_fitNeedCache){
+      sig = (tbl.classList.contains("steps-off") ? "s" : "") +
+            (tbl.classList.contains("tprob-off") ? "t" : "") +
+            (tbl.classList.contains("hide-date") ? "d" : "") +
+            (tbl.classList.contains("vol-wrap") ? "v" : "") +
+            (tbl.classList.contains("res-wrap") ? "r" : "");
+      var hit = _fitNeedCache[sig];
+      if(hit && hit.length >= n) return hit.slice(0, n);
+    }
     tbl.classList.add("measuring");
     for(i = 0; i < n; i++){
       var w = 0;
@@ -155,12 +177,13 @@
         if(!c) continue;
         var rg = document.createRange();
         rg.selectNodeContents(c);
-        var m = rg.getBoundingClientRect().width + _padOf(c);
+        var m = rg.getBoundingClientRect().width + _padOf(c, i);
         if(m > w) w = m;
       }
       need[i] = w;
     }
     tbl.classList.remove("measuring");
+    if(_fitNeedCache) _fitNeedCache[sig] = need.slice();
     return need;
   }
   function _cwOf(rows, idx){
@@ -234,16 +257,16 @@
   // 命中预估 / 缓存命中 两格还装不下（含「N 步」前缀），或者 token 格的步数胶囊折行了。
   // need 传进来就复用，省一次重排。
   function _stepsOver(rows, need){
-    if(!need) need = _needAll(rows, 12);
-    return need[8] > _cwOf(rows, 8) + 0.5 ||
-           need[10] > _cwOf(rows, 10) + 0.5 ||
-           need[11] > _cwOf(rows, 11) + 0.5;
+    if(!need) need = _needAll(rows, 13);
+    return need[9] > _cwOf(rows, 9) + 0.5 ||
+           need[11] > _cwOf(rows, 11) + 0.5 ||
+           need[12] > _cwOf(rows, 12) + 0.5;
   }
   // 除省略号列（决策理由 / 决策模型）、时间列和体积估算（有自己的折行兜底）外，还有列装不下。
   function _overAny(rows){
-    var need = _needAll(rows, 13);
+    var need = _needAll(rows, 14);
     for(var i = 1; i < need.length; i++){
-      if(i === 2 || i === 4 || i === 9) continue;
+      if(i === 2 || i === 4 || i === 10) continue;
       if(need[i] > _cwOf(rows, i) + 0.5) return true;
     }
     return false;
@@ -266,6 +289,10 @@
     tbl.classList.remove("res-wrap");
     for(var t = 0; t < ths.length; t++) ths[t].style.width = "";
     if(innerWidth <= 1000) return;
+    // 单次 fitCols 的测量缓存：内边距按列、自然宽按表格状态。函数末尾清掉，
+    // 不跨调用——换主题 / 字号 / 列宽后旧值就不对了。
+    _fitPadCache = Object.create(null);
+    _fitNeedCache = Object.create(null);
     // 用户 m01379：先把所有列的空隙收回来，收光了才允许省略 / 换行。
     var need = _reclaim(rows, ths);
     // 命中预估 / 缓存命中 还是装不下 → 隐藏「N 步」前缀（窄屏顶多省略步数，不换行），再收一次。
@@ -275,8 +302,8 @@
       _reclaim(rows, ths);
     }
     // 用户 m02449：触发类型的「概率」二字换行就藏掉它（只留百分比），再收一次。
-    var needT = _needAll(rows, 13);
-    if(needT[12] > _cwOf(rows, 12) + 0.5){
+    var needT = _needAll(rows, 14);
+    if(needT[13] > _cwOf(rows, 13) + 0.5){
       tbl.classList.add("tprob-off");
       for(var t3 = 0; t3 < ths.length; t3++) ths[t3].style.width = "";
       _reclaim(rows, ths);
@@ -330,7 +357,9 @@
       }
     }
     // 体积估算：装不下就允许折行，别压到隔壁格。
-    if(_worstOver(rows, 9) > 0) tbl.classList.add("vol-wrap");
+    if(_worstOver(rows, 10) > 0) tbl.classList.add("vol-wrap");
+    _fitPadCache = null;
+    _fitNeedCache = null;
   }
   window.addEventListener("resize", function(){
     if(_fitTimeTimer) clearTimeout(_fitTimeTimer);
@@ -389,6 +418,7 @@
       // 时间 / 结果 / 一格说明（决策写理由、回复写正文）/ 模型那一格。
       "<div class='tbl'><table><thead><tr><th>时间</th><th>结果</th><th class='lft'>决策<wbr>理由</th>" +
       "<th class='lft'>渠道</th>" + "<th class='lft'>决策<wbr>模型</th>" +
+      "<th class='lft' title='这一轮决策实际带的思考等级（reasoning_effort）'>推理<wbr>强度</th>" +
       "<th class='lft'>防抖</th>" +
       "<th class='lft'>用时</th><th class='lft'>窗口<wbr>条数</th>" +
       "<th class='lft' title='这一次决策调用的输入 / 输出 token'>token<wbr><span class='nw'>（入/出）</span></th>" +
@@ -435,20 +465,22 @@
       var del = Number(r.decision_debounce) || 0;
       var tk = r.tokens || {};
       html += "<tr class='round-row' data-round='" + esc(r.name) + "'>";
-      html += "<td class='num'>" + fmtTimeHtml(r.ts) + "</td>";
-      html += "<td class='res'>" + decisionConcl(r) + "</td>";
-      html += "<td class='lft rtxt' title='" + esc(tip) + "'><span class='ell'>" + esc(body) + "</span></td>";
+      html += "<td class='num' data-label='时间'>" + fmtTimeHtml(r.ts) + "</td>";
+      html += "<td class='res' data-label='结果'>" + decisionConcl(r) + "</td>";
+      html += "<td class='lft rtxt' data-label='决策理由' title='" + esc(tip) + "'><span class='ell'>" + esc(body) + "</span></td>";
       // 用户 m15537 第 4 条：渠道单独一列（在模型列左边），模型格只留模型名。
       // 用户 m02449：渠道列不换行，装不下就省略号截尾，全名挂在 title 上。
-      html += "<td class='chc'" + (mch ? " title='" + esc(mch) + "'" : "") + ">" +
+      html += "<td class='chc' data-label='渠道'" + (mch ? " title='" + esc(mch) + "'" : "") + ">" +
               (mch ? esc(mch) : "<span class='dim'>—</span>") + "</td>";
-      html += "<td class='mdl' title='" + esc("模型：" + mlabFull) + "'>" +
+      html += "<td class='mdl' data-label='决策模型' title='" + esc("模型：" + mlabFull) + "'>" +
               "<span class='mn'><span class='mnt'>" + esc(mlabFull) + "</span>" +
               (r.decision_via === "fallback" ? "<span class='tag pend'" +
                 (fbWhy ? " title='" + esc(fbWhy) + "'" : "") + ">备用</span>" : "") + "</span></td>";
+      // 用户 m06215：模型列后面跟一格思考等级。
+      html += "<td class='eff' data-label='推理强度'>" + effortCellHtml(r.decision_effort) + "</td>";
       // 用户 m13212：防抖单独占一列，用时列只写判定本身，读起来就是「防抖 7s + 3s」。
-      html += "<td class='num'>" + (del ? fmtDur(del) : "<span class='dim'>—</span>") + "</td>";
-      html += "<td class='num'>" + (el ? fmtDur(el) : "<span class='dim'>—</span>") + "</td>";
+      html += "<td class='num' data-label='防抖'>" + (del ? fmtDur(del) : "<span class='dim'>—</span>") + "</td>";
+      html += "<td class='num' data-label='用时'>" + (el ? fmtDur(el) : "<span class='dim'>—</span>") + "</td>";
       // 看图张数跟着「窗口条数」走：那是这一轮喂进去多少内容，放结论格里会把
       // 「理由」列挤窄、整行被撑成好几行（真机截图见过）。
       // v4.57（用户 m29312）：这一格跟回复表、走势柱同口径——只数用户消息，并且把
@@ -459,8 +491,8 @@
       var dTot = Number(r.window_total) || 0;
       var dUser = (typeof r.window_user === "number" && r.window_user > 0) ? r.window_user : dTot;
       // 用户 m13767：这一格里的「N 条」和标签锁在一行——以前标签会掉到第二行，看着像两行数据。
-      html += "<td class='num'><span class='wn'>" + (dTot || dUser) + " 条" + itag + "</span></td>";
-      html += "<td class='num tokc'>" + (tk.input
+      html += "<td class='num' data-label='窗口条数'><span class='wn'>" + (dTot || dUser) + " 条" + itag + "</span></td>";
+      html += "<td class='num tokc' data-label='token（入/出）'>" + (tk.input
         ? "<span class='tokw'>" + tokText(tk.input) + " / " + tokText(tk.output) + "</span>"
         : "<span class='dim'>—</span>") + "</td>";
       // v4.41（用户 m21541）：决策的体积估算以前只报文字，带图的轮次看着像没体积。
@@ -477,12 +509,12 @@
       } else {
         pcellD = pb ? fmtBytes(pb) : "<span class='dim'>—</span>";
       }
-      html += "<td class='num vol'>" + pcellD + "</td>";
+      html += "<td class='num vol' data-label='体积估算'>" + pcellD + "</td>";
       var est = (r.hit_estimate === null || r.hit_estimate === undefined) ? null : Number(r.hit_estimate);
-      html += "<td class='num'>" + (est === null ? "<span class='dim'>—</span>"
+      html += "<td class='num' data-label='命中预估'>" + (est === null ? "<span class='dim'>—</span>"
         : "<span class='est'>" + est.toFixed(1) + "%</span>") + "</td>";
       var hit = (tk.cache_hit === null || tk.cache_hit === undefined) ? null : Number(tk.cache_hit);
-      html += "<td class='num'>" +
+      html += "<td class='num' data-label='缓存命中'>" +
         (hit === null ? (r.cache_unreported ? cacheUnreportedCell() : "<span class='dim'>—</span>") : hit.toFixed(1) + "%") + "</td>";
       // v4.01（用户 m11166 图3）：末列叫「触发类型」——概率类（概率 / 曲线 / 动态）
       // 写「触发概率 X %」；@、叫昵称这种没有概率的写来源，跟回复记录同一套叫法。
@@ -501,13 +533,13 @@
       } else {
         tcell = "<span class='dim'>—</span>";
       }
-      html += "<td class='lft'>" + tcell + "</td>";
+      html += "<td class='lft' data-label='触发类型'>" + tcell + "</td>";
       html += "</tr>";
-      html += "<tr class='round-detail' data-detail='" + esc(r.name) + "' data-cspan='13' style='display:none'><td colspan='13'><div class='hint'>加载中…</div></td></tr>";
+      html += "<tr class='round-detail' data-detail='" + esc(r.name) + "' data-cspan='14' style='display:none'><td colspan='14'><div class='hint'>加载中…</div></td></tr>";
     });
     html += "</tbody></table></div>";
     box.innerHTML = html;
-    labelTableCells(box);
+    // 列名在拼 HTML 时已经写进每个 <td> 的 data-label，这里不再二次遍历。
     fitCols();
     // 展开着的那几行原样塞回去：节点是从上一版表格里捞的，内容还在，不用重新请求
     box.querySelectorAll("[data-detail]").forEach(function(row){
@@ -544,6 +576,20 @@
   // 跟「命中预估」不同：预估是我们自己算的，这一格是上游压根没给证据。
   function cacheUnreportedCell(){
     return "<span class='dim' title='" + esc("这个渠道没回报缓存用量，也反推不出来（它报的是完整 prompt），所以这一格没有数") + "'>上游未报</span>";
+  }
+  // 用户 m06215：这一轮实际带的思考等级（reasoning_effort）。设置页下拉显示的是英文原值，
+  // 这里用中文短标签，原值挂在 title 上。空串 = 跟随模型自己的设置（没传这个参数）；
+  // null = 这条是旧记录（当时还没存这个字段），显示「—」。
+  var EFFORT_LABEL = {off: "关", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高"};
+  function effortCellHtml(v){
+    if(v === null || v === undefined){
+      return "<span class='dim' title='这条是旧记录，当时没存思考等级'>—</span>";
+    }
+    var raw = String(v).trim().toLowerCase();
+    if(!raw){
+      return "<span class='dim' title='没设思考等级：跟随模型自己的设置（不传 reasoning_effort）'>跟随</span>";
+    }
+    return "<span title='" + esc("reasoning_effort = " + raw) + "'>" + esc(EFFORT_LABEL[raw] || raw) + "</span>";
   }
 
   // 每步明细（只给 title 用）：「1步 12.3% · 2步 45.6% · …」，超过 6 步只写前 6 步。
@@ -605,13 +651,14 @@
     html += "<span class='grow'></span>" + pager + "</div>";
     html += "<div class='tbl'><table><thead><tr><th>时间</th><th>结果</th>" +
             // v4.85（用户 m10425 第 8 条）：跟决策表同一列位置放这一轮的说明——决策那边
-            // 是「决策理由」，回复这边是真正发出去的正文。两张表因此都是 13 列。
+            // 是「决策理由」，回复这边是真正发出去的正文。两张表因此都是 14 列（用户 m06215 又加了「推理强度」）。
             "<th class='lft' title='这一轮真正发出去的文字；多条气泡用「/」连起来，太长只显示前面一段'>回复<wbr>内容</th>" +
             // v4.84（用户 m09179 第 10 条）：回复快照也记下这一轮用的渠道与模型。
             // 用户 m00375 第 8 条：这里的「渠道」要的是 API 渠道（供应商实例名），
             // 不是 IM 平台；列名改成「回复模型」，机器人账号挪到 title 里。
             "<th class='lft'>渠道</th>" +
             "<th class='lft' title='这一轮真正发出去的模型'>回复<wbr>模型</th>" +
+            "<th class='lft' title='这一轮回复实际带的思考等级（reasoning_effort）'>推理<wbr>强度</th>" +
             "<th class='lft'>防抖</th>" +
             "<th class='lft'>用时</th><th class='lft'>窗口<wbr>条数</th>" +
             "<th class='lft' title='这一轮所有步骤的合计；多步（有工具调用）时会把上下文重复计一次'>token<wbr><span class='nw'>（入/出）</span></th>" +
@@ -623,16 +670,16 @@
       html += "<tr class='round-row' data-round='" + esc(r.name) + "'>";
       // v4.78（用户 2026-11-07 第 5 条）：回复记录不再显示快照编号。编号是「实时窗口快照」
       // 的标识（v4.71 用户 m01516 第 3 条），回复快照是另一种东西，不该共用一套号。
-      html += "<td class='num'>" + fmtTimeHtml(r.ts) + "</td>";
-      html += "<td class='res'>" + roundResultHtml(r) + "</td>";
+      html += "<td class='num' data-label='时间'>" + fmtTimeHtml(r.ts) + "</td>";
+      html += "<td class='res' data-label='结果'>" + roundResultHtml(r) + "</td>";
       // v4.85（用户 m10425 第 8 条）：这一轮真正发出去的正文。跟决策表的理由列一样只露
       // 前面一段，完整正文挂在 title 上；老快照没有 reply_text，显示「—」。
       var rtxt = String(r.reply_text || "").replace(/\s+/g, " ").trim();
       if(!rtxt){
-        html += "<td><span class='dim' title='这条记录里没有正文：v4.85 之前的旧快照，或者这一轮没发文字'>—</span></td>";
+        html += "<td data-label='回复内容'><span class='dim' title='这条记录里没有正文：v4.85 之前的旧快照，或者这一轮没发文字'>—</span></td>";
       }else{
         // 用户 m13442 图1：正文一长就换行，把整行撑高。改成单行省略，完整正文留在 title 里。
-        html += "<td class='lft rtxt' title='" + esc(rtxt) + "'><span class='ell'>" + esc(rtxt) + "</span></td>";
+        html += "<td class='lft rtxt' data-label='回复内容' title='" + esc(rtxt) + "'><span class='ell'>" + esc(rtxt) + "</span></td>";
       }
       // v4.84（用户 m09179 第 10 条）：回复快照也记下这一轮用的渠道与模型。
       // v4.84 之前写的快照没有这两个键，显示「—」并在 title 里说明，别当成「没用到模型」。
@@ -645,13 +692,15 @@
       var rmd = String(r.reply_model || "").trim();
       // 用户 m15537 第 4 条：渠道单独一列（在模型列左边），模型格只留模型名。
       if(!rpv && !rmd){
-        html += "<td class='chc'><span class='dim' title='这条是旧记录，当时没存渠道'>—</span></td>";
-        html += "<td class='mdl'><span class='dim' title='这条是旧记录，当时没存模型'>—</span></td>";
+        html += "<td class='chc' data-label='渠道'><span class='dim' title='这条是旧记录，当时没存渠道'>—</span></td>";
+        html += "<td class='mdl' data-label='回复模型'><span class='dim' title='这条是旧记录，当时没存模型'>—</span></td>";
       }else{
-        html += "<td class='chc'>" + (rpv ? esc(rpv) : "<span class='dim'>—</span>") + "</td>";
-        html += "<td class='mdl' title='" + esc("模型：" + (rmd || "未记录")) + "'>" +
+        html += "<td class='chc' data-label='渠道'>" + (rpv ? esc(rpv) : "<span class='dim'>—</span>") + "</td>";
+        html += "<td class='mdl' data-label='回复模型' title='" + esc("模型：" + (rmd || "未记录")) + "'>" +
                  "<span class='mn'><span class='mnt'>" + esc(rmd || "—") + "</span></span></td>";
       }
+      // 用户 m06215：模型列后面跟一格思考等级。
+      html += "<td class='eff' data-label='推理强度'>" + effortCellHtml(r.reply_effort) + "</td>";
       // 用时（用户 m10749 第 7 条）：改成「流水线总耗时」——跟 ④ 明细里那条同口径，
       // 从请求开始到请求结束（模型思考 + 工具调用都算在内），不含回复慢慢吐字那段。
       // 原来用的是 elapsed_trigger（触发 → 请求结束），把前面的防抖等待也算了进去，
@@ -680,8 +729,8 @@
       // 用户 m06046 当年嫌算错的是「把决策耗时也算进回复行」，所以这里只取纯抖动那段：
       // 引擎量到的 debounce_fixed 优先，没有再退回 debounce - 决策耗时。
       var dbo = Number(r.elapsed_debounce) || 0;
-      html += "<td class='num'>" + (dbo > 0 ? fmtDur(dbo) : "<span class='dim'>—</span>") + "</td>";
-      html += "<td class='num'>" + durCell + "</td>";
+      html += "<td class='num' data-label='防抖'>" + (dbo > 0 ? fmtDur(dbo) : "<span class='dim'>—</span>") + "</td>";
+      html += "<td class='num' data-label='用时'>" + durCell + "</td>";
       // 用户 m02038 第 4 条：这一格只写「上下文窗口里总共有多少条」+「请求里实际带了多少张图」。
       // 待发不再单独标出来——它还没并进窗口，混进条数里会让人以为窗口有 50 多条。
       var wUser = (typeof r.window_user === "number") ? r.window_user : 0;
@@ -693,7 +742,7 @@
         ? " <span class='dim' title='" + esc("这一轮随请求发出 " + rimg + " 张图，base64 " + fmtBytes(rimgB) +
             "；含转发实际暴露的、历史里的、待发的，只要是请求里真带上的都算") + "'>· 图" + rimg + "</span>"
         : "";
-      html += "<td class='num'>" + ((wAll || wUser) ? (wAll || wUser) + " 条"
+      html += "<td class='num' data-label='窗口条数'>" + ((wAll || wUser) ? (wAll || wUser) + " 条"
                                      : "<span class='dim'>—</span>") +
                 rimgTag + "</td>";
       // 字符数 / 字符每 token / 文本体积各占一列：原来三条全挤在 token 单元格
@@ -704,7 +753,7 @@
       var stN = Number(r.steps) || 0;
       var tokTip = "入 / 出 是这一轮所有步骤的合计";
       if(stN > 1) tokTip += "：这一步数下，第二步起会把前面的上下文再发一遍，所以合计会比单步大；字符只算一次请求的文本，两者不能直接比";
-      html += "<td class='num tokc'" + (tokTip ? " title='" + esc(tokTip) + "'" : "") + ">" + (tk.input
+      html += "<td class='num tokc' data-label='token（入/出）'" + (tokTip ? " title='" + esc(tokTip) + "'" : "") + ">" + (tk.input
         ? "<span class='tokw'>" + tokText(tk.input) + " / " + tokText(tk.output) +
           (stN > 1 ? "<span class='stp' title='这一轮走了 " + stN + " 步'>" + stN + " 步</span>" : "") + "</span>"
         : "<span class='dim'>—</span>") + "</td>";
@@ -723,7 +772,7 @@
                  : " · <span class='dim'>无图</span>") +
           (pi.partial && rpcnt ? "（" + (r.image_unknown_count || 0) + " 张未知）" : "")
         : (pi.total ? pi.label : "<span class='dim'>—</span>");
-      html += "<td class='num vol'>" + pcell + "</td>";
+      html += "<td class='num vol' data-label='体积估算'>" + pcell + "</td>";
       // 命中预估（用户 m41511）：后端按「本轮公共前缀占比」算基准，只在距上一轮
       // 超过 3 小时时打五折（离线 97 轮 MAE 10.1pp）；不再写「（字符）」也不再拿上一轮实测去平均。
       var est = (r.hit_estimate === null || r.hit_estimate === undefined) ? null : r.hit_estimate;
@@ -751,29 +800,21 @@
         estCell = (est == null) ? "<span class='dim'>—</span>"
           : "<span class='est'>" + Number(est).toFixed(1) + "%</span>";
       }
-      html += "<td class='num'>" + estCell + "</td>";
+      html += "<td class='num' data-label='命中预估'>" + estCell + "</td>";
       // v3.59（用户 m17212 第 1 条）：实测量的是整轮各步合计（第二步会把前面整段再发一遍，
       // 所以天然偏高）；多步轮把首步命中一起写出来，跟上面的预估才是同一个量。
       var fch = (r.first_cache_hit === null || r.first_cache_hit === undefined) ? null : Number(r.first_cache_hit);
       // v3.60（用户 m17581 第 4 条）：多步轮按步写「1步 55.2% · 2步 89.5%」——每一步都是该步 cached ÷ 该步 input，
       // 第二步把前文再发一遍天然就高，混成一个整轮数看不出口径。后端没带 step_stats 的老记录退回「整轮 X%（首步 Y%）」。
       var cacheCell = "";
-      if(r.hit_inferred){
-        // 中转站不回报 cached_tokens：后端按上报 token 反推，逐步用 hit_est，整轮用 tk.cache_hit。
-        var chv = (tk.cache_hit === null || tk.cache_hit === undefined) ? null : (tk.cache_hit + "%");
-        if(stN > 1 && ss && ss.length > 1){
-          var hAvg = stepAvgPct(ss, "hit_est");
-          if(hAvg === null){
-            cacheCell = (chv !== null ? chv : cacheUnreportedCell());
-          }else{
-            cacheCell = "<span class='steps'><span class='stp'>" + ss.length + " 步 </span>≈" + hAvg.toFixed(1) + "%</span>";
-          }
-        } else {
-          var h0 = (ss && ss.length && ss[0] && ss[0].hit_est != null) ? ss[0].hit_est : null;
-          cacheCell = (h0 !== null) ? ("≈" + h0 + "%") : (chv !== null ? chv : cacheUnreportedCell());
-        }
+      // 用户 m05873：上游没回报 cached_tokens 时，这一格统一写「上游未报」，不再显示反推值。
+      // 反推是「本地估算的完整 prompt − 上游上报」，而本地估算偏高（文本按 0.8333 token/字，
+      // 实测约 0.58；图片按 1032/张，实测有的轮只有 50–180/张），分母虚高就会凭空算出
+      // 30% 左右的假命中，跟上游面板只有真命中那几行才有徽标对不上。
+      if(r.hit_inferred || r.cache_unreported){
+        cacheCell = cacheUnreportedCell();
       } else if(tk.cache_hit === null || tk.cache_hit === undefined){
-        cacheCell = r.cache_unreported ? cacheUnreportedCell() : "<span class='dim'>—</span>";
+        cacheCell = "<span class='dim'>—</span>";
       } else if(stN > 1 && ss && ss.length > 1){
         var nAvg = stepAvgPct(ss, "hit");
         if(nAvg === null){
@@ -784,7 +825,7 @@
       } else {
         cacheCell = tk.cache_hit + "%" + ((stN > 1 && fch !== null) ? " <span class='dim'>（首步 " + fch + "%）</span>" : "");
       }
-      html += "<td class='num'>" + cacheCell + "</td>";
+      html += "<td class='num' data-label='缓存命中'>" + cacheCell + "</td>";
       // 用户 m16808：回复记录的触发列只写大类，不再带「静默冒泡」「曲线触发 · 18% · 连 N 条」这些细项。
       // 判定顺序：重试轮 → 重试触发；决策通过/决策轮 → 决策触发；静默 → 静默触发；裁切快照保留窗口裁切。
       var rlab;
@@ -805,15 +846,16 @@
       if(trimPendN > 0 && (r.trim_only || r.trigger_reason === "trim")){
         rlab += " <span class='tag pend' title='" + esc("这份快照里有 " + trimPendN + " 条是攒着还没发出去的待发消息（打开快照后是带「待发」标记的那几条）") + "'>待发 " + trimPendN + "</span>";
       }
-      html += "<td>" + rlab + "</td></tr>";
+      html += "<td data-label='触发类型'>" + rlab + "</td></tr>";
       // v3.94：cspan 是详情加载器里的局部变量（renderCtxRounds 里取不到），
       // 这里直接写死并带上 data-cspan，展开时才不会被加载器按 9 列重排。
-      // v4.84 加「渠道 / 模型」、v4.85 加「回复内容」、v4.88 把渠道拆成独立列，回复表现在 13 列。
-      html += "<tr class='round-detail' data-detail='" + esc(r.name) + "' data-cspan='13' style='display:none'><td colspan='13'><div class='hint'>加载中…</div></td></tr>";
+      // v4.84 加「渠道 / 模型」、v4.85 加「回复内容」、v4.88 把渠道拆成独立列，
+      // 用户 m06215 又加了「推理强度」，回复表现在 14 列。
+      html += "<tr class='round-detail' data-detail='" + esc(r.name) + "' data-cspan='14' style='display:none'><td colspan='14'><div class='hint'>加载中…</div></td></tr>";
     });
     html += "</tbody></table></div>";
     box.innerHTML = html;
-    labelTableCells(box);
+    // 列名在拼 HTML 时已经写进每个 <td> 的 data-label，这里不再二次遍历。
     fitCols();
     box.querySelectorAll("[data-detail]").forEach(function(row){
       var old = ctxRoundDetails[row.getAttribute("data-detail")];
@@ -927,6 +969,127 @@
     return h + "<span class='dim'>（思考 · 工具调用与返回 · token）</span>";
   }
 
+  // v4.88（用户 m12096 图3 / 图4）：④ 的「调用工具」和「工具返回」以前直接复用 ①②③ 的
+  // 单行 tcall 与 toolBodyHtml —— 轨迹里既没有卡头，也看不出一次调了几个工具、返回是什么类型。
+  // 这里给轨迹单独一套卡：调用卡按参数键值排，返回卡带工具名 / 字数 / 类型徽标，
+  // JSON 走自己的缩进树（lib-3 的 segjson 不动），文本按行、超长折叠，空结果写「（空）」。
+  // 共享的 toolCallList / toolBodyHtml 一个字都不改，①②③ 继续用它们。
+  var TCALL_ARG_MAX = 120;   // 参数值超过这个字数就折进 details
+  var TRES_TEXT_MAX = 200;   // 文本返回超过这个字数就折进 details
+
+  // 参数值可能是字符串、数字、对象、数组：字符串原样，其余 JSON 化，认不出就 String()
+  function traceArgText(v){
+    if(v === null || v === undefined) return "";
+    if(typeof v === "string") return v;
+    try { return JSON.stringify(v); } catch(e){ return String(v); }
+  }
+
+  // 一次调用一张卡：卡头工具名 + 参数个数，正文一行一个参数（.k 键 / .v 值）
+  function traceCallHtml(calls){
+    if(!calls || !calls.length) return "";
+    var h = "<div class='tcall-cards'>";
+    for(var i = 0; i < calls.length; i++){
+      var c = calls[i] || {};
+      var name = String(c.name || "").trim() || "工具";
+      var a = toolArgsOf(c), keys = a ? Object.keys(a) : [];
+      h += "<div class='tcall-card'>" +
+           "<div class='tcall-hd'><span class='tcall-name'>" + esc(name) + "</span>" +
+           "<span class='tcall-n'>" + (keys.length ? keys.length + " 个参数" : "无参数") + "</span></div>" +
+           "<div class='tcall-args'>";
+      if(keys.length){
+        for(var j = 0; j < keys.length; j++){
+          var k = keys[j], txt = traceArgText(a[k]);
+          // 值里的换行/连续空格压成单个空格，一行放得下；全文留在 details 里
+          var one = txt.replace(/\s+/g, " ").trim();
+          h += "<div class='tcall-arg'><span class='k'>" + esc(k) + "</span>" +
+               "<span class='v'>" + esc(one.length > TCALL_ARG_MAX ? one.slice(0, TCALL_ARG_MAX) + "…" : one) + "</span>";
+          if(one.length > TCALL_ARG_MAX){
+            h += "<details class='tcall-more'><summary>展开全文（" + one.length + " 字）</summary>" +
+                 "<div class='tcall-vfull'>" + esc(txt) + "</div></details>";
+          }
+          h += "</div>";
+        }
+      } else {
+        // 参数不是对象（有的工具直接塞一段字符串），认不出就原文，别硬拆
+        var raw = c.args == null ? "" : String(c.args);
+        h += "<div class='tcall-raw'>" + esc(raw.trim() || "（无参数）") + "</div>";
+      }
+      h += "</div></div>";
+    }
+    return h + "</div>";
+  }
+
+  // 轨迹里的 JSON 缩进树：一行一个键，靠 padding-left 分层（跟 ③ 的 segjson 同一种读法，
+  // 但这里是独立实现，lib-3 那份不动）。key 为 null 表示根节点。
+  function traceJsonTree(v, ind, key){
+    ind = ind || 0;
+    var pad = "padding-left:" + (ind * 14) + "px";
+    var k = (key === null || key === undefined) ? "" :
+            "<span class='tj-k'>" + esc(String(key)) + "</span><span class='tj-p'>: </span>";
+    var row = function(inner){ return "<div class='tj-row' style='" + pad + "'>" + k + inner + "</div>"; };
+    if(v === null) return row("<span class='tj-b'>null</span>");
+    if(typeof v === "boolean") return row("<span class='tj-b'>" + (v ? "true" : "false") + "</span>");
+    if(typeof v === "number") return row("<span class='tj-n'>" + v + "</span>");
+    if(typeof v === "string"){
+      var s = v;
+      if(s.length > 300) s = s.slice(0, 300) + "…（共 " + v.length + " 字）";
+      return row("<span class='tj-s'>" + esc(JSON.stringify(s)) + "</span>");
+    }
+    if(Array.isArray(v)){
+      if(!v.length) return row("<span class='tj-b'>[]</span>");
+      if(ind > 8) return row("<span class='tj-b'>[…" + v.length + " 项]</span>");
+      var ha = row("<span class='tj-b'>[</span><span class='tj-c'>" + v.length + " 项</span>");
+      for(var i = 0; i < v.length; i++) ha += traceJsonTree(v[i], ind + 1, i);
+      return ha + "<div class='tj-row' style='" + pad + "'><span class='tj-b'>]</span></div>";
+    }
+    if(typeof v === "object"){
+      var ks = Object.keys(v);
+      if(!ks.length) return row("<span class='tj-b'>{}</span>");
+      if(ind > 8) return row("<span class='tj-b'>{…" + ks.length + " 个键}</span>");
+      var ho = row("<span class='tj-b'>{</span><span class='tj-c'>" + ks.length + " 个键</span>");
+      for(var m = 0; m < ks.length; m++) ho += traceJsonTree(v[ks[m]], ind + 1, ks[m]);
+      return ho + "<div class='tj-row' style='" + pad + "'><span class='tj-b'>}</span></div>";
+    }
+    return row(esc(String(v)));
+  }
+
+  // 文本返回按行排；超过 200 字先给开头几行，全文折进 details
+  function traceTextBody(raw){
+    var lines = function(t){
+      return t.split(/\r?\n/).map(function(l){
+        return "<div class='tres-ln" + (l.trim() ? "" : " gap") + "'>" + esc(l) + "</div>";
+      }).join("");
+    };
+    if(raw.length <= TRES_TEXT_MAX) return "<div class='tres-body'>" + lines(raw) + "</div>";
+    var head = raw.slice(0, TRES_TEXT_MAX);
+    // 别把一行切成两半：退到最后一个换行（太靠前就算了）
+    var nl = head.lastIndexOf("\n");
+    if(nl > 40) head = head.slice(0, nl);
+    return "<div class='tres-body'>" + lines(head) + "</div>" +
+           "<details class='tres-fold'><summary>展开全文（" + raw.length + " 字）</summary>" +
+           "<div class='tres-body full'>" + lines(raw) + "</div></details>";
+  }
+
+  // 一次返回一张卡：卡头工具名 + 字数 + 类型徽标（JSON / 文本 / 空），正文按类型走
+  function traceResultHtml(r){
+    r = r || {};
+    var raw = r.content == null ? "" : String(r.content);
+    var name = String(r.name || "").trim() || "工具";
+    var chars = (r.chars === null || r.chars === undefined) ? raw.length : r.chars;
+    var tj = tryJson(raw);
+    var kind = !raw.trim() ? "空" : (tj.ok ? "JSON" : "文本");
+    var cls = kind === "JSON" ? "json" : (kind === "空" ? "empty" : "text");
+    var h = "<div class='tres-card'>" +
+            "<div class='tres-hd'><span class='tres-name'>" + esc(name) + "</span>" +
+            "<span class='tres-chars'>" + chars + " 字</span>" +
+            "<span class='tres-kind " + cls + "'>" + kind + "</span></div>" +
+            "<div class='tres-bd'>";
+    if(kind === "空") h += "<div class='tres-empty'>（空）</div>";
+    else if(kind === "JSON") h += "<div class='tres-json mono'>" + traceJsonTree(tj.v, 0, null) + "</div>";
+    else h += traceTextBody(raw);
+    return h + "</div></div>";
+  }
+
   function traceHtml(tr, unreported){
     if(!tr || !(tr.steps || []).length) return "";
     var tot = tr.totals || {};
@@ -954,17 +1117,18 @@
         h += "<div class='lbl'>思考</div><div class='think'>" + esc(s.reasoning) + "</div>";
       }
       // v3.58（用户 m16875 图3）：④ 里原来调用工具是「一行等宽字」、工具返回是整块 JSON 平铺
-      // （search 一次就 3862 字）。现在跟 ① ② ③ 用同一套：调用走 tcall 卡，返回认得出结构就
-      // 排成结果卡/着色 JSON 并折叠，认不出还是原文。原文档看 traceRawText，一个字都不改。
+      // （search 一次就 3862 字）。v4.88（用户 m12096 图3/图4）起轨迹不再复用 ①②③ 的单行
+      // tcall：调用走 traceCallHtml 的参数卡，返回走 traceResultHtml 的结果卡（JSON 缩进树 /
+      // 文本按行 / 空结果）。原文档看 traceRawText，一个字都不改。
       if((s.tool_calls || []).length){
-        h += "<div class='lbl'>调用工具</div><div class='tcall-wrap'>" + toolCallList(s.tool_calls) + "</div>";
+        h += "<div class='lbl'>调用工具</div>" + traceCallHtml(s.tool_calls);
       }
-      (s.tool_results || []).forEach(function(r){
-        var resultRaw = r.content == null ? "" : String(r.content);
-        var tj = tryJson(resultRaw);
-        h += "<div class='lbl'>工具返回 · " + esc(r.name) + " · " + (r.chars || 0) + " 字</div>" +
-             "<div class='res-blk'>" + toolBodyHtml(resultRaw, tj) + "</div>";
-      });
+      var results = s.tool_results || [];
+      if(results.length){
+        // 卡头已经写了工具名和字数，这里只留一个段标，不再重复一遍
+        h += "<div class='lbl'>工具返回</div>";
+        results.forEach(function(r){ h += traceResultHtml(r); });
+      }
       if(s.text){
         // 输出与思考共用块布局；美化提取正文，对照完整保留原始 XML/空白。
         var outTxt = "";
@@ -1197,15 +1361,43 @@
     var rec=r || {}, msgs=Array.isArray(rec.messages) ? rec.messages.slice() : [];
     var trim=String(rec.outcome || "")==="trim" || String(rec.trigger_reason || "")==="trim" || rec.trim_only===true;
     var dec=String(rec.outcome || "")==="decision" || String(rec.trigger_reason || "")==="decision" || rec.decision_only===true;
-    var bound=segBoundX(rec), suffix=msgs.slice(bound), source=[], incoming=[], tail=[];
+    var bound=segBoundX(rec), suffix=msgs.slice(bound), source=[], incoming=[], tail=[], segInj=[];
+    // 用户 m11094 第 1/3/4 条：别的插件塞进本轮消息的段（pm-seg-head / alife_memory 这类）
+    // 不是聊天消息。以前它们被当成 user 消息铺出来（看着像「2 个 user」），有
+    // incoming_messages 的轮次还整段不显示。这里给它们带上 seg，单独画成「插件注入」卡，
+    // 并且统一排在决策注记后面。
+    function injRows(){
+      var rows=[], head="";
+      (Array.isArray(rec.user_prompt_parts) ? rec.user_prompt_parts : []).forEach(function(p){
+        var nm=String((p && p.name) || ""), tx=String((p && p.text) || "");
+        if(!p || !tx.trim() || !nm || nm === "message") return;
+        // 用户 m12096 图2：后端给每个注入段单独插一个 pm-seg-head 标题段，以前它自己占一行，
+        // 2 个注入被拆成 4 张卡。标题攒起来并到紧跟其后的那一段，不再单独出一行。
+        if(nm === "pm-seg-head"){ head = head ? head + "\n" + tx : tx; return; }
+        // 真实快照里 pm-seg-head 的 text 自带结尾换行（"## Alife_memory\n" 正好 16 字），
+        // 直接拼会多出一个空行，这里把标题的结尾空白收掉再拼。
+        rows.push({role:"user",content:(head ? head.replace(/\s+$/,"") + "\n" + tx : tx),seg:nm,head:head});
+        head = "";
+      });
+      // 标题后面没有段了：标题自己仍要能看见，别吞掉。
+      if(head) rows.push({role:"user",content:head.replace(/\s+$/,""),seg:"pm-seg-head",head:""});
+      return rows;
+    }
     if(!trim){
-      if(Array.isArray(rec.incoming_messages)) source=rec.incoming_messages;
-      else {
+      if(Array.isArray(rec.incoming_messages)){
+        source=rec.incoming_messages.slice();
+        segInj=injRows();
+      } else {
         source=(Array.isArray(rec.user_prompt_parts) ? rec.user_prompt_parts : [])
           .filter(function(p){return p && String(p.text || "").trim();})
-          .map(function(p){return {role:"user",content:p.text};});
-        if(!source.length && dec) source=decTranscriptLines(rec).map(function(p){return {role:p.role,content:p.text};});
-        if(!source.length && rec.user_prompt) source=splitIncoming(rec.user_prompt).map(function(t){return {role:"user",content:t};});
+          .map(function(p){
+            var nm=String((p && p.name) || "");
+            return {role:"user",content:p.text,seg:(nm && nm !== "message") ? nm : ""};
+          });
+        // 注入段统一从 segInj 出，保证排在决策注记后面且只出现一次。
+        segInj=injRows();
+        if(!source.length && dec){ source=decTranscriptLines(rec).map(function(p){return {role:p.role,content:p.text};}); segInj=injRows(); }
+        if(!source.length && rec.user_prompt){ source=splitIncoming(rec.user_prompt).map(function(t){return {role:"user",content:t};}); segInj=injRows(); }
       }
     }
     // 同一条本轮注记的重复投影排到触发消息后；独立存储注记仍全部保留。
@@ -1218,9 +1410,14 @@
       }
     }
     var used={}, viewByIndex={};
+    // 用户 m11094 第 2 条：③ 的显示投影只属于真实消息。以前按 source 下标硬对，
+    // 注入段排在前面时会把消息的投影吃到自己身上，美化档就重复画一遍正文。
+    var vmOf=[], _vk=0;
+    source.forEach(function(m,i){ if(m && !m.seg) vmOf[i]=(rec.incoming_display_messages || [])[_vk++]; });
     // ③ 本轮消息里的引用按本轮自己的投影取图，别用②历史里同一 id 的旧投影。
-    (rec.incoming_display_messages || []).forEach(function(vm, i){
-      var m = source[i]; if(!m) return;
+    source.forEach(function(m, i){
+      var vm = vmOf[i];
+      if(!m || m.seg) return;
       var mid = midOfText(rawContent(m.content));
       if(!mid) return;
       var media = (vm && vm.media) || m.media || [];
@@ -1242,7 +1439,7 @@
     });
     source.forEach(function(m,i){
       if(!m) return;
-      var vm=(rec.incoming_display_messages || [])[i];
+      var vm=vmOf[i];
       // 优先消费③内的一次投影；②同文不是本轮身份，跨界必须有明确 id / exact ts。
       var match=-1;
       for(var j=bound;j<msgs.length;j++){
@@ -1262,7 +1459,8 @@
       }
       incoming.push(carrySnapshotDisplay(m,vm));
     });
-    var current=trim ? [] : suffix.concat(incoming,tail).map(function(m){
+    // 注入段只从 segInj 出一次：source 里带 seg 的行已经算进 incoming，别再拼一遍。
+    var current=trim ? [] : suffix.concat(incoming.filter(function(m){return !(m && m.seg);}),tail).concat(segInj).map(function(m){
       var at=msgs.indexOf(m), canonical=carrySnapshotDisplay(m,(rec.display_messages || [])[at]);
       return carrySnapshotDisplay(canonical,viewByIndex[at]);
     });
@@ -1284,8 +1482,19 @@
       {key:"incoming",label:"本轮输入（含重送）",chars:bodyChars},
       {key:"dynamic",label:"动态段",chars:reloc.length}
     ];
+    // 用户 m15963 第 6 条：动态段以前被算成一条消息，表头就多出一条「9 条」。
+    // 它其实是注入段，按「## 标题」切几段就算几段，消息数只数真实消息。
+    var msgCount=current.filter(function(m){return m && !m.seg;}).length;
+    var segCount=current.filter(function(m){return m && m.seg && m.seg !== "dynamic_tail";}).length;
+    var dynCount=reloc ? relocParts(reloc, rec.system_relocated_names).length
+                       : current.filter(function(m){return m && m.seg === "dynamic_tail";}).length;
     return {messages:msgs,bound:bound,currentRows:current,historyChars:hc,currentChars:cc,
       currentCount:current.filter(function(m){return !!m;}).length+(reloc?1:0),relocated:reloc,
+      currentMsgCount:msgCount,
+      // 注入段和宿主挪来的动态段分开数：动态段不是插件塞的，表头不能都叫「注入」
+      segCount:segCount,
+      dynCount:dynCount,
+      segTotal:segCount+dynCount,
       prefixKnown:!trim && prefix>=0,prefixLen:prefix,sections:sections,trim:trim};
   }
 

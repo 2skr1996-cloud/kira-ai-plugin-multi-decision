@@ -282,6 +282,10 @@
       // v4.85（用户 m10425 第 3 条）：把原来压在表格下面的那段说明并进这里，页面上不再重复。
       note: "单位是元 / 百万 token，照各家官网的价目填就行。只有填了单价的模型才算花费；" +
             "高峰价留空就按普通价算，普通价填 0 就是免费。" },
+    // 用户 m12780 第 ⑦ 条：模型用量探针——记录别的插件（Alife 等）的 LLM / 嵌入 / 排序调用，
+    // 供这一页的柱图和饼图统计。关掉只停记录，包装器保留，随时能再打开。
+    { p: "pricing", t: "统计", solo: 1, custom: "probe", keys: ["usage_probe_enabled"],
+      note: "记录其他插件（如 Alife）的模型调用用量，柱图和饼图会多出对应的分类。" },
     // v3.91（用户 m05749 / m05856）：进阶模式做完了——开关、人格、提示词、模型、工具、预览
     // 全都放在「提示词」页（窗口设置右边那一页）。这几组必须写在数组最末：renderSettings 按
     // SET_GROUPS 顺序把「同页 + 同 split」的相邻组并进同一个 .split2 块，夹在聊天决策页中间
@@ -710,7 +714,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
   // 这一页的控件全部走普通表单：每个可写的都带 data-k，collectSettings() 照 schema 的键
   // 在 #settings 里找它，点保存（或自动保存）就一起 PUT 上去，不用另开保存接口。
   // 人格 / 工具 / 模型三份清单是 /decision-options 给的，DOPT 缓存一次。
-  var DOPT = null;
+  // 用户 m03889 图4：清单存一份到 sessionStorage，从首页切回设置页时首帧就能显示真名字，
+  // 不会先把内部引用（52acaec3deeb:…）摆出来再换掉。
+  var DOPT = cacheGet("dopt");
 
   function dVal(k, dft){
     var v = (configCache ? configCache[k] : null);
@@ -770,7 +776,11 @@ var DM_SPECIAL = { trigger_probability: 1 };
       if(v === cur) seen = true;
       h += "<option value='" + esc(v) + "'" + (v === cur ? " selected" : "") + ">" + esc(lb) + "</option>";
     });
-    if(cur && !seen) h += "<option value='" + esc(cur) + "' selected>" + esc(cur) + "（已不在框架配置里）</option>";
+    // 用户 m03889 图4：清单还没回来时别把内部引用直接摆出来，先写「读取中…」，
+    // 等 /decision-options 回来由 dcRefresh 换成真名字。
+    if(cur && !seen) h += DOPT
+      ? ("<option value='" + esc(cur) + "' selected>" + esc(cur) + "（已不在框架配置里）</option>")
+      : ("<option value='" + esc(cur) + "' selected>读取中…</option>");
     return h;
   }
 
@@ -1319,6 +1329,47 @@ var DM_SPECIAL = { trigger_probability: 1 };
   var PP_STATES = Object.create(null), ppModuleCounter = 0;
   var PP_REF_DIRTY = Object.create(null);
   function ppClone(value){ return JSON.parse(JSON.stringify(value)); }
+  // 用户第 ⑥ 条：折叠状态记在本机浏览器（localStorage），刷新 / 重开设置页都照旧收着。
+  // 键 mdp_pm_fold，值按页面 kind 分组：{"reply":["pm-xxx","3"],"decision":[...],"jev":[...]}，
+  // 元素是 String(module.id || index)——跟卡片折叠用的 foldKey 是同一个写法。
+  var PP_FOLD_KEY = "mdp_pm_fold";
+  function ppFoldAll(){
+    try{
+      var raw = localStorage.getItem(PP_FOLD_KEY);
+      var data = raw ? JSON.parse(raw) : null;
+      return (data && typeof data === "object" && !Array.isArray(data)) ? data : {};
+    }catch(e){ return {}; }
+  }
+  function ppFoldWrite(all){
+    try{ localStorage.setItem(PP_FOLD_KEY, JSON.stringify(all)); }catch(e){}
+  }
+  function ppFoldLoad(kind){
+    var ids = ppFoldAll()[kind], out = {};
+    if(Array.isArray(ids)) ids.forEach(function(id){ out[String(id)] = 1; });
+    return out;
+  }
+  function ppFoldSave(s){
+    var all = ppFoldAll(), ids = [];
+    Object.keys(s.collapsed || {}).forEach(function(id){ if(s.collapsed[id]) ids.push(String(id)); });
+    all[s.kind] = ids;
+    ppFoldWrite(all);
+  }
+  // 模块删掉 / 换了位置以后旧 id 会留在本机：只认当前布局里还在的那些，顺手把别的清掉。
+  function ppFoldPrune(s){
+    if(!s || !s.layout || !Array.isArray(s.layout.modules)) return 0;
+    var live = {};
+    s.layout.modules.forEach(function(m, i){ live[String((m && m.id) || i)] = 1; });
+    var all = ppFoldAll(), ids = Array.isArray(all[s.kind]) ? all[s.kind] : [];
+    var keep = [], dropped = 0;
+    ids.forEach(function(id){
+      var key = String(id);
+      if(live[key]){ if(keep.indexOf(key) < 0) keep.push(key); }
+      else dropped += 1;
+    });
+    Object.keys(s.collapsed || {}).forEach(function(id){ if(!live[id]) delete s.collapsed[id]; });
+    if(dropped || keep.length !== ids.length){ all[s.kind] = keep; ppFoldWrite(all); }
+    return dropped;
+  }
   function ppState(kind, sid){
     // 用户 m06706：JEV 是第三块提示词，跟决策 / 回复各存各的布局。
     kind = (kind === "reply" || kind === "jev") ? kind : "decision";
@@ -1330,7 +1381,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       toolChoices:[], toolsSelected:[],
       revision:null, inherited:false, contextSid:"", dirty:false, saving:false,
       editSeq:0, seq:0, timer:0, preview:null, previewPending:false, referencesPending:false, open:Object.create(null),
-      previewError:"", error:"", notice:""
+      previewError:"", error:"", notice:"", collapsed:ppFoldLoad(kind)
     };
     return PP_STATES[key];
   }
@@ -1379,7 +1430,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     return c.type === "identity" || c.type === "tools" || c.type === "realtime_marker" ||
       c.type === "system_dynamic" || c.type === "system_memory" || c.type === "system_time" ||
       c.type === "dynamic_marker" || c.type === "dynamic" ||
-      c.type === "persona" ||
+      c.type === "persona" || c.type === "module" ||
       (c.type === "framework" && String(c.key || "") === "tools");
   }
   // 用户 m04343 图5/图6：人格 / 工具 / 身份 / 实时窗 / 系统动态段在页面上各有一块固定的，
@@ -1389,7 +1440,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     return c.type === "persona" || c.type === "tools" || c.type === "identity" ||
       c.type === "realtime_marker" || c.type === "system_dynamic" ||
       c.type === "system_memory" || c.type === "system_time" ||
-      c.type === "dynamic_marker" ||
+      c.type === "dynamic_marker" || c.type === "module" ||
       (c.type === "framework" && String(c.key || "") === "tools");
   }
   function ppRef(s, module){
@@ -1489,7 +1540,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         ? (defHit ? (tweakedTpl ? "自定义" : ppSuffixOf(defHit)) : "自写")
         : ({text:"自定义", custom:"自定义", decision_format:"默认", decision_prompt:"默认",
         persona:"人格", identity:"只读", tools:"工具", realtime_marker:"位置", dynamic_marker:"位置",
-        dynamic:"", framework:"默认"}[module.type] || "自定义");
+        dynamic:"", framework:"默认", module:"模块"}[module.type] || "自定义");
       refs.push({type:module.type,key:module.key,label:module.label || module.type,group:"custom",suffix:sfx});
     }
     // 用户 m01209 图4：自己的模板一律排前面，默认模板统统排后面。
@@ -1541,6 +1592,15 @@ var DM_SPECIAL = { trigger_probability: 1 };
     return "<button type='button' class='pm-ico' title='" + esc(title) + "' aria-label='" + esc(title) + "'" +
       " data-pm-kind='" + s.kind + "' data-pm-action='" + action + "'" +
       (index === undefined ? "" : " data-pm-index='" + index + "'") + (disabled ? " disabled" : "") + ">" + text + "</button>";
+  }
+  // 用户第 ⑥ 条：折叠按钮带文字，一眼看得出点下去是「折叠」还是「展开」。
+  // 三个 data-pm-* 属性一个都不能少——点击委托靠 [data-pm-action] 找按钮（app.js 的 bindDecisionPage）。
+  function ppFoldBtn(s, collapsed, index){
+    var tip = collapsed ? "展开这一段" : "折叠这一段";
+    return "<button type='button' class='pm-ico pm-foldbtn" + (collapsed ? " pm-foldbtn-folded" : "") + "'" +
+      " title='" + esc(tip) + "' aria-label='" + esc(tip) + "' aria-expanded='" + (collapsed ? "false" : "true") + "'" +
+      " data-pm-kind='" + s.kind + "' data-pm-action='fold' data-pm-index='" + index + "'>" +
+      (collapsed ? "\u25B8 展开" : "\u25BE 折叠") + "</button>";
   }
   function ppSuffixOf(c){
     // 用户 m15846：下拉里的括注只留「默认 / 自定义 / 自写 / 人格 / 只读 / 工具 / 位置」这几种。
@@ -1726,6 +1786,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 用户 m23028：记忆插件注入的两段（固定说明 / 本轮上下文）现在是布局里的真模块——
     // 正文由插件在请求时现给，卡片只显示 + 只让你挪位置；金色标出来，跟框架自己的段分开。
     var isPluginMem = typ === "plugin_memory", isPluginCtx = typ === "plugin_memory_ctx";
+    // 用户 m02800：模块段——正文由注册进来的模块现给，卡片只显示 + 只让你挪位置。
+    var isModule = typ === "module";
+    // 用户 m20722：别的插件注入的段——自动建卡，只读、可关、位置可挪。
+    var isPluginSeg = typ === "plugin_seg";
+    // 用户 m23037：注入在 user_prompt 里的那批（Alife 的记忆块）也建卡，但它拼在本轮
+    // 消息里、不在系统提示词里——位置固定，只能开关。
+    var isPluginSegUser = isPluginSeg && String(module.location || "") === "user";
     var isPlugin = isPluginMem || isPluginCtx;
     // 用户 m02159 图3：人格段锁住不可删，但可以放空、可以挪位置；身份段与实时窗口段同理。
     // 用户 m02993 图2：工具模板也锁定（不能删），但位置可以挪。
@@ -1733,7 +1800,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 所以它不再算锁定段；真正锁死的只有人格 / 身份 / 工具 / 实时窗 / 系统动态段。
     // 用户 m05124 图1：「强化格式遵守」这块是锁定的（标「锁定」，没有 ✕），正文照旧能改。
     // 用户 m26048：位置也能挪了，只是不能越过实时窗口——它注入的是聊天记录末尾。
-    var locked = isPersona || isIdentity || isRealtime || isTools || isSystemDyn || isDynamic || isPlugin;
+    var locked = isPersona || isIdentity || isRealtime || isTools || isSystemDyn || isDynamic || isPlugin || isModule || isPluginSeg;
     // 用户 m04343 第 3 条：动态段「不锁定也不固定」，只是位置被钉在实时窗口下面、
     // 系统动态段上面——所以它不留删除键，也不挂锁标，只把 ↑↓ 变灰。
     // 用户 m04617 图3：只有实时窗是「固定」（位置钉死），别的都只是「锁定」（不能随便删）。
@@ -1746,6 +1813,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
       : isSystemMem ? "记忆段是框架自己拼在 system 末尾的动态内容，只标位置，不能删；位置可以挪。"
       : isSystemTime ? "时间段是框架自己拼在 system 末尾的动态内容，只标位置，不能删；位置可以挪。"
       : isPluginMem ? "记忆插件注入：正文由记忆插件在请求时现给，这里只决定它放在哪；不能删。"
+      : isPluginSegUser ? "插件注入：这一段拼在本轮消息里（不在系统提示词），位置固定；不能删，只能关。"
+      : isPluginSeg ? "插件注入：正文由别的插件在请求时现给，这里只决定它放在哪；不能删。"
       : isPluginCtx ? "记忆插件 · 本轮上下文：每轮现算，这里只决定它放在哪；不能删。"
       : "系统动态段是框架自己拼在 system 末尾的那些动态内容，只标位置，不能删。";
     // 用户 m02993 图1：实时窗口与动态段标的是「位置」，位置由框架钉死（系统提示词下面、最后一段），
@@ -1753,10 +1822,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 它们只是「锁定」（不能删、不能改），位置可以挪。
     // 用户 m04617 图8：动态段能上下挪（默认还是排在实时窗下面、系统动态段上面）。
     // 用户 m26048：「强化格式遵守」也不再钉死位置，只剩实时窗口是固定的。
-    var fixedPos = isRealtime;
+    var fixedPos = isRealtime || isPluginSegUser;
     // 用户 m27528 第 5 条：角色扮演（人格）这一段锁死——只能看，不能在这儿改，
     // 换人设请用右上角的下拉。以前它能改，一改就悄悄复制成一份「我的副本」。
-    var ro = isIdentity || isSystemDyn || isPersona || isPlugin;
+    var ro = isIdentity || isSystemDyn || isPersona || isPlugin || isModule || isPluginSeg;
     // 用户 m04617 图6：选了人格以后，卡片上的字数得跟真正注入的那一段一致，
     // 不能再显示目录里那份预览（60 字的空骨架），否则看着像「选了反而没注入」。
     // 用户 m05691：动态段默认不含正文（跟着默认模板走），字数与正文都按真正注入的那段显示。
@@ -1764,6 +1833,8 @@ var DM_SPECIAL = { trigger_probability: 1 };
       : isSystemTime ? ppRenderedPart(s, "system_time")
       : isSystemDyn ? ppRenderedPart(s, "system_dynamic")
       : isPersona ? ppRenderedPart(s, "persona")
+      : isModule ? ppRenderedPart(s, module.key)
+      : isPluginSeg ? ppRenderedPart(s, module.key)
       : isPlugin ? ppRenderedPart(s, typ)
       : isDynamic ? ppRenderedPart(s, "dynamic") : null;
     // 用户 m14457 图1：停用的模块以前照样把整段正文铺在卡上（只是变淡），
@@ -1772,7 +1843,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
     // 用户 m23323 图1：停用也照实显示正文与字数——卡片是「这一段会收到什么」的展示位，
     // 换成一串「未启用…」的说明字反而看不出内容（系统动态段就是这么被读成空白的）。
     var body = rendered ? String(rendered.text || "")
-      : ((typ === "text" || isDynamic || isPlugin) ? String(module.content || "") : ppReferenceText(s, module));
+      : ((typ === "text" || isDynamic || isPlugin || isPluginSeg) ? String(module.content || "") : ppReferenceText(s, module));
     // 用户 m09506：实时窗的真实内容与「读取哪个群组」不止 JEV 页要有，决策 / 回复页也一样。
     var rtLive = isRealtime;
     if(rtLive){ body = String(s.rtText || ""); }
@@ -1794,13 +1865,15 @@ var DM_SPECIAL = { trigger_probability: 1 };
       : (isTools ? "勾选注入"
         // 用户 m10962 第 1 条：动态段标题右边那句「拼在聊天记录最后」也去掉，位置标签已经说明清楚。
         : (isDynamic ? ""
-          : (isPlugin ? (isPluginMem ? "插件现给" : "每轮现算")
-            : (typ === "framework" ? "原段" : (typ === "custom" ? "自定义" : "")))));
-    // 用户 m03879 图3：位置标签只说明「注入在哪」，放到「N 字」左边。
+          : (isModule ? "模块现给"
+            : (isPluginSegUser ? "插件现给 · 本轮消息"
+            : (isPluginSeg ? "插件现给"
+            : (isPlugin ? (isPluginMem ? "插件现给" : "每轮现算")
+              : (typ === "framework" ? "原段" : (typ === "custom" ? "自定义" : ""))))))));
     // 用户 m04343 第 4 条：框架原段（系统模板）也挂「系统段」标签，跟系统动态段一个样。
     var isSysSeg = isSystemDyn || isIdentity || isTools || typ === "framework" || isPluginMem;
-    var posLabel = isRealtime ? "实时窗" : (isPlugin ? "插件段" : (isSysSeg ? "系统段" : (isDynamic ? "动态段" : "")));
-    var posCls = isRealtime ? "pm-pos-rt" : (isPlugin ? "pm-pos-plugin" : (isSysSeg ? "pm-pos-sys" : "pm-pos-dyn"));
+    var posLabel = isRealtime ? "实时窗" : (isModule ? "模块段" : ((isPlugin || isPluginSeg) ? "插件段" : (isSysSeg ? "系统段" : (isDynamic ? "动态段" : ""))));
+    var posCls = isRealtime ? "pm-pos-rt" : ((isPlugin || isModule || isPluginSeg) ? "pm-pos-plugin" : (isSysSeg ? "pm-pos-sys" : "pm-pos-dyn"));
     var source, note = ref && ref.note ? String(ref.note) : "";
     if(isPersona){
       source = module.key ? ("人格文件：" + String(module.key))
@@ -1819,9 +1892,15 @@ var DM_SPECIAL = { trigger_probability: 1 };
       source = "位置说明：框架自己拼在 system 末尾的动态内容（时间）";
     }else if(isSystemDyn){
       source = "位置说明：框架自己拼在 system 末尾的动态内容（会话信息 / 聊天环境 / 记忆 / 时间）";
+    }else if(isPluginSeg){
+      source = isPluginSegUser
+        ? "插件注入：正文由别的插件在请求时现给，这一段拼在本轮消息里"
+        : "插件注入：正文由别的插件在请求时现给，这里只决定它放在哪";
     }else if(isPlugin){
       source = isPluginMem ? "记忆插件注入：正文由插件在请求时现给，这里只决定它放在哪"
         : "记忆插件 · 本轮上下文：每轮现算，这里只决定它放在哪";
+    }else if(isModule){
+      source = "模块段：正文由注册的模块现给，这里只决定它放在哪";
     }else if(isDynamic){
       source = "动态段：拼在本轮聊天记录最后，紧贴模型开口的位置";
     }else{
@@ -1834,6 +1913,10 @@ var DM_SPECIAL = { trigger_probability: 1 };
     var nextType = (index + 1 < s.layout.modules.length) ? String((s.layout.modules[index + 1] || {}).type || "") : "";
     var nextIsRt = nextType === "realtime_marker";
     var open = !!(s.open && s.open[index]);
+    // 用户 m09986 第 8 条：每张卡都能折叠，折叠后只留第一行（标题那行）。
+    // 折叠只是看的时候收起来，不影响保存的布局，也不改启用状态。
+    var foldKey = String(module.id || index);
+    var collapsed = !!(s.collapsed && s.collapsed[foldKey]);
     var tip = source + (note ? " · " + note : "");
     var foot = "";
     if(isPersona){
@@ -1843,15 +1926,27 @@ var DM_SPECIAL = { trigger_probability: 1 };
     }
     // 来源下拉：只有还能换内容的段才给（人格 / 框架原段 / 自写）；位置段与身份段没得选。
     // 用户 m04617 图8：动态段也要有下拉——它本身就是一段模板，能换成别的写法。
-    var hasSelect = !(isIdentity || isTools || isRealtime || isSystemDyn || isPlugin);
+    var hasSelect = !(isIdentity || isTools || isRealtime || isSystemDyn || isPlugin || isModule || isPluginSeg);
     // 用户 m28586 第 3 条：右边那个「编辑（存成我的模板）」按钮撤掉。规则就一句话——
     // 直接在下面的正文框里改字，改完自动复制一份存进模板库（名字变成「原名·复制（自写）」），
     // 默认模板一个字都不动。这里只剩「自定义模板」那块去模板库改正文的入口。
     var convert = (typ === "custom" && module.key) ? ppButton(s,"edit_tpl","改这个模板",index,false) : "";
+    // 用户 m20722：插件注入段这轮没抓到正文时，卡片退回上一次抓到的文字（或者干脆还没有），
+    // 得明说一句，不然空着像坏了。
     var noteText = isPersona ? ""
       : (note || (isPlugin && rendered && rendered.sample_only
           ? "插件这轮没回传正文，下面显示的是默认模板（不会注入）。" : "")
-        || ((!custom && !isTools && !isPlugin && (!ref || ref.available === false)) ? "这个引用现在没内容，预览会给警告。" : ""));
+        || (isPluginSeg && rendered && rendered.sample_only
+          ? "插件这轮没回传正文，下面显示的是上一次抓到的文字（不会注入）。" : "")
+        || (isPluginSeg && !rendered
+          ? "还没抓到正文：等这个插件下一次发请求时就会显示。" : "")
+        || (isPluginSegUser
+          ? "这一段注入在本轮消息里，不在系统提示词；关掉就从这一轮消息里摘掉。" : "")
+        || ((!custom && !isTools && !isPlugin && !isModule && !isPluginSeg && (!ref || ref.available === false)) ? "这个引用现在没内容，预览会给警告。" : ""));
+    // 用户 m09986 第 1 条：插件注入段原来「说明」和「正文 N 字符」各占一行，太占地方——
+    // 说明并进下面那行摘要里，卡片少一行。
+    var sumNote = isPluginSeg ? noteText : "";
+    if(sumNote) noteText = "";
     // 用户 m04343 第 4 条：来源下拉搬到标题右边同一行（标题照旧能改名）；下面那行只留说明和按钮。
     var picker = hasSelect
       ? "<select class='dipt pm-src' aria-label='模块来源' title='换这一段用哪个模板' data-pm-field='type'" +
@@ -1870,7 +1965,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
       : "";
     var modNoticeHtml = ppModNoticeHtml(s, module, index);
     return "<section class='pm-module" + (locked ? " pm-locked" : "") + (isRealtime ? " pm-realtime" : "") +
-      (isDynamic ? " pm-dynamic-mod" : "") + (isSystemDyn ? " pm-sysdyn" : "") + (isPlugin ? " pm-plugin" : "") +
+      (isDynamic ? " pm-dynamic-mod" : "") + (isSystemDyn ? " pm-sysdyn" : "") + ((isPlugin || isPluginSeg) ? " pm-plugin" : "") + (collapsed ? " pm-collapsed" : "") +
       "' data-pm-module='" + index + "'>" +
       "<div class='pm-module-head'><span class='pm-idx'>" + (index + 1) + "</span>" +
         "<label class='pm-enabled'><input type='checkbox' data-pm-field='enabled' data-pm-index='" + index + "'" +
@@ -1890,7 +1985,7 @@ var DM_SPECIAL = { trigger_probability: 1 };
         (posLabel ? "<span class='pm-pos " + posCls + "' title='这一段注入在框架钉好的位置上'>" + posLabel + "</span>"
                   : "<span class='pm-pos pm-pos-none'>·</span>") +
         "<span class='pm-chars' title='正文 " + esc(chars) + " 字符'>" + esc(chars) + " 字</span>" +
-        "<div class='pm-move'>" + ppIcon(s,"up","\u2191","上移",index,
+        "<div class='pm-move'>" + ppFoldBtn(s, collapsed, index) + ppIcon(s,"up","\u2191","上移",index,
           fixedPos || index === 0 ||
           ((isDynamic || isPluginCtx) && index > 0 && String((s.layout.modules[index - 1] || {}).type || "") === "realtime_marker")) +
         ppIcon(s,"down","\u2193","下移",index,fixedPos || nextIsRt || index === s.layout.modules.length - 1) + (locked
@@ -1907,9 +2002,13 @@ var DM_SPECIAL = { trigger_probability: 1 };
         // 用户 m10866：动态段那句「拼在聊天记录最后」删掉，位置标签已经说明清楚。
         (isDynamic ? "（动态段 · 可编辑）"
           : (isRealtime ? "（真实实时窗 · 只读）"
+            : (isPluginSegUser ? "（插件注入 · 只读，位置固定）"
+            : (isPluginSeg ? "（插件注入 · 只读，位置可挪）"
             : (isPlugin ? "（插件注入 · 只读，位置可挪）"
               : (custom ? "（可编辑）" : (isPersona ? "（只读 · 换人设请用右上角的下拉）"
-                : (ro ? "（框架自动填写，只能看不能改）" : "（引用原文，只读）")))))) + "</summary>" +
+                : (ro ? "（框架自动填写，只能看不能改）" : "（引用原文，只读）")))))))) +
+        // 用户 m09986 第 1 条：说明并进摘要行后，来源说明（tip）挂到这一行的 title 上，别丢。
+        (sumNote ? "<span class='pm-sum-note' title='" + esc(tip) + "'>" + esc(sumNote) + "</span>" : "") + "</summary>" +
         "<div class='pm-body-row'>" +
         // 用户 m2618 第 2 条：输出格式段只读，正文里那两个占位符要能看出来——textarea 上不了色，
         // 这一段换成 pre，把两个 token 包成小标签高亮。
@@ -1926,8 +2025,9 @@ var DM_SPECIAL = { trigger_probability: 1 };
                 : (isSystemTime ? "时间段（只读）"
                   : (isSystemDyn ? "系统动态段（只读）"
                     : (isRealtime ? "实时窗口说明"
+                      : (isPluginSeg ? "插件注入（只读）"
                       : (isPlugin ? (isPluginMem ? "记忆插件注入（只读）" : "记忆插件 · 本轮上下文（只读）")
-                        : "改这里会自动存成你自己的模板")))))))) +
+                        : "改这里会自动存成你自己的模板"))))))))) +
         "' data-pm-field='content' data-pm-index='" + index + "'" +
         (rtLive ? " readonly" : (custom || isRealtime || isDynamic ? "" : (ro ? " readonly" : " data-pm-promote='1'"))) + ">\n" + esc(body) + "</textarea>")) +
         // 用户 m05124 图1：这句「只标位置」挪到上面第二行（正文摘要）去了，正文行里不再重复。

@@ -18,7 +18,8 @@
    只在「带图 + 正文除方括号词外没有别的字」时才换，正文里夹着的 [重点] 不动。
 
 两条硬约束：
-- 绝不阻塞消息流：下载走后台 task，调用方不 await；失败静默，只留 debug 日志。
+- 绝不阻塞消息流：下载走后台 task，调用方不 await；失败不抛，只留一条 INFO 日志
+  （带状态码和去掉查询串的链接，用户 m18331 图2 之后才查得动）。
 - 不新增依赖：只用 httpx（decision/engine.py 已经在用，requirements 里没加东西）。
 """
 
@@ -64,6 +65,7 @@ _HEADER_PROFILES = (
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     },
     {"User-Agent": _UA, "Referer": "https://im.qq.com/", "Accept": "image/*,*/*;q=0.8"},
+    {"User-Agent": _UA, "Referer": "https://qun.qq.com/", "Accept": "image/*,*/*;q=0.8"},
     {"User-Agent": _UA},
     {},
 )
@@ -184,6 +186,34 @@ def _host(url: str) -> str:
         return ""
 
 
+def _url_for_log(url: str) -> str:
+    """日志里用的链接：只留 scheme://host/path，查询串（可能带 rkey）一律丢掉。"""
+    try:
+        parts = urlparse(str(url or ""))
+    except Exception:
+        return ""
+    if not parts.scheme or not parts.netloc:
+        return ""
+    return ("%s://%s%s" % (parts.scheme, parts.netloc, parts.path))[:200]
+
+
+def _url_variants(url: str) -> list:
+    """同一个链接的几种写法：原样，以及 http/https 互换。
+
+    QQ 图床有的路径只认 https（http 直接 403），有的老链接只认 http，
+    两种都试一遍，代价只是一次请求。
+    """
+    text = str(url or "").strip()
+    if not text:
+        return []
+    out = [text]
+    if text.startswith("http://"):
+        out.append("https://" + text[len("http://"):])
+    elif text.startswith("https://"):
+        out.append("http://" + text[len("https://"):])
+    return out
+
+
 # ---------------------------------------------------------------- 已有副本
 
 
@@ -293,44 +323,58 @@ async def _fetch_bytes(url: str, budget: float):
 
     remaining = max(0.5, float(budget))
     last: Optional[BaseException] = None
+    last_status = None
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        for headers in _HEADER_PROFILES:
+        for candidate in _url_variants(url):
+            for headers in _HEADER_PROFILES:
+                if remaining <= 0.5:
+                    break
+                started = time.monotonic()
+                try:
+                    async with client.stream(
+                        "GET",
+                        candidate,
+                        headers=headers,
+                        timeout=min(_ATTEMPT_TIMEOUT, remaining),
+                    ) as resp:
+                        resp.raise_for_status()
+                        mime = (
+                            (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                        )
+                        chunks = []
+                        total = 0
+                        async for chunk in resp.aiter_bytes():
+                            total += len(chunk)
+                            if total > MAX_BYTES:
+                                return None, ""
+                            chunks.append(chunk)
+                        data = b"".join(chunks)
+                    if not data:
+                        return None, ""
+                    return data, mime
+                except Exception as exc:
+                    last = exc
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    if status is not None:
+                        last_status = status
+                    # 401/403/404 换一组头可能就过了；429/5xx 是对方临时抽风，换头
+                    # 未必有用但值得再试；超时和连接错误换什么都没用，直接放弃。
+                    if status is None or not (
+                        status in (401, 403, 404, 429) or status >= 500
+                    ):
+                        break
+                finally:
+                    remaining -= time.monotonic() - started
             if remaining <= 0.5:
                 break
-            started = time.monotonic()
-            try:
-                async with client.stream(
-                    "GET",
-                    url,
-                    headers=headers,
-                    timeout=min(_ATTEMPT_TIMEOUT, remaining),
-                ) as resp:
-                    resp.raise_for_status()
-                    mime = (
-                        (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-                    )
-                    chunks = []
-                    total = 0
-                    async for chunk in resp.aiter_bytes():
-                        total += len(chunk)
-                        if total > MAX_BYTES:
-                            return None, ""
-                        chunks.append(chunk)
-                    data = b"".join(chunks)
-                if not data:
-                    return None, ""
-                return data, mime
-            except Exception as exc:
-                last = exc
-                status = getattr(getattr(exc, "response", None), "status_code", None)
-                # 只有 401/403/404 值得换一组头再试；超时、连接错误、5xx 换头没用。
-                if status not in (401, 403, 404):
-                    break
-            finally:
-                remaining -= time.monotonic() - started
     if last is not None:
-        logger.debug(
-            "[multi-decision] 表情包下载失败（%s）：%s", _host(url), type(last).__name__
+        # 用户 m18331 图2：以前只记域名和异常类名，事后完全没法定位是哪条链接、
+        # 对方回了什么。现在把状态码和去掉查询串的链接记下来。
+        logger.info(
+            "[multi-decision] 表情包下载失败（%s）：%s %s",
+            _host(url),
+            ("HTTP %s" % last_status) if last_status is not None else type(last).__name__,
+            _url_for_log(url),
         )
     return None, ""
 

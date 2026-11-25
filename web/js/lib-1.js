@@ -1514,9 +1514,29 @@ var ctxSnapRequest = 0;
     }
   }
   var _foldTimer = 0;
+  // 性能：观察器挂在 document.body + subtree 上，流式渲染时一秒几十次 mutation，
+  // 每次都排一个 80ms 后的全文档 querySelectorAll + 逐项读 clientHeight（强制布局）太贵。
+  // 先看这一批 mutation 里有没有折叠相关的节点，没有就直接返回，不排任务。
+  // 判定覆盖三种情况：节点自己就是 .mono/.qbody/.qcard、节点在它们里面（流式追加正文）、
+  // 节点里装着它们（整块 innerHTML 替换）。
+  function _foldRelevant(node){
+    if(!node) return false;
+    var el = node.nodeType === 1 ? node : node.parentElement;
+    if(!el) return false;
+    if(el.closest && el.closest(".mono, .qbody, .qcard")) return true;
+    return !!(node.nodeType === 1 && node.querySelector && node.querySelector(".mono, .qbody, .qcard"));
+  }
   function watchFolds(){
     if(typeof MutationObserver === "undefined") return;
-    var ob = new MutationObserver(function(){
+    var ob = new MutationObserver(function(records){
+      var hit = false;
+      for(var i = 0; i < (records ? records.length : 0) && !hit; i++){
+        var an = records[i].addedNodes;
+        for(var j = 0; j < (an ? an.length : 0); j++){
+          if(_foldRelevant(an[j])){ hit = true; break; }
+        }
+      }
+      if(!hit) return;
       if(_foldTimer) return;
       _foldTimer = setTimeout(function(){ _foldTimer = 0; settleFolds(); }, 80);
     });

@@ -515,13 +515,13 @@
   "silent_skip_single_image": {
     "name": "单张图片",
     "type": "switch",
-    "default": false,
+    "default": true,
     "hint": ""
   },
   "silent_skip_single_image_count": {
     "name": "条数",
     "type": "integer",
-    "default": 3,
+    "default": 1,
     "hint": ""
   },
   "silent_skip_single_sticker": {
@@ -974,5 +974,11 @@
     "type": "integer",
     "default": 8,
     "hint": "4 到 12 周，默认 8 周。"
+  },
+  "usage_probe_enabled": {
+    "name": "模型用量探针",
+    "type": "switch",
+    "default": true,
+    "hint": "记录其他插件（如 Alife）的 LLM、嵌入、排序调用 token，供价目页统计。"
   }
 }

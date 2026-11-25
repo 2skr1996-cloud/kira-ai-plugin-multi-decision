@@ -392,17 +392,19 @@
            "<span class='qc-ft'><span class='qc-src'>" + foot + "</span>" +
            "<span class='qc-open'>打开</span></span></a>";
   }
-  function twPaint(id){
+  function twPaint(id, root){
+    root = root || document;
     var d = TW_CACHE[id];
     if(!d) return;
-    var cards = [].slice.call(document.querySelectorAll(".qcard[data-tw='" + id + "']"));
+    var cards = [].slice.call(root.querySelectorAll(".qcard[data-tw='" + id + "']"));
     cards.forEach(function(a){
       if(d.ok) a.outerHTML = tweetCardHtml(d);
       else a.classList.add("tw-bad");
     });
   }
-  function fillTweets(){
-    var nodes = [].slice.call(document.querySelectorAll(".qcard[data-tw]"));
+  function fillTweets(root){
+    root = root || document;
+    var nodes = [].slice.call(root.querySelectorAll(".qcard[data-tw]"));
     if(!nodes.length) return;
     var seen = Object.create(null);
     nodes.forEach(function(a){
@@ -412,7 +414,7 @@
       var got = TW_CACHE[id];
       if(got === null) return;            // 已经在请求里了
       if(got){
-        twPaint(id);
+        twPaint(id, root);
         // 图已经在前端缓存里，但服务端可能还没记这个会话的归属；静默补一次。
         if(twSid() && !TW_OWNED[twOwnKey(id)]){
           TW_OWNED[twOwnKey(id)] = 1;
@@ -440,8 +442,9 @@
     t.textContent = String(title);
     el.setAttribute("data-lt-done", "1");
   }
-  function fillLinkTitles(){
-    var nodes = [].slice.call(document.querySelectorAll(".qcard[data-lt]"));
+  function fillLinkTitles(root){
+    root = root || document;
+    var nodes = [].slice.call(root.querySelectorAll(".qcard[data-lt]"));
     for(var i = 0; i < nodes.length; i++){
       var el = nodes[i];
       if(el.getAttribute("data-lt-done") === "1") continue;
@@ -563,18 +566,20 @@
     return ghCard({ href: href, title: title || preTitle || href, desc: desc, foot: foot });
   }
   var GH_CACHE = Object.create(null);   // href -> 数据 | {ok:false} | null（请求中）
-  function ghPaint(url){
+  function ghPaint(url, root){
+    root = root || document;
     var d = GH_CACHE[url];
     if(!d) return;
-    var nodes = [].slice.call(document.querySelectorAll(".qcard.gh[data-gh]"));
+    var nodes = [].slice.call(root.querySelectorAll(".qcard.gh[data-gh]"));
     nodes.forEach(function(a){
       if(a.getAttribute("data-gh") !== url) return;
       if(!d.ok){ a.classList.add("gh-bad"); return; }
       a.outerHTML = ghCardFromData(d, a.getAttribute("href") || url, a.getAttribute("data-gh-t") || "");
     });
   }
-  function fillGitHub(){
-    var nodes = [].slice.call(document.querySelectorAll(".qcard.gh[data-gh]"));
+  function fillGitHub(root){
+    root = root || document;
+    var nodes = [].slice.call(root.querySelectorAll(".qcard.gh[data-gh]"));
     if(!nodes.length) return;
     var seen = Object.create(null);
     nodes.forEach(function(a){
@@ -583,7 +588,7 @@
       seen[url] = 1;
       var got = GH_CACHE[url];
       if(got === null) return;              // 已经在请求里了
-      if(got){ ghPaint(url); return; }
+      if(got){ ghPaint(url, root); return; }
       GH_CACHE[url] = null;
       fetch(API + "/github?url=" + encodeURIComponent(url))
         .then(function(r){ return r.json(); })
@@ -769,7 +774,7 @@
     var hd = "";
     if(!grp){
       hd = "<span class='rq bot'>bot</span>" + (extra || "") + ats;
-      hd += "<span class='k nm'>" + esc(dispNameOf(meta.name, meta.gnick) || "机器人") + "</span>";
+      hd += "<span class='k nm'>" + (dispNameHtml(meta.name, meta.gnick) || "机器人") + "</span>";
       if(meta.you) hd += "<span class='k you'>@你</span>";
       if(meta.ts) hd += "<span class='k weak' title='" + esc(meta.ts) + "'>" + esc(shortTs(meta.ts)) + "</span>";
       hd += "<span class='grow'></span>";
@@ -948,8 +953,8 @@
         }
       } else {
         if(p.meta.ts) h2 += "<span class='k' title='" + esc(p.meta.ts) + "'>" + esc(shortTs(p.meta.ts)) + "</span>";
-        var pn = dispNameOf(p.meta.name, p.meta.gnick);
-        if(pn) h2 += "<span class='k'>" + esc(pn) + "</span>";
+        var pn = dispNameHtml(p.meta.name, p.meta.gnick);
+        if(pn) h2 += "<span class='k'>" + pn + "</span>";
         if(p.meta.you) h2 += "<span class='k you'>@你</span>";
       }
       if(m.chars) h2 += "<span class='k weak'>" + m.chars + " 字</span>";
@@ -1038,8 +1043,8 @@
         parts.forEach(function(q, qi){
           var lab = "";
           if(q.meta.ts) lab += "<span class='k' title='" + esc(q.meta.ts) + "'>" + esc(shortTs(q.meta.ts)) + "</span>";
-          var qn = dispNameOf(q.meta.name, q.meta.gnick);
-          if(qn) lab += "<span class='k'>" + esc(qn) + "</span>";
+          var qn = dispNameHtml(q.meta.name, q.meta.gnick);
+          if(qn) lab += "<span class='k'>" + qn + "</span>";
           if(q.meta.you) lab += "<span class='k you'>@你</span>";
           var segOwn = segMedia[qi].own;
           // 用户 m03014 第 1 条：这一段本身是合并转发时，图片归转发卡（折叠时跟着藏起来），
@@ -1335,6 +1340,8 @@
   }
   function groupKeyOf(m, idx){
     if(!m) return "";
+    // 用户 m09986 第 3 条：插件注入段一条一张卡，不跟前后聊天消息并组。
+    if(m.seg) return "seg#" + idx;
     var r = m.role || "?";
     if(r !== "user" && r !== "assistant") return r + "#" + idx;
     // 一条消息里拼着好几个人的，不跟前后合并（里面各段自己带名字）
@@ -1404,9 +1411,23 @@
   }
   // 名单按会话缓存 30 秒：窗口每 5 秒重画一次，不能每次都打接口；
   // 但设置页那边刚拉黑的人，切回来最多半分钟就能看到。
+  // 用户 m03586：组头先画占位符（\u0001），整组画完才知道用了几次工具，这里统一补上。
+  // 窗口 / ② 历史 / ③ 本轮 三处 flush 都走这里——③ 以前自己拼组头、漏了替换，
+  // 控制字符被浏览器画成一个像 0 的方块，每条组头都显示「工具 ×0」。
+  function grpToolsChip(head, n){
+    if(!head) return "";
+    return n > 0 ? head.replace("工具 ×\u0001", "工具 ×" + n)
+                 : head.replace("<span class='chb'>工具 ×\u0001</span>", "");
+  }
   function grpHeadHtml(role, who, uid, you, note, tools, forcedBlk, gnick){
     // 用户本轮（G3）：组头显示「昵称 · 群昵称」；who 本身仍是纯昵称（分组键、拉黑名单都用它）。
-    var nm = who ? esc(dispNameOf(who, gnick)) : (role === "assistant" ? "assistant" : "user");
+    // 用户 m03205：群昵称单独上色（.gnick），跟昵称区分开；who 仍是纯昵称。
+    // 用户 m15963 第 2 条：私聊消息宿主不给昵称（messages.sender_name 是空串），
+    // whoOf 取不到名字时以前一律显示灰字 user。这里退回 QQ 号，再退回会话显示名，
+    // 至少能看出「是谁」——后端 raw_line_of 也会补昵称，这层是旧数据的兜底。
+    var nm = who ? dispNameHtml(who, gnick)
+      : (role === "assistant" ? "assistant"
+        : (role === "user" ? esc(uid || displayName(curSid)) : "user"));
     var decName = role === "assistant" && who === DEC_NOTE_NAME;
     var tcChip = (tools === 0 || tools === null || tools === undefined || tools === "") ? ""
       : "<span class='chb'>工具 ×" + tools + "</span>";
@@ -1444,8 +1465,446 @@
   }
 
   // tail：卡尾追加的小标签（v3.89 用户 m05321：裁切快照里那些「待发」）
+  // 用户 m09986 第 3 条：别的插件塞进本轮消息里的段（alife_memory / alife_recall 这类）
+  // 不是聊天消息。以前冷启动那一轮没有窗口快照，只能拿 user_prompt 整段按时间戳切，
+  // 注入段就被切成一条「1249 字」的假 user 消息，点开原文是一大坨 JSON。
+  // 这里给它单独一张卡：标题写段名，正文把外面那层 {"m": "…"} 剥掉再按行铺。
+  // 用户 m12096 第 4 条：通用渲染兜底，个别插件再单独照顾。
+  // 用户本轮第 ① 条：宿主挪到末尾的动态段（dynamic_tail）也是 markdown，走 md 行渲染。
+  var SEG_STYLE = { alife_memory: "json", alife_recall: "text", alife_rules: "md", dynamic_tail: "md" };
+
+  // 用户本轮第 ③ 条：注入卡的「联动美化 / 通用美化」档位记在 localStorage 里。
+  // 默认联动档（Alife 记忆段专属排版），点标签退回通用档，方便对比别的插件注入长什么样。
+  var SEG_STYLE_KEY = "mdp_seg_style";
+  function segStylePref(){
+    try{ return localStorage.getItem(SEG_STYLE_KEY) === "generic" ? "generic" : "alife"; }
+    catch(e){ return "alife"; }
+  }
+  function setSegStyle(v){
+    var val = (String(v) === "generic") ? "generic" : "alife";
+    try{ localStorage.setItem(SEG_STYLE_KEY, val); }catch(e){}
+    return val;
+  }
+  // 段名右边那个可点标签：写的是当前档位，点一下换到另一档（app.js 的 segStyleClick 接）。
+  function segStylePill(){
+    return segStylePref() === "alife"
+      ? "<span class='chb segpill' data-segstyle='alife' title='Alife 记忆段专属排版；点一下退回通用美化，方便对比别的插件'>联动美化</span>"
+      : "<span class='chb segpill off' data-segstyle='generic' title='通用排版；点一下换回 Alife 联动美化'>通用美化</span>";
+  }
+
+  // 行内标记：**粗体** 与 `代码`。先转义再替换，用户文本里的尖括号不会被当成标签。
+  function segInline(s){
+    return esc(String(s == null ? "" : s))
+      .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  }
+
+  // JSON 叶子值按类型上色：字符串 / 数字 / 布尔 / 空。
+  function segJsonVal(v){
+    if(v === null || v === undefined) return "<span class='v z'>null</span>";
+    var t = typeof v;
+    if(t === "boolean") return "<span class='v b'>" + (v ? "true" : "false") + "</span>";
+    if(t === "number") return "<span class='v n'>" + esc(String(v)) + "</span>";
+    if(t === "string") return "<span class='v s'>" + esc(v) + "</span>";
+    return "<span class='v z'>" + esc(String(v)) + "</span>";
+  }
+
+  // JSON 树：每层缩进，key 弱色，值按类型上色，数组下标写成 [0]。
+  // 用户本轮第 ① 条：对象/数组折成 details，前两层默认展开、第三层起收起，
+  // 大段 JSON 不再一屏铺到底。缩进挂在 summary 和行上，details 自己不带 padding。
+  function segJsonTree(v, depth){
+    var pad = "padding-left:" + (depth * 14) + "px";
+    if(v === null || v === undefined) return "<div class='segjrow' style='" + pad + "'><span class='k'>null</span></div>";
+    if(typeof v !== "object") return "<div class='segjrow' style='" + pad + "'>" + segJsonVal(v) + "</div>";
+    var arr = Array.isArray(v), keys = arr ? v.map(function(_, i){ return i; }) : Object.keys(v);
+    if(!keys.length) return "<div class='segjrow' style='" + pad + "'><span class='k'>" + (arr ? "[]" : "{}") + "</span></div>";
+    return keys.map(function(k){
+      var val = v[k], label = arr ? "[" + k + "]" : String(k);
+      if(val && typeof val === "object"){
+        var sub = Array.isArray(val) ? (val.length + " 项") : (Object.keys(val).length + " 键");
+        return "<details class='segjnode'" + (depth < 2 ? " open" : "") + ">" +
+               "<summary class='segjsum' style='" + pad + "'><span class='k'>" + esc(label) + "</span>" +
+               "<span class='segjmeta'>" + sub + "</span></summary>" +
+               segJsonTree(val, depth + 1) + "</details>";
+      }
+      return "<div class='segjrow' style='" + pad + "'><span class='k'>" + esc(label) + "</span>" +
+             segJsonVal(val) + "</div>";
+    }).join("");
+  }
+
+  // 用户本轮第 ③ 条：Alife 记忆段的真实排版。
+  // 真实快照（D:/KiraAI/data/plugin_data/kira-ai-plugin-multi-decision/requests/dm_admin/*.json）
+  // 里 alife_memory 的正文是 {"m": "【记忆·全局】会话｜名单\n<uid> <类型> <正文> ★N <日期>\n
+  // 会话=…\n1|AL1|日期|-|摘要\n- 时间 角色｜内容\n（另有 N 条未展示…）"}。
+  // 认不出结构（事实 + 记忆少于 2 条）就返回空串，调用方退回通用美化。
+  var SEG_ALIFE_KIND = {
+    ev: "事件", pf: "偏好", pr: "关系", rs: "资源", re: "关系",
+    fa: "事实", co: "结论"
+  };
+  // 用户 m15963 第 3 条：专属美化还不够。首行 `【记忆·全局】会话｜k=名|名、k=名…` 以前原样铺
+  // 四行，事实行的 uid 也不翻名字，fa/co 两种类型认不出来被甩到卡片最底下。这里把名单折成
+  // 可展开的表格，并用它把 uid 翻成显示名。
+  function segAlifeAlias(line){
+    var m = String(line || "").match(/^【([^】]*)】\s*([^｜|]*)[｜|]\s*([\s\S]*)$/);
+    if(!m) return null;
+    var map = {}, list = [];
+    String(m[3]).split("、").forEach(function(seg){
+      var s = seg.trim();
+      if(!s) return;
+      var eq = s.indexOf("=");
+      if(eq <= 0) return;
+      var key = s.slice(0, eq).trim();
+      var disp = s.slice(eq + 1).trim();
+      var bar = disp.indexOf("|");
+      if(bar >= 0) disp = disp.slice(0, bar).trim();
+      if(!key) return;
+      map[key] = disp || key;
+      list.push({key: key, name: disp || key});
+    });
+    return {scope: String(m[1]).trim(), session: String(m[2]).trim(), map: map, list: list};
+  }
+  function segAlifeName(map, key){
+    if(!key) return "";
+    var n = map[key];
+    if(!n) return key;
+    // 名单里存的是「机器人名:dm:123456」这种会话串，显示时压成「dm 123456」。
+    var sm = n.match(/^[^:]+:(dm|gm):(\d+)$/);
+    if(sm) return sm[1] + " " + sm[2];
+    return n;
+  }
+  // 最近记录里的 assistant 正文是整串 JSON，抽成「正文 + 工具名」再画，别把 JSON 糊在卡上。
+  function segAlifeRecent(body){
+    var s = String(body == null ? "" : body).trim();
+    if(s.charAt(0) !== "{") return {text: s, tools: []};
+    var v = null;
+    try{ v = JSON.parse(s); }catch(e){ v = null; }
+    if(!v){
+      // 长正文会被上游截断成「…」，整串解析不了，退回正则抽 content 与工具名。
+      var cm = s.match(/"content"\s*:\s*"((?:[^"\\]|\\.)*)/);
+      var t2 = cm ? cm[1] : "";
+      t2 = t2.replace(/\\n/g, " ").replace(/\\"/g, "\"").replace(/<\/?text>/g, "").replace(/\s+/g, " ").trim();
+      var tl = [], re = /"name"\s*:\s*"([^"]+)"/g, mm;
+      while((mm = re.exec(s))) tl.push(mm[1]);
+      if(!t2 && !tl.length) return {text: s, tools: []};
+      return {text: t2, tools: tl};
+    }
+    var txt = typeof v.content === "string" ? v.content : "";
+    txt = txt.replace(/<\/?text>/g, "").replace(/\s+/g, " ").trim();
+    var tools = [];
+    (Array.isArray(v.tool_calls) ? v.tool_calls : []).forEach(function(c){
+      var n = c && c.function && c.function.name;
+      if(n) tools.push(String(n));
+    });
+    if(!txt && !tools.length) return {text: s, tools: []};
+    return {text: txt, tools: tools};
+  }
+  function segAlifeTools(list){
+    if(!list || !list.length) return "";
+    return list.map(function(n){ return "<span class='segalife-tool'>" + esc(n) + "</span>"; }).join("");
+  }
+  function segAlifeHtml(raw){
+    var text = String(raw == null ? "" : raw);
+    var t = text.trim();
+    if(t.charAt(0) === "{"){
+      try{
+        var v = JSON.parse(t);
+        if(v && typeof v === "object" && !Array.isArray(v)){
+          var ks = Object.keys(v);
+          if(ks.length === 1 && typeof v[ks[0]] === "string") text = v[ks[0]];
+        }
+      }catch(e){}
+    }
+    var mems = [], facts = [], scopes = [], recents = [], notes = [], rest = [];
+    var alias = null;
+    // 用户 m18331 图1：`会话=xxx` 以前原样铺一行灰底，看着像调试输出；这里拆成字段，
+    // 跟名单里的会话串去重后只留一份。
+    var scopeSession = "";
+    String(text).split(/\r?\n/).forEach(function(ln){
+      var s = ln.replace(/\s+$/, "");
+      if(!s.trim()) return;
+      // 记忆行：序号|标签|日期|占位|摘要
+      var mm = s.match(/^(\d{1,3})\|([^|]*)\|([^|]*)\|([^|]*)\|(.+)$/);
+      if(mm){ mems.push({tag: mm[2].trim(), ts: mm[3].trim(), body: mm[5].trim()}); return; }
+      // 事实行：<uid> <类型> <正文> [★N] [>关系链] <日期>
+      var fm = s.match(/^([A-Za-z0-9_\-]{2,})\s+(ev|pf|pr|rs|re|fa|co)\s+(.+)$/);
+      if(fm){
+        var body = fm[3], star = "", ts = "", chain = "";
+        var dm = body.match(/\s(\d{2}-\d{2}(?:~\d{2}-\d{2})?)\s*$/);
+        if(dm){ ts = dm[1]; body = body.slice(0, dm.index); }
+        var cm = body.match(/\s*(>[^\s>]+(?:>[^\s>]+)*)\s*$/);
+        if(cm){ chain = cm[1]; body = body.slice(0, cm.index); }
+        var sm = body.match(/\s*★(\d+)\s*$/);
+        if(sm){ star = sm[1]; body = body.slice(0, sm.index); }
+        facts.push({uid: fm[1], kind: fm[2], body: body.replace(/\s+$/, ""), star: star, ts: ts, chain: chain});
+        return;
+      }
+      // 首行名单：【记忆·全局】会话｜k=名、k=名…
+      if(/^【/.test(s)){
+        var al = segAlifeAlias(s);
+        if(al && al.list.length){ if(!alias) alias = al; else scopes.push(s); return; }
+        scopes.push(s); return;
+      }
+      var sm2 = s.match(/^会话\s*=\s*(.+)$/);
+      if(sm2){ if(!scopeSession) scopeSession = sm2[1].trim(); return; }
+      // 最近记录：- MM-DD HH:MM U|A <uid>｜内容　来自 <别名>
+      if(/^[-*]\s+/.test(s)){
+        var r = s.replace(/^[-*]\s+/, "");
+        var rm = r.match(/^(\d{2}-\d{2})\s+(\d{2}:\d{2})\s+([UA])\s*(\d+)?\s*[｜|]\s*([\s\S]*)$/);
+        if(rm){
+          var content = rm[5], from = "";
+          var f2 = content.match(/^([\s\S]*?)\s*来自\s*(\S+)\s*$/);
+          if(f2){ content = f2[1]; from = f2[2]; }
+          recents.push({date: rm[1], time: rm[2], role: rm[3], uid: rm[4],
+                        body: content.trim(), from: from});
+          return;
+        }
+        recents.push({body: r});
+        return;
+      }
+      if(/^（另有/.test(s) || /^\(另有/.test(s)){ notes.push(s); return; }
+      rest.push(s);
+    });
+    if(mems.length + facts.length < 2) return "";
+    var amap = alias ? alias.map : {};
+    var scopeName = (alias && alias.scope) ? alias.scope : "";
+    var sess = (alias && alias.session) ? alias.session : scopeSession;
+    var h = "<div class='segbox segalife'>";
+    // 用户 m18331 图1：开头原来是三颗灰 chip + 一颗飘到最右的蓝 chip + 一行裸 `会话=…`，
+    // 现在并成一条汇总带：左边作用域、中间三项计数、右边会话串。
+    h += "<div class='segalife-top'>" +
+         (scopeName ? "<span class='segalife-scopebadge'>" + esc(scopeName) + "</span>" : "") +
+         "<span class='segalife-metrics'>" +
+         "<span class='segalife-metric'><b>" + mems.length + "</b> 条记忆</span>" +
+         "<span class='segalife-metric'><b>" + facts.length + "</b> 条事实</span>" +
+         "<span class='segalife-metric'><b>" + text.length + "</b> 字</span>" +
+         "</span>" +
+         "<span class='grow'></span>" +
+         (sess ? "<span class='segalife-sess' title='" + esc(sess) + "'>" + esc(sess) + "</span>" : "") +
+         "</div>";
+    if(alias && alias.list.length){
+      h += "<details class='segalife-alias'><summary class='segalife-aliassum'>" +
+           "<span class='segalife-aliaslabel'>名单</span>" +
+           "<span class='segalife-aliasnum'>" + alias.list.length + " 个</span>" +
+           "</summary><div class='segalife-aliasgrid'>" +
+           alias.list.map(function(a){
+             return "<span class='segalife-aliasrow'><span class='segalife-aliasid'>" +
+                    esc(a.key) + "</span><span class='segalife-aliasnm'>" + esc(segAlifeName(amap, a.key)) + "</span></span>";
+           }).join("") +
+           "</div></details>";
+    }
+    // 会话= 跟名单里的会话串一样就是重复，只在不一样时单独画一行。
+    if(scopeSession && scopeSession !== sess){
+      h += "<div class='segalife-scope'>会话 · " + esc(scopeSession) + "</div>";
+    }
+    scopes.forEach(function(s){ h += "<div class='segalife-scope'>" + esc(s) + "</div>"; });
+    if(mems.length){
+      h += "<div class='segalife-sec'>记忆<span class='k'>" + mems.length + "</span></div>";
+      mems.forEach(function(it){
+        h += "<div class='segalife-item'>" +
+             "<span class='segalife-tag'>" + esc(it.tag || "记忆") + "</span>" +
+             "<span class='segalife-body'>" + segInline(it.body) + "</span>" +
+             (it.ts ? "<span class='segalife-ts'>" + esc(it.ts) + "</span>" : "") +
+             "</div>";
+      });
+    }
+    if(facts.length){
+      h += "<div class='segalife-sec'>事实<span class='k'>" + facts.length + "</span></div>";
+      facts.forEach(function(it){
+        h += "<div class='segalife-item fact'>" +
+             "<span class='segalife-tag' title='" + esc(it.uid) + "'>" + esc(segAlifeName(amap, it.uid)) + "</span>" +
+             "<span class='segalife-kind k-" + esc(it.kind) + "'>" + esc(SEG_ALIFE_KIND[it.kind] || it.kind) + "</span>" +
+             "<span class='segalife-body'>" + segInline(it.body) + "</span>" +
+             (it.chain ? "<span class='segalife-chain'>" + esc(it.chain) + "</span>" : "") +
+             (it.star ? "<span class='segalife-star'>★" + esc(it.star) + "</span>" : "") +
+             (it.ts ? "<span class='segalife-ts'>" + esc(it.ts) + "</span>" : "") +
+             "</div>";
+      });
+    }
+    if(recents.length){
+      h += "<div class='segalife-sec'>最近<span class='k'>" + recents.length + "</span></div>";
+      recents.forEach(function(it){
+        var rb = segAlifeRecent(it.body);
+        if(!it.date){
+          h += "<div class='segalife-recent'><span class='segalife-rbody'>" + segInline(rb.text) + segAlifeTools(rb.tools) + "</span></div>";
+          return;
+        }
+        var nm = it.from ? segAlifeName(amap, it.from) : "";
+        h += "<div class='segalife-recent'>" +
+             "<span class='segalife-rt'>" + esc(it.date + " " + it.time) + "</span>" +
+             "<span class='segalife-rrole " + (it.role === "A" ? "a" : "u") + "'>" + esc(it.role) + "</span>" +
+             (nm ? "<span class='segalife-rname'>" + esc(nm) + "</span>" : "") +
+             "<span class='segalife-rbody'>" + segInline(rb.text) + segAlifeTools(rb.tools) + "</span>" +
+             "</div>";
+      });
+    }
+    notes.forEach(function(s){
+      // 用户 m18331 图1：结尾原来是斜体灰字「（另有 1 条未展示 · 用 next_batch 继续找）」，
+      // 后半句是给模型看的指令，对看记录的人没意义；改成一条带分隔线的尾注。
+      var nm = String(s).match(/^[（(]\s*另有\s*(\d+)\s*条未展示/);
+      if(nm){
+        h += "<div class='segalife-foot' title='这一段还有 " + esc(nm[1]) + " 条没塞进本轮'>" +
+             "<span class='segalife-footmark'>\u22ef</span>还有 " + esc(nm[1]) + " 条未展示</div>";
+        return;
+      }
+      h += "<div class='segalife-note'>" + esc(s) + "</div>";
+    });
+    rest.forEach(function(s){ h += "<div class='segalife-raw'>" + segInline(s) + "</div>"; });
+    return h + "</div>";
+  }
+
+  function segPrettyHtml(raw, seg){
+    var text = String(raw == null ? "" : raw);
+    var t = text.trim();
+    var style = SEG_STYLE[String(seg || "")] || "";
+    // 常见壳子：{"m": "…"} / {"memory": "…"}——只有一个字符串值时剥掉
+    if(t.charAt(0) === "{"){
+      try{
+        var v = JSON.parse(t);
+        if(v && typeof v === "object" && !Array.isArray(v)){
+          var keys = Object.keys(v);
+          if(keys.length === 1 && typeof v[keys[0]] === "string"){ text = v[keys[0]]; t = text.trim(); }
+        }
+      }catch(e){}
+    }
+    // 剥完还是整段 JSON 对象/数组：渲染成缩进的键值树，别糊成一坨长行。
+    // text 档强制按行、md 档走 markdown 行渲染；json 档强制树，解析失败退回按行。
+    if(style !== "text" && style !== "md" && t && (t.charAt(0) === "{" || t.charAt(0) === "[")){
+      try{
+        var obj = JSON.parse(t);
+        if(obj && typeof obj === "object"){
+          return "<div class='segbox'><div class='segjson'>" + segJsonTree(obj, 0) + "</div></div>";
+        }
+      }catch(e){}
+    }
+    var out = [], pendingGap = false;
+    String(text).split(/\r?\n/).forEach(function(ln){
+      var s = ln.replace(/\s+$/, "");
+      // 用户本轮第 ① 条：连续空行只留一个，开头和结尾的空行直接丢掉。
+      if(!s.trim()){ pendingGap = true; return; }
+      if(pendingGap && out.length) out.push("<div class='segln gap'></div>");
+      pendingGap = false;
+      // 超长行多半是插件把整段 JSON 塞进来了，折起来，点开看全文
+      if(s.length > 220){
+        out.push("<details class='segln long'><summary>" + esc(s.slice(0, 160)) + "…</summary>" +
+                 "<pre class='rawtxt'>" + esc(s) + "</pre></details>");
+        return;
+      }
+      var hm = s.match(/^\s{0,3}#{1,6}\s+(.+)$/);
+      if(hm){ out.push("<div class='segh'>" + segInline(hm[1].trim()) + "</div>"); return; }
+      // 用户 m15963 第 4 条：通用美化不要 1.2.3.4 这种编号徽章——编号是宿主自己加的，
+      // 换个插件就不通用，统一按项目符号排。
+      var om = s.match(/^\s*\d{1,3}[.)]\s+(.+)$/);
+      if(om){ out.push("<div class='segli'>" + segInline(om[1]) + "</div>"); return; }
+      var bm = s.match(/^\s*[-*]\s+(.+)$/);
+      if(bm){ out.push("<div class='segli'>" + segInline(bm[1]) + "</div>"); return; }
+      // 用户本轮第 ① 条：> 引用单独一块，左边一条竖线。
+      var qm = s.match(/^\s*>\s?(.*)$/);
+      if(qm){ out.push("<div class='segquote'>" + segInline(qm[1]) + "</div>"); return; }
+      // key: value —— key 不含空格、不超过 24 字；「https://…」这种地址不算键值，
+      // 「{"a":1}」这种 JSON 片段也不算（key 里带括号引号逗号的一律跳过）
+      var km = s.match(/^\s*([^\s:：{}\[\]"',]{1,24})\s*[:：]\s*(.+)$/);
+      if(km && !/^[a-z][a-z0-9+.-]*:\/\//i.test(s)){
+        out.push("<div class='segkv'><span class='k'>" + esc(km[1]) + "</span>" +
+                 "<span class='v'>" + segInline(km[2]) + "</span></div>");
+        return;
+      }
+      out.push("<div class='segln'>" + segInline(s) + "</div>");
+    });
+    return "<div class='segbox'>" + out.join("") + "</div>";
+  }
+
+  // 用户 m12780 第 ② 条：宿主挪到本轮末尾的动态段以前借 systemCardHtml 画，
+  // 组头写着「system」，看着像一条系统消息。它其实是注入段，走注入卡、组头写 seg。
+  // 用户 m15963 第 4 条：动态段是几段拼起来的（Format + Time），以前整串塞进一张卡，
+  // 现在按「## 标题」切开，一段一张卡，序号接着往下排。
+  function relocParts(text, names){
+    var raw = String(text == null ? "" : text);
+    var list = (names || []).filter(function(x){ return !!x; });
+    var parts = [], cur = null;
+    raw.split(/\r?\n/).forEach(function(ln){
+      var hm = ln.match(/^\s{0,3}##\s+(.+?)\s*$/);
+      if(hm){
+        if(cur) parts.push(cur);
+        cur = {head: hm[1], lines: []};
+        return;
+      }
+      if(!cur) cur = {head: "", lines: []};
+      cur.lines.push(ln);
+    });
+    if(cur) parts.push(cur);
+    if(!parts.length || (parts.length === 1 && !parts[0].head)){
+      return [{head: "", text: raw, name: list.length ? list.join(" · ") : "dynamic_tail"}];
+    }
+    return parts.map(function(p, i){
+      var body = p.lines.join("\n").replace(/^\s*\n+/, "").replace(/\s+$/, "");
+      var nm = (list.length === parts.length) ? list[i] : (p.head || ("part" + (i + 1)));
+      return {head: p.head, text: body, name: nm};
+    }).filter(function(p){ return !!p.text || !!p.head; });
+  }
+  function relocCardHtml(text, mode, names, idx){
+    var parts = relocParts(text, names);
+    var base = (idx === "" || idx === null || idx === undefined) ? null : Number(idx);
+    var h = "";
+    parts.forEach(function(p, i){
+      var m = {seg: "dynamic_tail", segname: p.name, head: p.head,
+               text: p.text, raw: p.text, chars: p.text.length};
+      h += "<div class='mgrp seg'>" +
+           segCardHtml(m, base === null ? "" : (base + i), mode === "mixed" ? "raw" : mode, "", true) +
+           "</div>";
+    });
+    return h;
+  }
+
+  // 用户 m18331 图1：卡头把「Alife_memory」和「alife_memory」并排写了两遍，看着像没做完。
+  // 段名只是标题的蛇形/大小写变体时不再重复挂小 chip。
+  function segKeyRedundant(head, label){
+    function norm(s){ return String(s == null ? "" : s).toLowerCase().replace(/[\s_\-.]+/g, ""); }
+    var a = norm(head), b = norm(label);
+    return !!a && !!b && a === b;
+  }
+  function segCardHtml(m, idx, mode, ts, grp, tail){
+    var name = String(m.seg || "");
+    // 用户 m11094 第 1 条：宿主把动态段挪到本轮末尾时也占一个 part（dynamic_tail），
+    // 它不是插件注入，别跟着写「插件注入」。
+    var isDyn = name === "dynamic_tail";
+    // 用户 m12780 第 ② 条：动态段是几个段拼起来的（dynamic_tail · memory · time），
+    // 卡头写全名，排版仍按 dynamic_tail 走。
+    var label = String(m.segname || name);
+    var raw = String(m.raw == null ? (m.text || "") : m.raw);
+    // 用户 m12096 图2：后端给注入段单独插的「## 段名」标题行已经并进正文开头，
+    // 这里把它当卡头主标题、段名降级成旁边的小 chip，正文里那行不再重复画。
+    var head = String(m.head || "").replace(/^[#\s]+/, "").replace(/\s+$/, "");
+    var bodyRaw = raw;
+    if(m.head){
+      var nl = raw.indexOf("\n");
+      var first = (nl < 0 ? raw : raw.slice(0, nl)).replace(/\s+$/, "");
+      if(first === String(m.head).replace(/\s+$/, "")) bodyRaw = nl < 0 ? "" : raw.slice(nl + 1);
+    }
+    // 用户 m12780 第 ② 条：动态段自己就是一张注入卡，序号接着 ③ 里的真实消息往下排。
+    var no = (idx === "" || idx === null || idx === undefined) ? "" : (idx + " · ");
+    // 用户 m15963 第 4 条：动态段拆开后，卡头主标题就是它自己的「## 标题」，
+    // 内部段名（dynamic_tail / time）对用户没意义，有标题时不再挂小 chip。
+    var hd = "<span class='rq seg'>" + no + (isDyn ? "动态段" : "插件注入") + "</span>" +
+             (head
+               ? "<span class='segname'>" + esc(head) + "</span>" +
+                 ((isDyn || label === head || segKeyRedundant(head, label)) ? "" : "<span class='chb segkey'>" + esc(label) + "</span>")
+               : "<span class='segname'>" + esc(label) + "</span>") +
+             (name === "alife_memory" ? segStylePill() : "") +
+             "<span class='k'>" + raw.length + " 字</span><span class='grow'></span>" +
+             (mode === "raw" ? "<span>原文</span>" : "<span class='k weak'>" + (isDyn ? "宿主挪到本轮末尾的动态段" : "别的插件塞进本轮消息") + "</span>");
+    var body = (mode === "raw")
+      ? "<pre class='rawtxt'>" + esc(bodyRaw) + "</pre>"
+      : ((name === "alife_memory" && segStylePref() === "alife")
+          ? (segAlifeHtml(bodyRaw) || segPrettyHtml(bodyRaw, name))
+          : segPrettyHtml(bodyRaw, name));
+    return "<div class='mc seg'><div class='mc-hd'>" + hd + "</div>" +
+           "<div class='mc-bd'>" + body + "</div></div>";
+  }
   function msgCards(m, idx, mode, ts, grp, tail){
     mode = mode || VIEW;
+    // 用户 m09986 第 3 条：插件注入段走自己的卡，别当 user 消息铺一坨 JSON。
+    if(m && m.seg) return segCardHtml(m, idx, mode, ts, grp, tail);
+    // 原文模式照旧走窗口消息那张卡（上面那条注入段自己会处理 raw）。
     if(mode === "raw") return windowMsgHtml(m, idx, ts, tail);
     if(m.role === "user" && mode === "pretty"){
       // v4.32：先拆原始各段；markdown 图片地址留给该段 botCard 提取。
@@ -1975,7 +2434,7 @@
   // 两页共用本页统计；0 是有效值，缺失值不冒充 0，推断与实测使用同一批记录。
   function recordPageStats(rows){
     var a = {count: rows.length, input: null, output: null, hit: null, estimate: null, delta: null,
-      inferred: false, bytes: null, partial: false, hitCount: 0, estCount: 0, pairCount: 0};
+      bytes: null, partial: false, hitCount: 0, estCount: 0, pairCount: 0};
     var hs = 0, hw = 0, es = 0, ew = 0, ds = 0, dw = 0;
     function number(v){
       if(v === null || v === undefined || v === "" || typeof v === "boolean") return null;
@@ -1989,30 +2448,22 @@
       if(output !== null) a.output = (a.output === null ? 0 : a.output) + output;
       var ss = Array.isArray(r.step_stats) ? r.step_stats : [];
       var multi = Number(r.steps) > 1 && ss.length > 1;
-      var hit = pct(tk.cache_hit), est = pct(r.hit_estimate), inferred = false;
-      // 与表格单行保持一致：多步用逐步平均，推断轮优先用 hit_est。
+      var hit = pct(tk.cache_hit), est = pct(r.hit_estimate);
+      // 与表格单行保持一致：多步用逐步平均。
       if(multi){
         var se = pct(stepAvgPct(ss, "est"));
         if(se !== null) est = se;
       }
-      if(r.hit_inferred){
-        var ih = pct(multi ? stepAvgPct(ss, "hit_est") : (ss[0] && ss[0].hit_est));
-        if(ih !== null){ hit = ih; inferred = true; }
+      // 用户 m05873：上游没回报缓存时不再拿反推值充数，这一轮不进命中平均（表格那格写「上游未报」）。
+      if(r.hit_inferred || r.cache_unreported){
+        hit = null;
       } else if(hit !== null && multi){
         var sh = pct(stepAvgPct(ss, "hit"));
         if(sh !== null) hit = sh;
       }
       var weight = input || 0;
-      if(inferred){
-        var full = 0;
-        (multi ? ss : ss.slice(0, 1)).forEach(function(s){
-          if(!s || pct(s.hit_est) === null) return;
-          full += number(s.full_est) || number(s.in) || 0;
-        });
-        if(full > 0) weight = full;
-      }
       if(weight > 0){
-        if(hit !== null){ hs += hit * weight; hw += weight; a.hitCount++; if(inferred) a.inferred = true; }
+        if(hit !== null){ hs += hit * weight; hw += weight; a.hitCount++; }
         if(est !== null){ es += est * weight; ew += weight; a.estCount++; }
         // 偏差保留“预估减命中”，只比较同一批、同时具备两个值的记录。
         if(hit !== null && est !== null){ ds += (est - hit) * weight; dw += weight; a.pairCount++; }
@@ -2033,10 +2484,9 @@
     var a = recordPageStats(rows);
     var tip = "本页 " + a.count + " 轮；入/出为上游原始 usage 合计。命中和预估按输入 token 加权，明确的 0% 也参与；缺失值不当作 0。" +
       "命中有值 " + a.hitCount + " 轮，预估有值 " + a.estCount + " 轮；偏差只按同时有两个值的 " + a.pairCount + " 轮计算，等于预估减命中。";
-    if(a.inferred) tip += "≈ 含推断：推断轮按可用逐步统计的完整输入估算加权，最多 8 步；因此不等于原始 cached/input。";
     tip += "请求体为本页各记录保存的文本和图片 base64 投影估算之和，不是多步全过程的网络流量；M/K 按 1024 换算。";
     if(a.partial) tip += "部分体积缺失或仅有旧版文本数据，显示已知下限。";
-    var hit = a.hit === null ? "—" : (a.inferred ? "≈" : "") + a.hit.toFixed(1) + "%";
+    var hit = a.hit === null ? "—" : a.hit.toFixed(1) + "%";
     var est = a.estimate === null ? "—" : a.estimate.toFixed(1) + "%";
     var delta = a.delta === null ? "—" : a.delta.toFixed(1) + "pp";
     var size = a.bytes === null ? "请求体 —" : "请求体" + (a.partial ? "≥ " : "约 ") +

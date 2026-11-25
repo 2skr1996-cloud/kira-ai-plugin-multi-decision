@@ -673,6 +673,10 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
                 if _own and not any(ref.get("missing") for ref in _own):
                     display.update(own_media_known=True, own_media=_own, unassigned_media=[],
                                    source="own_media")
+                elif _own:
+                    # 用户 m18331 图2：这条消息自己的图确实存在过，只是框架归档失败、插件也
+                    # 救不回来。归属是确定的，先记下来，等下面几轮补救都跑完再定案。
+                    display["own_media_lost"] = _own
         if not display["own_media_known"]:
             original = proofs.get(mid)
             # The raw proof item knows how many images the message really had; the
@@ -817,6 +821,27 @@ def project_items(items, raw_sid: str, native_rows: dict, *, public_media, text_
                     display["unassigned_media"] = [
                         ref for ref in display.get("unassigned_media") or []
                         if str((ref or {}).get("path") or "") not in _qpaths]
+        # 用户 m18331 图2：上面几轮补救都没能把这条消息自己的图救回来，归属其实是
+        # 确定的，只是图没了。以前这种会掉进 unassigned，前端就多挂一个「归属未确认
+        # 的附件」；现在按本条自有图收下，前端在原位置画「图片已清理」。
+        # 只在 unassigned 里剩下的都是「本条自己的图（含缺失占位）」时才收——混进
+        # 别的消息的图就说明归属还没定，保持原样。
+        if not display["own_media_known"] and display.get("own_media_lost"):
+            _lost = display["own_media_lost"]
+            # 带路径又 missing 的是「这次没解析出来」，图可能还在，不能替它认领归属；
+            # 只有路径为空才是框架清理掉、插件也没副本的真丢失。
+            _unresolved = any(ref.get("missing") and (ref.get("path") or ref.get("url"))
+                              for ref in _lost if isinstance(ref, dict))
+            _lost_paths = {str(ref.get("path") or ref.get("url") or "")
+                           for ref in _lost if isinstance(ref, dict)}
+            _lost_paths.discard("")
+            if not _unresolved and all(
+                    ref.get("missing")
+                    or str(ref.get("path") or ref.get("url") or "") in _lost_paths
+                    for ref in display.get("unassigned_media") or []):
+                display.update(own_media_known=True, own_media=_lost,
+                               unassigned_media=[], source="own_media_lost")
+        display.pop("own_media_lost", None)
         projected = dict(item)
         projected["display"] = display
         if display.get("files"):

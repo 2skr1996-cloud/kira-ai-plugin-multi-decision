@@ -1140,16 +1140,14 @@
   function gifTokenOf(w, h, q){
     return Math.round(w * h / 750 * q / 100);
   }
-  function gifFramesDesc(k, tile, q){
+  // 用户 m13968：说明加回「拼图帧数」这一行，但只留帧数与尺寸，token 预估挪到下面单独一行。
+  function gifFramesDesc(k, tile){
     var t = parseInt(tile, 10);
     if(!isFinite(t) || t <= 0) t = parseInt((configCache || {}).gif_tile, 10);
     if(!isFinite(t) || t <= 0) t = 384;
-    var qq = parseInt(q, 10);
-    if(!isFinite(qq) || qq <= 0 || qq > 100) qq = gifQualityNow();
     if(k === 0){
       // 用户 m13967：自动档按动图内容去重后自己决定拼几格，这里只报上限。
       // 用户 m15110：说明压成一行，别在右栏折成两行。
-      // 用户 m15473：自动档不报 token 预估——帧数不定，报了也只是按上限瞎猜，只留格数。
       var gm = gifGridOf(25, t);
       var sm = "按内容去重，有几个关键帧拼几格，最多 25 帧（" + gm.cols + "×" + gm.rows + "）。";
       if(gm.tile < t) sm += "（" + t + " 超上限，已降到 " + gm.tile + "）";
@@ -1157,15 +1155,32 @@
     }
     var g = gifGridOf(k, t);
     var s = "先去重，再挑变化大的 " + k + " 帧拼成 " + g.cols + "×" + g.rows + "，" +
-      g.w + "×" + g.h + " 像素，质量 " + qq + "% 约 " + gifTokenOf(g.w, g.h, qq) + " token。";
+      g.w + "×" + g.h + " 像素。";
     // 用户 m31535：合成超过像素上限时后端会自动把单帧边长收小，这里说清楚收到了多少。
     if(g.tile < t) s += "（" + t + " 超上限，已降到 " + g.tile + "）";
     return s;
   }
+  // 用户 m13968：token 预估单独一行，标题「消耗预估」。
+  // 用户 m15473：自动档不报单一 token 数——帧数不定，报了也只是瞎猜（m04497 改成报区间）。
+  // 用户 m04497：改成报 9–25 帧的区间，两头都按当前边长和质量现算。
+  function gifTokenDesc(k, tile, q){
+    var t = parseInt(tile, 10);
+    if(!isFinite(t) || t <= 0) t = parseInt((configCache || {}).gif_tile, 10);
+    if(!isFinite(t) || t <= 0) t = 384;
+    var qq = parseInt(q, 10);
+    if(!isFinite(qq) || qq <= 0 || qq > 100) qq = gifQualityNow();
+    if(k === 0){
+      var gm = gifGridOf(25, t);
+      var g9 = gifGridOf(9, t);
+      return "约 " + gifTokenOf(g9.w, g9.h, qq) + "–" + gifTokenOf(gm.w, gm.h, qq) + " token。";
+    }
+    var g = gifGridOf(k, t);
+    return "质量 " + qq + "% 约 " + gifTokenOf(g.w, g.h, qq) + " token。";
+  }
   function gifFramesHtml(){
     var cur = gifFramesNow();
-    // 用户 m15473：说明独占第二行（.ds2），右栏窄的时候也不会折成两行。
-    return "<div class='setrow inline ds2' data-row='gif_frames'>" +
+    // 用户 m13968：说明加回这一行（不带 token 预估），token 预估单独成行放到「动图质量」下面。
+    return "<div class='setrow inline' data-row='gif_frames'>" +
       "<div class='nm'>拼图帧数<i class='dfv'>默认 9 帧</i></div>" +
       "<div class='ds' data-gifframesdesc='1'>" + esc(gifFramesDesc(cur)) + "</div>" +
       "<div class='ctl'><span class='seg'>" + GIF_FRAMES.map(function(n){
@@ -1173,11 +1188,21 @@
           "' data-gifframes='" + n + "'>" + (n === 0 ? "自动" : n + " 帧") + "</button>";
       }).join("") + "</span></div></div>";
   }
+  // 用户 m13968：token 预估单独一行，标题「消耗预估」，挂在「动图质量」下面。
+  // 用户 m04711：这一行也当成正常选项行——挂 .setrow，跟别的行同高、同样有悬停高亮；
+  // 它成了组里最后一个 .setrow，上一行「动图质量」的 border-bottom 正好当分割线。
+  function gifFramesNoteHtml(){
+    return "<div class='setrow inline'><div class='nm'>消耗预估</div>" +
+      "<div class='ds' data-giftokendesc='1'>" + esc(gifTokenDesc(gifFramesNow())) + "</div></div>";
+  }
   // 用户 m15110：质量改了要能当场重算 token 预估，所以允许把新质量直接传进来
   // （change 事件里 configCache 还没更新，读它只会拿到旧值）。
   function gifFramesPaint(tile, q){
+    var k = gifFramesNow();
     var el = document.querySelector("#settings [data-gifframesdesc]");
-    if(el) el.textContent = gifFramesDesc(gifFramesNow(), tile, q);
+    if(el) el.textContent = gifFramesDesc(k, tile);
+    var el2 = document.querySelector("#settings [data-giftokendesc]");
+    if(el2) el2.textContent = gifTokenDesc(k, tile, q);
   }
   // 用户 m31535：单帧边长改成几个性价比档位——256 省 token、320 偏省、384 均衡、512 高质量。
   // 边长只是上限：超了才缩，没超就按原样拆；合成超过 600 万像素时后端会自动降级，
@@ -1232,6 +1257,8 @@
     h += gifTileHtml();
     // 用户 m10267：质量也放这一组，改完下一轮请求就按新值重算。
     if(schemaCache && schemaCache["gif_quality"]) h += rowHtml("gif_quality", schemaCache["gif_quality"]);
+    // 用户 m03889 图2：拼图预算的说明单独一行，放在「动图质量」下面。
+    h += gifFramesNoteHtml();
     return h;
   }
   // 框架的图片压缩只能走框架自己的接口：整份读回来 → 改 bot_config.image_compression → 整份写回去。
@@ -1323,12 +1350,21 @@
   }
   // 表格按「最近一次 cache-stats 回包 + 当前作用范围」重画：会话模式取值走 cacheCurVal，
   // 窗口快照那类后端暂时没给 limit_key 的，按约定兜成 windows_keep。
+  // 性能：同一份数据 + 同一个 tbody 不重复写 innerHTML（loadCacheStats 回包、切作用范围、
+  // 整页重画都会走到这里）。元素身份也要比——renderSettings 重建 #settings 时 tbody 是新的，
+  // 只比字符串会永远停在「读取中…」。
+  var lastCacheRowsSig = "", lastCacheRowsEl = null;
   function renderCacheRows(){
     var body = document.getElementById("cache-rows");
     if(!body) return;
     var d = cacheStatsData;
     if(!d || !d.ok || !(d.kinds && d.kinds.length)) return;  // 占位 / 失败文案已经由 loadCacheStats 写过
-    body.innerHTML = d.kinds.map(cacheRowHtml).join("");
+    var html = d.kinds.map(cacheRowHtml).join("");
+    if(html !== lastCacheRowsSig || body !== lastCacheRowsEl){
+      body.innerHTML = html;
+      lastCacheRowsSig = html;
+      lastCacheRowsEl = body;
+    }
     setCacheTotal(d.total || null);
     if(cacheScopeSid){
       // 会话模式下不显示全局补充行：这几个键能不能按会话单独设，后端说了算，别在这乱写
@@ -1443,6 +1479,7 @@
     cacheStatsData = (d && d.ok && kinds.length) ? d : null;
     cacheSessList = (d && Array.isArray(d.sessions)) ? d.sessions : [];
     if(!cacheStatsData){
+      lastCacheRowsSig = ""; lastCacheRowsEl = null;   // 这行绕过了 renderCacheRows，签名要作废
       if(body) body.innerHTML = "<tr><td colspan='7' class='cnote bad'>读取失败</td></tr>";
       setCacheTotal(null);
       // 接口整个失败时也得让人改：全局模式下把四行设置补在表格下面（会话模式下这些键归会话管，不补）
@@ -1464,7 +1501,7 @@
     if(!body) return;
     // v3.68（用户 m20632 第 4 条后半）：这里不再先清成「读取中…」——旧数据留在原位，
     // 新数据回来直接替换，切作用范围时不会闪一下（后端 /cache-stats 本身有 10 秒缓存）。
-    if(!cacheStatsData) body.innerHTML = "<tr><td colspan='7' class='cnote'>读取中…</td></tr>";
+    if(!cacheStatsData){ lastCacheRowsSig = ""; lastCacheRowsEl = null; body.innerHTML = "<tr><td colspan='7' class='cnote'>读取中…</td></tr>"; }
     // 用户 m22090：选了单个群 / 私聊时，数量 / 占用 / 合计都要按这个会话取，
     // 不能还拿全局总量。后端按 sid 逐类过滤，10 秒缓存也按 sid 分开。
     var wantSid = cacheScopeSid || "";
@@ -1585,6 +1622,19 @@
   // 用户 m30335：上一帧此刻滑到哪儿。新的一帧要从这个位置接着走，
   // 不然连着滚的时候每一格都从原位重新起步，看着就是一跳一跳的。
   var pricingPanFrom = 0;
+  // 用户 m17450：上一帧每天的横坐标。柱图按实际根数紧凑排布、整块居中，换一天以后
+  // 同一天的横坐标会挪 140 多像素，按平均槽宽平移两层就错开、看着像重影。
+  // 所以翻页时拿共同日期算真实位移，存在这里。
+  var pricingPrevDayX = null;
+  // 用户 m18000：这一帧要平移多少像素（只平移一层，不再垫 ghost）。
+  var pricingPanPx = 0;
+  // 用户 m18000：翻窗口时把「上一帧有、这一帧没有」的那几天垫在可见窗口左右两侧的裁切框外，
+  // 整块只有一层，滑动时不会出现两份内容（以前垫 ghost 两层，刻度一变就上下错开成重影）。
+  var pricingPadPrev = [], pricingPadNext = [];
+  // 用户 m18000：上一帧的数据点，翻页时用来挑出离开窗口的那几天。
+  var pricingPrevPoints = null;
+  // 用户 m18000：这一帧的滑动时长（毫秒），滚得越远走得越久；app.js 等它走完再放下一批。
+  var pricingPanDurMs = 0;
   var pricingWinEnd = "";
   var pricingWinTimer = 0;
   // 用户 m09125：滚轮翻窗口改成排队——滚几格排几格，每格走完自己的动画时间再走下一格。
@@ -1861,19 +1911,31 @@
     if(!a || !b) return "";
     return a === b ? a : (a + " ~ " + b);
   }
-  // 用户 m29560 第 8 条：「默认」是最近 N 天的窗口，N 按卡片宽度自适应，最多 10 天，且不跨月份。
-  // 一天最多三根柱子、每根至少 14px、天与天之间留 6% 的缝，反推一天至少要 46px。
+  // 用户 m29560 第 8 条：「默认」是最近 N 天的窗口，N 按卡片宽度自适应，且不跨月份。
+  // 用户 m15463：柱子宽度固定 38px 之后，一屏能放几天要看实际数据（lib-4.js 里按真实
+  // 根数切片），这里按「最省地方」的情况取——一天一根柱子 + 14px 缝，多取几天备用。
   function pricingWinDays(){
     if(pricingTrendMode === "custom"){
       var ca = pdParse(pricingCustom.start), cb = pdParse(pricingCustom.end);
       if(ca && cb) return Math.max(1, pdDays(cb, ca) + 1);
     }
-    var w = pricingChartW || 900;
+    // 首帧还没量到卡片宽度（pricingChartW 是 0）时按宽屏估，先把整月取回来，
+    // 画的时候再按真实宽度切片——估小了首帧会少画几天，右边留一块空白。
+    var w = pricingChartW || 1600;
     var plotW = Math.max(300, w - 128);
-    var days = Math.floor(plotW / 46);
+    var days = Math.floor((plotW + 14) / 52);
     if(days < 3) days = 3;
-    if(days > 10) days = 10;
+    if(days > 31) days = 31;
     return days;
+  }
+  // 用户 m15463：上一帧真正画了几天（lib-4.js 切片后写进来）。翻窗口的边界按它算——
+  // 按取数窗口算会以为一屏能放 28 天，往回翻一格就到底了。
+  var pricingDrawnDays = 0;
+  // 用户 m15463：上一帧真正画的第一天（lib-4.js 切片后写进来）。标题那行日期按它写——
+  // 取数窗口是 28 天、图上只画得下 15 天，照取数窗口写会变成 11-01 ~ 11-25。
+  var pricingDrawnStartLabel = "";
+  function pricingWinSpan(){
+    return pricingDrawnDays > 0 ? pricingDrawnDays : pricingWinDays();
   }
   function pricingWinScrollable(){ return pricingTrendMode === "default"; }
   function pricingWinRange(){
@@ -1888,7 +1950,7 @@
     var end = pdParse(pricingWinEnd) || today;
     if(end > today) end = today;
     var first = new Date(today.getFullYear(), today.getMonth(), 1);
-    var minEnd = pdAdd(first, days - 1);
+    var minEnd = pdAdd(first, pricingWinSpan() - 1);
     if(minEnd > today) minEnd = today;
     if(end < minEnd) end = minEnd;
     var start = pdAdd(end, -(days - 1));

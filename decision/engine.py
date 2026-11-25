@@ -12,6 +12,7 @@ import copy
 import hashlib
 from html import unescape as _html_unescape
 from collections import deque
+from urllib.parse import urlsplit
 import inspect
 import json
 import random
@@ -221,8 +222,37 @@ _TEMPLATE_FALLBACK = {
 }
 
 
+def _tag_prompt_of(tag_set) -> Optional[str]:
+    """框架这一刻真正会给的标签清单（适配器 tag_set 里那份）。
+
+    用户 m08614：`core.tag.tag_registry` 只装插件自己注册的 tag，内置的
+    <text>/<at>/<reply> 这些在适配器的 tag_set 里，从注册表读永远是空的，
+    快照就记成了插件写死的四条兜底。hook 拿得到 tag_set，直接问它要。
+    """
+    if tag_set is None:
+        return None
+    try:
+        text = tag_set.to_prompt()
+    except Exception:
+        return None
+    return text if isinstance(text, str) else None
+
+
+def _tag_root_prompt_of(tag_set) -> Optional[str]:
+    """同上，<msg> 之外的控制标签；没有就是空串。"""
+    if tag_set is None:
+        return None
+    try:
+        root = tag_set.to_root_prompt()
+    except Exception:
+        return None
+    if not isinstance(root, str):
+        return None
+    return f"此外，你可以在<msg>标签外使用以下控制标签（与<msg>同级）：\n{root}" if root.strip() else ""
+
+
 def _framework_tag_prompt() -> Optional[str]:
-    """框架 assemble 阶段会填进 format 段的标签清单（同源：core.tag.tag_registry）。
+    """插件自己注册的 tag（core.tag.tag_registry），tag_set 拿不到时的次选。
 
     取不到就返回 None，调用方退回 _TEMPLATE_FALLBACK。
     """
@@ -245,28 +275,34 @@ def _framework_root_tag_prompt() -> Optional[str]:
     return f"此外，你可以在<msg>标签外使用以下控制标签（与<msg>同级）：\n{root}" if root else ""
 
 
-def _fill_late_template_kwargs(p) -> bool:
+def _fill_late_template_kwargs(p, tag_set=None) -> bool:
     """把框架稍后才填的模板变量先补上，返回是否补了东西。
 
     format 段的 {{ message_types }} / {{ root_tags }} 由框架在 ON_LLM_REQUEST
     之后才填（core/workflow/src/im/stages/assemble.py），hook 里提前渲染必然
     缺变量。这里按框架稍后会算出来的同一份清单先补上：快照和预览看到的就是
     真实请求那一份，框架稍后还会用同样的值覆盖一次。
+
+    用户 m08614：清单优先问 hook 传进来的 tag_set（框架 assemble 用的就是它），
+    拿不到才退回插件注册表，最后才是写死的兜底。
     """
     kw = getattr(p, "kwargs", None)
     if not isinstance(kw, dict):
         return False
     added = False
     if "message_types" not in kw:
-        text = _framework_tag_prompt()
+        text = _tag_prompt_of(tag_set)
+        if text is None:
+            text = _framework_tag_prompt()
         kw["message_types"] = text if (text or "").strip() else _TEMPLATE_FALLBACK["message_types"]
         added = True
     if "root_tags" not in kw:
-        text = _framework_root_tag_prompt()
+        text = _tag_root_prompt_of(tag_set)
+        if text is None:
+            text = _framework_root_tag_prompt()
         kw["root_tags"] = text if text is not None else _TEMPLATE_FALLBACK["root_tags"]
         added = True
     return added
-
 
 def emoji_repr(element) -> str:
     """把一个表情元素还原成框架历史里那种文字：[Emoji 汪汪 (ID: 277)]。
@@ -523,6 +559,17 @@ def _url_host(url: str) -> str:
         return str(url or "").split("://", 1)[-1].split("/", 1)[0][:80]
     except Exception:
         return ""
+
+
+def _url_for_log(url: str) -> str:
+    """日志里用的链接：只留 scheme://host/path，查询串（可能带 rkey）一律丢掉。"""
+    try:
+        parts = urlsplit(str(url or ""))
+    except Exception:
+        return ""
+    if not parts.scheme or not parts.netloc:
+        return ""
+    return ("%s://%s%s" % (parts.scheme, parts.netloc, parts.path))[:200]
 
 
 async def _fetch_media_bytes(url: str, timeout: float = 12.0) -> bytes:
@@ -1268,6 +1315,33 @@ def reply_line_of(message, lookup=None) -> str:
         return "[Reply ID: %s]" % rid
     return "[Reply %s]" % txt
 
+_NICK_EMPTY_RE = re.compile(
+    r"\[user_nickname:\s*,\s*(?:group_nickname:\s*([^,\]]*),\s*)?user_id:"
+)
+
+
+def _fill_empty_nickname(raw: str, name: str, sender: str) -> str:
+    """把框架原文里空着的 user_nickname 补上（用户 m15963 第 2 条）。
+
+    私聊消息宿主给的 message_str 是 `[user_nickname: , user_id: 512179630]`：
+    昵称位是空的（宿主 messages 表里 sender_name 就是空串，chat_sessions.title
+    也空），前端 whoOf 取不到名字，整条消息的发送者就显示成灰字 user。
+    这里用 sender_name_of 的结果补，取不到就退回 QQ 号，至少能看出是谁。
+    """
+    if not raw or "[user_nickname:" not in raw:
+        return raw
+    who = str(name or "").strip() or str(sender or "").strip()
+    if not who:
+        return raw
+
+    def _sub(m):
+        # 群名片在、昵称空：直接用群名片当昵称，别让同一个名字写两遍
+        use = str(m.group(1) or "").strip() or who
+        return "[user_nickname: %s, user_id:" % use
+
+    return _NICK_EMPTY_RE.sub(_sub, raw, count=1)
+
+
 def raw_line_of(message, text: str, sender: str, name: str, ts: float = 0.0, lookup=None) -> str:
     """拼一条「和框架记忆里长得一样」的消息行。
 
@@ -1278,6 +1352,8 @@ def raw_line_of(message, text: str, sender: str, name: str, ts: float = 0.0, loo
     raw = str(getattr(message, "message_str", "") or "").strip()
     if raw:
         raw = _fill_forward_shell(message, raw)
+        # 用户 m15963 第 2 条：私聊原文的昵称位是空的，补上再往下走
+        raw = _fill_empty_nickname(raw, name, sender)
         # v4.11（用户 m17596 第 4 条）：框架给的 message_str **不含引用那一段**
         # （实测 QQ 通道原文只到 "… | @冇似 派头林立是这样的"，[Reply ID …] 整节
         # 缺失），v4.02 拼的引用只挂在下面「自拼」分支里，所以真机上引用块从来没
@@ -1469,6 +1545,9 @@ class DecisionEngine:
         self._reply_fallback_until: dict[str, float] = {}
         # 用户 m08153：0 次重试时强制补的那一次直接走备用模型，用这个标记带过去。
         self._reply_force_fallback: dict[str, bool] = {}
+        # 用户 m06215：这一轮回复实际带的思考等级（按 sid 记），结算时写进记录。
+        # 空串 = 跟随模型自己的设置（没传 reasoning_effort）。
+        self._reply_effort: dict[str, str] = {}
         # 用户 m17492 图5/图6：别的插件的通知事件（is_notice）触发的这一轮不是聊天请求。
         # 请求侧按 (sid, event_id) 记一笔，结算时标成「工具回调」，不算空回复、不进统计。
         self._notice_rounds: dict[tuple[str, str], float] = {}
@@ -1652,7 +1731,7 @@ class DecisionEngine:
         这里只读不裁。裁切必须等真空闲，见 handle_final。
         """
         try:
-            await self._handle_llm_request(event, request)
+            await self._handle_llm_request(event, request, tag_set)
         except Exception:
             logger.exception(
                 "[multi-decision] 窗口钩子异常（已吞掉，本轮退回框架原生记忆）"
@@ -1883,6 +1962,33 @@ class DecisionEngine:
             and self._active_rounds.get(sid) == eid and (sid, eid) in self._settled_rounds
             and (sid, eid) in self._round_errors)
 
+    def late_render_snapshot(self, event) -> None:
+        """用户 m24756：模型回话时把这一轮的 system 段再渲染一遍写回快照。
+
+        框架在 ON_LLM_REQUEST 之后才往 format 段填 message_types / root_tags，
+        钩子那一刻渲染出来的快照会缺这一截。Prompt.to_string() 不缓存，所以
+        响应时对同一批对象再渲染一次就能拿到模型真正看到的文本。
+        """
+        log = getattr(self, "request_log", None)
+        if log is None:
+            return
+        sid = ""
+        try:
+            sid = getattr(event, "sid", "") or event.session.sid
+        except Exception:
+            sid = getattr(event, "sid", "") or ""
+        sid = normalize_sid(sid)
+        if not sid:
+            return
+        log.late_render(sid, str(getattr(event, "event_id", "") or ""))
+        # 用户 m09537：排在咱们后面跑的插件，注入的段钩子那一刻还看不见；
+        # 响应时 request 已经是最终形态，补扫一次，卡片下一轮就能出现。
+        layouts = getattr(getattr(self, "plugin", None), "prompt_layouts", None)
+        if layouts is not None:
+            try:
+                layouts.note_plugin_segs_late(sid)
+            except Exception:
+                logger.debug("[multi-decision] 响应时补扫插件注入段失败（已吞掉）", exc_info=True)
     async def guard_reply_final(self, event, result) -> None:
         if self._accepted_reply_failure(event):
             steps = list(getattr(result, "step_results", None) or [])
@@ -1964,7 +2070,7 @@ class DecisionEngine:
             runner.cancel()
         await self._settle_input_locked(sid, flow, trigger="watchdog")
 
-    async def _handle_llm_request(self, event, request) -> None:
+    async def _handle_llm_request(self, event, request, tag_set=None) -> None:
         plugin = self.plugin
         if not plugin.enabled or request is None:
             return
@@ -2115,7 +2221,7 @@ class DecisionEngine:
         except Exception:
             logger.exception(f"[multi-decision] {sid} 原生图片引用检查异常（已吞掉）")
 
-        self._repair_render_failures(request)
+        self._repair_render_failures(request, tag_set)
 
         self._hoist_identity(request, sid)
 
@@ -2234,7 +2340,7 @@ class DecisionEngine:
         # Keep the identity captured before preparation; tool steps share its deadline.
         await self._check_reply_round(request._mdp_reply_round)
 
-    def _repair_render_failures(self, request) -> None:
+    def _repair_render_failures(self, request, tag_set=None) -> None:
         """渲染失败的 Prompt 降级成原文，别让整段 system 消失。
 
         assemble_prompt 是 "".join(p.to_string() ...)，任何一个 Prompt 抛异常
@@ -2256,7 +2362,7 @@ class DecisionEngine:
                 continue
             except Exception:
                 pass
-            if _fill_late_template_kwargs(p):
+            if _fill_late_template_kwargs(p, tag_set):
                 try:
                     p.to_string()
                     continue
@@ -3388,6 +3494,8 @@ class DecisionEngine:
                 "reply_model": self._reply_model_name(event),
                 "reply_provider": self._reply_provider_name(event),
                 "reply_channel": self._reply_channel_name(sid),
+                # 用户 m06215：请求这一刻的思考等级也一起记下（_reply_model_clients 已经算好）。
+                "reply_effort": str(self._reply_effort.get(sid, "") or ""),
             }
         except Exception:
             logger.debug("[multi-decision] 记回复模型/渠道失败（已忽略）", exc_info=True)
@@ -3404,6 +3512,9 @@ class DecisionEngine:
         model = str((meta or {}).get("reply_model") or "")
         provider = str((meta or {}).get("reply_provider") or "")
         channel = str((meta or {}).get("reply_channel") or "")
+        effort = str((meta or {}).get("reply_effort") or "")
+        if not effort:
+            effort = str(self._reply_effort.get(sid, "") or "")
         if not model:
             model = self._reply_model_name(event)
         if not provider:
@@ -3416,8 +3527,10 @@ class DecisionEngine:
                 "reply_model": model,
                 "reply_provider": provider,
                 "reply_channel": channel,
+                "reply_effort": str(self._reply_effort.get(sid, "") or ""),
             }
-        return {"reply_model": model, "reply_provider": provider, "reply_channel": channel}
+        return {"reply_model": model, "reply_provider": provider,
+                "reply_channel": channel, "reply_effort": effort}
 
     def _reply_text_of(self, final_result, limit: int = 160) -> str:
         """这一轮真正发出去的回复正文（v4.85，用户 m10425 第 8 条）。
@@ -3563,6 +3676,14 @@ class DecisionEngine:
                     )
             except Exception:
                 pass
+            # 用户 m15963 第 1 条：私聊默认是关的（新会话自动关），关着的时候
+            # 消息以前整条丢掉，用户点开开关后窗口还是空的，要等下一条才看得到。
+            # 私聊改成「静音但照收」：只进窗口缓存，不计数、不触发、不决策。
+            if _sid0.startswith("dm:"):
+                try:
+                    await self._cache_muted_message(event, _sid0)
+                except Exception:
+                    logger.exception("[multi-decision] 静音私聊缓存消息失败（已忽略）")
             return
 
         # default-chat 被重载会把 _terminating 复位，这里顺手自愈
@@ -3672,6 +3793,61 @@ class DecisionEngine:
                 await self._drain_input_locked(sid, flow)
             return
         await self._admit_message(event, sid, st, now, flow)
+
+    async def _cache_muted_message(self, event, sid: str) -> None:
+        """静音的私聊也把消息收进窗口（用户 m15963 第 1 条）。
+
+        私聊新会话默认是关的，关着的时候以前整条丢掉：用户点开开关，窗口还是
+        空的，要等下一条消息才看得到。这里只做「收进窗口」这一件事——不计数、
+        不触发、不决策，开关打开后历史就在那儿。
+        """
+        if self.window is None:
+            return
+        message = getattr(event, "message", None)
+        if message is None:
+            return
+        now = time.time()
+        text = extract_text(message)
+        media = media_kind(message)
+        sender = sender_id_of(message)
+        name = sender_name_of(message)
+        media_refs = []
+        try:
+            media_refs = await self._cache_media(message, sid)
+            if not media_refs:
+                # 与 _admit_message 同一条兜底：归档进 session_media/ 的图要按
+                # message_id 回消息库捞一次，否则静音期间收的图全是空壳。
+                mid = ""
+                for attr in ("message_id", "msg_id", "id"):
+                    try:
+                        mid = str(getattr(message, attr, "") or "").strip()
+                    except Exception:
+                        mid = ""
+                    if mid:
+                        break
+                if mid:
+                    media_refs = _media_from_db(mid) or []
+        except Exception:
+            logger.debug("[multi-decision] 静音私聊缓存图片失败（已忽略）", exc_info=True)
+        try:
+            raw_line = raw_line_of(message, text, sender, name, now,
+                                   lookup=lambda mid: _quoted_text(self.window, sid, mid))
+            item = self.window.push_pending(
+                sid, sender, name, text, media, now, raw_line,
+                media_refs=media_refs, files=file_refs_of(message),
+            )
+        except Exception:
+            logger.exception("[multi-decision] 静音私聊记窗口消息失败（已忽略）")
+            return
+        if not item:
+            return
+        # 立刻并进窗口：记录页读的是窗口历史，挂在待发里要等下一轮才看得见。
+        # 并完顺手按同一套阈值裁一次，静音很久的私聊才不会无限长。
+        try:
+            self.window.fold_pending(sid)
+            self.window.maybe_trim(sid, "idle_check")
+        except Exception:
+            logger.debug("[multi-decision] 静音私聊折叠待发失败（已忽略）", exc_info=True)
 
     def _note_skipped(self, sid: str, message, text: str, media: str, now: float) -> None:
         """记一条「没进上下文」的消息，页面单独一组显示（用户 m5411）。
@@ -4022,10 +4198,14 @@ class DecisionEngine:
             )
             return await store_session_media(wrapped, self._raw_sids.get(sid) or sid, mid)
         except Exception as exc:
+            # 用户 m18331 图2：以前只记域名和异常类名，事后查不动是哪条链接、
+            # 对方回了什么。这里补上状态码和去掉查询串的链接。
+            _status = getattr(getattr(exc, "response", None), "status_code", None)
             logger.info(
-                "[multi-decision] 图片下载失败（%s）：%s",
+                "[multi-decision] 图片下载失败（%s）：%s %s",
                 _url_host(url),
-                type(exc).__name__,
+                ("HTTP %s" % _status) if _status is not None else type(exc).__name__,
+                _url_for_log(url),
             )
             return None
     def _mark(self, sid: str, item, mark: str) -> None:
@@ -5991,6 +6171,8 @@ class DecisionEngine:
         现在主模型失败就如实报主模型的错，由插件自己的重试累计失败次数，
         到 2 次才换备用。取不到客户端就返回空，让框架按默认模型走。
         """
+        # 用户 m06215：先清空，取不到模型时记录页就显示「—」，别留上一轮的值。
+        self._reply_effort[sid] = ""
         primary = str(self._c("reply_model", sid) or "").strip()
         fallback = str(self._c("reply_fallback_model", sid) or "").strip()
         if not primary and not fallback:
@@ -6031,6 +6213,7 @@ class DecisionEngine:
                 effort = (self._c("reply_fallback_reasoning_effort", sid)
                           if fallback and key == fallback
                           else self._c("reply_reasoning_effort", sid))
+                self._reply_effort[sid] = str(effort or "").strip().lower()
                 clients.append(_effort_client(client, effort))
         return clients
 
@@ -6679,6 +6862,9 @@ class DecisionEngine:
             "raw": str(got.get("raw") or ""),
             "model": str(got.get("model") or ""),
             "via": str(got.get("via") or ""),
+            # 用户 m06215：决策这一轮真正下发的思考等级（空 = 跟随模型自己的设置）。
+            # 少了这一行，快照里 decision_effort 永远是空串，记录页只能显示「跟随」。
+            "effort": str(got.get("effort") or ""),
             "attempts": int(got.get("attempts") or 0),
             "elapsed": float(got.get("elapsed") or 0.0),
             "tools_used": list(got.get("tools_used") or []),

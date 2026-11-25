@@ -112,6 +112,8 @@
         s.layout = ppClone(d.layout); s.revision = d.revision; s.inherited = !!d.inherited;
         s.defNotice = d.default_notice || null;
         ppAdoptSkeletons(s);
+        // 用户第 ⑥ 条：布局换了以后，本机记的折叠 id 只认还在的那些，删掉的顺手清掉。
+        ppFoldPrune(s);
         s.dirty = false; s.preview = d.preview || null; s.notice = "";
       }else if(d.revision !== s.revision){
         // 用户 m14457 图1：决策/回复两个 tab 各持一份 revision，另一边保存过之后，
@@ -179,6 +181,16 @@
   function ppModuleAction(s, action, index, selected, zone){
     if(!s.loaded) return;
     var list = s.layout.modules, module = list[index];
+    // 用户 m09986 第 8 条：折叠 / 展开一张卡——只是看的时候收起来，不动布局、不标脏。
+    if(action === "fold"){
+      s.collapsed = s.collapsed || {};
+      var fid = String((module && module.id) || index);
+      if(s.collapsed[fid]) delete s.collapsed[fid]; else s.collapsed[fid] = 1;
+      // 用户第 ⑥ 条：折叠状态记进 localStorage，刷新页面还照旧收着。
+      ppFoldSave(s);
+      ppRenderEditor(s);
+      return;
+    }
     if(action === "add"){
       var pair;
       try{ pair = JSON.parse(selected || '["text",""]'); }catch(e){ return; }
@@ -193,7 +205,7 @@
         var cat = list.length;
         for(var ci = 0; ci < list.length; ci++){
           var ct = String((list[ci] || {}).type || "");
-          if(ct === "realtime_marker" || ct === "dynamic" || ct === "system_dynamic"){ cat = ci; break; }
+          if(ct === "realtime_marker" || ct === "dynamic" || ct === "system_dynamic" || ct === "module"){ cat = ci; break; }
         }
         list.splice(cat, 0, cm);
         ppChanged(s,true); return;
@@ -215,20 +227,23 @@
       var at = list.length;
       for(var zi = 0; zi < list.length; zi++){
         var zt = String((list[zi] || {}).type || "");
-        if(zt === "realtime_marker" || zt === "dynamic" || zt === "system_dynamic"){ at = zi; break; }
+        if(zt === "realtime_marker" || zt === "dynamic" || zt === "system_dynamic" || zt === "module"){ at = zi; break; }
       }
       list.splice(at, 0, module);
     }else if(action === "remove" && module){
       // 用户 m02159 图3：人格 / 身份 / 实时窗口是固定段，只能放空或换人格，不能整段删掉。
       if(module.type === "persona" || module.type === "identity" || module.type === "realtime_marker"
-         || module.type === "plugin_memory" || module.type === "plugin_memory_ctx") return;
+         || module.type === "plugin_memory" || module.type === "plugin_memory_ctx" || module.type === "module"
+         || module.type === "plugin_seg") return;
       list.splice(index,1);
+      // 用户第 ⑥ 条：这一段没了，本机记的折叠状态里也别再留着它的 id。
+      ppFoldPrune(s);
     }
     else if(action === "up" && module && index > 0){
       // 用户 m26048：动态段（强化格式遵守 / 记忆插件·本轮上下文）注入的是聊天记录末尾，
       // 不是系统提示词，所以只能在「实时窗口」下面挪，不能挪到它上面去。
       var upType = String(module.type || "");
-      if((upType === "dynamic" || upType === "plugin_memory_ctx")
+      if((upType === "dynamic" || upType === "plugin_memory_ctx" || upType === "module")
          && String((list[index-1] || {}).type || "") === "realtime_marker") return;
       list.splice(index,1); list.splice(index-1,0,module);
     }
@@ -241,7 +256,8 @@
       // 用户 m27528 第 5 条：模块也能复制一份——副本排在原段后面，名字带「（副本）」后缀
       // （来源下拉里一眼认得出），正文照抄；动副本不碰原段。
       if(module.type === "persona" || module.type === "identity" || module.type === "realtime_marker"
-         || module.type === "plugin_memory" || module.type === "plugin_memory_ctx") return;
+         || module.type === "plugin_memory" || module.type === "plugin_memory_ctx" || module.type === "module"
+         || module.type === "plugin_seg") return;
       var cp = {};
       Object.keys(module).forEach(function(k){ cp[k] = module[k]; });
       cp.id = "pm-" + Date.now().toString(36) + "-" + (++ppModuleCounter);
@@ -283,7 +299,16 @@
     });
   }
   function ppReferencesSaved(sid, epoch){
-    if(!epoch) return;
+    // 用户 m22158：改「Agent循环数 / 单轮工具上限」这类数字不走工具勾选那条路，
+    // 以前只有勾工具（PP_REF_DIRTY 自增）才会重排预览，数字改了右边一直显示旧值。
+    // 现在配置一存完就让当前这一页的预览按新值重排一次。
+    if(!epoch){
+      if(curPage === "prompt" && ppPane !== "templates"){
+        var cur = ppState(ppPane);
+        if(cur && cur.loaded) ppPreview(cur);
+      }
+      return;
+    }
     if(PP_REF_DIRTY[sid] === epoch) delete PP_REF_DIRTY[sid];
     loadDecisionOptions();
     loadJevOptions();
@@ -620,9 +645,13 @@
   // 用户 m06193：用户黑名单——按 QQ 号整条剔除。窗口页把鼠标放到名字上也能拉黑。
   // 用户 m07418：总表从四列表格改成页内胶囊——一人一枚，× 就是解黑，末尾「+」手动填 QQ 拉黑。
   // 拉黑只影响请求上下文：窗口页照常显示（默认折叠），拉黑之前的历史也照留。
-  function renderSettings(){
+  // 性能：整页表单 800+ 节点，首帧缓存和 loadSettings 回包都会重画一遍。
+  // 同一份 HTML 不重复写 innerHTML（跟首页 renderCtxList 的 lastListSig 一个思路）。
+  // 注意：跳过写入时后面的绑定逻辑照跑——它们都幂等，也不依赖「DOM 每次都是新的」。
+  var lastSettingsSig = "";
+  function renderSettings(force){
     var box = document.getElementById("settings");
-    if(!schemaCache){ box.innerHTML = '<div class="empty">读取配置中…</div>'; return; }
+    if(!schemaCache){ lastSettingsSig = ""; box.innerHTML = '<div class="empty">读取配置中…</div>'; return; }
     var used = {};
     // trigger_mode 由三个模式开关承载（不是普通行），标成已用，别被再渲染一份
     used["trigger_mode"] = 1;
@@ -757,6 +786,9 @@
         rows += adminRowsHtml();
       }
       if(g.custom === "pricing"){ rows += pricingBlockHtml(); }
+      // 用户本轮第 4 条：插件命名——先按插件自己报的名字自动命名，想改的在这里单独覆盖。
+      // 后端接口没上线时整块保持 hidden，不挡别的设置项。
+      if(g.custom === "probe"){ rows += probeNamesBlockHtml(); }
       // v3.54（用户本轮第 3 条）：配额两行——开关 + 数字框 + 一句说明，见 quotaRowsHtml。
       if(g.custom === "quota"){ rows += quotaRowsHtml(); }
       // 用户 m17752：显示条数三行（回复记录 / 决策记录 / 窗口快照），每行右侧两个数字框。
@@ -869,7 +901,10 @@
     // v3.56（用户本轮第 7 条）：「其他」页签撤掉，schema 里没分组的键不再兜底渲染——
     // 老键（observe_* / quota_* / trace_enabled 等）早就从 schema 删了，这一手只会凭空长出第五个页签。
     // 上面那一串 used 标记照旧留着：同一个键被两个分组画两遍才是真问题。
-    box.innerHTML = html;
+    if(force || html !== lastSettingsSig){
+      box.innerHTML = html;
+      lastSettingsSig = html;
+    }
     // v3.92（用户 m06951 第 5 条）：提示词页的预览自动跑，不用点按钮。
     bindDecisionPage();
     setTimeout(ppAutoPreview, 0);
@@ -898,7 +933,131 @@
     bindBandBox();
     bindCacheClear();
     mountCacheBlock();   // v3.62：装「作用范围」选择器 + 按当前作用域重画缓存表（真值等 loadCacheStats 回来再刷）
+    mountProbeNames();   // 用户本轮第 4 条：装「插件命名」块（接口没上线就整块不显示）
     renderTabs();
+  }
+
+  // 用户本轮第 4 条：插件命名——先按插件自己报的名字自动命名（probe-plugins 的 auto_name），
+  // 想改的在「统计」组里单独覆盖（probe-names 的 override），留空就是恢复自动。
+  // 后端接口没上线时整块不显示：请求失败就保持 hidden，不报错、不挡别的设置项。
+  var probeNamesData = null, probeNamesLoading = false, probeNamesAt = 0;
+  var probeNamesMsg = "", probeNamesMsgTone = "";
+
+  function probeNamesBlockHtml(){
+    return "<div class='pm-probe' id='pm-probe-names' hidden></div>";
+  }
+
+  function probeNamesRowsHtml(){
+    var list = (probeNamesData && probeNamesData.plugins) || [];
+    var out = "<div class='pm-probe-hd'><span class='pm-probe-t'>插件命名</span>" +
+      "<span class='pm-probe-hint'>默认按插件自己报的名字自动命名；想改就在右边填，留空恢复自动。</span></div>";
+    out += "<div class='pm-probe-list'>";
+    list.forEach(function(p){
+      var pid = String((p && p.plugin_id) || "");
+      var auto = String((p && p.auto_name) || "");
+      var ov = String((p && p.override) || "");
+      var pname = String((p && p.plugin_name) || "");
+      var kinds = (p && p.kinds && p.kinds.length) ? (" · " + p.kinds.join(" / ")) : "";
+      out += "<div class='pm-probe-row'>" +
+        "<span class='pm-probe-id' title='" + esc((pname || pid) + kinds) + "'>" + esc(pid) + "</span>" +
+        "<input class='pm-probe-in' type='text' data-pid='" + esc(pid) + "' placeholder='" + esc(auto) + "' value='" + esc(ov) + "'>" +
+        "<button class='pm-probe-reset' type='button' data-pid='" + esc(pid) + "'" + (ov ? "" : " disabled") + ">恢复自动</button>" +
+        "</div>";
+    });
+    out += "</div>";
+    out += "<div class='pm-probe-msg" + (probeNamesMsgTone ? (" " + probeNamesMsgTone) : "") + "'>" + esc(probeNamesMsg) + "</div>";
+    return out;
+  }
+
+  function paintProbeNames(){
+    var box = document.getElementById("pm-probe-names");
+    if(!box) return;
+    var list = (probeNamesData && probeNamesData.plugins) || [];
+    if(!list.length){ box.hidden = true; box.innerHTML = ""; return; }
+    box.innerHTML = probeNamesRowsHtml();
+    box.hidden = false;
+    bindProbeNames();
+  }
+
+  function bindProbeNames(){
+    var box = document.getElementById("pm-probe-names");
+    if(!box || !box.querySelectorAll) return;
+    Array.prototype.forEach.call(box.querySelectorAll(".pm-probe-in"), function(inp){
+      inp.addEventListener("change", function(){
+        var pid = inp.getAttribute("data-pid") || "";
+        if(pid) probeSaveName(pid, String(inp.value || ""));
+      });
+    });
+    Array.prototype.forEach.call(box.querySelectorAll(".pm-probe-reset"), function(btn){
+      btn.addEventListener("click", function(){
+        var pid = btn.getAttribute("data-pid") || "";
+        if(!pid) return;
+        var inp = box.querySelector ? box.querySelector(".pm-probe-in[data-pid='" + pid + "']") : null;
+        if(inp) inp.value = "";
+        probeSaveName(pid, "");
+      });
+    });
+  }
+
+  function setProbeMsg(text, tone){
+    probeNamesMsg = String(text || "");
+    probeNamesMsgTone = String(tone || "");
+    var box = document.getElementById("pm-probe-names");
+    var el = (box && box.querySelector) ? box.querySelector(".pm-probe-msg") : null;
+    if(!el) return;
+    el.textContent = probeNamesMsg;
+    el.className = "pm-probe-msg" + (probeNamesMsgTone ? (" " + probeNamesMsgTone) : "");
+  }
+
+  function loadProbeNames(){
+    if(probeNamesLoading) return;
+    probeNamesLoading = true;
+    probeNamesAt = Date.now();
+    fetch(API + "/probe-plugins", { credentials: "same-origin" })
+      .then(function(r){ if(!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function(d){
+        probeNamesLoading = false;
+        var list = (d && d.plugins) || [];
+        probeNamesData = (d && d.ok !== false && list.length) ? { plugins: list } : null;
+        paintProbeNames();
+      })
+      .catch(function(){
+        probeNamesLoading = false;
+        probeNamesData = null;
+        paintProbeNames();
+      });
+  }
+
+  function probeSaveName(pid, name){
+    var names = {};
+    names[pid] = String(name || "").trim();
+    setProbeMsg("保存中…", "");
+    fetch(API + "/probe-names", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: names })
+    })
+      .then(function(r){ if(!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function(d){
+        if(d && d.ok === false) throw new Error("save rejected");
+        setProbeMsg("已保存，价目页下次刷新就用新名字。", "ok");
+        if(typeof pricingForgetNames === "function") pricingForgetNames();
+        probeNamesData = null;
+        probeNamesLoading = false;
+        probeNamesAt = 0;
+        loadProbeNames();
+      })
+      .catch(function(){
+        setProbeMsg("保存失败，稍后再试。", "bad");
+      });
+  }
+
+  function mountProbeNames(){
+    if(probeNamesData){ paintProbeNames(); return; }
+    if(probeNamesLoading) return;
+    if(probeNamesAt && Date.now() - probeNamesAt < 30000) return;
+    loadProbeNames();
   }
 
   // 单群（独立配置）页：把本群真正写过的行标出来（用户 m02580：与全局不同的选项要淡橙底）。
@@ -1157,6 +1316,7 @@
       setTimeout(checkConfig, 0);
     }).catch(function(e){
       if(requestedScopeVersion !== saveScopeVersion || requestedEditVersion !== saveEditVersion || requestedSid !== String(scopeSid || "") || dirty) return;
+      lastSettingsSig = "";   // 这行绕过了 renderSettings，签名要作废，否则下次同 HTML 会被跳过
       document.getElementById("settings").innerHTML = '<div class="empty">读取配置失败：' + esc(e.message) + "</div>";
     });
   }
@@ -1212,7 +1372,7 @@
       if(!pageValSame(before, def)) changed.push({ k: k, from: before, to: def });
     });
     if(!done) return { done: 0, changed: [], saved: null };
-    renderSettings();   // 表单按新值重画，免得控件还显示旧值
+    renderSettings(true);   // 表单按新值重画，免得控件还显示旧值（用户可能刚在输入框里改过，必须强制写）
     dirty = true;
     var saved = saveNow();   // 同其它离散编辑一起登记版本，再走原自动保存
     // 保存完按后端真值再画一次：等于全局值的项后端不会存，别在表格上留一个假的「单独」胶囊
@@ -1982,7 +2142,7 @@
                   d.configuration.bot_config.image_compression;
         if(ic2) coreImgCache = ic2;
         coreImgTried = true;
-        renderSettings();
+        renderSettings(true);   // 回滚界面：控件可能刚被用户点过，DOM 与缓存不同，必须强制写
       }).catch(function(){});
     });
   }
@@ -2079,6 +2239,30 @@
     return pricingInFlight;
   }
 
+  // 用户 m14599：价目表「请求」列的几行字——0 的不写，别的插件调过的补「插件名 次数」。
+  function puLinesHtml(r){
+    var out = [];
+    var calls = Number(r && r.calls) || 0;
+    if(calls > 0) out.push("<span class='pl'>请求 " + esc(fmtNum(calls)) + "</span>");
+    var dec = Number(r && r.decision_rounds) || 0;
+    if(dec > 0) out.push("<span class='pl'>决策 " + esc(fmtNum(dec)) + "</span>");
+    var rep = Number(r && r.reply_rounds) || 0;
+    if(rep > 0) out.push("<span class='pl'>回复 " + esc(fmtNum(rep)) + "</span>");
+    var plugs = (r && r.plugins) || [];
+    for(var i = 0; i < plugs.length; i++){
+      var p = plugs[i] || {};
+      var n = Number(p.calls) || 0;
+      if(n <= 0) continue;
+      var nm = String(p.plugin_name || p.plugin_id || "");
+      if(!nm) continue;
+      out.push("<span class='pl pplug' title='" + esc(String(p.plugin_id || nm)) + "'>" +
+        esc(nm) + " " + esc(fmtNum(n)) + "</span>");
+    }
+    // 一行都没有（价目表里存过价、这段时间没调用过）就写个短横，别留个空格子。
+    if(!out.length) return "<span class='pl pdim'>—</span>";
+    return out.join("");
+  }
+
   function paintPricing(){
     var box = document.getElementById("pricing-box");
     if(!box) return;
@@ -2125,9 +2309,9 @@
             esc(d.provider !== undefined ? d.provider : (r.provider || "")) + "'></span></td>" +
         pricePairHtml("in", inV, p.in) + pricePairHtml("cache", cacheV, p.cache) + pricePairHtml("out", outV, p.out) +
         // 用户 m00443：请求 / 决策 / 回复各一行，token 拆成入 / 缓存 / 出三行，再加一列缓存命中率。
-        "<td class='pu'><span class='puc'><span class='pl'>请求 " + esc(fmtNum(r.calls)) + "</span>" +
-          "<span class='pl'>决策 " + esc(fmtNum(r.decision_rounds)) + "</span>" +
-          "<span class='pl'>回复 " + esc(fmtNum(r.reply_rounds)) + "</span></span></td>" +
+        // 用户 m14599：0 的不写（以前每行都挂「决策 0 / 回复 0」，一列全是 0 看不出重点）；
+        // 别的插件调过这个模型的，按「插件名 次数」再补几行，名字跟着设置页的改名走。
+        "<td class='pu'><span class='puc'>" + puLinesHtml(r) + "</span></td>" +
         "<td class='pt'><span class='puc'>" +
           "<span class='pl' title='输入 " + esc(fmtNum(unc)) + "（未命中）'><i class='plt plt-in'>输入</i> " + esc(fmtBig(unc)) + "</span>" +
           "<span class='pl' title='缓存 " + esc(fmtNum(r.cached)) + "'><i class='plt plt-hit'>命中</i> " + esc(fmtBig(r.cached)) + "</span>" +
@@ -2335,13 +2519,19 @@
     // 用户 m29947：方向反过来（往下滚 = 往后一天）；只有指针落在左右两根轴之间才翻图，
     // 轴外面滚的是整页，不拦。
     // 用户 m09125：滚轮一下子拉满时，以前每个 wheel 事件立刻翻一天、立刻请求，
-    // 视觉上直接闪到最左/最右。改成排队：滚几格排几格，每格都要等自己的动画走完
-    // （PRICING_PAN_STEP_MS）再走下一格；慢慢滚还是一格一格跟手。
-    var PRICING_PAN_STEP_MS = 200, PRICING_WHEEL_UNIT = 100;
+    // 视觉上直接闪到最左/最右。改成排队：滚几格排几格。
+    // 用户 m17464：一次滚两格要一口气走完，中间不能停一下再走——所以攒格窗口
+    // （PRICING_PAN_BATCH_MS）内的滚轮先排队，窗口到了再一次性消费整队；
+    // 用户 m18000：一批走完要等这一批的滑动动画真正结束再放下一批，不然下一批会在半路打断上一批。
+    var PRICING_PAN_STEP_MS = 0, PRICING_WHEEL_UNIT = 100;
+    var PRICING_PAN_BATCH_MS = 50, PRICING_PAN_MAX_STEPS = 4;
+    var pricingPanBatchTimer = 0;
     // 用户 m09563：窗口已经到头（默认窗口的右端就是今天）时，滚轮再往下翻不动；
     // 以前照样 preventDefault，页面不滚、图也不翻，手感像卡住再闪一下。到头就放行，让整页照常滚。
     function pricingPanClamp(end, dir){
-      var today = pdToday(), days = pricingWinDays();
+      // 用户 m15463：一屏画几天由实际数据决定（lib-3.js 的 pricingWinSpan），
+      // 按取数窗口算会以为能放 28 天，往回翻一格就到底了。
+      var today = pdToday(), days = pricingWinSpan();
       var minEnd = pdAdd(new Date(today.getFullYear(), today.getMonth(), 1), days - 1);
       if(minEnd > today) minEnd = today;
       var next = pdAdd(end, dir);
@@ -2354,7 +2544,7 @@
       var r = pricingWinRange();
       var end = pdParse(r.end) || pdToday();
       var queued = pricingPanClamp(end, pricingPanQueue || 0);
-      var today = pdToday(), days = pricingWinDays();
+      var today = pdToday(), days = pricingWinSpan();
       var minEnd = pdAdd(new Date(today.getFullYear(), today.getMonth(), 1), days - 1);
       if(minEnd > today) minEnd = today;
       var left = dir > 0 ? pdDays(today, queued) : pdDays(queued, minEnd);
@@ -2366,11 +2556,20 @@
       var dir = pricingPanQueue > 0 ? 1 : -1;
       var r = pricingWinRange();
       var end = pdParse(r.end);
-      var next = pricingPanClamp(end, dir);
-      if(pdDays(next, end) === 0){ pricingPanQueue = 0; return; }
-      pricingPanQueue -= dir;
+      // 用户 m17464：队列里攒了几格就一次走几格（上限 PRICING_PAN_MAX_STEPS，
+      // 连滚十几格也不会整张图横扫过去），中间不再一格一格停。
+      var want = Math.min(Math.abs(pricingPanQueue), PRICING_PAN_MAX_STEPS);
+      var next = end, moved = 0;
+      while(moved < want){
+        var cand = pricingPanClamp(next, dir);
+        if(pdDays(cand, next) === 0) break;
+        next = cand;
+        moved += 1;
+      }
+      if(!moved){ pricingPanQueue = 0; return; }
+      pricingPanQueue -= dir * moved;
       // 用户 m30335：连着滚几格就记几格，平移距离按格数算。
-      pricingPanDays += dir;
+      pricingPanDays += dir * moved;
       pricingAnimDir = dir;
       pricingWinEnd = pdFmt(next);
       // 用户 m05422：以前是 45ms 防抖——连着滚的时候一次都不重画，停手才跳一格，
@@ -2380,7 +2579,9 @@
       pricingWinTimer = 0;
       pricingPanBusy = true;
       loadPricingTrend(pricingTrendMode, true).then(function(){
-        setTimeout(function(){ pricingPanBusy = false; pricingPanStep(); }, PRICING_PAN_STEP_MS);
+        // 用户 m18000：等这一批的滑动动画走完再放开（pricingPanDurMs 是这一帧算出来的时长）。
+        var wait = Math.max(PRICING_PAN_STEP_MS, (pricingPanDurMs || 0) + 30);
+        setTimeout(function(){ pricingPanBusy = false; pricingPanStep(); }, wait);
       });
     }
     if(tcharts) tcharts.onwheel = function(ev){
@@ -2416,7 +2617,11 @@
       if(n > avail){ n = avail; pricingWheelAcc = 0; }
       else pricingWheelAcc -= dir * n * PRICING_WHEEL_UNIT;
       pricingPanQueue += dir * n;
-      pricingPanStep();
+      // 用户 m17464：先攒一小会儿（PRICING_PAN_BATCH_MS），把一次滚动的几格并成一段动画；
+      // 正在走的那一批不受影响，滚轮只往队列里加，走完立刻接上。
+      if(pricingPanBusy) return;
+      clearTimeout(pricingPanBatchTimer);
+      pricingPanBatchTimer = setTimeout(function(){ pricingPanBatchTimer = 0; pricingPanStep(); }, PRICING_PAN_BATCH_MS);
     };
   }
 

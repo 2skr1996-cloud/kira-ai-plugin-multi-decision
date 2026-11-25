@@ -5,15 +5,17 @@
   // 用户 m1337：工具条单独抽出来，直接画进卡头（pp-left-head）。以前是先画进卡片、再整块搬到卡头，
   // 卡片里那版按钮是 26px、卡头里是 22px，慢一点的机器上中间那一帧会被画出来，看着就是「刷新一瞬间按钮放大」。
   function ppToolbarHtml(s){
-    if(!s.loaded) return "";
+    // 用户 m03889 图4：以前没读完就整条不画，从首页切回设置页会先空一排、过两秒才长出来。
+    // 现在按钮先画出来（读之前是灰的），状态位写「读取中…」，读完再由 ppRenderEditor 重画。
+    var busy = !s.loaded;
     return "<div class='pm-toolbar'>" +
       // 用户 m05093：撤掉「编辑方式」下拉，提示词一律按模块编排；老稿子（mode=text）仍按单段文本显示，见下面的 textMode 分支。
       // 2026-11-08（J）：底下那排按钮只留一个「恢复默认」，放在工具条最左边。
-      ppButton(s,"inherit",s.sid ? "恢复跟随全局" : "恢复默认",undefined,s.saving) +
+      ppButton(s,"inherit",s.sid ? "恢复跟随全局" : "恢复默认",undefined,busy || s.saving) +
       // 用户 m3096 追加：模型卡的折叠开关放这儿，卡片顶上不再单独占一行。
       mcToggleBtn(s.kind) +
-      "<span class='pm-state' id='pp-state-" + s.kind + "' role='status' aria-live='polite'></span>" +
-      ppButton(s,"save",s.saving ? "保存中…" : "保存此提示词",undefined,s.saving || !s.dirty) + "</div>";
+      "<span class='pm-state' id='pp-state-" + s.kind + "' role='status' aria-live='polite'>" + (busy ? "读取中…" : "") + "</span>" +
+      ppButton(s,"save",s.saving ? "保存中…" : "保存此提示词",undefined,busy || s.saving || !s.dirty) + "</div>";
   }
   function ppEditorInner(s, noBar){
     if(!s.loaded){
@@ -117,6 +119,7 @@
     var node = document.getElementById("pp-state-" + s.kind);
     var bits = [s.sid ? "当前会话独立编排" : "全局编排"];
     if(s.loaded) bits.push(s.dirty ? "未保存草稿" : (s.inherited ? "跟随全局 / 自动默认" : "已保存"));
+    else bits.push("读取中…");
     if(s.saving) bits.push("保存中（仍可继续编辑）");
     if(s.error) bits.push(s.error);
     if(s.notice) bits.push(s.notice);
@@ -648,6 +651,8 @@
       .then(function(d){
         if(!d || !d.ok) return;
         DOPT = d;
+        // 用户 m03889 图4：清单存一份到 sessionStorage，下次从首页切回来首帧就有真名字。
+        cachePut("dopt", d);
         dcRefresh();
       })
       .catch(function(){ /* 拿不到就按空清单画，不影响别的页 */ });

@@ -65,7 +65,11 @@
     // 签名里必须带上「当前选中会话」和「别名表」：切会话、改名的时候
     // ctxSessions 一个字都没变，只比数据会直接早退，active 高亮和改后的名字
     // 永远落不到 DOM（审查 bug）
-    var listSig = JSON.stringify([ctxSid, aliases, ctxSessions, Object.keys(foldedSids).sort(), Object.keys(foldedGroups).sort()]);
+    // ① 签名里剔掉 busy_seconds / last_mark_ago：这两个字段后端每秒重算，
+    // 带上它们签名每 5 秒必变，整张会话表就跟着重建（滚动位置、焦点全丢）。
+    // 它们的显示由 paintStateNodes / tickEtas 每秒就地刷新，不进签名不影响显示。
+    var listSig = JSON.stringify([ctxSid, aliases, ctxSessions, Object.keys(foldedSids).sort(), Object.keys(foldedGroups).sort()],
+      function(k, v){ return (k === "busy_seconds" || k === "last_mark_ago") ? undefined : v; });
     if(listSig === lastListSig) return;
     lastListSig = listSig;
     var listTop = box.scrollTop;
@@ -181,7 +185,11 @@
 
   // 每轮结果只由该轮持久化字段判断，不从当前会话的 busy/error 推断。
   (function(){
-    document.addEventListener("wheel", function(e){
+    // ④ 走势图只在 #ctx-window 里（buildTrend 和骨架都插进这个面板）。以前挂在 document 上，
+    // 整页每一次滚轮都要冒泡到 document 再走一遍 passive:false 的向上查找；挂到面板上，
+    // 面板外的滚动根本不进这个 handler。面板还没建出来时退回 document，行为跟以前一样。
+    var wheelRoot = document.getElementById("ctx-window") || document;
+    wheelRoot.addEventListener("wheel", function(e){
       var el = e.target;
       while(el && el.nodeType === 1 && !(el.classList && el.classList.contains("trend"))) el = el.parentNode;
       if(!el || el.nodeType !== 1 || !el.classList) return;
@@ -503,14 +511,18 @@
   }
 
   // 切档后给新铺进去的内容一层极短淡入，标题行不动（它是静态骨架）
-  function fillQuoteMiss(){
-    var box = document.body;
+  function fillQuoteMiss(root){
+    // ③ root 可选：窗口重画时传 #ctx-window，只扫这一块；不传就退回整页
+    // （记录详情、引用弹层这些不在窗口里的地方仍要全文档兜底）。
+    // 不传 root 时 box 仍是 document.body、scope 仍是 document，跟改前逐字一致。
+    var box = root || document.body;
+    var scope = root || document;
     if(!box || !QUOTE_SID || quoteFarBusy) return;
     var nodes = [].slice.call(box.querySelectorAll(".quote[data-qmiss], .quote[data-qpic]"));
     var ids = [], seen = Object.create(null), sid = QUOTE_SID;
     function keyOf(n){ return String(n.getAttribute("data-qmiss") || n.getAttribute("data-qpic") || ""); }
     function replaceNode(n, k, hit){
-      if(!document.contains(n) || !n.parentNode) return false;
+      if(!scope.contains(n) || !n.parentNode) return false;
       // 用户 m21787 图4：后端只按 message_id 认回了图（source=media_index），没有正文/昵称。
       // 这种时候别整块替换——原节点已经按引用里那行原文画好了名字和原话，只把图补进去。
       if(!hit.body){
@@ -680,9 +692,9 @@
       box.innerHTML = SECHD_HTML + (rest || "");
       restoreTrendScroll(box, keepX);
       revealTrendSel(box.querySelector(".trend"));
-      fillQuoteMiss();
-      fillTweets();
-      fillGitHub();
+      fillQuoteMiss(box);
+      fillTweets(box);
+      fillGitHub(box);
       return box;
     }
     var node = hd.nextSibling;
@@ -690,9 +702,9 @@
     if(rest) box.insertAdjacentHTML("beforeend", rest);
     restoreTrendScroll(box, keepX);
     revealTrendSel(box.querySelector(".trend"));
-    fillQuoteMiss();
-    fillTweets();
-    fillGitHub();
+    fillQuoteMiss(box);
+    fillTweets(box);
+    fillGitHub(box);
     return box;
   }
 
@@ -713,7 +725,6 @@
   // v4.01（用户 m11166 图1）：快照态里的决策注记是普通 assistant 消息——后端存的是
   // name=对当前聊天消息的决策建议、正文带「[决策记录] HH:MM」前缀，没有 decnote 标记。
   // 不认出来就会画成 bot 自己的话（名字是 bot 名、正文留着前缀、也没有注记那条样式）。
-  var winPaintInputs = null;
   function syncCtxPaneVisibility(){
     var windowBox = document.getElementById("ctx-window");
     var roundsBox = document.getElementById("ctx-rounds");
@@ -745,12 +756,8 @@
     if(!d || !d.ok){
       swapWinBody("<div class='empty'>选一个会话</div>");
       lastWinSig = "";
-      winPaintInputs = null;
       return;
     }
-    var inputs = [d, VIEW, ctxSnap, ctxTrendReq, ctxTrendDec, ctxTrendRounds, ctxTrims,
-                  ctxDecTrend, ctxDecFolded, ctxSnapKeep, ctxSnapTotal, ctxTrimKeep, ctxDecisions[0]];
-    if(!force && winPaintInputs && inputs.every(function(x, i){ return x === winPaintInputs[i]; })) return;
     var msgs = (d.messages || []).map(normDecNote);
     var pend = d.pending || [];
     var sm = d.summary || {};
@@ -819,15 +826,13 @@
     // 每次窗口 GET 都重新给 unknown 有限回查机会，指纹不变也不能永久丢图。
     QUOTE_PIC_TRIED = Object.create(null);
     if(!force && sig === lastWinSig && trendSig === lastTrendSig){
-      winPaintInputs = inputs;
-      fillQuoteMiss();
+      fillQuoteMiss(box);
       return;
     }
     // 用户 m11091 第 8 条：正在滚动就先别重画。5 秒轮询一落地就整块 innerHTML
     // 重建（70 条消息几百个节点），恰好压在滚轮/拖动滚动条那一帧上就会卡一下；
     // 数据不丢，等滚动停下再画。
     if(!force && isScrolling()){ deferWin = { d: d, force: false }; return; }
-    winPaintInputs = inputs;
     var bodyUnchanged = !force && sig === lastWinSig;
     // 用户 m02993 图10：引用只有 id 时要回查窗口，索引跟着这批消息一起换。
     if(!bodyUnchanged) QUOTE_IDX = buildQuoteIdx(msgs, pend);
@@ -934,7 +939,7 @@
       restoreTrendScroll(trendBox, keepX);
       revealTrendSel(trendBox.querySelector(".trend"));
       restoreWinScroll(keepWinY);
-      fillQuoteMiss();
+      fillQuoteMiss(box);
       return;
     }
     html += "<div data-ctx-trend>" + trendHtml + "</div>";
@@ -1018,10 +1023,7 @@
       var flushGrp = function(){
         if(!grpBuf) return;
         // 组头在组开始时画的，那时还不知道整组用了几次工具，这里补上（0 次就把胶囊删掉）
-        var ghead = grpHead
-          ? (grpTools > 0 ? grpHead.replace("工具 ×\u0001", "工具 ×" + grpTools)
-                          : grpHead.replace("<span class='chb'>工具 ×\u0001</span>", ""))
-          : "";
+        var ghead = grpToolsChip(grpHead, grpTools);
         // 用户 m06193：拉黑的人整组默认折叠（只留组头），点「展开」才看内容
         // 用户 m16754：快照里那条拉黑消息按「当时被拉黑」折叠，不看现在的名单。
         var blkCls = ((grpBlk || (UBLK_ON && grpRole === "user" && grpUid && UBLK[grpUid])))
@@ -1111,7 +1113,8 @@
           grpKey = gk; grpRole = m.role || "user"; grpUid = uidOf(m);
           grpNote = (VIEW === "mixed" && (m.role === "user" || m.role === "assistant") && !multiOf(m))
             ? mixNoteOf(m) : "";
-          grpHead = ((m.role === "user" || m.role === "assistant") && !multiOf(m))
+          // 用户 m09986 第 3 条：插件注入段自己带标题，不画头像/昵称那一行。
+          grpHead = ((m.role === "user" || m.role === "assistant") && !multiOf(m) && !m.seg)
             ? grpHeadHtml(m.role, whoOf(m), uidOf(m), youOf(m), grpNote, "\u0001", false, gnickOf(m)) : "";
         }
         if(m.tools) grpTools += Number(m.tools) || 0;
@@ -1366,10 +1369,33 @@
       });
       // 群聊冷启动那一轮根本没发历史（request.messages 是空的），点柱子会看到
       // 一片空白，像是点坏了（用户 m29567）。这里拿本轮实际发出去的正文顶上。
-      if(!hasSnapshot && !vmsgs.length && r.user_prompt){
-        vmsgs = splitIncoming(String(r.user_prompt)).map(function(t){
-          return { role: "user", text: t, raw: t, chars: t.length };
-        });
+      // 群聊冷启动那一轮根本没发历史（request.messages 是空的），点柱子会看到
+      // 一片空白，像是点坏了（用户 m29567）。这里拿本轮实际发出去的正文顶上。
+      // 用户 m09986 第 3 条：优先用带段名的 user_prompt_parts——以前拿整段 user_prompt
+      // 按时间戳切，别的插件注入的那段会被切成一条「1249 字」的假 user 消息。
+      if(!hasSnapshot && !vmsgs.length){
+        var ups = Array.isArray(r.user_prompt_parts) ? r.user_prompt_parts : [];
+        if(ups.length){
+          vmsgs = [];
+          ups.forEach(function(p){
+            var nm = String((p && p.name) || "");
+            var t = String((p && p.text) || "");
+            if(!t) return;
+            // 本轮消息那一段可能装着好几条群消息，照旧按 [HH:MM] [message_id: …] 切开
+            if(!nm || nm === "message"){
+              splitIncoming(t).forEach(function(one){
+                vmsgs.push({ role: "user", text: one, raw: one, chars: one.length, seg: "" });
+              });
+              return;
+            }
+            // 别的插件注入的段：单独一条，带上段名，画成注入卡
+            vmsgs.push({ role: "user", text: t, raw: t, chars: t.length, seg: nm });
+          });
+        } else if(r.user_prompt){
+          vmsgs = splitIncoming(String(r.user_prompt)).map(function(t){
+            return { role: "user", text: t, raw: t, chars: t.length };
+          });
+        }
       }
       ctxSnap = { name: name, ts: hasSnapshot ? snapshot.ts : (r.ts || 0), messages: vmsgs,
         counted: hasSnapshot && typeof snapshot.counted === "number" ? snapshot.counted : null,
@@ -1629,18 +1655,19 @@
   }
 
   // 裁切记录只用来给走势图的柱子标橙色 + 悬停提示，不再单独成块。
-  function refreshCtxWindow(sid){
+  // ⑤ 走势图三件套（/windows、/decision-rounds、/requests?light=1）只为柱子服务，
+  // 定时轮询降到 SLOW_MS；正文 /window 仍按 5 秒走，首屏内容不受影响。
+  var SLOW_MS = 15000;
+  var ctxTrendInFlight = null, ctxTrendInFlightSid = "";
+  var ctxTrendRequest = 0;
+  function refreshCtxTrends(sid){
     if(!sid || sid !== ctxSid) return;
-    if(ctxWindowInFlight) return ctxWindowInFlight;
-    var requestId = ++ctxWindowRequest;
+    // 守卫自带 sid：lib-4 的 invalidateCtxRequests 只重置 ctxWindowInFlight，
+    // 不认这个新守卫，切会话后必须靠 sid 比对放行，否则会一直卡在上一轮的 promise 上。
+    if(ctxTrendInFlight && ctxTrendInFlightSid === sid) return ctxTrendInFlight;
+    var requestId = ++ctxTrendRequest;
     var querySid = encodeURIComponent(sid);
-    function current(){ return sid === ctxSid && requestId === ctxWindowRequest; }
-    // 正文先交付；裁切和决策趋势仍一起提交，避免先显示不完整的柱子。
-    var win = get(API + "/window?sid=" + querySid).then(function(d){
-      if(!current() || !d) return;
-      ctxWin = d;
-      renderCtxWindow(d);
-    }).catch(function(){});
+    function current(){ return sid === ctxSid && requestId === ctxTrendRequest; }
     var trend = Promise.all([
       get(API + "/windows?limit=0&sid=" + querySid).catch(function(){ return null; }),
       get(API + "/decision-rounds?sid=" + querySid + "&limit=0&light=1&_" + Date.now()).catch(function(){ return null; })
@@ -1666,7 +1693,28 @@
       }
       if(ctxWin) renderCtxWindow(ctxWin);
     }).catch(function(){});
-    var p = Promise.all([win, trend]).then(function(){
+    var p = trend.then(function(){
+      if(ctxTrendInFlight === p){ ctxTrendInFlight = null; ctxTrendInFlightSid = ""; }
+      if(!current()) return;
+      if(ctxWin) cachePut("win", {sid: sid, win: ctxWin, trims: ctxTrims, trimKeep: ctxTrimKeep, snapKeep: ctxSnapKeep, snapTotal: ctxSnapTotal});
+    });
+    ctxTrendInFlight = p;
+    ctxTrendInFlightSid = sid;
+    return p;
+  }
+  // 正文单独一路：切会话时它先发，走势图延后到 queueCtxPrefetch 的 1.5 秒之后。
+  function refreshCtxWinBody(sid){
+    if(!sid || sid !== ctxSid) return;
+    if(ctxWindowInFlight) return ctxWindowInFlight;
+    var requestId = ++ctxWindowRequest;
+    var querySid = encodeURIComponent(sid);
+    function current(){ return sid === ctxSid && requestId === ctxWindowRequest; }
+    var win = get(API + "/window?sid=" + querySid).then(function(d){
+      if(!current() || !d) return;
+      ctxWin = d;
+      renderCtxWindow(d);
+    }).catch(function(){});
+    var p = win.then(function(){
       if(!current()) return;
       ctxWindowInFlight = null;
       if(ctxWin) cachePut("win", {sid: sid, win: ctxWin, trims: ctxTrims, trimKeep: ctxTrimKeep, snapKeep: ctxSnapKeep, snapTotal: ctxSnapTotal});
@@ -1674,13 +1722,17 @@
     ctxWindowInFlight = p;
     return p;
   }
+  // 事件驱动（清摘要、清记录）仍要一次全刷，保持原来的语义。
+  function refreshCtxWindow(sid){
+    if(!sid || sid !== ctxSid) return;
+    return Promise.all([refreshCtxWinBody(sid), refreshCtxTrends(sid)]);
+  }
 
   function openCtx(sid){
     invalidateCtxRequests();
     ctxSid = sid;
     lastWinSig = "";
     lastTrendSig = "";
-    winPaintInputs = null;
     ctxRounds = [];
     ctxTrendRounds = [];
     ctxKeep = 0;
@@ -1693,7 +1745,9 @@
     renderCtxList();
     paintCtxPaneFromCache();
     if(ctxPane !== "window") swapWinBody("");
-    refreshSelectedCtx(sid);
+    refreshSelectedCtx(sid, {skipTrends: true});
+    // ⑥ /windows 与 /decision-rounds 挪到 1.5 秒后的预取里，别跟首屏抢带宽。
+    queueCtxPrefetch(sid);
   }
 
   function toggleRequestRow(name){
@@ -1705,7 +1759,7 @@
       if(rows[i].getAttribute("data-round") === name){ head = rows[i]; }
     }
     if(!target || !head) return;
-    // 决策表与回复记录现在都是 13 列（v4.84 加「渠道 / 模型」、v4.85 加「回复内容」、v4.88 渠道独立成列），详情单元格的 colspan 跟着这张表走
+    // 决策表与回复记录现在都是 14 列（v4.84 加「渠道 / 模型」、v4.85 加「回复内容」、v4.88 渠道独立成列、用户 m06215 加「推理强度」），详情单元格的 colspan 跟着这张表走
     var cspan = target.getAttribute("data-cspan") || 9;
     var open = target.style.display !== "none";
     target.style.display = open ? "none" : "";
@@ -1851,16 +1905,26 @@
             var toolR = isToolNoteMsg(m);
             var body = toolR ? toolNoteBody(contentText(m.content)) : rawContent(m.content);
             if(m.role === "assistant") body = botRawHead(body, noteNameOf(m), toolR ? hhmm(m.ts) : "");
+            // 用户 m12096 图2：合并后正文开头就是「## 段名」标题行，标签里已经写了段名，
+            // 原文里别再重复一遍——按 m.head 精确匹配首行再切掉。
+            if(m.head){
+              var hnl = body.indexOf("\n");
+              var hfirst = (hnl < 0 ? body : body.slice(0, hnl)).replace(/\s+$/, "");
+              if(hfirst === String(m.head).replace(/\s+$/, "")) body = hnl < 0 ? "" : body.slice(hnl + 1);
+            }
             n += 1;
-            currentRaw += "[" + n + "] " + String(m.role || "user") + "\n" + body + "\n";
+            // 用户 m11094 第 1 条：注入段在原文里也标成「注入·段名」，别再写成 user。
+            currentRaw += "[" + n + "] " + (m.seg ? ((m.seg === "dynamic_tail" ? "动态·" : "注入·") + m.seg) : String(m.role || "user")) + "\n" + body + "\n";
             if(m.tool_calls && m.tool_calls.length) currentRaw += "[tool_calls] " + JSON.stringify(m.tool_calls) + "\n";
             currentRaw += "\n";
           }
-          var dynamicRow = reloc ? {role:"user",content:"<system_reminder>\n" + reloc + "\n</system_reminder>"} : null;
+          var dynamicRow = reloc ? {role:"user",seg:"dynamic_tail",content:"<system_reminder>\n" + reloc + "\n</system_reminder>"} : null;
           if(dynamicRow && pos.actual !== "tail") appendCurrentRaw(dynamicRow);
           partition.currentRows.forEach(appendCurrentRaw);
           if(dynamicRow && pos.actual === "tail") appendCurrentRaw(dynamicRow);
-          h += rawBlock("③ 本轮消息", "· " + partition.currentCount + " 条 · " + partition.currentChars +
+          h += rawBlock("③ 本轮消息", "· " + partition.currentMsgCount + " 条" +
+                        (partition.segTotal ? " · 注入 " + partition.segTotal + " 段" : "") +
+                        " · " + partition.currentChars +
                         " 字符 · 本轮送入（含重送）；按轮次归属，非缓存实测",
                         currentRaw || "（这一轮没有单独的本轮消息）", "");
         }
@@ -1951,10 +2015,7 @@
       var grpKey2 = null, grpRole2 = null, grpBuf2 = "", grpHead2 = "", grpNote2 = "", grpTools2 = 0;
       var flushGrp2 = function(){
         if(!grpBuf2) return;
-        var ghead2 = grpHead2
-          ? (grpTools2 > 0 ? grpHead2.replace("工具 ×\u0001", "工具 ×" + grpTools2)
-                           : grpHead2.replace("<span class='chb'>工具 ×\u0001</span>", ""))
-          : "";
+        var ghead2 = grpToolsChip(grpHead2, grpTools2);
         h += "<div class='mgrp " + esc(grpRole2 || "user") + "'>" + ghead2 + grpBuf2 + "</div>";
         grpBuf2 = ""; grpHead2 = ""; grpTools2 = 0;
       };
@@ -2002,20 +2063,18 @@
       h += "</div>";
       if(!isTrimSnap){
         var curHint = "本轮送入（含重送）；按轮次归属，非缓存实测";
-        h += "<div class='seqh'>③ 本轮消息 <span class='dim'>· " + partition.currentCount +
-             " 条 · " + partition.currentChars + " 字符 · " + curHint + "</span>" +
+        h += "<div class='seqh'>③ 本轮消息 <span class='dim'>· " + partition.currentMsgCount +
+             " 条" + (partition.segTotal ? " · 注入 " + partition.segTotal + " 段" : "") +
+             " · " + partition.currentChars + " 字符 · " + curHint + "</span>" +
              "<span class='grow'></span><span class='mini' data-fold='final'>展开</span></div>";
         h += "<div class='scroll' data-foldbody='final' style='display:none'>";
         var atTail = (pos.actual === "tail"), relocBlock = "";
-        if(reloc.length){
-          var relocRaw = "<system_reminder>\n" + reloc + "\n</system_reminder>";
-          relocBlock = systemCardHtml(VIEW === "mixed" ? relocRaw : reloc, VIEW);
-        }
-        var msgBlock = "", grpKey3 = null, grpRole3 = null, grpBuf3 = "", grpHead3 = "";
+        var msgBlock = "", grpKey3 = null, grpRole3 = null, grpBuf3 = "", grpHead3 = "", grpTools3 = 0;
         var flushGrp3 = function(){
           if(!grpBuf3) return;
-          msgBlock += "<div class='mgrp " + esc(grpRole3 || "user") + "'>" + grpHead3 + grpBuf3 + "</div>";
-          grpBuf3 = ""; grpHead3 = "";
+          // 用户 m03586：③ 以前直接把带占位符的组头拼进去，控制字符被画成「工具 ×0」。
+          msgBlock += "<div class='mgrp " + esc(grpRole3 || "user") + "'>" + grpToolsChip(grpHead3, grpTools3) + grpBuf3 + "</div>";
+          grpBuf3 = ""; grpHead3 = ""; grpTools3 = 0;
         };
         partition.currentRows.forEach(function(m, idx){
           if(!m) return;
@@ -2037,19 +2096,31 @@
             disp3 = {own_media_known:true, own_media:media3, unassigned_media:[],
                      own_body:text3, direct_reply:null, source:"tool_note"};
           }
-          var mm3 = {role:role3,who:tool3 ? String(m.name || "") : (m.who || m.name || ""),name:m.name || "",gnick:m.gnick || "",text:text3,
+          // 用户 m11094 第 1/3 条：注入段带 seg，msgCards 会画成「插件注入」卡，不再冒充 user 消息。
+          var mm3 = {role:role3,who:tool3 ? String(m.name || "") : (m.who || m.name || ""),name:m.name || "",gnick:m.gnick || "",seg:m.seg || "",head:m.head || "",text:text3,
             raw:raw3,media:media3,display:disp3,chars:text3.length,origMedia:!!orig3,
             files:m.files || [],
             tools:(m.tool_calls || []).length,tool_call_id:m.tool_call_id || "",tc:tcOf(m)};
           var gk3 = groupKeyOf(mm3, "f" + idx);
           if(gk3 !== grpKey3){
-            flushGrp3(); grpKey3 = gk3; grpRole3 = role3;
+            flushGrp3(); grpKey3 = gk3; grpRole3 = mm3.seg ? "seg" : role3;
             var multi3 = multiOf(mm3);
-            grpHead3 = grpHeadHtml(role3,multi3?"":whoOf(mm3),multi3?"":uidOf(mm3),multi3?false:youOf(mm3),VIEW==="mixed"?mixNoteOf(mm3):"","\u0001",false,multi3?"":gnickOf(mm3));
+            // 用户 m11094 第 1 条：注入段自己那张卡已经写了「N · 插件注入 / 段名」，
+            // 上面再顶一个 user 组头就还是「2 个 user」，这里不画组头。
+            grpHead3 = mm3.seg ? "" : grpHeadHtml(role3,multi3?"":whoOf(mm3),multi3?"":uidOf(mm3),multi3?false:youOf(mm3),VIEW==="mixed"?mixNoteOf(mm3):"","\u0001",false,multi3?"":gnickOf(mm3));
           }
           grpBuf3 += msgCards(mm3, idx + 1, VIEW, "", true);
+          if(mm3.tools) grpTools3 += Number(mm3.tools) || 0;
         });
         flushGrp3();
+        // 用户 m12780 第 ② 条：宿主挪到本轮末尾的动态段以前借 systemCardHtml 画成 system 消息，
+        // 现在走注入卡（组头 mgrp seg、标题写「动态段」），序号接着 ③ 里的真实消息往下排。
+        // <system_reminder> 是宿主包的外壳，美化档不露出来；原文档那边照旧如实保留。
+        if(reloc.length){
+          // 对照档（mixed）要的是原文，宿主包的外壳照旧露出来；美化档只画内容。
+          var relocBody = (VIEW === "mixed") ? ("<system_reminder>\n" + reloc + "\n</system_reminder>") : reloc;
+          relocBlock = relocCardHtml(relocBody, VIEW, relocNames, partition.currentRows.length + 1);
+        }
         h += atTail ? (msgBlock + relocBlock) : (relocBlock + msgBlock);
         if(!partition.currentCount) h += "<div class='empty'>这一轮没有单独的本轮消息</div>";
         h += "</div>";
@@ -2186,9 +2257,23 @@
 
   function setAuto(on){
     if(autoTimer){ clearInterval(autoTimer); autoTimer = null; }
-    if(on){ autoTimer = setInterval(function(){ if(!document.hidden) load(); }, 5000); startStateTimer(); }
-    else stopStateTimer();
+    if(on){ autoTimer = setInterval(function(){ if(!document.hidden) load(false, true); }, 5000); startStateTimer(); startSlowTimer(); }
+    else { stopStateTimer(); stopSlowTimer(); }
     setSwitch("sw-auto", !!on);
+  }
+  // ⑤ 走势图三件套单独一个慢定时器：/windows、/decision-rounds、/requests?light=1
+  // 只为柱子服务，没必要跟正文一样 5 秒一次。受同一个「自动刷新」开关管。
+  var slowTimer = null;
+  function startSlowTimer(){
+    if(slowTimer) return;
+    slowTimer = setInterval(function(){
+      if(document.hidden || !ctxSid) return;
+      refreshCtxTrends(ctxSid);
+      loadRoundLane(ctxSid, "trend");
+    }, SLOW_MS);
+  }
+  function stopSlowTimer(){
+    if(slowTimer){ clearInterval(slowTimer); slowTimer = null; }
   }
 
   function hydrateCtxRounds(){
@@ -2285,11 +2370,13 @@
     }).catch(function(){});
   }
 
-  function refreshSelectedCtx(sid){
+  function refreshSelectedCtx(sid, opts){
+    opts = opts || {};
     if(ctxPane === "decisions") loadCtxDecisions(sid);
     if(ctxPane === "rounds") loadRoundLane(sid, "table");
-    refreshCtxWindow(sid);
-    loadRoundLane(sid, "trend");
+    refreshCtxWinBody(sid);
+    if(!opts.skipTrends) refreshCtxTrends(sid);
+    if(!opts.skipTrendLane) loadRoundLane(sid, "trend");
   }
   var ctxPrefetchTimer = null;
   function queueCtxPrefetch(sid){
@@ -2302,16 +2389,20 @@
         ctxDecPrefetched = sid;
         loadCtxDecisions(sid);
       }
+      // ⑥ 切会话时 /windows + /decision-rounds 不跟首屏抢带宽，挪到这 1.5 秒之后。
+      refreshCtxTrends(sid);
     }, 1500);
   }
   var ctxListLoad = null;
-  function load(warmStart){
+  function load(warmStart, timerTick){
     if(document.hidden) return;
     loadOverview();
     loadModelDot();
     if(ctxListLoad) return ctxListLoad;
     var startedSid = warmStart === true ? ctxSid : "";
-    if(startedSid) refreshSelectedCtx(startedSid);
+    // ⑤ 定时轮询只刷首屏可见的正文与列表；走势图三件套交给 SLOW_MS 的慢定时器。
+    var opts = timerTick ? { skipTrends: true, skipTrendLane: true } : null;
+    if(startedSid) refreshSelectedCtx(startedSid, opts);
     ctxListLoad = getContextSessions().then(function(d){
       cachePut("sessions", {items: d.items || [], aliases: d.aliases || {}, health: d.health || null});
       ctxSessions = d.items || [];
@@ -2319,7 +2410,7 @@
       if(d.health) renderHealth(d.health);
       if(ctxSid && ctxSessions.some(function(s){ return s.sid === ctxSid; })){
         renderCtxList();
-        if(ctxSid !== startedSid) refreshSelectedCtx(ctxSid);
+        if(ctxSid !== startedSid) refreshSelectedCtx(ctxSid, opts);
         if(!ctxRoundsFull || ctxDecPrefetched !== ctxSid) queueCtxPrefetch(ctxSid);
       } else if(ctxSessions.length){
         openCtx(ctxSessions[0].sid);
@@ -2338,11 +2429,11 @@
     return ctxListLoad;
   }
 
-  // 状态点每 1 秒自己刷一次：只改那几个字，不重画列表，
+  // 状态点每 2 秒自己刷一次：只改那几个字，不重画列表，
   // 免得用户正看着的时候列表跳一下（重画会丢滚动位置和悬停状态）。
   // 受「自动刷新」开关管：关掉就整个停，否则那个开关等于没做（审查 bug）
   function startStateTimer(){
-    if(!stateTimer) stateTimer = setInterval(pollStates, 1000);
+    if(!stateTimer) stateTimer = setInterval(pollStates, 2000);
     pollStates();
   }
   var statePollPending = false;
@@ -2444,7 +2535,49 @@
     var it = e.target.closest ? e.target.closest("[data-ctx]") : null;
     if(it) openCtx(it.getAttribute("data-ctx"));
   });
+  // 用户本轮第 ③ 条：点注入卡上的「联动美化 / 通用美化」标签换档。
+  // 标签的 data-segstyle 记的是当前档位，点一下换到另一档，再重画这一行。
+  // 用户 m15963 第 5 条：换档重画会把行内 ①②③④ 的展开状态一起清掉（重画后全部
+  // 回到 display:none），刚点开的卡片就「回弹」关上了。重画前先按 setView 同一套
+  // 口径记下这一行摊开了哪几块，重画后 restoreRowFolds 会照它摊回去。
+  function rememberRowFolds(tr){
+    if(!tr) return;
+    var nm = tr.getAttribute("data-detail");
+    if(!nm) return;
+    var idxs = [];
+    Array.prototype.forEach.call(tr.querySelectorAll("[data-foldbody]"), function(el, i){
+      if(el.style.display !== "none") idxs.push(i);
+    });
+    if(idxs.length) restoreFolds[nm] = idxs;
+    else delete restoreFolds[nm];
+  }
+  function segStyleClick(e){
+    var t = e && e.target;
+    if(!t || !t.closest) return false;
+    var sp = t.closest("[data-segstyle]");
+    if(!sp) return false;
+    if(e.preventDefault) e.preventDefault();
+    if(e.stopPropagation) e.stopPropagation();
+    var cur = String(sp.getAttribute("data-segstyle") || "") === "generic" ? "generic" : "alife";
+    setSegStyle(cur === "alife" ? "generic" : "alife");
+    var row = sp.closest("tr[data-detail]");
+    if(row){ rememberRowFolds(row); repaintRequestRow(row.getAttribute("data-detail")); }
+    return true;
+  }
+  // 换档后只重画这一行：清掉 data-loaded 再走一遍展开逻辑，不整页刷新。
+  function repaintRequestRow(name){
+    var rows = document.querySelectorAll("#ctx-rounds tr"), target = null;
+    for(var i = 0; i < rows.length; i++){
+      if(rows[i].getAttribute("data-detail") === name){ target = rows[i]; break; }
+    }
+    if(!target) return;
+    target.removeAttribute("data-loaded");
+    target.style.display = "none";
+    toggleRequestRow(name);
+  }
   document.getElementById("ctx-rounds").addEventListener("click", function(e){
+    // 用户本轮第 ③ 条：注入卡上的「联动美化 / 通用美化」标签，点了就地换档重画这一行。
+    if(segStyleClick(e)) return;
     var pgBtn = e.target.closest ? e.target.closest("button[data-pg]") : null;
     if(pgBtn){
       if(pgBtn.disabled) return;

@@ -1434,7 +1434,9 @@ class Tracer:
 
     def _rotate_ledger(self, now: float) -> None:
         """把上个月及更早的行挪进按月归档，tokens.jsonl 只留本月。"""
-        first = time.mktime(time.localtime(now)[:3] + (1, 0, 0, 0, 0, -1))
+        # 本月 1 号 00:00。原来写成 localtime(now)[:3] + (1, 0, 0, 0, 0, -1)，
+        # 拼出来是「今天 01:00」——每天 0 点到 1 点之间跑一次滚动，会把当天的行也挪进归档。
+        first = time.mktime(time.localtime(now)[:2] + (1, 0, 0, 0, 0, 0, -1))
         keep: List[str] = []
         buckets: Dict[str, List[str]] = {}
         moved = 0

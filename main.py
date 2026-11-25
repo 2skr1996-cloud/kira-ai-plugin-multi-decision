@@ -35,6 +35,7 @@ from .state.band_stats import BandStats
 from .state.band_rhythm import BandRhythm
 from .state.band_tune import BandTuner
 from .state import compat
+from .state import usage_probe
 from .state.decision_phase import (
     DEFAULT_CHAT_RULES,
     DEFAULT_DECISION_PROMPT,
@@ -91,6 +92,8 @@ from .state.overrides import Overrides
 from .state.pricing import PRICE_UNIT, Pricing, _CURRENCY, _UNKNOWN_NAMES
 from .state.reply_prompt import PERSONA_NAME, ReplyPrompt, apply_reply_tools
 from .state.prompt_layout import PromptLayouts
+from .state.prompt_modules import PromptModuleRegistry
+from .state.plugin_segs import PluginSegs
 from .state.provider_bind import ProviderBindings
 from .state.request_log import RequestLog, _safe_sid, payload_metrics
 from .state.retry_history import RetryHistory
@@ -1216,6 +1219,29 @@ def _as_bool(value, default: bool) -> bool:
     return bool(value)
 
 
+def _as_str_map(value) -> dict:
+    """把配置里的 {id: 名字} 洗成干净的字符串字典；非法值一律当空。"""
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for key, item in value.items():
+        name = str(key or "").strip()
+        if not name:
+            continue
+        text = str(item or "").strip()
+        if text:
+            out[name] = text
+    return out
+
+
+def _day_start_ts(day_key) -> int | None:
+    """本地日 YYYY-MM-DD 的零点 epoch；解析失败返回 None。"""
+    try:
+        return int(time.mktime(time.strptime(str(day_key), "%Y-%m-%d")))
+    except Exception:
+        return None
+
+
 def _as_list(value) -> list:
     if isinstance(value, list):
         return [str(v).strip() for v in value if str(v).strip()]
@@ -1548,7 +1574,8 @@ class MultiDecisionPlugin(BasePlugin):
         self.silent_skip_short = _as_bool(cfg.get("silent_skip_short"), True)
         # 用户 m04896 第 3 条：短句阈值默认 5 个字。
         self.silent_skip_short_len = max(1, _as_int(cfg.get("silent_skip_short_len"), 5))
-        self.silent_skip_single_image = _as_bool(cfg.get("silent_skip_single_image"), False)
+        # 用户 m03889 图3：单张图片默认开、条数默认 1（用户自己就是这么用的）。
+        self.silent_skip_single_image = _as_bool(cfg.get("silent_skip_single_image"), True)
         self.silent_skip_single_sticker = _as_bool(cfg.get("silent_skip_single_sticker"), True)
         self.silent_skip_empty_forward = _as_bool(cfg.get("silent_skip_empty_forward"), True)
         # 用户 m04896 第 1 条：每个过滤项各自带「管前几条」。用户 m10685 把默认值调成
@@ -1558,7 +1585,7 @@ class MultiDecisionPlugin(BasePlugin):
         self.silent_skip_short_count = max(
             1, _as_int(cfg.get("silent_skip_short_count"), 3))
         self.silent_skip_single_image_count = max(
-            1, _as_int(cfg.get("silent_skip_single_image_count"), 3))
+            1, _as_int(cfg.get("silent_skip_single_image_count"), 1))
         self.silent_skip_single_sticker_count = max(
             1, _as_int(cfg.get("silent_skip_single_sticker_count"), 3))
         self.silent_skip_empty_forward_count = max(
@@ -1682,6 +1709,13 @@ class MultiDecisionPlugin(BasePlugin):
         self.history_gif_grid = _as_bool(cfg.get("history_gif_grid"), True)
         self.history_gif_original = _as_bool(cfg.get("history_gif_original"), False)
         self.history_gif_first = _as_bool(cfg.get("history_gif_first"), False)
+        # 用户 m03205：动图设置这三项（单帧边长 / 质量 / 拼图帧数）以前只写进配置文件，
+        # 从没读进实例属性——eff() 拿到 None，window/manager.py 的 _int_eff 就一路回落到
+        # 写死的 384 / 90 / 9，设置页选「自动」（0）也还是按 9 帧拼。这里补上，
+        # 范围与 _BOUNDS 一致；0 = 自动，按去重后的关键帧数决定拼几格。
+        self.gif_tile = max(128, min(512, _as_int(cfg.get("gif_tile"), 384)))
+        self.gif_quality = max(1, min(100, _as_int(cfg.get("gif_quality"), 90)))
+        self.gif_frames = max(0, min(36, _as_int(cfg.get("gif_frames"), 9)))
         # 用户 2026-11-06：转发消息怎么进请求——off 不展开 / text 只给文字 /
         # on_demand 默认只挂前几张，模型需要时用 view_forward 看完整内容。
         self.forward_mode = str(cfg.get("forward_mode") or "on_demand").strip().lower()
@@ -1713,6 +1747,13 @@ class MultiDecisionPlugin(BasePlugin):
         # 用户 m13708 第 3/4 条：消息日志 / 窗口快照的保留天数又拉回设置页了，
         # 而且分开设（decisions_keep_days / windows_keep_days，见下面的新读取）。
         self.request_log_enabled = True
+
+        # 用户 m00001：模型用量探针（记录其他插件的真实 token，供价目页统计）。
+        self.usage_probe_enabled = _as_bool(cfg.get("usage_probe_enabled"), True)
+        # 用户本轮第 ④ 条：探针柱子上的插件名先读插件自己的名字（manifest 的
+        # locales.zh.display_name），读不到才用 id；想改的话在价目页单独覆盖，
+        # 覆盖值存这里（{plugin_id: 自定义名}），空串等于清除。
+        self.probe_plugin_names = _as_str_map(cfg.get("probe_plugin_names"))
 
         # 动态段（时间/会话/记忆）默认挪到本轮消息之后。框架原本把这几段插在
         # 最后一条 user 消息前面，会让「上一轮正文」的位置每轮变化，前缀缓存
@@ -2104,6 +2145,13 @@ class MultiDecisionPlugin(BasePlugin):
         # v3.92（用户 m06951 第 6 条）：聊天规则不再塞进决策提示词，改成插进回复那一轮
         # 的系统提示词（人格段后面），这一份对象顺便缓存最近一次的原文给设置页预览。
         self.reply_prompt = ReplyPrompt(self)
+        # 用户 m02800：提示词模块注册口。黑话 / 样式学习 / 模拟日程这类功能注册一个模块，
+        # 往动态段里塞自己算好的文字，装配侧不用再改。必须先于 PromptLayouts 建好——
+        # 布局层渲染时按 getattr(self.plugin, "prompt_modules", None) 取它。
+        self.prompt_modules = PromptModuleRegistry()
+        # 用户 m20722：别的插件往 system_prompt 里注入的段，第一次见到就登记，布局侧据此
+        # 自动补一张只读卡。必须先于 PromptLayouts 建好——布局层按 getattr 取它。
+        self.plugin_segs = PluginSegs(data_dir)
         self.prompt_layouts = PromptLayouts(self, data_dir)
         self.engine.store = self.store
         self.engine.overrides = self.overrides
@@ -2129,6 +2177,12 @@ class MultiDecisionPlugin(BasePlugin):
             self.engine.start_buffer_loop()
         except Exception:
             logger.exception("[multi-decision] 缓冲裁切巡检启动失败（已忽略）")
+
+        # 用户 m00001：模型用量探针（全局 monkey-patch，记录其他插件的真实 token）。
+        try:
+            usage_probe.install(self, enabled=self.usage_probe_enabled)
+        except Exception:
+            logger.exception("[multi-decision] 安装模型用量探针失败（已忽略）")
 
         logger.info(
             f"[multi-decision] initialized (enabled={self.enabled}, "
@@ -2185,6 +2239,19 @@ class MultiDecisionPlugin(BasePlugin):
         except Exception:
             logger.exception("[multi-decision] 钩子自检失败（已忽略）")
 
+    def register_prompt_module(self, module):
+        """用户 m02800：注册一个提示词模块，返回它自己（方便链式写）。
+
+        模块要继承 state/prompt_modules.py 里的 PromptModule：给 name（唯一键）、
+        label（中文名）、可选 max_chars / auto_block，并实现同步的 render(ctx)。
+        render 里不能 await 数据库——装配是同步的，慢数据请自己后台算好放内存。
+        """
+        return self.prompt_modules.register(module)
+
+    def unregister_prompt_module(self, name):
+        """用户 m02800：注销提示词模块，返回是否真的删掉了。"""
+        return self.prompt_modules.unregister(name)
+
     async def terminate(self):
         try:
             if self.store is not None and self.engine is not None:
@@ -2207,7 +2274,17 @@ class MultiDecisionPlugin(BasePlugin):
                 step()
             except Exception:
                 logger.exception(f"[multi-decision] 关闭{name}失败（继续收尾其它组件）")
+        # 用户 m02800：模块是别的插件注册进来的对象，收尾时一并清掉，免得重载后残留旧实例。
+        try:
+            self.prompt_modules.clear()
+        except Exception:
+            logger.exception("[multi-decision] 清空提示词模块失败（已忽略）")
         self._release_builtin_chat()
+        # 用户 m00001：卸载探针，把原方法还回去（重载后由新的 initialize 重新装）。
+        try:
+            usage_probe.uninstall()
+        except Exception:
+            logger.exception("[multi-decision] 卸载模型用量探针失败（已忽略）")
         logger.info("[multi-decision] terminated")
 
     def _release_builtin_chat(self):
@@ -2452,6 +2529,13 @@ class MultiDecisionPlugin(BasePlugin):
     @on.llm_response(priority=Priority.SYS_HIGH)
     async def _on_llm_response(self, event, llm_resp):
         await self.engine.guard_reply_response(event, llm_resp)
+        # 用户 m24756：快照在钩子那一刻就渲染好了，框架之后才往 format 段补
+        # message_types / root_tags。模型回话时再渲染一遍写回去，记录页才是
+        # 模型真正看到的那份。
+        try:
+            self.engine.late_render_snapshot(event)
+        except Exception:
+            logger.debug("[multi-decision] 快照补渲染异常（已吞掉）", exc_info=True)
         self._touch_reply_progress(event)
         # 先记轨迹：轨迹里留模型的原样输出，收口之后也能看出是它自己写了两遍。
         if self.tracer is not None:
@@ -3560,6 +3644,66 @@ class MultiDecisionPlugin(BasePlugin):
         if not isinstance(data, dict):
             return {"ok": False, "schema": {}, "error": "ui_schema.json 不是对象"}
         return {"ok": True, "schema": data}
+
+    @_api("GET", "/usage-probe")
+    async def api_usage_probe(self):
+        """用户 m00001：线上实测用——探针装没装、包了几个类、最近 20 条记录。"""
+        try:
+            info = usage_probe.status()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        info["ok"] = True
+        info["config_enabled"] = bool(getattr(self, "usage_probe_enabled", True))
+        return info
+
+    @_api("GET", "/probe-plugins")
+    async def api_probe_plugins(self):
+        """用户本轮第 ④ 条：探针账本里出现过的插件 + 自动名 / 覆盖名。"""
+        try:
+            plugins = self.probe_plugins_payload()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "plugins": plugins}
+
+    @_api("POST", "/probe-names")
+    async def api_probe_names(self, names: str = "", payload: dict = None):
+        """用户本轮第 ④ 条：单独调整探针柱子上的插件名。
+
+        names 是 {plugin_id: 自定义名}，空串表示清除覆盖、回到自动读到的名字。
+        既认 query 里的 JSON 文本（跟本插件其他 POST 一致），也认 JSON body
+        {"names": {...}}。
+        """
+        data = None
+        if isinstance(payload, dict):
+            inner = payload.get("names")
+            if isinstance(inner, dict):
+                data = inner
+            elif payload:
+                data = payload
+        if data is None:
+            try:
+                data = json.loads(names) if str(names or "").strip() else {}
+            except Exception:
+                return {"ok": False, "detail": "names 不是合法 JSON"}
+        if not isinstance(data, dict):
+            return {"ok": False, "detail": "names 必须是对象"}
+        current = getattr(self, "probe_plugin_names", None)
+        merged = dict(current) if isinstance(current, dict) else {}
+        for key, value in data.items():
+            pid = str(key or "").strip()
+            if not pid:
+                continue
+            name = str(value or "").strip()
+            if name:
+                merged[pid] = name
+            else:
+                merged.pop(pid, None)
+        self.probe_plugin_names = merged
+        saved = self._probe_names_write(merged)
+        result = {"ok": True, "saved": bool(saved), "plugins": self.probe_plugins_payload()}
+        if not saved:
+            result["detail"] = "名字已生效，但写配置文件失败，重启后会丢"
+        return result
 
     @_api("GET", "/config-check")
     async def api_config_check(self, sid: str = ""):
@@ -6199,6 +6343,7 @@ class MultiDecisionPlugin(BasePlugin):
         alias = {}
         price_view = None
         try:
+            totals = {}
             if self.tracer is not None:
                 totals = self.tracer.recent_totals(span) or {}
                 # 用户 m21592：同一个模型、同一个渠道在账本里可能落在两个 key 上
@@ -6206,11 +6351,15 @@ class MultiDecisionPlugin(BasePlugin):
                 # 成了两行——一行有价、一行「未定价」。计价和展示前先归并成一份。
                 alias = self._model_alias(totals, extra=models.keys())
                 totals = self._merge_model_totals(totals, alias)
-                seen = totals.get("models") or {}
-                if self.pricing is not None:
-                    # 用户 m04493：价目表按归并后的 key 重排，否则有量的那行查不到价
-                    price_view = self._canon_prices(models, alias)
-                    cost = self.pricing.summarize(totals, prices=price_view)
+            # 用户本轮第 ① 条：探针账本里的模型（排序 / 嵌入 / 传输层 LLM）并进
+            # totals["models"]——必须在 seen 之前，价目表的行和花费卡片都从 totals
+            # 取，只并 seen 的话用户填完单价「花费」也不会变。
+            totals = self._merge_probe_totals(totals, span)
+            seen = totals.get("models") or {}
+            if self.pricing is not None:
+                # 用户 m04493：价目表按归并后的 key 重排，否则有量的那行查不到价
+                price_view = self._canon_prices(models, alias)
+                cost = self.pricing.summarize(totals, prices=price_view)
         except Exception:
             seen = {}
             cost = None
@@ -6278,6 +6427,8 @@ class MultiDecisionPlugin(BasePlugin):
                     "decision_rounds": int(stat.get("decision_rounds") or 0),
                     "reply_rounds": int(stat.get("reply_rounds") or 0),
                     "calls": int(stat.get("calls") or 0),
+                    # 用户 m14599：这一行是哪个插件调的、各调了几次（名字走覆盖名）。
+                    "plugins": self._row_plugins(stat),
                     "model_name": self._display_model_name(
                         str(stat.get("model_name") or ("快速决策模型" if name == "fast" else name))),
                     "provider_id": str(stat.get("provider_id") or ""),
@@ -6297,6 +6448,379 @@ class MultiDecisionPlugin(BasePlugin):
         zone = time.tzname[1 if time.daylight and time.localtime().tm_isdst > 0 else 0]
         return {"ok": True, "unit": PRICE_UNIT, "hours": span, "rows": rows, "cost": cost,
                 "active": sorted(active), "timezone": zone}
+
+    def _row_plugins(self, stat) -> list:
+        """价目表一行里「哪些插件调过这个模型、各几次」（用户 m14599）。
+
+        名字走 _probe_plugin_name：用户在设置页改过名就用改过的，没改就用插件
+        自己 manifest 里的中文名。按次数从多到少排，前端照顺序一行一个。
+        """
+        out = []
+        try:
+            pmap = (stat or {}).get("plugins")
+            if not isinstance(pmap, dict):
+                return out
+            for pid, cnt in pmap.items():
+                n = _as_int(cnt, 0)
+                if n <= 0:
+                    continue
+                key = str(pid or "").strip()
+                if not key:
+                    continue
+                out.append({
+                    "plugin_id": key,
+                    "plugin_name": self._probe_plugin_name(key),
+                    "calls": n,
+                })
+            out.sort(key=lambda x: (-x["calls"], x["plugin_id"]))
+        except Exception:
+            return []
+        return out
+
+    def _plugin_display_name(self, plugin_id: str) -> str:
+        """插件 id → 给人看的名字（用户本轮第 ④ 条）。
+
+        先读宿主 PluginInfo 的 locales.zh.display_name（manifest 里那份中文名），
+        没有再退回 display_name，都没有（或插件没装 / 读不到）就用 id 本身。
+        """
+        pid = str(plugin_id or "").strip()
+        if not pid:
+            return ""
+        try:
+            mgr = getattr(self.ctx, "plugin_mgr", None)
+            getter = getattr(mgr, "get_plugin_info", None)
+            if not callable(getter):
+                return pid
+            info = getter(pid)
+            if info is None:
+                return pid
+            locales = getattr(info, "locales", None)
+            if isinstance(locales, dict):
+                zh = locales.get("zh")
+                if isinstance(zh, dict):
+                    name = str(zh.get("display_name") or "").strip()
+                    if name:
+                        return name
+            name = str(getattr(info, "display_name", "") or "").strip()
+            return name or pid
+        except Exception:
+            return pid
+
+    def _probe_plugin_name(self, plugin_id: str) -> str:
+        """探针柱子上的插件名：先看用户覆盖，再看插件自己的名字。"""
+        pid = str(plugin_id or "").strip()
+        if not pid:
+            return ""
+        try:
+            names = getattr(self, "probe_plugin_names", None)
+            if isinstance(names, dict):
+                custom = str(names.get(pid) or "").strip()
+                if custom:
+                    return custom
+        except Exception:
+            pass
+        return self._plugin_display_name(pid) or pid
+
+    def probe_plugins_payload(self) -> list:
+        """探针账本里出现过的插件 + 自动名 / 覆盖名 / 用到的类别。"""
+        out = []
+        try:
+            if not usage_probe.is_installed():
+                return out
+            days = usage_probe.totals()
+            kinds = {}
+            for plugins in (days or {}).values():
+                for plugin, kinds_map in (plugins or {}).items():
+                    pid = str(plugin or "").strip()
+                    if not pid or pid == "unknown":
+                        continue
+                    bucket = kinds.setdefault(pid, set())
+                    for kind in (kinds_map or {}):
+                        if str(kind) in ("llm", "embed", "rerank"):
+                            bucket.add(str(kind))
+            names = getattr(self, "probe_plugin_names", None)
+            for pid in sorted(kinds):
+                auto = self._plugin_display_name(pid) or pid
+                override = ""
+                if isinstance(names, dict):
+                    override = str(names.get(pid) or "").strip()
+                out.append({
+                    "plugin_id": pid,
+                    "plugin_name": override or auto,
+                    "auto_name": auto,
+                    "override": override,
+                    "kinds": [k for k in ("llm", "embed", "rerank") if k in kinds[pid]],
+                })
+        except Exception:
+            logger.debug("[multi-decision] 读探针插件清单失败（已忽略）", exc_info=True)
+            return []
+        return out
+
+    def _probe_names_write(self, names: dict) -> bool:
+        """把 {plugin_id: 自定义名} 写回插件配置文件；失败返回 False。"""
+        tmp = None
+        try:
+            path = self._global_config_path()
+            if path is None or not path.is_file():
+                return False
+            data = json.loads(path.read_text("utf-8"))
+            if not isinstance(data, dict):
+                return False
+            data["probe_plugin_names"] = dict(names or {})
+            tmp = path.with_name(path.name + ".tmp-" + os.urandom(4).hex())
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(data, ensure_ascii=False, indent=2))
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+            tmp = None
+            return True
+        except Exception:
+            logger.exception("[multi-decision] 保存探针插件名失败")
+            return False
+        finally:
+            if tmp is not None:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+    def _probe_model_stats(self, span: int) -> dict:
+        """探针账本里这段时间的模型用量，摊成价目表能用的 {模型名: 统计}。
+
+        用户本轮第 ① 条：排序 / 嵌入只记了用量没记模型，价目表里根本看不到
+        BAAI/bge-m3 这些行，也就没法填单价。这里按模型名汇总后并进 totals["models"]，
+        用户就能在表里看到它们、填完单价花费卡片也算得上。
+
+        形状照 state/pricing.py 的 summarize 吃的来：每个模型带一份 usage 列表，一条
+        对应账本里的一次调用（ts 用那条的真实时间），kind 固定 "probe"——探针的调用
+        不是我们的回复轮，写 "reply" 会把别的插件的钱算进「回复」里。
+        """
+        out = {}
+        try:
+            if not usage_probe.is_installed():
+                return out
+            end = time.time()
+            start = end - max(1, int(span)) * 3600
+            for row in usage_probe.iter_records(start, end):
+                if str(row.get("plugin") or "unknown") == "unknown":
+                    continue
+                ref = str(row.get("model") or "").strip()
+                key = str(row.get("model_name") or "").strip() or ref
+                if not key:
+                    continue
+                inp = max(0, _as_int(row.get("in"), 0))
+                outp = max(0, _as_int(row.get("out"), 0))
+                cached = min(inp, max(0, _as_int(row.get("cached"), 0)))
+                try:
+                    ts = float(row.get("ts") or 0.0)
+                except (TypeError, ValueError):
+                    ts = 0.0
+                stat = out.get(key)
+                if stat is None:
+                    pid, mid = "", ""
+                    if ":" in ref:
+                        pid, _, mid = ref.partition(":")
+                    stat = out[key] = {
+                        "input": 0, "output": 0, "cached": 0,
+                        "rounds": 0, "calls": 0,
+                        "model_name": key, "provider_id": pid, "model_id": mid,
+                        "provider_auto": "", "identity_source": "probe",
+                        "usage": [],
+                        # 用户 m14599：价目表「请求」列要写清是哪个插件调的、调了几次。
+                        "plugins": {},
+                    }
+                stat["input"] += inp
+                stat["output"] += outp
+                stat["cached"] += cached
+                stat["calls"] += 1
+                _pid = str(row.get("plugin") or "").strip()
+                if _pid:
+                    stat["plugins"][_pid] = int(stat["plugins"].get(_pid) or 0) + 1
+                stat["usage"].append({
+                    "input": inp, "output": outp, "cached": cached,
+                    "ts": ts, "kind": "probe", "timestamp_source": "request_start",
+                })
+            for stat in out.values():
+                # 探针没有「轮次」概念，用调用次数顶上。
+                stat["rounds"] = stat["calls"]
+        except Exception:
+            logger.debug("[multi-decision] 价目页合并探针模型失败（已忽略）", exc_info=True)
+            return {}
+        return out
+
+    def _merge_probe_totals(self, totals, span: int) -> dict:
+        """把探针账本的模型用量并进 totals["models"]（用户本轮第 ① 条）。
+
+        必须并进 totals 而不是只并进 seen：价目表的行和花费卡片都从 totals 取，
+        只并 seen 的话用户填完单价「花费」也不会变。同名相加，不覆盖。
+        """
+        probe = self._probe_model_stats(span)
+        if not probe:
+            return totals
+        base = dict((totals or {}).get("models") or {}) if isinstance(totals, dict) else {}
+        for name, stat in probe.items():
+            old = base.get(name)
+            if not isinstance(old, dict):
+                base[name] = stat
+                continue
+            merged = dict(old)
+            for field in ("input", "output", "cached", "calls", "rounds"):
+                merged[field] = _as_int(old.get(field), 0) + _as_int(stat.get(field), 0)
+            # 账本桶本来就带 usage 列表（tracer 的 recent_totals 一定给），拼起来
+            # 才能按每次调用的真实时间算高峰价；老桶没有列表就保持汇总口径，
+            # summarize 会退回 legacy_round 用汇总数算，钱不会丢。
+            if isinstance(old.get("usage"), list):
+                merged["usage"] = list(old["usage"]) + list(stat.get("usage") or [])
+            for field in ("model_name", "provider_id", "model_id"):
+                if not str(merged.get(field) or "").strip():
+                    merged[field] = str(stat.get(field) or "")
+            # 用户 m14599：插件调用次数也要跟着并，不然同一模型两边都有量时
+            # 价目表里只看得见探针那一路的插件。
+            _old_plugs = merged.get("plugins")
+            if not isinstance(_old_plugs, dict):
+                _old_plugs = {}
+            for _pid, _cnt in (stat.get("plugins") or {}).items():
+                _key = str(_pid or "").strip()
+                if not _key:
+                    continue
+                _old_plugs[_key] = int(_old_plugs.get(_key) or 0) + int(_cnt or 0)
+            merged["plugins"] = _old_plugs
+            base[name] = merged
+        return dict(totals or {}, models=base)
+
+    def _price_probe_bucket(self, slot, price_view):
+        """给探针的一个 (插件, 类别) 桶按价目表算钱；失败就当未定价。"""
+        try:
+            if self.pricing is None:
+                return
+            models = {}
+            for name, mb in (slot.get("models") or {}).items():
+                models[str(name)] = {
+                    "input": int(mb.get("input") or 0),
+                    "output": int(mb.get("output") or 0),
+                    "cached": int(mb.get("cached") or 0),
+                    "usage": list(mb.get("usage") or []),
+                }
+            if not models:
+                return
+            money = self.pricing.summarize({"models": models}, prices=price_view)
+            bk = ((money or {}).get("by_kind") or {}).get("reply") or {}
+            slot["cost"] = round(float(bk.get("total") or (money or {}).get("total") or 0.0), 4)
+            slot["priced"] = bool(bk.get("priced")) or int(slot.get("tokens") or 0) <= 0
+            slot["estimated"] = bool(bk.get("estimated"))
+        except Exception:
+            logger.debug("[multi-decision] 价目页补其他插件计价失败（已忽略）", exc_info=True)
+
+    def _probe_kinds(self, points, price_view):
+        """用户 m00001：把用量探针记下的其他插件调用补成价目页的额外柱子。
+
+        返回 (by_point, all_kinds, extra_kinds)：
+        - by_point: {point_key: {extra_key: {input,output,cached,tokens,rounds,cost,priced,estimated,calls}}}
+        - all_kinds: 整段窗口的合计，结构同上
+        - extra_kinds: [{"key","plugin_id","plugin_name","kind_label","label","short","color"}]，
+          给前端填 FN_EXTRA（前端只读 key/label/short/color，多出来的字段忽略）
+        """
+        by_point = {}
+        all_kinds = {}
+        extra_kinds = []
+        try:
+            if not points or not usage_probe.is_installed():
+                return by_point, all_kinds, extra_kinds
+            lo = points[0].get("start")
+            hi = points[-1].get("end")
+            if lo is None or hi is None:
+                return by_point, all_kinds, extra_kinds
+            days = usage_probe.totals(lo, hi)
+            if not days:
+                return by_point, all_kinds, extra_kinds
+            keys = set()
+            for plugins in days.values():
+                for plugin, kinds in plugins.items():
+                    for kind in kinds:
+                        if str(plugin) == "unknown":
+                            continue
+                        keys.add((str(plugin), str(kind)))
+            keys = sorted(keys)
+            palette = ("#f59e0b", "#10b981", "#6366f1", "#ec4899",
+                       "#14b8a6", "#f97316", "#8b5cf6", "#84cc16")
+            labels = {"llm": "LLM", "embed": "嵌入", "rerank": "排序"}
+            for idx, (plugin, kind) in enumerate(keys):
+                kind_label = labels.get(kind, kind)
+                plugin_name = self._probe_plugin_name(plugin)
+                extra_kinds.append({
+                    "key": plugin + "_" + kind,
+                    "plugin_id": plugin,
+                    "plugin_name": plugin_name,
+                    "kind_label": kind_label,
+                    "label": plugin_name + " " + kind_label,
+                    "short": kind_label,
+                    "color": palette[idx % len(palette)],
+                })
+            for point in points:
+                p_start = point.get("start")
+                p_end = point.get("end")
+                if p_start is None or p_end is None:
+                    continue
+                p_start, p_end = int(p_start), int(p_end)
+                buckets = {}
+                for day_key, plugins in days.items():
+                    day_ts = _day_start_ts(day_key)
+                    if day_ts is None or not (p_start <= day_ts < p_end):
+                        continue
+                    for plugin, kinds in plugins.items():
+                        if str(plugin) == "unknown":
+                            continue
+                        for kind, bucket in kinds.items():
+                            key = str(plugin) + "_" + str(kind)
+                            slot = buckets.setdefault(key, {
+                                "input": 0, "output": 0, "cached": 0, "tokens": 0,
+                                "rounds": 0, "calls": 0, "cost": 0.0,
+                                "priced": False, "estimated": False, "models": {}})
+                            slot["input"] += int(bucket.get("in") or 0)
+                            slot["output"] += int(bucket.get("out") or 0)
+                            slot["cached"] += int(bucket.get("cached") or 0)
+                            slot["calls"] += int(bucket.get("calls") or 0)
+                            for model, mb in (bucket.get("models") or {}).items():
+                                ms = slot["models"].setdefault(
+                                    str(model), {"input": 0, "output": 0, "cached": 0, "usage": []})
+                                ms["input"] += int(mb.get("in") or 0)
+                                ms["output"] += int(mb.get("out") or 0)
+                                ms["cached"] += int(mb.get("cached") or 0)
+                                ms["usage"].append({
+                                    "input": int(mb.get("in") or 0),
+                                    "output": int(mb.get("out") or 0),
+                                    "cached": int(mb.get("cached") or 0),
+                                    "ts": day_ts + 43200,
+                                    "kind": "reply",
+                                    "timestamp_source": "request_start",
+                                })
+                for key, slot in buckets.items():
+                    slot["tokens"] = slot["input"] + slot["output"]
+                    slot["rounds"] = slot["calls"]
+                    self._price_probe_bucket(slot, price_view)
+                    slot.pop("models", None)
+                if not buckets:
+                    continue
+                by_point[str(point.get("key") or "")] = buckets
+                for key, slot in buckets.items():
+                    agg = all_kinds.setdefault(key, {
+                        "input": 0, "output": 0, "cached": 0, "tokens": 0,
+                        "rounds": 0, "calls": 0, "cost": 0.0,
+                        "priced": False, "estimated": False})
+                    agg["input"] += slot["input"]
+                    agg["output"] += slot["output"]
+                    agg["cached"] += slot["cached"]
+                    agg["tokens"] += slot["tokens"]
+                    agg["calls"] += slot["calls"]
+                    agg["rounds"] += slot["rounds"]
+                    agg["cost"] = round(float(agg["cost"]) + float(slot["cost"]), 4)
+                    agg["priced"] = bool(agg["priced"]) or bool(slot["priced"])
+                    agg["estimated"] = bool(agg["estimated"]) or bool(slot["estimated"])
+        except Exception:
+            logger.debug("[multi-decision] 价目页补其他插件用量失败（已忽略）", exc_info=True)
+            return {}, {}, []
+        return by_point, all_kinds, extra_kinds
 
     @_api("GET", "/pricing/trend")
     async def api_pricing_trend(self, range_key: str = "", bucket: str = "day", count: int = 0,
@@ -6553,6 +7077,12 @@ class MultiDecisionPlugin(BasePlugin):
                 "models": models,
                 "kinds": _kinds_out(totals, money),
             })
+        # 用户 m00001：其他插件（尤其 Alife）的模型调用不经过宿主工作流，账本里没有；
+        # 这里把用量探针记下的真实 token 按同一个桶补成额外的柱子。
+        probe_by_point, probe_all, extra_kinds = self._probe_kinds(points, price_view)
+        if probe_by_point:
+            for point in points:
+                point["kinds"].update(probe_by_point.get(str(point.get("key") or ""), {}))
         # 用户 m08952：折线往左延伸时要接上「真实的前一天」。以前前端拿前两个点反推，
         # 11-08 比 11-09 低，反推出来是个假低点，滚轮翻过去线会跳一下。这里把窗口
         # 前后各一天也算出来一起返回，前端拿它当延伸锚点（只给 label / cost / tokens）。
@@ -6656,7 +7186,8 @@ class MultiDecisionPlugin(BasePlugin):
                 "start_day": str(data.get("start_day") or ""),
                 "end_day": str(data.get("end_day") or ""),
                 "prev": edge["prev"], "next": edge["next"],
-                "kinds": _kinds_out(all_totals, money_all),
+                "kinds": dict(_kinds_out(all_totals, money_all), **probe_all),
+                "extra_kinds": extra_kinds,
                 "bucket": str(data.get("bucket") or "day"),
                 "count": int(data.get("count") or 0),
                 "unit": PRICE_UNIT, "currency": currency, "points": points, "parts": parts,
@@ -8743,7 +9274,8 @@ class MultiDecisionPlugin(BasePlugin):
                         it["hit_estimate_single"] = it.get("hit_estimate")
                         it["hit_estimate"] = round(_vsum / _wsum, 1)
             # 上游没回报缓存时，实测那一格没有意义（写 0% 会被当成一次都没命中）。
-            # 反推得出来的（hit_est）照旧显示 ≈，反推不出来的留空，前端画「—」。
+            # 用户 m05873：这一格统一写「上游未报」，反推值只留在 hit_est 里给「命中预估」
+            # 列和价目页用，不再显示（本地估算偏高，反推出来的命中率对不上上游面板）。
             if it.get("cache_reported") is False:
                 it["hit_inferred"] = True
                 _tk = it.get("tokens")
@@ -8820,6 +9352,8 @@ class MultiDecisionPlugin(BasePlugin):
                 "trim_user_total_before", "trim_user_total_after",
                 "trim_trigger", "snap_id",
                 "reply_model", "reply_provider", "reply_channel", "reply_text",
+                # 用户 m06215：这一轮回复实际带的思考等级，走势图那条路也要带上。
+                "reply_effort",
             }
             for it in items:
                 for key in list(it.keys()):
@@ -9091,12 +9625,9 @@ class MultiDecisionPlugin(BasePlugin):
                          "已按图片占比从预估里扣掉" % (new_imgs, imgs))
         act = (item.get("tokens") or {}).get("cache_hit")
         if item.get("cache_unreported"):
-            # v5.x（用户 m12891）：上游没回报 cached_tokens 时不能拿 0% 当实测去比，
-            # 反推得出来的标「≈」，反推不出来的直说无法反推。
-            _inf = any(isinstance(_sp, dict) and _sp.get("hit_est") is not None
-                       for _sp in (item.get("step_stats") or []))
-            parts.append("上游没回报 cached_tokens，这一轮命中%s"
-                         % ("按上报 token 反推（≈）" if _inf else "无法反推"))
+            # 用户 m05873：上游没回报 cached_tokens 时这一格统一写「上游未报」，
+            # 不再拿「本地估算 − 上报」反推（估算偏高，会凭空算出假命中）。
+            parts.append("上游没回报 cached_tokens，这一格不显示命中率")
         if isinstance(act, (int, float)):
             if abs(est - act) >= 1.0:
                 parts.append("本轮实测 %s%%，预估%s %.1f 个百分点"

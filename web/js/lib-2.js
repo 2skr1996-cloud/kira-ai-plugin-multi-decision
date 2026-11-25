@@ -311,6 +311,15 @@
     if(!b || b === a) return a;
     return a ? (a + " · " + b) : b;
   }
+  // 用户 m03205：昵称和群昵称要分色，光靠一个字符串分不出来——HTML 场景用这个，
+  // 群昵称包一层 .gnick（强调色）；纯文本场景（title、data 属性、分组键）仍用 dispNameOf。
+  function dispNameHtml(nm, gn){
+    var a = String(nm == null ? "" : nm).trim();
+    var b = String(gn == null ? "" : gn).trim();
+    if(!b || b === a) return esc(a);
+    if(!a) return "<span class='gnick'>" + esc(b) + "</span>";
+    return esc(a) + "<span class='gnick'> · " + esc(b) + "</span>";
+  }
   // 从一段消息头里取群名片（没有就返回空串）。老格式没有这一段，返回空。
   // 群名片里可能有逗号（后端 window/manager.py 的 _NICK_LINE_RE 也是按 ", user_id:" 锚定的），
   // 所以不能按逗号截断：先取到右括号/行尾，再把后面的 user_id 段剥掉。
@@ -573,7 +582,11 @@
       // 用户本轮：可选组会把「@某人 https://…」里的「 https」吃掉，剩下「://…」不再被
       // 后面的 URL 正则认出来，字数从 10 变 33，拉黑按钮就不挂了。URL 协议头/域名前面
       // 不许再吃空格；i 只影响 https/www 这两个字面量，别的行为不变。
-      .replace(/(^|[\s。，,、；;：:])@[\u4e00-\u9fa5A-Za-z0-9_\-]{1,32}(?:[ \t]+(?!https?:\/\/|www\.)[A-Za-z0-9_\-]{1,32})?/gi, "$1")
+      // 用户 m17388：群名片里带 ʚ 〜 ♡ ɞ 这类符号时（`@ʚ不安死✟ふぁんし〜♡ɞ 打不打大坝`），
+      // 上面这条的字符集只吃汉字/字母/数字/_-，整段昵称没剥掉，待发卡把 5 个字算成 18 字。
+      // 字符集与长度上限改成跟徽章渲染（lib-1 的 richText）完全一致：除空白、方括号、@、尖括号
+      // 和常见中英文标点之外都算昵称字符，最多 24 个。
+      .replace(/(^|[\s。，,、；;：:])@[^\s\[\]@<>，。、；;：:！!？?（）()「」“”"'…]{1,24}(?:[ \t]+(?!https?:\/\/|www\.)[A-Za-z0-9_\-]{1,32})?/gi, "$1")
       // 用户 m22683：QQ 的 @ 昵称是「@[编码]昵称」两截（`@[%ĀĀ␇Ö]我在未来，等你`），
       // 上面两条都从 `[` 就断了，昵称整段留在正文里，一句话被算成十几个字。
       .replace(/(^|[\s。，,、；;：:])@\[[^\]]{0,64}\][^\s]{0,32}/g, "$1")
@@ -1110,6 +1123,7 @@
     if(d.all && d.all.length) projected.forward_media_all = d.all;
     // name 是展示名（昵称 · 群昵称），who 仍是纯昵称：引用块标题用前者，身份判定用后者
     return { body: body, name: dispNameOf(m.name || m.who, m.gnick), who: String(m.who || m.name || ""),
+      gnick: String(m.gnick || ""),
       ts: String(m.ts || ""), media: quoteMedia, display: projected };
   }
   function unassignedMediaHtml(refs, mode){
@@ -1202,10 +1216,13 @@
     }
     var m = t.match(/^\[(?!Forward\b)([^\]]{4,40})\]\s*([^:：]{1,40})[:：]\s*([\s\S]*)$/);
     var who = String((hit && (hit.name || hit.who)) || q.who || (m ? m[2] : ""));
+    // 用户 m03205：引用块标题里的群昵称也分色；who 仍是纯文本（身份判定用）。
+    var whoHtml = "";
     if(!who){
       var nm = String(outerText || q.text || "").match(/user_nickname:\s*([^,\]]+)(?:,\s*group_nickname:\s*([^,\]]+))?/);
-      if(nm) who = dispNameOf(nm[1], nm[2]);
+      if(nm){ who = dispNameOf(nm[1], nm[2]); whoHtml = dispNameHtml(nm[1], nm[2]); }
     }
+    if(!whoHtml) whoHtml = (hit && hit.gnick) ? dispNameHtml(hit.who || "", hit.gnick) : esc(who);
     var when = shortTs(String((hit && hit.ts) || q.ts || (m ? m[1] : "")));
     var body = stripReplyTokens(m ? m[3] : t);
     var qIsFwd = body.trim().indexOf("[Forward") === 0;
@@ -1232,7 +1249,7 @@
     if(qm || (d.known && !qsrc.length)) body = tidyBody(body)
       .replace(/\[(?:Image attached|Image(?:\s*\d+)?|图片|表情|image)\]/gi, " ").replace(/^[\s\u00a0]+|[\s\u00a0]+$/g, "");
     var mark = (!d.known && id && !qsrc.length) ? " data-qpic='" + esc(id) + "'" : "";
-    var qh = "<span class='qwho'>" + (who ? esc(who) : "引用") +
+    var qh = "<span class='qwho'>" + (who ? whoHtml : "引用") +
       (when ? "<span class='dim'> · " + esc(when) + "</span>" : "") + "</span>";
     var fw = forwardHtml(body, qsrc);
     if(fw){
@@ -1294,10 +1311,10 @@
       // 多段原话（拼了好几条）或者外层没解析出「昵称:」时，把这段自己的时间/昵称
       // 用小字标一行；否则 ISO 时间戳会混进正文，看着像他说的原话
       if((parts.length > 1 && pi > 0) || !hasHead){
-        var nm2 = dispNameOf(mt.name, mt.gnick), wh2 = mt.ts ? shortTs(mt.ts) : "";
+        var nm2 = dispNameHtml(mt.name, mt.gnick), wh2 = mt.ts ? shortTs(mt.ts) : "";
         // 外层已经写了「引用」两个字，这段没昵称时就只补时间，别再重复一遍
         if(nm2 || wh2){
-          head = "<span class='qwho'>" + (nm2 ? esc(nm2) : "") +
+          head = "<span class='qwho'>" + (nm2 ? nm2 : "") +
                  (wh2 ? "<span class='dim'>" + (nm2 ? " · " : "") + esc(wh2) + "</span>" : "") + "</span>";
         }
       }
