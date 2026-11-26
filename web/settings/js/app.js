@@ -2316,10 +2316,10 @@
           "<span class='pl' title='输入 " + esc(fmtNum(unc)) + "（未命中）'><i class='plt plt-in'>输入</i> " + esc(fmtBig(unc)) + "</span>" +
           "<span class='pl' title='缓存 " + esc(fmtNum(r.cached)) + "'><i class='plt plt-hit'>命中</i> " + esc(fmtBig(r.cached)) + "</span>" +
           "<span class='pl' title='输出 " + esc(fmtNum(r.output)) + "'><i class='plt plt-out'>输出</i> " + esc(fmtBig(r.output)) + "</span></span></td>" +
-        "<td class='ph'>" + hitRateHtml(r) + "</td>" +
+        "<td class='ph'>" + hitRateCellHtml(r) + "</td>" +
         // 用户本轮：紧跟缓存命中率的「费用」列——这一行在当前区间的花费。
         "<td class='pcostc'>" +
-          partCostHtml(costParts[r.model] || null) + "</td>" +
+          costCellHtml(r, costParts[r.model] || null) + "</td>" +
         "<td class='psw'><input type='checkbox' data-pfield='peak.enabled'" + (p.enabled ? " checked" : "") + "></td>" +
         "<td class='psw'><input type='checkbox' data-pfield='peak.weekends'" + (!p.weekends ? " checked" : "") + "></td>" +
         "<td class='pschedule'>" + pricingPeriodsHtml(p) + "</td></tr>";
@@ -2485,6 +2485,15 @@
         }
         return;
       }
+      // 用户 m20864 图5：点饼心改成弹出居中详情窗口，不再把这张卡撑满一行挤开其它卡。
+      var hit = t.closest(".ppie-hit");
+      if(hit){
+        var zcard = hit.closest(".pchart-pie");
+        var zpie = zcard ? pricingPieById(zcard.getAttribute("data-pie")) : null;
+        if(!zpie) return;
+        openPricingPieModal(zpie.id);
+        return;
+      }
       var qb = t.closest("[data-q]");
       if(qb){
         var pie = pricingPieById(qb.getAttribute("data-pie"));
@@ -2524,7 +2533,8 @@
     // （PRICING_PAN_BATCH_MS）内的滚轮先排队，窗口到了再一次性消费整队；
     // 用户 m18000：一批走完要等这一批的滑动动画真正结束再放下一批，不然下一批会在半路打断上一批。
     var PRICING_PAN_STEP_MS = 0, PRICING_WHEEL_UNIT = 100;
-    var PRICING_PAN_BATCH_MS = 50, PRICING_PAN_MAX_STEPS = 4;
+    // 用户 m20864 图5：一次滚轮只走一天；连滚几格排进队列，每格一段等速动画首尾相接。
+    var PRICING_PAN_BATCH_MS = 12, PRICING_PAN_MAX_STEPS = 1, PRICING_PAN_QUEUE_MAX = 6;
     var pricingPanBatchTimer = 0;
     // 用户 m09563：窗口已经到头（默认窗口的右端就是今天）时，滚轮再往下翻不动；
     // 以前照样 preventDefault，页面不滚、图也不翻，手感像卡住再闪一下。到头就放行，让整页照常滚。
@@ -2580,13 +2590,12 @@
       pricingPanBusy = true;
       loadPricingTrend(pricingTrendMode, true).then(function(){
         // 用户 m18000：等这一批的滑动动画走完再放开（pricingPanDurMs 是这一帧算出来的时长）。
-        var wait = Math.max(PRICING_PAN_STEP_MS, (pricingPanDurMs || 0) + 30);
+        var wait = Math.max(PRICING_PAN_STEP_MS, (pricingPanDurMs || 0) + 8);
         setTimeout(function(){ pricingPanBusy = false; pricingPanStep(); }, wait);
       });
     }
     if(tcharts) tcharts.onwheel = function(ev){
       if(ev.target && ev.target.closest && ev.target.closest(".pchart-pie")) return;
-      if(!pricingWinScrollable()) return;
       var svg = ev.target && ev.target.closest ? ev.target.closest(".pchart-svg") : null;
       if(!svg || !pricingGeom) return;
       var rc = svg.getBoundingClientRect();
@@ -2600,15 +2609,20 @@
       if(ev.clientX < x0 || ev.clientX > x1 || ev.clientY < y0 || ev.clientY > y1) return;
       var dy = Number(ev.deltaY) || 0;
       if(!dy) return;
+      // 用户 m20864 图5：指针落在图里就吃掉滚轮——翻到头也不放行整页。
+      // 以前到头或固定区间就把事件让给页面，快滚时整页会突然跟着动。
+      ev.preventDefault();
+      if(!pricingWinScrollable()){
+        // 固定区间（本周 / 上周 / 本月…）不翻窗口，滚轮在图上等于无效，但也不许带动整页。
+        pricingWheelAcc = 0;
+        return;
+      }
       // 一格 = 100px：鼠标滚轮一格约 100；触控板是小步长，攒够一格才算一天。
       var unit = ev.deltaMode === 1 ? 16 : (ev.deltaMode === 2 ? 400 : 1);
       var px = dy * unit;
       var dir = px > 0 ? 1 : -1;
-      // 用户 m09563：到头了就不拦滚轮，让整页照常滚——以前这里先 preventDefault，
-      // 结果页面不滚、图也不翻，滚过头再动鼠标就像闪了一下。
       var avail = pricingPanAvail(dir);
       if(!avail){ pricingWheelAcc = 0; return; }
-      ev.preventDefault();
       if(pricingWheelAcc && (pricingWheelAcc > 0 ? 1 : -1) !== dir) pricingWheelAcc = 0;
       pricingWheelAcc += px;
       var n = Math.floor(Math.abs(pricingWheelAcc) / PRICING_WHEEL_UNIT);
@@ -2616,9 +2630,10 @@
       // 只剩这么多天：多出来的格子不排队，免得排到一半到头、页面又不动。
       if(n > avail){ n = avail; pricingWheelAcc = 0; }
       else pricingWheelAcc -= dir * n * PRICING_WHEEL_UNIT;
+      // 用户 m20864 图5：一次只走一天，连滚几格就排几格——每格一段等速动画首尾相接，不再一格停一下。
       pricingPanQueue += dir * n;
-      // 用户 m17464：先攒一小会儿（PRICING_PAN_BATCH_MS），把一次滚动的几格并成一段动画；
-      // 正在走的那一批不受影响，滚轮只往队列里加，走完立刻接上。
+      if(pricingPanQueue > PRICING_PAN_QUEUE_MAX) pricingPanQueue = PRICING_PAN_QUEUE_MAX;
+      if(pricingPanQueue < -PRICING_PAN_QUEUE_MAX) pricingPanQueue = -PRICING_PAN_QUEUE_MAX;
       if(pricingPanBusy) return;
       clearTimeout(pricingPanBatchTimer);
       pricingPanBatchTimer = setTimeout(function(){ pricingPanBatchTimer = 0; pricingPanStep(); }, PRICING_PAN_BATCH_MS);
@@ -3453,7 +3468,46 @@
     var qs = new URLSearchParams(location.search);
     scopeSid = qs.get("sid") || "";
   } catch(err) { scopeSid = ""; }
+  // 用户 m24700 第 ③⑤ 条：设置页顶部一行——宿主版本、七项兼容探测、私有补丁装了几个。
+  // 全部通过时安静一行；有跳过项就变琥珀色，名字直接写出来，明细挂在 title 上。
+  function loadCompatBar(){
+    var bar = document.getElementById("compat-bar");
+    if(!bar) return;
+    get(API + "/health").then(function(d){
+      var compat = (d && d.compat) || {};
+      var keys = Object.keys(compat);
+      var gate = (d && d.patch_gate) || {};
+      var entries = Array.isArray(gate.entries) ? gate.entries : [];
+      if(!keys.length && !entries.length) return;   // 老后端没有这两块，别显示 0/0 吓人
+      var okCount = keys.filter(function(k){ return compat[k]; }).length;
+      var skipped = Array.isArray(gate.skipped) ? gate.skipped : [];
+      var host = String((d && d.host) || "");
+      if(host && host.charAt(0) !== "v") host = "v" + host;
+      var bad = skipped.length > 0 || okCount < keys.length;
+      var tips = keys.map(function(k){ return k + "：" + (compat[k] ? "有" : "缺"); });
+      skipped.forEach(function(it){
+        tips.push("跳过 " + (it.label || it.name || "") + "：" + (it.reason || ""));
+      });
+      bar.className = "compatbar" + (bad ? " warn" : "");
+      bar.title = tips.join("\n");
+      bar.innerHTML = "<span class='cb-dot'></span>" +
+        "<span>宿主 <b>" + esc(host || "未知") + "</b></span>" +
+        "<span>兼容 <b>" + okCount + "/" + keys.length + "</b></span>" +
+        "<span>私有补丁 <b>" + Number(gate.applied || 0) + "/" + Number(gate.total || 0) + "</b></span>" +
+        (skipped.length
+          ? "<span class='cb-skip'>跳过 " +
+            skipped.map(function(it){ return esc(it.label || it.name || ""); }).join("、") + "</span>"
+          : "");
+      bar.hidden = false;
+    }).catch(function(){
+      bar.className = "compatbar";
+      bar.innerHTML = "<span class='cb-dot'></span><span>兼容自检读取失败</span>";
+      bar.hidden = false;
+    });
+  }
+
   paintFromCache();
+  loadCompatBar();
   loadSettings();
   bindDecisionPage();
   // 用户 m04756：作用范围 / 隐藏会话不挡首屏——等配置和当前页的数据先发出去再补。

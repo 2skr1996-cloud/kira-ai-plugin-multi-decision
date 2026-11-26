@@ -484,6 +484,8 @@ html[data-theme="dark"] .mgrp + .mgrp{border-top-color:rgba(255,255,255,.22);}
 .mgrp > .mc .mc-hd{padding:3px 10px 1px;background:transparent;border-bottom:none;}
 .mgrp > .mc .mc-hd .k{background:rgba(255,255,255,.6);border-color:rgba(0,0,0,.06);}
 .mgrp > .mc .mc-bd{padding:0 12px 5px;}
+/* 用户 m20864 第 6 条：注入卡的正文以前顶着卡头（padding-top:0），标题和第一行糊在一起 */
+.mgrp > .mc.seg .mc-bd{padding-top:6px;}
 .mgrp > .mc.pend{border:none;border-left:2px dashed var(--accent);}
 .mgrp > .mc.skip{border:1px dashed var(--muted);border-radius:8px;margin:4px 0;}
 /* 组内消息悬停：v2.78 把 .mc 的边框去掉后，.mc:hover 的 border-color 就失效了（用户 m32094） */
@@ -611,7 +613,17 @@ html[data-theme="dark"] .mgrp-hd .gh-nm.dec-name{color:#c4b5fd;}
 .segbox{font-size:12px;line-height:1.65;color:var(--text);}
 .segln{white-space:pre-wrap;word-break:break-word;padding:1px 0;}
 .segln.gap{height:6px;}
-.segln.long > summary{cursor:pointer;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* 用户 m20864 第 8 条：缩进过的标签行单独画成代码块，不再靠 pre-wrap 留前导空格 */
+.segcode{margin:3px 0;padding:3px 9px;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;
+  line-height:1.6;color:var(--muted);background:var(--soft);border:1px solid var(--line);border-radius:6px;
+  white-space:pre-wrap;word-break:break-all;}
+.segln.long > summary{cursor:pointer;display:flex;align-items:center;gap:6px;color:var(--muted);min-width:0;}
+/* 用户 m20864 第 9 条：折叠条以前直接拿正文前 160 字当标题，看着像调试输出；
+   现在左边一个「长文本」标、右边字数，中间留一段预览。 */
+.seglongtag{flex:none;font-size:10px;line-height:15px;font-weight:700;color:#0ea5e9;
+  border:1px solid rgba(14,165,233,.35);background:rgba(14,165,233,.10);border-radius:5px;padding:0 5px;}
+.seglongtxt{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.seglongnum{flex:none;font-size:10px;line-height:15px;color:var(--muted);font-variant-numeric:tabular-nums;}
 .segln.long > pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-all;font-size:11.5px;line-height:1.6;color:var(--muted);}
 /* 用户 m12096 第 4 条：注入段正文通用美化（小标题 / 项目符号 / 键值 / JSON 树）。 */
 /* 用户 m15963 第 4 条：标题栏以前只有一条虚线，太素；改成带左侧色条的浅底标题条。 */
@@ -621,9 +633,25 @@ html[data-theme="dark"] .mgrp-hd .gh-nm.dec-name{color:#c4b5fd;}
 .mc.seg .segh:first-child{margin-top:0;}
 .segli{padding:1px 0 1px 14px;position:relative;}
 .segli:before{content:"·";position:absolute;left:4px;color:var(--accent);font-weight:700;}
-.segkv{display:flex;gap:8px;padding:1px 0;}
-.segkv .k{flex:none;max-width:38%;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.segkv .v{flex:1;min-width:0;word-break:break-word;}
+.segkv{padding:1px 0;}
+/* 用户 m20864 第 8 条：键值行以前两列对齐，键长短不一时右边的值一行一个缩进；
+   改成「弱色键 + 正文值」连着排，跟普通行同一个左边缘。 */
+.segkv .k{color:var(--muted);font-weight:600;margin-right:6px;}
+.segkv .v{color:var(--text);word-break:break-word;}
+.segrow{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;padding:2px 0;
+  border-bottom:1px dashed var(--line);}
+.segrow:last-child{border-bottom:0;}
+.segcell{min-width:0;word-break:break-word;}
+.segcell.idx{flex:none;font-size:10.5px;line-height:15px;padding:0 5px;border:1px solid var(--line);
+  border-radius:5px;color:var(--muted);font-variant-numeric:tabular-nums;}
+.segcell.tag{flex:none;font-size:10.5px;line-height:15px;padding:0 5px;border:1px solid rgba(14,165,233,.35);
+  border-radius:5px;background:rgba(14,165,233,.08);color:#0ea5e9;}
+.segcell.ts{flex:none;font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums;}
+.segcell.body{flex:1 1 100%;}
+.segfoot{display:inline-flex;align-items:center;gap:6px;margin-top:6px;padding:2px 10px 2px 8px;
+  border:1px dashed var(--line);border-radius:999px;background:var(--soft);font-size:11px;color:var(--muted);}
+.segfoot b{font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;}
+.segfootmark{font-size:12px;letter-spacing:1px;opacity:.75;}
 .segjson{background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:6px 9px;
   font-family:ui-monospace,Consolas,monospace;font-size:11.5px;line-height:1.7;}
 .segjrow{display:flex;gap:8px;}
@@ -632,6 +660,8 @@ html[data-theme="dark"] .mgrp-hd .gh-nm.dec-name{color:#c4b5fd;}
 .segkey{font-family:ui-monospace,Consolas,monospace;}
 html[data-theme="dark"] .segjson{background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.10);}
 html[data-theme="dark"] .segkv .k,html[data-theme="dark"] .segjrow .k{color:var(--muted);}
+html[data-theme="dark"] .segcell.idx,html[data-theme="dark"] .segfoot{border-color:rgba(255,255,255,.12);}
+html[data-theme="dark"] .segcell.tag{border-color:rgba(56,189,248,.35);background:rgba(56,189,248,.12);color:#7dd3fc;}
 /* 用户本轮第 ①②③ 条：注入段通用美化（有序列表 / 引用 / 行内标记 / 可折叠 JSON 树）与 Alife 联动美化。 */
 /* 用户 m15963 第 4 条：通用美化不再给有序列表上编号徽章，编号一律按项目符号排。 */
 .mc.seg .segquote{padding:2px 0 2px 10px;margin:1px 0;border-left:3px solid rgba(14,165,233,.45);
@@ -659,36 +689,48 @@ html[data-theme="dark"] .segkv .k,html[data-theme="dark"] .segjrow .k{color:var(
 .mc-hd .segpill.off:hover{color:var(--accent);border-color:var(--accent);}
 .mc.seg .segalife{font-size:12px;}
 /* 用户 m18331 图1：开头并成一条汇总带（作用域 + 三项计数 + 会话串），结尾改成带分隔线的尾注。 */
-.mc.seg .segalife-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-  margin:0 0 8px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;
+/* 用户 m19461 图2：顶上拆成两行、全部靠左——第一行作用域与会话，第二行三项计数；
+   左边加一道竖条，跟下面的条目拉开层级。 */
+.mc.seg .segalife-top{display:flex;flex-direction:column;align-items:flex-start;gap:6px;
+  margin:0 0 10px;padding:8px 11px 9px;border:1px solid var(--line);border-left:3px solid #0ea5e9;
+  border-radius:8px;
   background:linear-gradient(90deg,rgba(14,165,233,.10),rgba(14,165,233,.02) 55%,transparent);}
+.mc.seg .segalife-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;max-width:100%;}
 .mc.seg .segalife-scopebadge{display:inline-flex;align-items:center;gap:6px;flex:none;
   font-size:11.5px;font-weight:700;color:#0ea5e9;letter-spacing:.02em;}
 .mc.seg .segalife-scopebadge:before{content:"";width:6px;height:6px;border-radius:50%;
   background:currentColor;box-shadow:0 0 0 3px rgba(14,165,233,.16);}
-.mc.seg .segalife-metrics{display:inline-flex;align-items:center;gap:12px;flex:none;}
+.mc.seg .segalife-metrics{display:flex;align-items:center;gap:14px;flex-wrap:wrap;}
 .mc.seg .segalife-metric{font-size:11px;line-height:16px;color:var(--muted);white-space:nowrap;}
 .mc.seg .segalife-metric b{font-size:12px;font-weight:700;color:var(--text);margin-right:2px;
   font-variant-numeric:tabular-nums;}
 .mc.seg .segalife-sess{font-size:10.5px;line-height:16px;font-family:ui-monospace,Consolas,monospace;
-  color:var(--muted);max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  color:var(--muted);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  padding:0 6px;border:1px solid var(--line);border-radius:5px;background:var(--card);}
 .mc.seg .segalife-aliaslabel{font-weight:700;color:var(--text);}
-.mc.seg .segalife-aliasnum{font-size:10.5px;line-height:15px;color:var(--muted);
-  border:1px solid var(--line);border-radius:5px;padding:0 5px;}
-.mc.seg .segalife-foot{display:flex;align-items:center;gap:6px;margin-top:8px;padding-top:6px;
-  border-top:1px dashed var(--line);font-size:11px;line-height:16px;color:var(--muted);}
+.mc.seg .segalife-aliasnum{font-size:10.5px;line-height:15px;font-weight:600;color:#0ea5e9;
+  border:1px solid rgba(14,165,233,.35);border-radius:5px;padding:0 5px;background:rgba(14,165,233,.10);}
+/* 用户 m19461 图2：尾部改成居左的小胶囊，不再是一条通栏虚线 */
+/* 用户 m20864 第 7 条：结尾的小胶囊单独漂在一角；改成一条压在末尾的虚线栏。 */
+.mc.seg .segalife-foot{display:flex;align-items:center;gap:6px;margin:10px 0 2px;padding-top:6px;
+  border-top:1px dashed var(--line);font-size:11px;line-height:17px;color:var(--muted);}
+.mc.seg .segalife-foot b{font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;}
 .mc.seg .segalife-footmark{font-size:12px;letter-spacing:1px;opacity:.75;}
 .mc.seg .segalife-scope{font-size:11px;line-height:16px;color:var(--muted);margin:0 0 6px;
   background:var(--soft);border:1px solid var(--line);border-radius:5px;padding:1px 7px;
   width:max-content;max-width:100%;}
 /* 用户 m15963 第 3 条：名单以前是一整串铺四行，现在折成可展开的表格。 */
-.mc.seg .segalife-alias{margin:0 0 7px;border:1px solid var(--line);border-radius:7px;background:var(--soft);}
-.mc.seg .segalife-aliassum{display:flex;align-items:center;gap:6px;cursor:pointer;list-style:none;
-  font-size:11px;line-height:22px;color:var(--muted);padding:0 8px;border-radius:7px;}
+/* 用户 m20864 第 6 条：名单那条以前整行 muted、跟正文糊在一起，看不出是能点开的名单。 */
+.mc.seg .segalife-alias{margin:2px 0 8px;border:1px solid rgba(14,165,233,.35);border-left:3px solid #0ea5e9;
+  border-radius:7px;background:rgba(14,165,233,.07);}
+.mc.seg .segalife-aliassum{display:flex;align-items:center;gap:7px;cursor:pointer;list-style:none;
+  font-size:11.5px;line-height:24px;color:var(--text);padding:0 9px 0 8px;border-radius:7px;}
 .mc.seg .segalife-aliassum::-webkit-details-marker{display:none;}
-.mc.seg .segalife-aliassum:before{content:"▸";flex:none;width:9px;font-size:10px;color:var(--muted);}
+.mc.seg .segalife-aliassum:before{content:"▸";flex:none;width:9px;font-size:10px;color:#0ea5e9;}
 .mc.seg .segalife-alias[open] > .segalife-aliassum:before{content:"▾";}
-.mc.seg .segalife-aliassum:hover{background:rgba(14,165,233,.06);}
+.mc.seg .segalife-aliassum:after{content:"展开";margin-left:auto;font-size:10.5px;color:var(--muted);}
+.mc.seg .segalife-alias[open] > .segalife-aliassum:after{content:"收起";}
+.mc.seg .segalife-aliassum:hover{background:rgba(14,165,233,.10);}
 .mc.seg .segalife-aliasgrid{display:flex;flex-wrap:wrap;gap:4px 6px;padding:2px 8px 8px;}
 .mc.seg .segalife-aliasrow{display:inline-flex;align-items:center;gap:5px;max-width:100%;
   background:var(--card);border:1px solid var(--line);border-radius:5px;padding:0 6px;line-height:17px;}
@@ -699,10 +741,12 @@ html[data-theme="dark"] .segkv .k,html[data-theme="dark"] .segjrow .k{color:var(
   color:var(--muted);margin:8px 0 4px;letter-spacing:.02em;}
 .mc.seg .segalife-sec .k{font-weight:600;font-size:10.5px;line-height:15px;color:var(--muted);
   border:1px solid var(--line);border-radius:5px;padding:0 5px;}
-.mc.seg .segalife-item{display:flex;align-items:flex-start;gap:7px;padding:5px 8px;margin-bottom:4px;
+.mc.seg .segalife-item{display:flex;align-items:baseline;gap:7px;padding:5px 8px;margin-bottom:4px;
   background:var(--card);border:1px solid var(--line);border-left:3px solid rgba(14,165,233,.55);border-radius:7px;}
 .mc.seg .segalife-item.fact{border-left-color:rgba(139,92,246,.55);}
-.mc.seg .segalife-tag{flex:none;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+/* 用户 m20864 第 8 条：标签/类型宽度随内容变，正文左边缘一行一个位置；固定成一列。 */
+.mc.seg .segalife-lead{flex:0 0 108px;display:flex;align-items:baseline;gap:4px;min-width:0;overflow:hidden;}
+.mc.seg .segalife-tag{flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-size:10.5px;line-height:15px;font-weight:700;font-family:ui-monospace,Consolas,monospace;
   color:#0ea5e9;background:rgba(14,165,233,.12);border-radius:5px;padding:1px 6px;}
 .mc.seg .segalife-item.fact .segalife-tag{color:#7c3aed;background:rgba(139,92,246,.12);}
@@ -720,15 +764,19 @@ html[data-theme="dark"] .segkv .k,html[data-theme="dark"] .segjrow .k{color:var(
 .mc.seg .segalife-star{flex:none;font-size:10.5px;line-height:15px;font-weight:700;color:#f59e0b;}
 .mc.seg .segalife-ts{flex:none;font-size:10.5px;line-height:15px;color:var(--muted);white-space:nowrap;
   font-family:ui-monospace,Consolas,monospace;}
-.mc.seg .segalife-recent{display:flex;align-items:baseline;gap:6px;font-size:11.5px;color:var(--muted);
-  padding:2px 0 2px 8px;border-left:2px solid var(--line);margin-bottom:2px;}
-.mc.seg .segalife-rt{flex:none;font-size:10.5px;font-family:ui-monospace,Consolas,monospace;color:var(--muted);}
-.mc.seg .segalife-rrole{flex:none;font-size:10px;line-height:14px;font-weight:700;border-radius:4px;padding:0 4px;
+/* 用户 m20864 第 7 条：最近记录以前是一条 flex 行，长正文绕过左侧元信息继续排；
+   改成「时间/角色/昵称一行 + 正文一行」，更像一条聊天记录。 */
+.mc.seg .segalife-recent{padding:3px 0 5px 9px;border-left:2px solid var(--line);margin-bottom:4px;}
+.mc.seg .segalife-rhead{display:flex;align-items:center;gap:6px;margin-bottom:2px;}
+.mc.seg .segalife-rt{font-size:10.5px;font-family:ui-monospace,Consolas,monospace;color:var(--muted);font-variant-numeric:tabular-nums;}
+.mc.seg .segalife-rrole{font-size:10px;line-height:14px;font-weight:700;border-radius:4px;padding:0 4px;
   color:#0ea5e9;background:rgba(14,165,233,.12);}
 .mc.seg .segalife-rrole.a{color:#7c3aed;background:rgba(139,92,246,.12);}
-.mc.seg .segalife-rname{flex:none;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+.mc.seg .segalife-rname{max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-size:11px;color:var(--text);}
-.mc.seg .segalife-rbody{flex:1;min-width:0;word-break:break-word;color:var(--text);}
+.mc.seg .segalife-rbody{font-size:11.5px;line-height:1.6;color:var(--text);word-break:break-word;}
+.mc.seg .segalife-rat{display:inline-block;margin-left:5px;font-size:10px;line-height:15px;color:#0ea5e9;
+  background:rgba(14,165,233,.12);border-radius:4px;padding:0 5px;vertical-align:1px;}
 .mc.seg .segalife-tool{display:inline-block;margin-left:5px;font-size:10px;line-height:15px;
   font-family:ui-monospace,Consolas,monospace;color:#7c3aed;background:rgba(139,92,246,.12);
   border-radius:4px;padding:0 5px;vertical-align:1px;}
@@ -748,11 +796,12 @@ html[data-theme="dark"] .mc.seg .segalife-scope{background:rgba(255,255,255,.05)
 html[data-theme="dark"] .mc.seg .segalife-top{background:linear-gradient(90deg,rgba(56,189,248,.14),rgba(56,189,248,.03) 55%,transparent);border-color:rgba(255,255,255,.10);}
 html[data-theme="dark"] .mc.seg .segalife-scopebadge{color:#7dd3fc;}
 html[data-theme="dark"] .mc.seg .segalife-scopebadge:before{box-shadow:0 0 0 3px rgba(56,189,248,.20);}
-html[data-theme="dark"] .mc.seg .segalife-aliasnum{border-color:rgba(255,255,255,.12);}
-html[data-theme="dark"] .mc.seg .segalife-foot{border-top-color:rgba(255,255,255,.12);}
-html[data-theme="dark"] .mc.seg .segalife-alias{background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.10);}
+html[data-theme="dark"] .mc.seg .segalife-aliasnum{border-color:rgba(56,189,248,.35);color:#7dd3fc;background:rgba(56,189,248,.12);}
+html[data-theme="dark"] .mc.seg .segalife-foot{border-color:rgba(255,255,255,.12);}
+html[data-theme="dark"] .mc.seg .segalife-sess{border-color:rgba(255,255,255,.12);}
+html[data-theme="dark"] .mc.seg .segalife-alias{background:rgba(56,189,248,.08);border-color:rgba(56,189,248,.28);border-left-color:rgba(56,189,248,.65);}
 html[data-theme="dark"] .mc.seg .segalife-aliasrow{background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.10);}
-html[data-theme="dark"] .mc.seg .segalife-aliassum:hover{background:rgba(56,189,248,.10);}
+html[data-theme="dark"] .mc.seg .segalife-aliassum:hover{background:rgba(56,189,248,.14);}
 html[data-theme="dark"] .mc.seg .segalife-item{background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.10);}
 html[data-theme="dark"] .mc.seg .segalife-tag{color:#7dd3fc;background:rgba(56,189,248,.16);}
 html[data-theme="dark"] .mc.seg .segalife-item.fact .segalife-tag{color:#c4b5fd;background:rgba(139,92,246,.20);}
@@ -766,6 +815,8 @@ html[data-theme="dark"] .mc.seg .segalife-kind.k-co{color:#67e8f9;border-color:r
 html[data-theme="dark"] .mc.seg .segalife-recent{border-left-color:rgba(255,255,255,.14);}
 html[data-theme="dark"] .mc.seg .segalife-rrole{color:#7dd3fc;background:rgba(56,189,248,.16);}
 html[data-theme="dark"] .mc.seg .segalife-rrole.a{color:#c4b5fd;background:rgba(139,92,246,.20);}
+html[data-theme="dark"] .mc.seg .segalife-rat{color:#7dd3fc;background:rgba(56,189,248,.16);}
+html[data-theme="dark"] .mc.seg .segalife-aliassum:before{color:#7dd3fc;}
 .mc-hd .k{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:11.5px;}
 .mc-hd .grow{flex:1;}
 .mc-bd{padding:9px 12px;}
@@ -970,6 +1021,8 @@ html[data-theme="dark"] .mc-bd .at{background:rgba(59,130,246,.26);color:#93c5fd
       font-size:11px;color:var(--muted);background:var(--soft);}
     .mc-bd .qcard .qc-src{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
     .mc-bd .qcard .qc-open{flex:none;color:var(--accent);font-weight:500;}
+    /* 用户 m19461 图1：待发 / 过滤这类小标签放进页脚、紧挨「打开」左边 */
+    .mc-bd .qcard .qc-ft .chb{flex:none;margin-left:0;}
     /* 用户 m19755：转发条目里的分享卡现在画在弹层（.fwd-pop）里，上面这套只写在 .mc-bd 下，
        这里补一份，免得卡片进弹层只剩一行裸文字。 */
     .fwd-pop .fp-tx .qcard{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:11px;

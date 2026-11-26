@@ -1844,11 +1844,26 @@ var ctxSnapRequest = 0;
     return inner.slice(j + 4).trim() ? "" : inner;
   }
 
+  // 用户 m19461 图1：待发 / 过滤这类消息级小标签要落在分享卡自己的页脚里、
+  // 紧挨「打开」左边，而不是飘在卡片右侧外面（.chip-line 那个位置看着跟卡片脱开）。
+  // 只认带 .qc-ft 页脚的分享卡；X 卡（.qcard.tw）整张 <a> 会被 fillTweets 换掉，
+  // 塞进去的标签会跟着没，仍走右上角那条路。
+  function qcardFootChip(h, chip){
+    var s = String(h == null ? "" : h).trim();
+    if(!s || s.indexOf("data-tw=") >= 0) return "";
+    if(s.indexOf("class='qcard") < 0) return "";
+    var k = s.lastIndexOf("<span class='qc-open'>");
+    if(k < 0) return "";
+    return s.slice(0, k) + chip + s.slice(k);
+  }
+
   function chipInto(pre, body, chip, inCard){
     // 用户 m13647：X 卡的标签放进卡片右上角（卡片外面套一层相对定位的壳，标签绝对定位）
     if(chip && inCard){
       var tw = twCardOnlyHtml(body);
       if(tw) return "<div class='tw-host'>" + tw + "<span class='card-chips'>" + chip + "</span></div>";
+      var qf = qcardFootChip(body, chip);
+      if(qf) return qf;
     }
     // 整段只有一张卡：气泡挂卡片右边，别落进卡片内部/下面
     var sole = chip ? cardOnlyHtml(body) : "";
@@ -1868,6 +1883,11 @@ var ctxSnapRequest = 0;
     // 转发卡一律把气泡放到卡片外面下方，卡片保持通栏。
     if(chip && pre.indexOf("<div class='fwd'") >= 0)
       return pre + "<div class='mc-tail'>" + chip + "</div>";
+    // 正文是空的、卡片在 pre 里（B 站链接被抽成卡就是这条路）：同样塞进页脚
+    if(chip && inCard){
+      var qf2 = qcardFootChip(pre, chip);
+      if(qf2) return qf2;
+    }
     if(chip && pre.indexOf("class='qcard") >= 0)
       return "<div class='chip-line'>" + pre + chip + "</div>";
     return tailChip(pre, chip);

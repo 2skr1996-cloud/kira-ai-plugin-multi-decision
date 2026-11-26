@@ -1644,9 +1644,9 @@
   // 用户 m06116：三张饼，一张饼一个指标。
   // 用户 m06437：每张饼里改成左右两个饼——左边按功能、右边按模型，sub 只在数据没到时露一下。
   var pricingPies = [
-    { id: "cost", title: "花费占比", sub: "按功能 / 按模型", start: "", end: "", data: null, tag: "", at: 0, seq: 0, open: false },
-    { id: "tokens", title: "Token 占比", sub: "按功能 / 按模型", start: "", end: "", data: null, tag: "", at: 0, seq: 0, open: false },
-    { id: "calls", title: "调用分布", sub: "按功能 / 按模型", start: "", end: "", data: null, tag: "", at: 0, seq: 0, open: false }
+    { id: "cost", title: "花费占比", sub: "按功能 / 按模型", start: "", end: "", data: null, tag: "", at: 0, seq: 0, open: false, zoom: false },
+    { id: "tokens", title: "Token 占比", sub: "按功能 / 按模型", start: "", end: "", data: null, tag: "", at: 0, seq: 0, open: false, zoom: false },
+    { id: "calls", title: "调用分布", sub: "按功能 / 按模型", start: "", end: "", data: null, tag: "", at: 0, seq: 0, open: false, zoom: false }
   ];
 
   function setPMsg(text, cls){
@@ -1857,6 +1857,44 @@
   }
 
 
+  // 用户 m19461 图7：命中率与花费也要按插件分开——第一行是我们自己的（决策 / 回复），
+  // 下面每个调过这个模型的插件各一行，名字用强调色，跟「请求」列那几行对得上。
+  function rowPlugins(r){
+    var out = [], plugs = (r && r.plugins) || [];
+    for(var i = 0; i < plugs.length; i++){
+      var p = plugs[i] || {};
+      if((Number(p.calls) || 0) <= 0) continue;
+      if(!String(p.plugin_name || p.plugin_id || "")) continue;
+      out.push(p);
+    }
+    return out;
+  }
+
+  // 我们自己的 token = 这一行的总数减掉各插件那部分（探针用量是并进同一行的）。
+  function ownTokens(r){
+    var inp = Number(r && r.input) || 0, hit = Number(r && r.cached) || 0;
+    var plugs = rowPlugins(r);
+    for(var i = 0; i < plugs.length; i++){
+      inp -= Number(plugs[i].input) || 0;
+      hit -= Number(plugs[i].cached) || 0;
+    }
+    return { input: Math.max(0, inp), cached: Math.max(0, hit) };
+  }
+
+  // 用户 m20864 图1：插件数据是 0 的子行不写——一列里全是「Alife 0.0%」既没信息也把列撑歪。
+  // 子行前加一个 ↳ 缩进标记，让「主行 + 插件行」的两级对齐看上去是刻意的（用户嫌对齐不好看）。
+  function hitRateCellHtml(r){
+    var plugs = rowPlugins(r).filter(function(p){ return (Number(p.cached) || 0) > 0; });
+    if(!plugs.length) return hitRateHtml(r);
+    var out = "<span class='puc'><span class='pl'>" + hitRateHtml(ownTokens(r)) + "</span>";
+    for(var i = 0; i < plugs.length; i++){
+      var p = plugs[i];
+      out += "<span class='pl pplug' title='" + esc(String(p.plugin_id || "")) + "'>" +
+        esc(String(p.plugin_name || p.plugin_id || "")) + " " + hitRateHtml(p) + "</span>";
+    }
+    return out + "</span>";
+  }
+
   function partCostHtml(part){
     var c = pricingCost;
     if(!c || !part) return "<span class='pdim'>—</span>";
@@ -1869,6 +1907,29 @@
            (cur ? "<span class='pcf-u'>" + esc(cur) + "</span>" : "");
   }
 
+  // 用户 m19461 图7：费用列同样分两拨——我们自己的花费 + 每个插件自己的花费。
+  // 用户 m20864 图1：同上，插件花费为 0 的子行不写；全部为 0 时退回单行总价。
+  function costCellHtml(r, part){
+    var plugs = rowPlugins(r).filter(function(p){ return (Number(p.cost) || 0) > 0; });
+    if(!plugs.length) return partCostHtml(part);
+    var plugCost = 0;
+    for(var i = 0; i < plugs.length; i++) plugCost += Number(plugs[i].cost) || 0;
+    var own = null;
+    if(part){
+      own = { cost: Math.max(0, (Number(part.cost) || 0) - plugCost),
+              unset: part.unset, approximate: part.approximate };
+    }
+    var out = "<span class='puc'><span class='pl'>" + partCostHtml(own) + "</span>";
+    for(var j = 0; j < plugs.length; j++){
+      var p = plugs[j];
+      out += "<span class='pl pplug' title='" + esc(String(p.plugin_id || "")) + "'>" +
+        esc(String(p.plugin_name || p.plugin_id || "")) + " " +
+        partCostHtml({ cost: Number(p.cost) || 0, unset: !!p.unset, approximate: !!p.approximate }) +
+        "</span>";
+    }
+    return out + "</span>";
+  }
+
   // 静默刷新（保存价目后只换花费、不重画整张表）时同步这一列，别让顶部总计已经变了、行里还是旧数。
   function paintCostCells(box){
     if(!box) return;
@@ -1876,11 +1937,13 @@
     if(pricingCost && pricingCost.parts) pricingCost.parts.forEach(function(p){
       if(p && p.model != null) parts[p.model] = p;
     });
+    var rows = Object.create(null);
+    (pricingCache || []).forEach(function(r){ if(r && r.model != null) rows[r.model] = r; });
     Array.prototype.forEach.call(box.querySelectorAll("tr[data-pmodel]"), function(tr){
       var cell = tr.querySelector("td.pcostc");
       if(!cell) return;
-      var part = parts[tr.getAttribute("data-pmodel")] || null;
-      cell.innerHTML = partCostHtml(part);
+      var name = tr.getAttribute("data-pmodel");
+      cell.innerHTML = costCellHtml(rows[name] || null, parts[name] || null);
     });
   }
 
@@ -1971,6 +2034,9 @@
       if(!d) return "<span class='pcal-d mute'></span>";
       var txt = y + "-" + ("0" + (mo + 1)).slice(-2) + "-" + ("0" + d).slice(-2);
       var cls = "pcal-d";
+      // 用户 m20864 图2：日历里也标出周末、法定节假日和调休补班（补班描边，底色仍按工作日）。
+      var mk = (typeof pricingDayMark === "function") ? pricingDayMark(txt) : "";
+      if(mk === "weekend"){ cls += " we"; }else if(mk === "holiday"){ cls += " ho"; }else if(mk === "workday"){ cls += " wo"; }
       if(s && e && txt >= s && txt <= e) cls += " in";
       if(txt === s) cls += " s";
       if(txt === e) cls += " e";

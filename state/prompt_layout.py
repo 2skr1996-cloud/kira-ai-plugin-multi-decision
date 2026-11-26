@@ -1212,13 +1212,8 @@ class PromptLayouts:
 
     def _now_text(self):
         """框架同款时间串（Oct 29 2026 01:53 Thu），时区跟框架配置走。"""
-        tz = None
-        try:
-            cfg = getattr(getattr(self.plugin, "ctx", None), "config", None)
-            tz = cfg.get_timezone() if cfg is not None and hasattr(cfg, "get_timezone") else None
-        except Exception as exc:
-            logger.debug("[multi-decision] 读不到框架时区，时间串按系统本地时间：%s", exc)
-            tz = None
+        cfg = getattr(getattr(self.plugin, "ctx", None), "config", None)
+        tz = compat.config_timezone(cfg)
         try:
             now = datetime.now(tz) if tz else datetime.now()
         except Exception:

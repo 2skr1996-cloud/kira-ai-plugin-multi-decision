@@ -13,7 +13,6 @@ import hashlib
 from html import unescape as _html_unescape
 from collections import deque
 from urllib.parse import urlsplit
-import inspect
 import json
 import random
 import re
@@ -38,6 +37,8 @@ from ..state.reply_media import ReplyMediaAdapter
 from ..state.media_rescue import apply_placeholder, needs_rescue, rescue_in_background
 from ..state.reply_delivery import REPLY_ATTEMPT, ReplyDeliveryGuard
 from ..state.reply_publication import REPLY_PUBLICATION, ReplyPublicationGuard
+from ..state import compat
+from ..state.patch_gate import require_callable
 from ..window.buffer import ids_of
 from ..window.split import _looks_image, mark_mention, mark_messages, split_user_content
 
@@ -64,23 +65,7 @@ def _effort_client(client, effort: str):
     level = str(effort or "").strip().lower()
     if not level or client is None:
         return client
-    base = None
-    try:
-        from core.provider import LLMModelClient  # type: ignore
-        base = LLMModelClient
-    except Exception:
-        try:
-            from core.provider.provider import LLMModelClient  # type: ignore
-            base = LLMModelClient
-        except Exception:
-            base = None
-    if base is None:
-        # 导入不到就顺着客户端自己的继承链找——框架给的客户端本来就是它的子类，
-        # 这样即使 core.provider 的导出变了，isinstance 过滤也照样过得去。
-        for cls in type(client).__mro__:
-            if cls.__name__ == "LLMModelClient":
-                base = cls
-                break
+    base = compat.llm_client_base(client)
     if base is None:
         return client
 
@@ -1315,6 +1300,10 @@ def reply_line_of(message, lookup=None) -> str:
         return "[Reply ID: %s]" % rid
     return "[Reply %s]" % txt
 
+#: 用户 m19461 第 5 条：私聊昵称问适配器的超时（秒）与失败后的重试间隔。
+NICK_TIMEOUT = 10.0
+NICK_RETRY_SECONDS = 600.0
+
 _NICK_EMPTY_RE = re.compile(
     r"\[user_nickname:\s*,\s*(?:group_nickname:\s*([^,\]]*),\s*)?user_id:"
 )
@@ -1482,6 +1471,19 @@ class _InputFlow:
         self.held_pending = []
 
 
+def _install_private_patch(engine, gate, name, label, adapter, owner, attr):
+    """按用户 m24700 第 ⑤ 条走准入层；没有准入层（测试里的假插件）时照旧直接装。"""
+    if gate is None:
+        return adapter.install()
+    return gate.install(
+        name,
+        label,
+        adapter.install,
+        requires=lambda: require_callable(getattr(engine.ctx, owner, None), attr, owner),
+        min_host="3.0.0",
+    )
+
+
 class DecisionEngine:
     def __init__(self, plugin):
         self.plugin = plugin
@@ -1491,11 +1493,19 @@ class DecisionEngine:
         self._reply_media = ReplyMediaAdapter(
             self.ctx, logger=logger, on_failure=self._handle_reply_preparation_failure,
             on_check=self._check_reply_round)
-        self._reply_media.install()
         self._reply_delivery = ReplyDeliveryGuard(self.ctx, logger=logger)
-        self._reply_delivery.install()
         self._reply_publication = ReplyPublicationGuard(self.ctx, logger=logger)
-        self._reply_publication.install()
+        # 用户 m24700 第 ⑤ 条：私有补丁先过准入层（宿主版本 + 结构），跳过也留痕。
+        gate = getattr(plugin, "patch_gate", None)
+        _install_private_patch(
+            self, gate, "reply_media", "回复媒体投影", self._reply_media,
+            "provider_mgr", "get_model_client")
+        _install_private_patch(
+            self, gate, "reply_delivery", "回复投递屏障", self._reply_delivery,
+            "message_delivery", "send_message_chain")
+        _install_private_patch(
+            self, gate, "reply_publication", "回复发布钩子", self._reply_publication,
+            "event_bus", "publish")
         self._reply_attempts: dict[str, object] = {}
         self._reply_tasks: set = set()
         self._states: dict[str, SessionState] = {}
@@ -1524,6 +1534,8 @@ class DecisionEngine:
         # 否则整轮重放会把同一句话再发一遍。
         self._round_sent: dict[str, int] = {}
         self._round_sent_ids: dict[str, set] = {}
+        # 上面两个只数条数；这里留正文，别的插件绕过框架发送层时用它补回复记录。
+        self._round_sent_texts: dict[str, list] = {}
         # 用户 m26142 第 1 条：决策判了要回、但回复还没跑完的会话。这一轮别裁窗口，
         # 等回复结束再裁（以前是判要回立刻裁，回复读到的是裁完的窗口）。
         # 存的是「记下这一笔的时刻」：万一一轮没走到收束（异常、看门狗没兜住），
@@ -1571,6 +1583,11 @@ class DecisionEngine:
         self._closed = False
         self.log = None            # 由 main.py 注入 DecisionLog
         self.window = None         # 由 main.py 注入 WindowManager
+        # 用户 m19461 第 5 条：私聊昵称缓存（宿主不给昵称，问适配器要一次存下来）
+        self.nick_names = None     # 由 main.py 注入 NickNames
+        self._nick_pending: set = set()   # 正在问的号，同一个号只问一次
+        self._nick_tried: dict = {}       # 号 -> 上次问的时刻（失败后隔一阵再试）
+        self._nick_tasks: set = set()
         self.request_log = None    # 由 main.py 注入 RequestLog
         self.stats = None          # 由 main.py 注入 AdaptiveStats
         self.band_stats = None     # 由 main.py 注入 BandStats（按时段算平均消息/触发/回复）
@@ -2108,6 +2125,7 @@ class DecisionEngine:
             # H06：新的一轮从头数「发了几个」，别把上一轮的账带进来
             self._round_sent.pop(sid, None)
             self._round_sent_ids.pop(sid, None)
+            self._round_sent_texts.pop(sid, None)
         self._active_rounds[sid] = eid
         flow = self._input_flow(sid)
         flow.event_id = eid
@@ -3346,6 +3364,189 @@ class DecisionEngine:
                 return bot
         return None
 
+    # ------------------------------------------------------------ 私聊昵称
+    def _is_dm_sid(self, sid: str) -> bool:
+        """这个会话是不是私聊（原始 sid 形如「樱井桃华:dm:512179630」）。"""
+        raw = ""
+        try:
+            raw = str(self._raw_sids.get(sid) or "")
+        except Exception:
+            raw = ""
+        parts = (raw or str(sid or "")).split(":")
+        return len(parts) >= 2 and parts[-2] == "dm"
+
+    def _adapter_of(self, sid: str):
+        """按原始 sid 里的机器人名找适配器实例，认不出来退回第一个。"""
+        mgr = getattr(self.ctx, "adapter_mgr", None)
+        if mgr is None:
+            return None
+        try:
+            ads = mgr.get_adapters()
+        except Exception:
+            return None
+        items = list(ads.values()) if isinstance(ads, dict) else list(ads or [])
+        if not items:
+            return None
+        want = ""
+        try:
+            raw = str(self._raw_sids.get(sid) or "")
+        except Exception:
+            raw = ""
+        parts = raw.split(":")
+        if len(parts) >= 3 and parts[-2] in ("gm", "dm"):
+            want = parts[0].strip()
+        if want:
+            for one in items:
+                if str(getattr(getattr(one, "info", None), "name", "") or "").strip() == want:
+                    return one
+        return items[0]
+
+    @staticmethod
+    def _nick_from_info(info) -> str:
+        """适配器返回的用户信息里挑一个能当昵称的字段。"""
+        data = info
+        if isinstance(info, dict):
+            inner = info.get("data")
+            data = inner if isinstance(inner, dict) else info
+        elif info is not None:
+            inner = getattr(info, "data", None)
+            if isinstance(inner, dict):
+                data = inner
+        if not isinstance(data, dict):
+            return ""
+        for key in ("card", "nickname", "remark", "name"):
+            val = str(data.get(key) or "").strip()
+            if val:
+                return val[:64]
+        return ""
+
+    def _dm_name_cached(self, sid: str, sender: str, name: str) -> str:
+        """同步版：只查缓存，不问适配器（关停这类不能等的路径用）。"""
+        uid = str(sender or "").strip()
+        if not uid or not self._is_dm_sid(sid):
+            return name
+        cur = str(name or "").strip()
+        if cur and cur != uid:
+            return cur
+        cache = getattr(self, "nick_names", None)
+        if cache is None:
+            return name
+        try:
+            return str(cache.get(uid) or "").strip() or name
+        except Exception:
+            return name
+
+    async def _dm_name_of(self, sid: str, sender: str, name: str) -> str:
+        """私聊里把发送者名字补成真昵称（用户 m19461 第 5 条）。
+
+        宿主对私聊不给昵称（sender_name 是空串），sender_name_of 只能退回 QQ 号。
+        这里先查缓存；缓存没有就后台问一次适配器，问到了从下一条起就用真名，
+        同时把已经收进窗口的那些一起改掉。
+        """
+        if not self._is_dm_sid(sid):
+            return name
+        got = self._dm_name_cached(sid, sender, name)
+        if got != name:
+            return got
+        uid = str(sender or "").strip()
+        if uid:
+            self._spawn_nick_lookup(sid, uid)
+        return name
+
+    def _spawn_nick_lookup(self, sid: str, uid: str) -> None:
+        """后台问一次适配器要昵称（同一个号同时只问一次，失败隔一阵再试）。"""
+        if uid in self._nick_pending:
+            return
+        last = float(self._nick_tried.get(uid) or 0.0)
+        if last and time.time() - last < NICK_RETRY_SECONDS:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._nick_pending.add(uid)
+        try:
+            task = loop.create_task(self._fetch_dm_nickname(sid, uid))
+        except Exception:
+            self._nick_pending.discard(uid)
+            return
+        self._nick_tasks.add(task)
+        task.add_done_callback(self._nick_tasks.discard)
+
+    async def _fetch_dm_nickname(self, sid: str, uid: str) -> str:
+        """问适配器要一次昵称，要到了写缓存并回填窗口。"""
+        name = ""
+        try:
+            adapter = self._adapter_of(sid)
+            bot = getattr(adapter, "bot", None)
+            getter = getattr(bot, "get_user_info", None)
+            if getter is not None:
+                try:
+                    info = await asyncio.wait_for(getter(user_id=int(uid)), timeout=NICK_TIMEOUT)
+                except Exception:
+                    info = None
+                name = self._nick_from_info(info)
+        except Exception:
+            name = ""
+        finally:
+            self._nick_pending.discard(uid)
+            self._nick_tried[uid] = time.time()
+        if not name:
+            logger.info("[multi-decision] 私聊昵称没要到（%s），先按号显示", uid)
+            return ""
+        cache = getattr(self, "nick_names", None)
+        if cache is not None:
+            try:
+                cache.set(uid, name)
+            except Exception:
+                logger.debug("[multi-decision] 私聊昵称写缓存失败（已忽略）", exc_info=True)
+        n = 0
+        try:
+            if self.window is not None:
+                n = self.window.rename_sender(sid, uid, name)
+        except Exception:
+            logger.debug("[multi-decision] 私聊昵称回填窗口失败（已忽略）", exc_info=True)
+        logger.info("[multi-decision] 私聊昵称 %s → %s（回填 %d 处）", uid, name, n)
+        return name
+
+    def prefetch_dm_nicknames(self) -> int:
+        """开机把已知私聊会话的昵称补一遍（用户 m19461 第 5 条）。
+
+        历史里那些已经按 QQ 号存下来的消息，等不到新消息就一直是数字；
+        这里按缓存先回填，缓存没有的排进后台去问。返回排了几个。
+        """
+        window = getattr(self, "window", None)
+        if window is None:
+            return 0
+        try:
+            rows = window.list_states()
+        except Exception:
+            return 0
+        cache = getattr(self, "nick_names", None)
+        n = 0
+        for row in rows or []:
+            sid = str((row or {}).get("sid") or "")
+            if not sid or not self._is_dm_sid(sid):
+                continue
+            uid = sid.split(":")[-1].strip()
+            if not uid:
+                continue
+            got = ""
+            if cache is not None:
+                try:
+                    got = str(cache.get(uid) or "").strip()
+                except Exception:
+                    got = ""
+            if got:
+                try:
+                    window.rename_sender(sid, uid, got)
+                except Exception:
+                    logger.debug("[multi-decision] 私聊昵称回填失败（已忽略）", exc_info=True)
+                continue
+            self._spawn_nick_lookup(sid, uid)
+            n += 1
+        return n
+
     # ------------------------------------------------- 回复快照的模型 / 渠道
 
     @staticmethod
@@ -3810,7 +4011,8 @@ class DecisionEngine:
         text = extract_text(message)
         media = media_kind(message)
         sender = sender_id_of(message)
-        name = sender_name_of(message)
+        # 用户 m19461 第 5 条：私聊宿主不给昵称，这里换成问到的真名
+        name = await self._dm_name_of(sid, sender, sender_name_of(message))
         media_refs = []
         try:
             media_refs = await self._cache_media(message, sid)
@@ -3937,12 +4139,14 @@ class DecisionEngine:
                 logger.debug("[multi-decision] 取待发文件信息失败（已忽略）", exc_info=True)
         if self.window is not None:
             try:
-                raw_line = raw_line_of(message, text, sender, sender_name_of(message), now,
+                # 用户 m19461 第 5 条：私聊宿主不给昵称，这里换成问到的真名
+                _who = await self._dm_name_of(sid, sender, sender_name_of(message))
+                raw_line = raw_line_of(message, text, sender, _who, now,
                                        lookup=lambda mid: _quoted_text(self.window, sid, mid))
                 if skip_file:
                     raw_line = strip_file_placeholders(raw_line)
                 pend = self.window.push_pending(
-                    sid, sender, sender_name_of(message), text, media, now,
+                    sid, sender, _who, text, media, now,
                     # 框架格式化好的原文：下一轮采集直接拿它当窗口消息，
                     # 格式与框架记忆一致，去重和缓存前缀都对得上
                     raw_line,
@@ -4243,9 +4447,16 @@ class DecisionEngine:
             sid = ""
         sid = normalize_sid(sid)
         eid = str(getattr(event, "event_id", "") or "")
+        # 正文先算出来：下面「窗口没开」会直接 return，兜底正文也得记。
+        try:
+            text = chain_text(action)
+        except Exception:
+            text = ""
+        text = (text or "").strip()
         if (self._closed or (sid, eid) in self._settled_rounds
                 or (sid in self._active_rounds and self._active_rounds[sid] != eid)):
             return
+        sent_fresh = False
         if sid:
             # H06：先记「这一轮真发出去过东西」。同一个 message_id 只算一条，
             # 跟下面窗口去重无关——这里要的是「有没有对外发过」，不是进没进待发列表。
@@ -4259,6 +4470,14 @@ class DecisionEngine:
                     if key0:
                         seen.add(key0)
                     self._round_sent[sid] = int(self._round_sent.get(sid, 0) or 0) + 1
+                    sent_fresh = True
+            except Exception:
+                sent_fresh = False
+        # 先把正文记下来：下面窗口没开（window_enabled=false）就直接 return 了，
+        # 但回复记录的兜底正文不依赖窗口，得在这之前留一份。
+        if sent_fresh and sid:
+            try:
+                self._round_sent_texts.setdefault(sid, []).append(text)
             except Exception:
                 pass
         if self.window is None or self._closed:
@@ -4274,11 +4493,6 @@ class DecisionEngine:
         stable_id = str(mid) if mid is not None else ""
         if stable_id and flow is not None and stable_id in flow.sent_ids:
             return
-        try:
-            text = chain_text(action)
-        except Exception:
-            text = ""
-        text = (text or "").strip()
         if not text:
             return
         name = ""
@@ -4697,6 +4911,17 @@ class DecisionEngine:
                 if getattr(result, "ok", False) and not getattr(result, "is_notice", False):
                     replied = True
                     bubble_count += 1
+        sent_texts = []
+        try:
+            sent_texts = [str(t).strip() for t in (self._round_sent_texts.get(sid) or [])
+                          if str(t).strip()]
+        except Exception:
+            sent_texts = []
+        if not replied and sent_texts:
+            # 别的插件（流式加速器）在解析前就把 <msg> 发掉了，框架这一轮没有
+            # message_results；但 ON_MESSAGE_SENT 钩子收到过真实发送，按回过了算。
+            replied = True
+            bubble_count = max(bubble_count, len(sent_texts))
         if failed and not error:
             error = next((str(getattr(step, "raw_output", "") or "")[:500]
                           for step in getattr(final_result, "step_results", None) or []
@@ -4708,13 +4933,16 @@ class DecisionEngine:
         notice_only = bool(self._notice_rounds.pop(key, False)) and not replied
         outcome = ("failed" if failed else "replied" if replied
                    else "notice" if notice_only else "no_reply")
+        reply_text_fallback = " / ".join(sent_texts)
+        if len(reply_text_fallback) > 160:
+            reply_text_fallback = reply_text_fallback[:160].rstrip() + "…"
         if self.request_log is not None:
             try:
                 self.request_log.flush(
                     sid, replied=replied, reply_bubbles=bubble_count, event_id=eid,
                     extra={"failed": failed, "outcome": outcome, "error": error,
                            "notice_only": bool(notice_only),
-                           "reply_text": self._reply_text_of(final_result),
+                           "reply_text": self._reply_text_of(final_result) or reply_text_fallback,
                            **self._reply_meta_of(sid, eid, event)})
             except Exception:
                 logger.exception("[multi-decision] 落盘请求记录失败")
@@ -4765,6 +4993,7 @@ class DecisionEngine:
         self._round_decision.pop(sid, None)
         self._round_sent.pop(sid, None)
         self._round_sent_ids.pop(sid, None)
+        self._round_sent_texts.pop(sid, None)
         # 这里不能再清 counter：触发的那一刻已经清过一遍了，此刻 counter 里装的是
         # 「本轮请求期间新到、这轮没覆盖到」的消息。清掉等于让它们永远不计入下一次
         # 触发阈值——群越活跃、回复越慢，实际触发比配置慢一档（审查 bug）
@@ -6273,6 +6502,7 @@ class DecisionEngine:
                 st.last_error_at = 0.0
                 self._round_sent.pop(sid, None)
                 self._round_sent_ids.pop(sid, None)
+                self._round_sent_texts.pop(sid, None)
             self._active_rounds[sid] = eid
             flow.event_id = eid
             # 用户 m06995 第 2 项：回复模型 / 备用模型在这里挂上去——这是框架真正
@@ -6317,7 +6547,7 @@ class DecisionEngine:
         flush = self.ctx.flush_session_messages
         # Older hosts exposed extra_event; inspect before calling, never replay
         # a call after TypeError since publication may already have side effects.
-        if len(events) == 1 and "extra_event" in inspect.signature(flush).parameters:
+        if len(events) == 1 and compat.accepts_kwarg(flush, "extra_event"):
             return await self._with_reply_publication(normalize_sid(raw_sid),
                 flush(raw_sid, extra_event=events[0]))
         buffer = self.ctx.get_buffer(raw_sid)
@@ -7314,7 +7544,7 @@ class DecisionEngine:
                 continue
             try:
                 sender = sender_id_of(message)
-                name = sender_name_of(message)
+                name = self._dm_name_cached(sid, sender, sender_name_of(message))
                 text = extract_text(message)
                 self.window.push_pending(sid, sender, name, text, media_kind(message), arrived,
                     raw_line_of(message, text, sender, name, arrived),

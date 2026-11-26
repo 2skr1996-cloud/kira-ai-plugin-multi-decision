@@ -357,6 +357,9 @@ class Pricing:
         parts, unset = [], []
         total = normal_total = peak_total = 0.0
         any_approximate = any_unknown = False
+        # 用户 m19461 图7：命中率与花费要按插件分开记——(模型, 插件) 一份，前端在
+        # 「缓存命中率」「费用」两列各写一行；我们自己的那部分用总数减掉插件部分。
+        by_plugin: Dict[tuple, Dict[str, Any]] = {}
         # v4.68（用户 m02472）：花费卡片要把「回复 / 决策」分开显示，逐事件按 kind 再记一份。
         by_kind: Dict[str, Dict[str, Any]] = {}
 
@@ -424,6 +427,21 @@ class Pricing:
                     rate_cache = float(fb_price.get("cache") or 0) or rate_in
                     fb_used = True
                 cost = ((a - c) * rate_in + c * rate_cache + b * rate_out) / 1000000.0
+                _pl = str(event.get("plugin") or "").strip()
+                if _pl:
+                    _pk = (str(name), _pl)
+                    _pb = by_plugin.get(_pk)
+                    if _pb is None:
+                        _pb = by_plugin[_pk] = {
+                            "model": str(name), "plugin_id": _pl, "cost": 0.0,
+                            "input": 0, "output": 0, "cached": 0, "calls": 0,
+                            "unset": bool(is_unset), "approximate": False}
+                    _pb["cost"] += cost
+                    _pb["input"] += a
+                    _pb["output"] += b
+                    _pb["cached"] += c
+                    _pb["calls"] += 1
+                    _pb["approximate"] = bool(_pb["approximate"]) or approximate
                 kb = _kind_bucket(str(event.get("kind") or "reply"))
                 kb["priced"] = bool(kb.get("priced")) or not is_unset or bool(fb_price)
                 if fb_price:
@@ -468,6 +486,13 @@ class Pricing:
                           "reply_cost": round(part_kinds.get("reply", 0.0), 4),
                           "decision_cost": round(part_kinds.get("decision", 0.0), 4)})
         parts.sort(key=lambda x: (-x["cost"], x["model"]))
+        plugin_parts = [{"model": v["model"], "plugin_id": v["plugin_id"],
+                         "cost": round(v["cost"], 4), "input": v["input"],
+                         "output": v["output"], "cached": v["cached"],
+                         "calls": v["calls"], "unset": bool(v["unset"]),
+                         "approximate": bool(v["approximate"])}
+                        for v in by_plugin.values()]
+        plugin_parts.sort(key=lambda x: (-x["cost"], x["model"], x["plugin_id"]))
         kinds_out = {k: {"total": round(v["cost"], 4), "input": v["input"], "output": v["output"],
                         "cached": v["cached"], "calls": v["calls"],
                         "priced": bool(v.get("priced")),
@@ -478,6 +503,7 @@ class Pricing:
                         "estimated": bool(v.get("estimated"))} for k, v in by_mode.items()}
         return {"total": round(total, 4), "currency": _CURRENCY, "unit": PRICE_UNIT,
                 "priced": any(p["priced"] for p in parts), "parts": parts,
+                "plugin_parts": plugin_parts,
                 "by_kind": kinds_out, "by_mode": modes_out,
                 "unpriced": [], "unset": unset, "normal_cost": round(normal_total, 4),
                 "peak_cost": round(peak_total, 4), "approximate": bool(any_approximate),

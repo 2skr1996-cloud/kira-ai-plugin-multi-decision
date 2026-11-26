@@ -110,6 +110,41 @@ def _restore(obj, name, wrapper):
         delattr(obj, name)
 
 
+def _own_dict(obj):
+    # object.__getattribute__ 不会走代理的 __getattr__：只读代理没法靠转发的
+    # "__dict__" 假装自己可写，能写才会返回非 None。
+    try:
+        return object.__getattribute__(obj, "__dict__")
+    except AttributeError:
+        return None
+
+
+def _slot_names(obj):
+    names = []
+    for cls in type(obj).__mro__:
+        slots = cls.__dict__.get("__slots__")
+        if isinstance(slots, str):
+            slots = (slots,)
+        names.extend(slots or ())
+    return names
+
+
+def _forwarded_client(obj):
+    # 有些插件（如流式加速器）把 client 包进 __slots__ 里只有槽位的代理。
+    # CPython 不允许遮蔽这种类上的方法：'LLMClientProxy' object attribute
+    # 'chat' is read-only。代理把调用转给它持有的真实 client，所以改包那一层。
+    for name in _slot_names(obj):
+        if name in ("__dict__", "__weakref__"):
+            continue
+        try:
+            value = object.__getattribute__(obj, name)
+        except AttributeError:
+            continue
+        if value is not obj and hasattr(value, "chat") and hasattr(value, "chat_stream"):
+            return value
+    return None
+
+
 class ReplyMediaAdapter:
     def __init__(self, ctx=None, logger=None, on_failure=None, on_check=None):
         self.ctx, self.logger = ctx, logger
@@ -122,6 +157,12 @@ class ReplyMediaAdapter:
         self._closed = False
         # 探测失败只提醒一次：stage() 每轮都会再调 install()，不能每轮刷同一条。
         self._warned_unavailable = False
+        # 客户端被别的插件套了只读代理时同样只提醒一次。
+        self._warned_unwritable = False
+        # 安装时类上的 get_model_client：别的插件（如流式加速器）在那之后才替换类
+        # 方法时，我们的实例补丁会把它挡在外面，得改用类上的新实现。
+        self._inner = None
+        self._class_previous = None
 
     def install(self) -> bool:
         if self._closed:
@@ -140,10 +181,12 @@ class ReplyMediaAdapter:
         if previous is self._factory or _contains(previous, self):
             return True
         owned = "get_model_client" in vars(manager)
+        self._inner = previous
+        self._class_previous = getattr(type(manager), "get_model_client", None)
 
         @wraps(previous)
         def factory(*args, **kwargs):
-            client = previous(*args, **kwargs)
+            client = self._call_inner(*args, **kwargs)
             if not self._closed:
                 self._wrap_client(client)
             return client
@@ -153,33 +196,80 @@ class ReplyMediaAdapter:
         manager.get_model_client = factory
         return True
 
+    def _call_inner(self, *args, **kwargs):
+        # 实例补丁会一直遮住类方法：装好之后别的插件再替换类上的 get_model_client
+        # （加速器就是类级 patch），调用还是走我们手里这份旧实现，对方的补丁等于
+        # 没装上。每次调用比一下类方法，被换过就改用新的，把对方接进链里。
+        manager, inner = self._manager, self._inner
+        current = getattr(type(manager), "get_model_client", None) if manager is not None else None
+        if current is not None and current is not self._class_previous:
+            self._class_previous = current
+            try:
+                self._inner = current.__get__(manager, type(manager))
+            except AttributeError:
+                self._inner = current
+            inner = self._inner
+        return inner(*args, **kwargs)
+
+    def _write_target(self, client):
+        # 自己可写就包自己；被别的插件套了只读代理，就顺着代理找到真实 client。
+        target, seen = client, set()
+        while target is not None and id(target) not in seen:
+            seen.add(id(target))
+            if _own_dict(target) is not None:
+                return target
+            target = _forwarded_client(target)
+        return None
+
     def _wrap_client(self, client):
         # Actual 3.0 clients advertise ModelType.LLM; no guesses from model names.
         kind = getattr(client, "type", None)
         if getattr(kind, "value", kind) != "llm":
             return False
+        target = self._write_target(client)
+        if target is None:
+            # 包装不了只跳过媒体投影，不能让整轮回复失败（加速器的代理就属于这种）。
+            self._warn_unwritable(client)
+            return False
         changed = False
         wrapped = False
         for name in ("chat", "chat_stream"):
             # 框架升级可能删掉其中一个方法：缺哪个跳哪个，不能因为少一个就整条包装失败。
-            if not hasattr(client, name):
+            if not hasattr(target, name):
                 continue
-            previous = getattr(client, name, None)
+            previous = getattr(target, name, None)
             if not callable(previous):
                 continue
             if _contains(previous, self):
                 wrapped = True
                 continue
-            owned = name in vars(client)
+            owned = name in (_own_dict(target) or {})
             wrapper = self._call_wrapper(previous, stream=name == "chat_stream")
-            setattr(client, name, _remember(wrapper, self, previous, owned))
+            try:
+                setattr(target, name, _remember(wrapper, self, previous, owned))
+            except (AttributeError, TypeError):
+                self._warn_unwritable(target)
+                return wrapped
             changed = True
             wrapped = True
         if changed:
             self._clients = [ref for ref in self._clients if ref() is not None]
-            if not any(ref() is client for ref in self._clients):
-                self._clients.append(weakref.ref(client))
+            if not any(ref() is target for ref in self._clients):
+                try:
+                    self._clients.append(weakref.ref(target))
+                except TypeError:
+                    pass
         return wrapped
+
+    def _warn_unwritable(self, client):
+        # 每轮请求都会再走一遍包装：只提醒一次，但媒体投影退化必须能从日志看见。
+        if self._warned_unwritable:
+            return
+        self._warned_unwritable = True
+        if self.logger is not None:
+            self.logger.warning(
+                "[multi-decision] 客户端 %s 不接受 chat 补丁，回复媒体投影跳过",
+                type(client).__name__)
 
     def _call_wrapper(self, previous, *, stream):
         async def arguments(args, kwargs):

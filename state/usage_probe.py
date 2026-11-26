@@ -42,11 +42,17 @@ except Exception:  # pragma: no cover - 只在脱离宿主时走到
     logger = logging.getLogger("multi_decision.usage_probe")
 
 
+from . import compat
+
 PLUGIN_ID = "kira-ai-plugin-multi-decision"
 LEDGER_NAME = "plugin_usage.jsonl"
 ARCHIVE_DIR = "archive"
 KINDS = ("llm", "embed", "rerank")
 _MAX_FRAME_DEPTH = 24
+# 用户 m25289：kira_accelerator 只替换 ProviderManager.get_model_client，
+# 用一个透明代理把调用转给真正的调用方，自己从不发模型请求。它的帧夹在
+# 探针和真正调用方之间，不能算作这次调用的归属，扫描时直接跳过。
+_TRANSPARENT_PLUGINS = frozenset({"kira_accelerator"})
 _SCAN_INTERVAL = 30.0
 _STOP = object()
 
@@ -218,7 +224,9 @@ def _caller_plugin() -> str:
         if name and name != __name__:
             plugin = _plugin_of_module(name)
             if plugin:
-                if plugin == PLUGIN_ID:
+                if plugin in _TRANSPARENT_PLUGINS:
+                    pass
+                elif plugin == PLUGIN_ID:
                     own_seen = True
                 else:
                     return plugin
@@ -855,20 +863,9 @@ def _wrap_method(cls, attr, kind, factory) -> bool:
     return True
 
 
-def _import_base(name):
-    for module_name in ("core.provider.provider", "core.provider"):
-        try:
-            module = __import__(module_name, fromlist=[name])
-            base = getattr(module, name, None)
-            if base is not None:
-                return base
-        except Exception:
-            continue
-    return None
-
 
 def _wrap_llm_classes() -> int:
-    base = _import_base("LLMModelClient")
+    base = compat.client_base("LLMModelClient")
     if base is None:
         return 0
     count = 0
@@ -883,7 +880,7 @@ def _wrap_llm_classes() -> int:
 
 
 def _wrap_embed_classes() -> int:
-    base = _import_base("EmbeddingModelClient")
+    base = compat.client_base("EmbeddingModelClient")
     if base is None:
         return 0
     count = 0
@@ -896,7 +893,7 @@ def _wrap_embed_classes() -> int:
 
 
 def _wrap_rerank_classes() -> int:
-    base = _import_base("RerankModelClient")
+    base = compat.client_base("RerankModelClient")
     if base is None:
         return 0
     count = 0
@@ -945,6 +942,23 @@ def _resolve_data_dir(plugin) -> Optional[Path]:
             if value:
                 return Path(value)
     return None
+
+
+def available() -> bool:
+    """探针能不能装：认得宿主客户端基类，或 openai/httpx 能自己 import。"""
+    for name in ("LLMModelClient", "EmbeddingModelClient", "RerankModelClient"):
+        try:
+            if compat.client_base(name) is not None:
+                return True
+        except Exception:
+            continue
+    for module_name in ("openai", "httpx"):
+        try:
+            __import__(module_name)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def install(plugin=None, data_dir=None, enabled=True) -> Dict[str, Any]:
@@ -1136,6 +1150,7 @@ def status() -> Dict[str, Any]:
 
 __all__ = [
     "PLUGIN_ID",
+    "available",
     "install",
     "uninstall",
     "rescan",

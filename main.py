@@ -36,6 +36,7 @@ from .state.band_rhythm import BandRhythm
 from .state.band_tune import BandTuner
 from .state import compat
 from .state import usage_probe
+from .state.patch_gate import PatchGate
 from .state.decision_phase import (
     DEFAULT_CHAT_RULES,
     DEFAULT_DECISION_PROMPT,
@@ -94,6 +95,7 @@ from .state.reply_prompt import PERSONA_NAME, ReplyPrompt, apply_reply_tools
 from .state.prompt_layout import PromptLayouts
 from .state.prompt_modules import PromptModuleRegistry
 from .state.plugin_segs import PluginSegs
+from .state.nick_names import NickNames
 from .state.provider_bind import ProviderBindings
 from .state.request_log import RequestLog, _safe_sid, payload_metrics
 from .state.retry_history import RetryHistory
@@ -1792,6 +1794,7 @@ class MultiDecisionPlugin(BasePlugin):
         self.observe_messages = max(1, _as_int(cfg.get("observe_messages"), 30))
         self.observe_max_chars = max(200, _as_int(cfg.get("observe_max_chars"), 1500))
 
+        self.patch_gate = PatchGate(self.ctx, logger=logger)
         self.engine = DecisionEngine(self)
         self.window = None
         self.request_log = None
@@ -2152,6 +2155,10 @@ class MultiDecisionPlugin(BasePlugin):
         # 用户 m20722：别的插件往 system_prompt 里注入的段，第一次见到就登记，布局侧据此
         # 自动补一张只读卡。必须先于 PromptLayouts 建好——布局层按 getattr 取它。
         self.plugin_segs = PluginSegs(data_dir)
+        # 用户 m19461 第 5 条：私聊昵称缓存。宿主对私聊不给昵称（sender_name 是空串），
+        # 插件只能按 QQ 号显示；这里把问适配器要到的真名存下来，重启后也还在。
+        self.nick_names = NickNames(data_dir)
+        self.engine.nick_names = self.nick_names
         self.prompt_layouts = PromptLayouts(self, data_dir)
         self.engine.store = self.store
         self.engine.overrides = self.overrides
@@ -2179,10 +2186,24 @@ class MultiDecisionPlugin(BasePlugin):
             logger.exception("[multi-decision] 缓冲裁切巡检启动失败（已忽略）")
 
         # 用户 m00001：模型用量探针（全局 monkey-patch，记录其他插件的真实 token）。
+        # 用户 m24700 第 ⑤ 条：探针走准入层，宿主换结构时跳过并留一条 warning。
         try:
-            usage_probe.install(self, enabled=self.usage_probe_enabled)
+            self.patch_gate.install(
+                "usage_probe",
+                "用量探针",
+                lambda: usage_probe.install(
+                    self, enabled=self.usage_probe_enabled).get("installed", False),
+                requires=lambda: "" if usage_probe.available() else "认不出宿主客户端基类",
+                min_host="3.0.0",
+            )
         except Exception:
             logger.exception("[multi-decision] 安装模型用量探针失败（已忽略）")
+
+        # 用户 m19461 第 5 条：开机把已知私聊的昵称补一遍（历史里那些 QQ 号也能变成真名）
+        try:
+            self.engine.prefetch_dm_nicknames()
+        except Exception:
+            logger.exception("[multi-decision] 预取私聊昵称失败（已忽略）")
 
         logger.info(
             f"[multi-decision] initialized (enabled={self.enabled}, "
@@ -2198,8 +2219,18 @@ class MultiDecisionPlugin(BasePlugin):
             f"{'' if (self.quota_hour_enabled or self.quota_day_enabled) else 'off'}, "
             f"weekday_bucket={self.adaptive_weekday_bucket})"
         )
+        # 用户 m24700 第 ③ 条：兼容探测与私有补丁结果也进启动自检日志。
+        try:
+            self.patch_gate.declare(
+                "prompt_kwargs",
+                "提示词轮数补丁",
+                requires=lambda: "" if compat.has_prompt_kwargs() else "宿主 Prompt 不带 kwargs",
+                min_host="3.0.0",
+            )
+        except Exception:
+            logger.exception("[multi-decision] 登记提示词补丁失败（已忽略）")
         self._log_hook_selftest()
-
+        self._log_compat_selftest()
     def _log_hook_selftest(self):
         """启动自检：确认框架真的收到了本插件的钩子。
 
@@ -2238,6 +2269,20 @@ class MultiDecisionPlugin(BasePlugin):
                 )
         except Exception:
             logger.exception("[multi-decision] 钩子自检失败（已忽略）")
+
+    def _log_compat_selftest(self):
+        """启动自检：宿主版本、七项兼容探测、私有补丁装了几个（用户 m24700 第 ③⑤ 条）。"""
+        try:
+            logger.info(
+                f"[multi-decision] 自检：宿主 {compat.host_version() or '未知'}；"
+                f"兼容 {compat.describe()}"
+            )
+            gate = getattr(self, "patch_gate", None)
+            if gate is not None:
+                logger.info(f"[multi-decision] 自检：{gate.line()}")
+        except Exception:
+            logger.exception("[multi-decision] 兼容自检失败（已忽略）")
+
 
     def register_prompt_module(self, module):
         """用户 m02800：注册一个提示词模块，返回它自己（方便链式写）。
@@ -2373,8 +2418,8 @@ class MultiDecisionPlugin(BasePlugin):
             )
             return False
         mgr = getattr(self.ctx, "plugin_mgr", None)
-        setter = getattr(mgr, "set_plugin_enabled", None)
-        if not callable(setter):
+        setter = compat.plugin_toggle_setter(mgr)
+        if setter is None:
             logger.error("[multi-decision] ctx.plugin_mgr 不可用，无法接管 default-chat")
             return False
         try:
@@ -2391,8 +2436,8 @@ class MultiDecisionPlugin(BasePlugin):
         """把 _takeover_via_toggle 关掉的 default-chat 重新打开。"""
         self._takeover_toggled = False
         mgr = getattr(self.ctx, "plugin_mgr", None)
-        setter = getattr(mgr, "set_plugin_enabled", None)
-        if not callable(setter):
+        setter = compat.plugin_toggle_setter(mgr)
+        if setter is None:
             logger.error("[multi-decision] ctx.plugin_mgr 不可用，无法恢复 default-chat")
             return
         try:
@@ -2796,17 +2841,10 @@ class MultiDecisionPlugin(BasePlugin):
         取不到返回 None，调用方自己决定怎么兜底。会话选的模型被删了框架会抛错，
         这里一并吞掉，让调用方退回自己的顺序。
         """
-        fn = getattr(self.ctx, "get_default_llm_client", None)
-        if not callable(fn):
-            return None
-        try:
-            if session is not None and compat.has_session_llm():
-                return fn(session=session)
-            return fn()
-        except Exception:
-            logger.debug("[multi-decision] 取默认 LLM 客户端失败（已吞掉）", exc_info=True)
-            return None
-
+        client, why = compat.default_llm_client(self.ctx, session=session)
+        if why:
+            logger.debug("[multi-decision] %s", why, exc_info=True)
+        return client
     def _trace_model_hint(self, event) -> str:
         """这一轮真正拿去发请求的模型名（用户 m02939 第 2 条）。
 
@@ -4590,7 +4628,9 @@ class MultiDecisionPlugin(BasePlugin):
         got = {}
         last_err = ""
         for client in clients:
-            got = await self.decision_phase.one_shot(payload, client=client)
+            # 加速器代理强制走流式、分片不带 usage，测试窗要看到正文和 token
+            # 就得拿内层真实客户端；真回复还是走框架那条链，不受这里影响。
+            got = await self.decision_phase.one_shot(payload, client=compat.direct_client(client))
             if got.get("ok"):
                 break
             last_err = str(got.get("error") or "")
@@ -5759,6 +5799,10 @@ class MultiDecisionPlugin(BasePlugin):
             "enabled": bool(self.enabled),
             "decision": bool(self.decision_enabled),
             "pending_finals": max(0, int(h.get("delivered") or 0) - int(h.get("finals") or 0)),
+            # 用户 m24700 第 ③⑤ 条：宿主版本、兼容探测、私有补丁准入结果都给页面。
+            "host": compat.host_version(),
+            "compat": compat.flags(),
+            "patch_gate": (self.patch_gate.summary() if getattr(self, "patch_gate", None) else {}),
         }
 
     @_api("GET", "/health")
@@ -6383,6 +6427,12 @@ class MultiDecisionPlugin(BasePlugin):
         cost_of = {}
         for part in ((cost or {}).get("parts") or []):
             cost_of[str(part.get("model") or "")] = float(part.get("cost") or 0.0)
+        # 用户 m19461 图7：每个插件在这个模型上花了多少，按 (模型, 插件) 建索引。
+        plug_parts = {}
+        for _pp in ((cost or {}).get("plugin_parts") or []):
+            if not isinstance(_pp, dict):
+                continue
+            plug_parts[(str(_pp.get("model") or ""), str(_pp.get("plugin_id") or ""))] = _pp
         active = set()
         for _name, _stat in seen.items():
             if not isinstance(_stat, dict):
@@ -6428,7 +6478,7 @@ class MultiDecisionPlugin(BasePlugin):
                     "reply_rounds": int(stat.get("reply_rounds") or 0),
                     "calls": int(stat.get("calls") or 0),
                     # 用户 m14599：这一行是哪个插件调的、各调了几次（名字走覆盖名）。
-                    "plugins": self._row_plugins(stat),
+                    "plugins": self._row_plugins(stat, name, plug_parts),
                     "model_name": self._display_model_name(
                         str(stat.get("model_name") or ("快速决策模型" if name == "fast" else name))),
                     "provider_id": str(stat.get("provider_id") or ""),
@@ -6449,7 +6499,7 @@ class MultiDecisionPlugin(BasePlugin):
         return {"ok": True, "unit": PRICE_UNIT, "hours": span, "rows": rows, "cost": cost,
                 "active": sorted(active), "timezone": zone}
 
-    def _row_plugins(self, stat) -> list:
+    def _row_plugins(self, stat, model: str = "", parts=None) -> list:
         """价目表一行里「哪些插件调过这个模型、各几次」（用户 m14599）。
 
         名字走 _probe_plugin_name：用户在设置页改过名就用改过的，没改就用插件
@@ -6460,6 +6510,8 @@ class MultiDecisionPlugin(BasePlugin):
             pmap = (stat or {}).get("plugins")
             if not isinstance(pmap, dict):
                 return out
+            pu = (stat or {}).get("plugin_usage")
+            pu = pu if isinstance(pu, dict) else {}
             for pid, cnt in pmap.items():
                 n = _as_int(cnt, 0)
                 if n <= 0:
@@ -6467,10 +6519,22 @@ class MultiDecisionPlugin(BasePlugin):
                 key = str(pid or "").strip()
                 if not key:
                     continue
+                one = pu.get(key)
+                one = one if isinstance(one, dict) else {}
+                part = (parts or {}).get((str(model or ""), key))
+                part = part if isinstance(part, dict) else {}
                 out.append({
                     "plugin_id": key,
                     "plugin_name": self._probe_plugin_name(key),
                     "calls": n,
+                    # 用户 m19461 图7：命中率与花费按插件分开记，前端在
+                    # 「缓存命中率」「费用」两列各写一行，我们自己的那部分用总数减掉。
+                    "input": _as_int(one.get("input"), 0),
+                    "output": _as_int(one.get("output"), 0),
+                    "cached": _as_int(one.get("cached"), 0),
+                    "cost": float(part.get("cost") or 0.0),
+                    "unset": bool(part.get("unset")),
+                    "approximate": bool(part.get("approximate")),
                 })
             out.sort(key=lambda x: (-x["calls"], x["plugin_id"]))
         except Exception:
@@ -6629,6 +6693,8 @@ class MultiDecisionPlugin(BasePlugin):
                         "usage": [],
                         # 用户 m14599：价目表「请求」列要写清是哪个插件调的、调了几次。
                         "plugins": {},
+                        # 用户 m19461 图7：命中率和花费也要按插件分开记，光有次数不够。
+                        "plugin_usage": {},
                     }
                 stat["input"] += inp
                 stat["output"] += outp
@@ -6637,9 +6703,19 @@ class MultiDecisionPlugin(BasePlugin):
                 _pid = str(row.get("plugin") or "").strip()
                 if _pid:
                     stat["plugins"][_pid] = int(stat["plugins"].get(_pid) or 0) + 1
+                    _pu = stat["plugin_usage"].get(_pid)
+                    if not isinstance(_pu, dict):
+                        _pu = stat["plugin_usage"][_pid] = {
+                            "input": 0, "output": 0, "cached": 0, "calls": 0}
+                    _pu["input"] += inp
+                    _pu["output"] += outp
+                    _pu["cached"] += cached
+                    _pu["calls"] += 1
                 stat["usage"].append({
                     "input": inp, "output": outp, "cached": cached,
                     "ts": ts, "kind": "probe", "timestamp_source": "request_start",
+                    # 用户 m19461 图7：这次调用是哪个插件花的，计价时按它分账。
+                    "plugin": _pid,
                 })
             for stat in out.values():
                 # 探针没有「轮次」概念，用调用次数顶上。
@@ -6686,6 +6762,20 @@ class MultiDecisionPlugin(BasePlugin):
                     continue
                 _old_plugs[_key] = int(_old_plugs.get(_key) or 0) + int(_cnt or 0)
             merged["plugins"] = _old_plugs
+            # 用户 m19461 图7：每个插件的 token 也要跟着并，命中率和花费才分得开。
+            _old_pu = merged.get("plugin_usage")
+            if not isinstance(_old_pu, dict):
+                _old_pu = {}
+            for _pid, _one in (stat.get("plugin_usage") or {}).items():
+                _key2 = str(_pid or "").strip()
+                if not _key2 or not isinstance(_one, dict):
+                    continue
+                _cur = _old_pu.get(_key2)
+                if not isinstance(_cur, dict):
+                    _cur = _old_pu[_key2] = {"input": 0, "output": 0, "cached": 0, "calls": 0}
+                for _f in ("input", "output", "cached", "calls"):
+                    _cur[_f] = _as_int(_cur.get(_f), 0) + _as_int(_one.get(_f), 0)
+            merged["plugin_usage"] = _old_pu
             base[name] = merged
         return dict(totals or {}, models=base)
 

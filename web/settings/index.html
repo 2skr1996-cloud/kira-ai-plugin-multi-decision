@@ -279,6 +279,16 @@ html.booting *,html.booting *::before,html.booting *::after{transition:none!impo
 .chip b{cursor:pointer;color:var(--muted);font-weight:400;}
 .chip b:hover{color:var(--bad);}
 #check-bar{margin-bottom:12px;}
+/* 用户 m24700 第 ③⑤ 条：兼容自检条——通过时安静一行，有问题变琥珀色并把跳过项写出来 */
+.compatbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:7px 12px;
+  border:1px solid var(--line);border-radius:9px;background:var(--soft);color:var(--muted);
+  font-size:12px;line-height:1.5;}
+.compatbar[hidden]{display:none;}
+.compatbar .cb-dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none;}
+.compatbar.warn{border-color:rgba(245,158,11,.38);}
+.compatbar.warn .cb-dot{background:var(--warn);}
+.compatbar b{color:var(--text);font-weight:600;}
+.compatbar .cb-skip{color:var(--warn);}
 /* v3.73（用户 m24918 澄清第 1 条）：只留一行，文字靠左；要的是行内垂直居中，不是水平居中。 */
 #check-bar .chk{position:relative;display:flex;align-items:center;justify-content:flex-start;padding:8px 12px;border-radius:8px;
   font-size:12.5px;line-height:1.65;margin-bottom:8px;border:1px solid;}
@@ -1577,6 +1587,11 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .ptable .pcostc .pcf-u{font-size:10.5px;font-weight:400;color:var(--muted);margin-left:1px;}
   .ptable .pcostc .pcf-e{font-size:10.5px;font-weight:400;color:var(--muted);margin-right:1px;}
   .ptable .pcostc .pdim{color:var(--muted);font-weight:400;}
+  /* 用户 m19461 图7：命中率与费用两列里「插件名 + 数值」那几行，跟请求列一样用强调色。 */
+  .ptable .ph .pl.pplug,.ptable .pcostc .pl.pplug{color:var(--accent);font-weight:400;}
+  /* 用户 m20864 图1：插件子行缩进一格加个小箭头，跟主行一眼分得开，也对得齐。 */
+  .ptable .ph .pl.pplug,.ptable .pcostc .pl.pplug{padding-left:9px;}
+  .ptable .ph .pl.pplug::before,.ptable .pcostc .pl.pplug::before{content:"↳";margin-right:2px;opacity:.55;}
   /* 用户 m00153：两个开关各占一列，单元格里只放勾选框，含义由列头说明。 */
   .ptable .psw{text-align:center;}
   .ptable .psw input[type=checkbox]{width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--accent);}
@@ -1720,10 +1735,29 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
    中间不再一格一格停。 */
 .pplot.pan{animation:ppan var(--pdur,.18s) linear both;}
 @keyframes ppan{from{transform:translateX(var(--pdx,0px));}to{transform:none;}}
+/* 用户 m20864 图5：换纵轴量程时曲线从旧高度缓缓升降到新高度（--pdy 由 lib-4.js 写），
+   只动曲线和它的价格标签，柱子和坐标轴直接是新高度。 */
+.plinewrap.settle{animation:plineSettle .28s cubic-bezier(.22,.7,.3,1) both;}
+@keyframes plineSettle{from{transform:translateY(var(--pdy,0px));opacity:.45;}to{transform:none;opacity:1;}}
 /* 用户 m18000：pad 天是「离开窗口」的那几天，跟可见窗口画在同一层，滑完整组推出裁切框，
    边上不会留半根柱子；整块只有一层，也就没有「重叠画面」。 */
 .ppad{animation:ppadOut var(--pdur,.18s) linear both;}
 @keyframes ppadOut{from{transform:translateX(0);}to{transform:translateX(var(--pdx,0px));}}
+/* 用户 m19461 第 4 条：周末 / 法定节假日给柱图垫一层底色，跟柱子一起平移；
+   调休上班的那天按工作日画，不垫。 */
+.pband{pointer-events:none;}
+.pband.wk{fill:rgba(100,116,139,.14);}
+.pband.hd{fill:rgba(245,158,11,.20);stroke:rgba(245,158,11,.45);stroke-width:1;}
+html[data-theme="dark"] .pband.wk{fill:rgba(148,163,184,.16);}
+html[data-theme="dark"] .pband.hd{fill:rgba(245,158,11,.24);stroke:rgba(245,158,11,.50);}
+/* 用户 m20864 图2：图例里给「周末 / 节假日」两枚色块说明，颜色跟柱子后面的底色对得上。 */
+.pbl-s.wk{background:rgba(100,116,139,.30);}
+.pbl-s.hd{background:rgba(245,158,11,.42);box-shadow:inset 0 0 0 1px rgba(245,158,11,.55);}
+html[data-theme="dark"] .pbl-s.wk{background:rgba(148,163,184,.34);}
+html[data-theme="dark"] .pbl-s.hd{background:rgba(245,158,11,.46);}
+/* 用户 m20864 图4：天数太多自动简化时，卡头日期后面挂一枚小标记。 */
+.pchart-auto{margin-left:6px;padding:0 6px;height:18px;line-height:18px;border-radius:6px;
+  background:var(--soft);color:var(--muted);font-size:11px;white-space:nowrap;}
 /* 用户 m29947：记分牌式翻字——只让变了的那个字上下滚，没变的原地不动。 */
 .droll{display:inline-block;transform-box:fill-box;transform-origin:50% 50%;
   animation:drollUp .3s cubic-bezier(.2,.7,.3,1) both;}
@@ -1746,7 +1780,13 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
     font-size:12px;font-variant-numeric:tabular-nums;cursor:pointer;}
   .pcal-d:hover{background:var(--soft);}
   .pcal-d.mute{background:transparent;cursor:default;}
-  .pcal-d.in{background:rgba(59,130,246,.18);}
+/* 用户 m20864 图2：日历里也分得出周末、法定节假日、调休上班（补班按工作日画虚线）。 */
+.pcal-d.we{background:rgba(100,116,139,.12);color:var(--muted);}
+.pcal-d.ho{background:rgba(245,158,11,.18);color:#b45309;font-weight:600;}
+.pcal-d.wo{box-shadow:inset 0 0 0 1px rgba(100,116,139,.35);}
+html[data-theme="dark"] .pcal-d.we{background:rgba(148,163,184,.14);}
+html[data-theme="dark"] .pcal-d.ho{background:rgba(245,158,11,.22);color:#fbbf24;}
+.pcal-d.in{background:rgba(59,130,246,.18);}
   html[data-theme="dark"] .pcal-d.in{background:rgba(96,165,250,.24);}
   .pcal-d.s,.pcal-d.e{background:var(--accent);color:#fff;}
   .pcal-d.today{box-shadow:inset 0 0 0 1px var(--accent);}
@@ -1768,6 +1808,52 @@ html[data-theme="dark"] .bd-line.bot .lline{stroke:rgba(34,211,238,.8);}
   .ppie-leads{position:absolute;left:0;top:0;pointer-events:none;z-index:1;overflow:visible;color:var(--muted);}
   .ppie-svg{flex:0 0 auto;position:relative;z-index:2;}
   .ppie-svg + .ppie-svg{margin-left:2px;}
+  /* 用户 m19461 图6：点饼心放大这张卡——卡片独占一行、饼从 124 放到 200，右侧模型图例
+     不再并成「其他 N 个」，全部展开；再点一下饼心还原。 */
+  .ppie-hit{cursor:zoom-in;}
+  .pchart-pie.zoomed{grid-column:1/-1;}
+  .pchart-pie.zoomed .ppie-wrap{max-width:920px;height:auto;min-height:236px;padding:6px 0;}
+  .pchart-pie.zoomed .pleg-right{flex:0 0 auto;max-width:none;}
+  .pchart-pie.zoomed .pleg-right .pleg{grid-template-columns:8px max-content auto 46px;}
+  .pchart-pie.zoomed .pleg-right .pleg-n{max-width:260px;}
+  /* 用户 m20864 图5：点饼心弹出的居中详情窗口（饼放大一档 + 右侧功能/模型明细）。 */
+  #p-pie-modal:empty{display:none;}
+  .ppie-mask{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;
+    padding:24px;background:rgba(15,23,42,.46);overscroll-behavior:contain;}
+  html[data-theme="dark"] .ppie-mask{background:rgba(2,6,23,.62);}
+  .ppie-modal{position:relative;width:min(940px,100%);max-height:min(84vh,760px);overflow:auto;
+    background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:16px;
+    box-shadow:0 24px 64px rgba(15,23,42,.28);padding:14px 20px 18px;}
+  html[data-theme="dark"] .ppie-modal{box-shadow:0 24px 64px rgba(0,0,0,.55);}
+  .ppie-mhead{display:flex;align-items:baseline;gap:10px;padding-bottom:9px;margin-bottom:12px;border-bottom:1px solid var(--line);}
+  .ppie-mtitle{font-size:15px;font-weight:600;}
+  .ppie-mspan{font-size:12px;color:var(--muted);}
+  .ppie-mx{margin-left:auto;border:0;background:transparent;color:var(--muted);font-size:20px;line-height:1;
+    cursor:pointer;padding:0 6px 3px;border-radius:8px;}
+  .ppie-mx:hover{background:var(--soft);color:var(--text);}
+  /* 用户 m20864 图5：弹窗改成「上面两个饼、下面并排两栏明细」——饼不带图例和引线，
+     明细表才写名字与占比，三套东西不再挤在同一个横向区域里互相压字。 */
+  .ppie-mbody{display:flex;flex-direction:column;gap:14px;}
+  .ppie-mpie{display:flex;align-items:center;justify-content:center;gap:26px;flex-wrap:wrap;min-width:0;}
+  .ppie-mwrap .ppie-wrap{height:auto;min-height:0;max-width:none;gap:8px;}
+  .ppie-mlists{display:grid;grid-template-columns:1fr 1fr;gap:24px;border-top:1px solid var(--line);padding-top:12px;}
+  .ppie-mlist{display:flex;flex-direction:column;min-width:0;}
+  .ppie-mlt{font-size:12px;color:var(--muted);margin:0 0 6px;}
+  .ppie-mrow{display:grid;grid-template-columns:8px minmax(0,1fr) auto 48px;align-items:center;gap:8px;
+    padding:4px 0;font-size:12px;border-bottom:1px solid var(--line);}
+  .ppie-mrow:last-child{border-bottom:0;}
+  .ppie-mrow i{width:8px;height:8px;border-radius:3px;}
+  .ppie-mn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .ppie-mv{font-variant-numeric:tabular-nums;}
+  .ppie-mp{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums;}
+  /* 图2：区间弹层里的小图例（周末 / 节假日 / 调休上班），跟日历格子一个颜色。 */
+  .pcal-mk{display:flex;gap:12px;margin:8px 2px 0;font-size:11px;color:var(--muted);}
+  .pcal-mk span{display:inline-flex;align-items:center;gap:4px;}
+  .pcal-mk i{width:9px;height:9px;border-radius:3px;display:inline-block;}
+  .pcal-mk i.we{background:rgba(100,116,139,.34);}
+  .pcal-mk i.ho{background:rgba(245,158,11,.62);}
+  .pcal-mk i.wo{background:transparent;border:1px dashed rgba(100,116,139,.7);}
+  /* 用户 m19461 图6：点饼心放大这张卡（旧放大档的样式保留，别再新增使用）。 */
   /* 饼心文字：左饼放标题、右饼放总数，字号要能塞进内圈（直径 68px）。 */
   /* 用户 m07837：饼保持 120px，标题 13px、副行 11.5px。用户 m08731：饼放到 132px。 */
   .ppie-t1{font-size:13px;font-weight:600;fill:var(--text);}
@@ -2807,6 +2893,8 @@ html[data-theme="dark"] .pm-enabled input,html[data-theme="dark"] .dtool input{c
        价目页跟作用范围无关，切过去时整条收起。（原来在下拉框里，缓存页也各有一个下拉，都撤了。） -->
   <div class="scards" id="set-cards" role="group" aria-label="设置作用范围：全局，或某个群 / 私聊"></div>
 
+  <!-- 用户 m24700 第 ③⑤ 条：宿主版本、兼容探测、私有补丁准入结果，一行小字。 -->
+  <div class="compatbar" id="compat-bar" hidden></div>
   <div id="check-bar"></div>
 
 

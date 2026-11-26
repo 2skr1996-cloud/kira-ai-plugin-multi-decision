@@ -50,11 +50,11 @@ except Exception:  # pragma: no cover - 只在离线测试里
     _plugin_logger = None
 logger = _plugin_logger("multi_decision", "orange") if _plugin_logger else logging.getLogger(__name__)
 
-# 宿主缺 DECISION 时不能把插件加载搞崩：这一段允许整体缺失，运行入口再判 available()。
+# 宿主缺 DECISION 时不能把插件加载搞崩：ModelType 统一由 compat.model_type() 取
+# （用户 m24378 第 ① 条：兼容探测单点化），ProviderAPIError 只用于认宿主异常。
 try:  # pragma: no cover - 真机才有
-    from core.provider import ModelType, ProviderAPIError  # type: ignore
+    from core.provider import ProviderAPIError  # type: ignore
 except Exception:  # pragma: no cover - 离线测试 / 旧宿主
-    ModelType = None  # type: ignore
     ProviderAPIError = None  # type: ignore
 
 #: choice() 的两档选项名。改这里等于改判定合同，记录里的概率键会跟着变。
@@ -988,7 +988,8 @@ class JevPhase:
     @staticmethod
     def available() -> bool:
         """宿主是否支持 decision 类模型（旧宿主缺 DECISION 只挡住新模式）。"""
-        return ModelType is not None and hasattr(ModelType, "DECISION")
+        mt = compat.model_type()
+        return mt is not None and hasattr(mt, "DECISION")
 
     def _streak_of(self, key: str) -> int:
         return int(self._fail_by_model.get(key) or 0)
@@ -1035,15 +1036,18 @@ class JevPhase:
         mgr = getattr(ctx, "provider_mgr", None)
         if mgr is None:
             return None, "宿主没有 provider_mgr，取不到 decision 模型"
+        mt = compat.model_type()
+        if mt is None:
+            return None, "当前宿主不支持 decision 类模型（需要 KiraAI 3.1.1 及以上）"
         try:
-            client = mgr.get_model_client(pid, mid, ModelType.DECISION)
+            client = mgr.get_model_client(pid, mid, mt.DECISION)
         except Exception as exc:
             return None, "%s: %s" % (type(exc).__name__, exc)
         if client is None:
             return None, "模型 %s 不存在，或不是 decision 类型" % key
         if not callable(getattr(client, "choice", None)):
             return None, "模型 %s 不支持 choice()" % key
-        return client, ""
+        return compat.direct_client(client), ""
 
     def _default_client(self):
         """jev_model 留空时跟随官方默认决策槽（KiraAI 3.2.1 起才有）。
@@ -1059,7 +1063,7 @@ class JevPhase:
         if mgr is None:
             return None, "宿主没有 provider_mgr，取不到默认决策模型"
         try:
-            client = mgr.get_default_decision()
+            client = compat.default_decision_client(mgr)
         except (TypeError, ValueError) as exc:
             logger.warning("[multi-decision] 取官方默认决策模型失败：%s: %s",
                            type(exc).__name__, exc)
@@ -1070,7 +1074,7 @@ class JevPhase:
             return None, "官方默认决策槽没有返回决策模型，请在插件里选一个 JEV 决策模型"
         if not callable(getattr(client, "choice", None)):
             return None, "官方默认决策槽的模型不支持 choice()，请在插件里选一个 JEV 决策模型"
-        return client, ""
+        return compat.direct_client(client), ""
 
     async def _one_call(self, key: str, state_text: str, instructions: str,
                         timeout: float) -> dict:

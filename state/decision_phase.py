@@ -34,6 +34,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import compat
 from .sids import bot_name
 
 # v4.65（用户 m36234）：这条链路以前用模块自己的 logger，而插件的文件日志只挂在
@@ -1049,21 +1050,36 @@ class DecisionPhase:
     # ---------- 模型链 ----------
 
     def _client_for(self, model: str):
-        """取客户端。空 = 框架默认快速模型（用户 m05856：默认选快速模型）。"""
+        """取客户端。空 = 框架默认快速模型（用户 m05856：默认选快速模型）。
+
+        用户 m23855 第 ④ 条（降级必须可用）：3.3.0 宿主有「默认快速模型」这个方法，
+        这个方法，但没配快速模型时它会返回 None。快速模型取不到（返回 None 或抛错）
+        就继续问默认 LLM；两处都拿不到才返回 None。用户 m24378 第 ① 条：这条
+        顺序统一在 compat.default_chat_client，这里只管点名模型与解只读代理。
+        """
         ctx = getattr(self.plugin, "ctx", None)
         if ctx is None:
             return None
         key = str(model or "").strip()
         try:
             if key:
-                return ctx.get_llm_client(key)
-            getter = getattr(ctx, "get_default_fast_llm_client", None)
-            if callable(getter):
-                return getter()
-            return ctx.get_default_llm_client()
+                # 点名了模型就只认这一个：取不到让 _chain 记失败并走备用模型，
+                # 不静默换成框架默认 LLM——那会让人以为设的模型生效了。
+                client = ctx.get_llm_client(key)
+            else:
+                client, note = compat.default_chat_client(ctx)
+                if note:
+                    logger.warning("[multi-decision] %s", note)
         except Exception as exc:
             logger.warning("[multi-decision] 取决策模型失败（%s）：%s", key or "fast", exc)
             return None
+        # 流式加速器这类插件会把客户端包成只读代理、强制走流式，而上游的流式分片
+        # 常常不带 usage——决策只发一次完整请求，走内层真实客户端才能拿回 token
+        # （否则记录页的入/出与 ④ 轨迹全是 0）。解不开就原样用代理，行为不变。
+        direct = compat.direct_client(client)
+        if direct is not client:
+            logger.debug("[multi-decision] 决策模型客户端解包到内层：%s", type(direct).__name__)
+        return direct
 
     async def _one_call(self, client, messages, tools, timeout: float,
                        effort: str = "") -> dict:

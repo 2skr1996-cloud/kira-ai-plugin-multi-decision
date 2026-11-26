@@ -6019,6 +6019,46 @@ class WindowManager:
         # v4.03（用户 m11947）：注记在 msgs 里，view_of 已经按 decnote 画好，直接返回。
         return out + view
 
+    def rename_sender(self, sid: str, uid: str, name: str) -> int:
+        """把窗口里这个人的昵称补上（用户 m19461 第 5 条）。
+
+        私聊宿主不给昵称，插件先按 QQ 号顶上；等适配器把真名要回来，这里把已经
+        收进窗口、待发、跳过三处的原文和 name 一起改掉，页面不用等下一条消息。
+        返回改了几处。
+        """
+        st = self._states.get(sid)
+        uid = str(uid or "").strip()
+        name = str(name or "").strip()
+        if st is None or not uid or not name or name == uid:
+            return 0
+        # 昵称位可能是空的（框架原文就这样），也可能已经被填成 QQ 号
+        # （_fill_empty_nickname 兜底时把 sender 写进去了），两种都换；
+        # 已经写着真名的说明这条本来就有名字，不动。
+        pat = re.compile(r"\[user_nickname:\s*(?:%s)?\s*,\s*user_id:\s*%s\s*\]"
+                         % (re.escape(uid), re.escape(uid)))
+        rep = "[user_nickname: %s, user_id: %s]" % (name, uid)
+        n = 0
+        for bucket in (st.messages, st.pending, st.skipped):
+            for item in bucket:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("sender") or "").strip() == uid:
+                    cur = str(item.get("name") or "").strip()
+                    if not cur or cur == uid:
+                        item["name"] = name
+                        n += 1
+                for key in ("content", "raw", "text"):
+                    val = item.get(key)
+                    if not isinstance(val, str) or uid not in val:
+                        continue
+                    new = pat.sub(rep, val)
+                    if new != val:
+                        item[key] = new
+                        n += 1
+        if n:
+            self._save()
+        return n
+
     # ------------------------------------------------------------------ 观察窗
 
     # -------------------------------------------------- 进阶决策的记录（v3.91）

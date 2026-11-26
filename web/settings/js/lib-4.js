@@ -35,6 +35,9 @@
                "' data-prange='" + o.k + "'>" + o.t + "</button>";
       }).join("") + "</div>" +
       pricingCalPairHtml() +
+      // 用户 m20864 图2：日历下面补一行小图例，说明格子的三种底色。
+      "<div class='pcal-mk'><span><i class='we'></i>周末</span><span><i class='ho'></i>节假日</span>" +
+      "<span><i class='wo'></i>调休上班</span></div>" +
       "<div class='pdp-f'><span class='pdp-span'>" + esc(pricingCalSpanText()) + "</span>" +
       "<button type='button' class='pdp-ok' data-cal-apply='1'>应用</button></div>" +
       "</div>";
@@ -97,6 +100,10 @@
   var BAR_SIMPLE_COLOR = "#64748b";
   var BAR_SIMPLE_KEY = "mdp_bar_simple";
   var BAR_HIDDEN_KEY = "mdp_bar_hidden";
+  // 用户 m20864 图4：这段天数太多、分项柱挤不下了就自动简化——标记只用于卡头那枚「已自动简化」。
+  var pricingBarAutoSimple = false;
+  // 用户 m20864 图5：上一帧每个数据点的纵坐标，重画后按日期配对，用高度差决定曲线要不要做升降过渡。
+  var pricingLineYPrev = null;
 
 
   // 用户第 ⑦ 条：标题右边那个「简化模式」开关，状态存 localStorage，每次渲染现读。
@@ -248,6 +255,64 @@
     }).join("");
   }
 
+  // 用户 m19461 第 4 条：周末和法定节假日给柱图垫一层底色，一眼能看出「这天是休息日」。
+  // 日期取自国务院办公厅的放假通知（2025 国办发明电〔2024〕12号、2026 〔2025〕7号、2027 〔2026〕10号），
+  // 调休上班的那几天单独列出来，优先判成工作日（不然「补班」那天会被画成周末）。
+  var PRICING_HOLIDAY_SPEC =
+    "2025:01-01,01-28~02-04,04-04~04-06,05-01~05-05,05-31~06-02,10-01~10-08;" +
+    "2026:01-01~01-03,02-15~02-23,04-04~04-06,05-01~05-05,06-19~06-21,09-25~09-27,10-01~10-07;" +
+    "2027:01-01~01-03,02-05~02-13,04-03~04-05,05-01~05-05,06-09,09-15,10-01~10-07";
+  var PRICING_WORKDAY_SPEC =
+    "2025:01-26,02-08,04-27,09-28,10-11;" +
+    "2026:01-04,02-14,02-28,05-09,09-20,10-10;" +
+    "2027:01-31,02-14,05-08,09-26,10-09";
+  function pricingDaySet(spec){
+    var out = {};
+    var p2 = function(n){ return (n < 10 ? "0" : "") + n; };
+    String(spec || "").split(";").forEach(function(part){
+      var seg = part.split(":");
+      if(seg.length !== 2){ return; }
+      var yr = seg[0].replace(/\s+/g, "");
+      if(!/^\d{4}$/.test(yr)){ return; }
+      seg[1].split(",").forEach(function(item){
+        var it = item.replace(/\s+/g, "");
+        if(!it){ return; }
+        var rg = it.split("~");
+        var a = rg[0], b = rg[1] || rg[0];
+        if(!/^\d{2}-\d{2}$/.test(a) || !/^\d{2}-\d{2}$/.test(b)){ return; }
+        var d = new Date(Number(yr), Number(a.slice(0, 2)) - 1, Number(a.slice(3, 5)));
+        var end = new Date(Number(yr), Number(b.slice(0, 2)) - 1, Number(b.slice(3, 5)));
+        // 上限 40 天：写错成跨年区间也不会死循环。
+        for(var guard = 0; guard < 40 && d.getTime() <= end.getTime(); guard++){
+          out[yr + "-" + p2(d.getMonth() + 1) + "-" + p2(d.getDate())] = 1;
+          d.setDate(d.getDate() + 1);
+        }
+      });
+    });
+    return out;
+  }
+  var PRICING_HOLIDAY_SET = pricingDaySet(PRICING_HOLIDAY_SPEC);
+  var PRICING_WORKDAY_SET = pricingDaySet(PRICING_WORKDAY_SPEC);
+  // 返回 "holiday" / "weekend" / ""（工作日）。key 是后端给的 ISO 日期，别的格式一律当工作日。
+  function pricingDayKind(key){
+    var k = String(key == null ? "" : key);
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(k)){ return ""; }
+    if(PRICING_WORKDAY_SET[k]){ return ""; }
+    if(PRICING_HOLIDAY_SET[k]){ return "holiday"; }
+    var wd = new Date(Number(k.slice(0, 4)), Number(k.slice(5, 7)) - 1, Number(k.slice(8, 10))).getDay();
+    return (wd === 0 || wd === 6) ? "weekend" : "";
+  }
+  // 用户 m20864 图2：日历格要用「节假日 / 周末 / 调休补班」三种标记，比柱图多一个「补班」。
+  // 补班那天在柱图里按工作日画（不垫底色），在日历里给个描边，免得看着像漏标。
+  function pricingDayMark(key){
+    var k = String(key == null ? "" : key);
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(k)){ return ""; }
+    if(PRICING_WORKDAY_SET[k]){ return "workday"; }
+    if(PRICING_HOLIDAY_SET[k]){ return "holiday"; }
+    var wd = new Date(Number(k.slice(0, 4)), Number(k.slice(5, 7)) - 1, Number(k.slice(8, 10))).getDay();
+    return (wd === 0 || wd === 6) ? "weekend" : "";
+  }
+
   function pricingBarChartHtml(width){
     var d = pricingTrend;
     // 用户 m15463：标题那行日期按「真正画出来的第一天」写，先清掉上一帧的值。
@@ -263,17 +328,41 @@
     // 用户第 ⑦ 条：要画哪几根柱子先定下来（简化模式一根合计，分项模式跳过图例里点掉的类）。
     var series = barSeries();
     // 用户 m15463：柱子回到原来的宽度（38px 上限），不再为了铺满把柱子拉宽；
-    // 宽度不够就少画前几天——从最后一天往前数，装得下几天画几天。
-    var DAY_GAP = 14, BAR_MAX_W = 38;
-    var liveCounts = pts.map(function(p){
-      return series.filter(function(s){ return barParts(p, s).tok > 0; }).length;
-    });
-    var fitFrom = pts.length - 1, fitW = 0;
-    for(var fi = pts.length - 1; fi >= 0; fi--){
-      var fw = liveCounts[fi] * BAR_MAX_W + (fi < pts.length - 1 ? DAY_GAP : 0);
-      if(fi < pts.length - 1 && fitW + fw > plotW){ break; }
-      fitW += fw;
-      fitFrom = fi;
+    // 用户 m15463：柱子回到 38px 上限，宽度不够就少画前几天——这是「默认」那个可滚窗口的规矩。
+    // 用户 m20864 图3/图4：本周 / 上周 / 本月 / 上月 / 自定义是不可滚的固定区间，不能切片——
+    // 整段要么拉伸柱子和天缝铺满窗口（图3），要么整段换成一天一根合计柱的自动简化（图4 本月）。
+    var DAY_GAP = 14, BAR_MAX_W = 38, BAR_W_FIX_MAX = 96, GAP_FIX_MAX = 44, BAR_W_MIN = 12;
+    var fixedRange = !pricingWinScrollable();
+    var countLive = function(list, ser){
+      return list.map(function(p){
+        return ser.filter(function(s){ return barParts(p, s).tok > 0; }).length;
+      });
+    };
+    var liveTotalOf = function(list){ var t = 0; list.forEach(function(n){ t += n; }); return t; };
+    var liveCounts = countLive(pts, series);
+    var autoSimple = false;
+    if(fixedRange){
+      var fixGapAll = DAY_GAP * Math.max(0, pts.length - 1);
+      var fixLive = liveTotalOf(liveCounts);
+      // 分项柱挤到 12px 以下就读不出来了，这时候整段自动简化成「一天一根合计柱」。
+      // 用户 m20864 图4：本月 / 上月这种整段区间，一天要挤两三根 26px 的柱子，柱里那两行字
+      // 和柱顶的钱全糊在一起；天数上了 20、一天又不止一根，就整段换成合计柱。
+      var spanMonth = pts.length >= 20 && fixLive > pts.length;
+      if(fixLive > 0 && (spanMonth || (plotW - fixGapAll) / fixLive < BAR_W_MIN)){
+        series = [{ key: "__all", label: "合计", color: BAR_SIMPLE_COLOR, seg: null, all: true }];
+        autoSimple = true;
+        liveCounts = countLive(pts, series);
+      }
+    }
+    pricingBarAutoSimple = autoSimple;
+    var fitFrom = fixedRange ? 0 : pts.length - 1, fitW = 0;
+    if(!fixedRange){
+      for(var fi = pts.length - 1; fi >= 0; fi--){
+        var fw = liveCounts[fi] * BAR_MAX_W + (fi < pts.length - 1 ? DAY_GAP : 0);
+        if(fi < pts.length - 1 && fitW + fw > plotW){ break; }
+        fitW += fw;
+        fitFrom = fi;
+      }
     }
     var prevPtOverride = null;
     if(fitFrom > 0){
@@ -310,12 +399,29 @@
     // 用户 m14947 第 ② 条：柱子不再「每天固定占一格、组居中」——那样两根柱子的日子
     // 两边各空一大块，看着像给没数据的柱子留了位置。现在按实际根数排：全图柱子一样宽，
     // 天与天之间留固定空隙，整块内容在绘图区里居中；柱子多的一天自然占得宽。
-    var liveTotal = 0;
-    liveCounts.forEach(function(n){ liveTotal += n; });
-    var gapTotal = DAY_GAP * Math.max(0, pts.length - 1);
-    // 用户 m15463：宽度上限就是原来的 38px，不再往上拉；切片已经保证装得下。
-    var bwAll = liveTotal > 0 ? Math.min(BAR_MAX_W, (plotW - gapTotal) / liveTotal) : BAR_MAX_W;
-    bwAll = Math.max(3.5, bwAll);
+    var liveTotal = liveTotalOf(liveCounts);
+    var gapW = DAY_GAP, bwAll = BAR_MAX_W;
+    if(liveTotal > 0){
+      if(fixedRange){
+        // 铺满窗口：柱宽和天缝按同一比例放大，柱宽最多 96、天缝最多 44；两个都顶到上限才留白。
+        var kFit = plotW / (liveTotal * BAR_MAX_W + DAY_GAP * Math.max(0, pts.length - 1));
+        var bwF = BAR_MAX_W * kFit, gapF = DAY_GAP * kFit;
+        if(bwF > BAR_W_FIX_MAX){
+          bwF = BAR_W_FIX_MAX;
+          gapF = pts.length > 1 ? (plotW - liveTotal * bwF) / (pts.length - 1) : DAY_GAP;
+        }
+        if(gapF > GAP_FIX_MAX){
+          gapF = GAP_FIX_MAX;
+          bwF = Math.min(BAR_W_FIX_MAX, (plotW - gapF * Math.max(0, pts.length - 1)) / liveTotal);
+        }
+        if(gapF < DAY_GAP){ gapF = Math.max(6, Math.min(DAY_GAP, gapF)); }
+        bwAll = Math.max(3.5, bwF);
+        gapW = gapF;
+      }else{
+        bwAll = Math.max(3.5, Math.min(BAR_MAX_W, (plotW - DAY_GAP * Math.max(0, pts.length - 1)) / liveTotal));
+      }
+    }
+    var gapTotal = gapW * Math.max(0, pts.length - 1);
     var contentW = liveTotal * bwAll + gapTotal;
     var dayX = [];
     var contentLeft = padL + Math.max(0, (plotW - contentW) / 2);
@@ -323,7 +429,7 @@
     for(var di = 0; di < pts.length; di++){
       var dw = liveCounts[di] * bwAll;
       dayX.push(accX + dw / 2);
-      accX += dw + DAY_GAP;
+      accX += dw + gapW;
     }
     // 用户 m18000：翻窗口时把「上一帧有、这一帧没有」的那几天也画进同一层，摆在可见窗口
     // 左右两侧的裁切框外。整块只有一层，滑动时不会出现两份内容，也就没有重影。
@@ -331,18 +437,18 @@
       return series.filter(function(s){ return barParts(p, s).tok > 0; }).length;
     };
     var padPrevX = [], padNextX = [];
-    var padEdge = contentLeft - DAY_GAP;
+    var padEdge = contentLeft - gapW;
     for(var pp = pricingPadPrev.length - 1; pp >= 0; pp--){
       var ppw = padLiveCount(pricingPadPrev[pp]) * bwAll;
       padEdge -= ppw;
       padPrevX.unshift(padEdge + ppw / 2);
-      padEdge -= DAY_GAP;
+      padEdge -= gapW;
     }
-    padEdge = contentLeft + contentW + DAY_GAP;
+    padEdge = contentLeft + contentW + gapW;
     for(var pn = 0; pn < pricingPadNext.length; pn++){
       var pnw = padLiveCount(pricingPadNext[pn]) * bwAll;
       padNextX.push(padEdge + pnw / 2);
-      padEdge += pnw + DAY_GAP;
+      padEdge += pnw + gapW;
     }
     var padN = pricingPadPrev.length;
     var ptsAll = pricingPadPrev.concat(pts, pricingPadNext);
@@ -378,6 +484,8 @@
     var grid = "", bars = "", dots = "", lineDots = "", labels = "", linePts = [];
     // 用户 m18000：pad 天（上一帧有、这一帧没有的那几天）单独装一组，滑完整组推出裁切框。
     var padBars = "", padDots = "", padLabels = "", padLineDots = "";
+    // 用户 m19461 第 4 条：周末 / 节假日底色，跟柱子一起平移（pad 天的那块跟着 pad 组一起滑出去）。
+    var bands = "", padBands = "";
     // 用户 m29889：左轴 1M 一段，网格线和刻度只画在整 M 上，顶上那 0.3M 不画。
     for(var tv = 0; tv < tokTop; tv += 1e6){
       var gy = (padT + plotH * (1 - tv / tokTop)).toFixed(1);
@@ -443,13 +551,30 @@
       // 用户 m06021：曲线有 2px 描边，Catmull-Rom 转贝塞尔还会稍微鼓出去一点，留 3px 余量。
       return mx >= box.t - 3 && mn <= box.b + 3;
     };
-    var step = Math.max(1, Math.ceil(pts.length / 16));
+    // 用户 m20864 图4：合计模式一天只有一根柱，位置够，日期就全写出来；分项模式还是老规矩，
+    // 隔几格写一个，免得字压在柱底那两行上。
+    var simpleScale = barSimpleOn() || pricingBarAutoSimple;
+    var step = Math.max(1, simpleScale ? Math.ceil(pts.length * 42 / Math.max(1, plotW))
+                                       : Math.ceil(pts.length / 16));
     // 用户 m18000：pad 天跟可见窗口一起画，只是摆在裁切框外；vi 是它在可见窗口里的下标。
     ptsAll.forEach(function(p, i){
       var cx = dayXAll[i];
       var vi = i - padN;
       var isPad = vi < 0 || vi >= pts.length;
       var bBuf = "", dBuf = "", lBuf = "", ldBuf = "";
+      // 用户 m19461 第 4 条：这天是周末或节假日就垫一条通栏底色。左右边界取相邻两天的中点，
+      // 首尾各外延半个间距，相邻两块正好接上、不留缝。
+      var bandBuf = "";
+      var dayKind = pricingDayKind(p.key || p.label);
+      if(dayKind){
+        var bandL = i > 0 ? (dayXAll[i - 1] + cx) / 2
+          : cx - (dayXAll.length > 1 ? (dayXAll[1] - cx) / 2 : slot / 2);
+        var bandR = i + 1 < dayXAll.length ? (cx + dayXAll[i + 1]) / 2
+          : cx + (i > 0 ? (cx - dayXAll[i - 1]) / 2 : slot / 2);
+        bandBuf = "<rect class='pband " + (dayKind === "holiday" ? "hd" : "wk") + "' x='" + bandL.toFixed(1) +
+                  "' y='" + padT + "' width='" + Math.max(1, bandR - bandL).toFixed(1) +
+                  "' height='" + plotH + "'></rect>";
+      }
       // 没有数据的那根柱子（比如 JEV 从来没跑过）不占位置：留着空档会看成「柱子之间有缝」。
       var live = series.filter(function(s){ return barParts(p, s).tok > 0; });
       var bw = bwAll;
@@ -652,8 +777,8 @@
         lBuf += "<text class='pxlab" + numCls + "' x='" + cx.toFixed(1) + "' y='" + (H - 11) +
                   "' style='" + numDelay(i * 14) + "' text-anchor='middle'>" + esc(p.label) + "</text>";
       }
-      if(isPad){ padBars += bBuf; padDots += dBuf; padLabels += lBuf; padLineDots += ldBuf; }
-      else { bars += bBuf; dots += dBuf; labels += lBuf; lineDots += ldBuf; }
+      if(isPad){ padBands += bandBuf; padBars += bBuf; padDots += dBuf; padLabels += lBuf; padLineDots += ldBuf; }
+      else { bands += bandBuf; bars += bBuf; dots += dBuf; labels += lBuf; lineDots += ldBuf; }
     });
     // 用户 m29560 第 4 条：曲线两头都延伸到图的左右边缘，但最新那天不延伸（不画到未来）。
     // 用户 m08731：翻窗口时整块最多滑两格，线只伸到边缘的话，滑到一半两头就断在裁切框里——
@@ -701,12 +826,16 @@
         }
       }
     }
+    // 用户 m20864 图5：留下这一帧每个点的日期和纵坐标，换量程时按日期配对算升降幅度
+    // （翻页那一帧会带上窗口外的 pad 天，前后长度对不上，只能按日期配）。
+    pricingLineYPrev = { labels: pts.map(function(p){ return String(p.label || ""); }),
+                         ys: linePts.map(function(p){ return p[1]; }) };
     var line = linePts2.length > 1 ? "<path class='pline' d='" + smoothLinePath(linePts2, padT, padT + plotH) + "'/>" : "";
     // 用户第 ⑦ 条：图例点一下隐藏那一类柱子（再点回来），隐藏的加 .off 变淡。
     // 简化模式只有一根合计柱，图例也只留「合计」+「花费（右轴）」。
     var hidKeys = barHiddenKeys();
     var legend = "<div class='pbar-legend'>" +
-      (barSimpleOn()
+      ((barSimpleOn() || pricingBarAutoSimple)
         ? "<span class='pbl'><i class='pbl-s' style='background:" + BAR_SIMPLE_COLOR + "'></i>合计</span>"
         : FN_KEYS.map(function(k){
             var off = hidKeys.indexOf(k) >= 0;
@@ -715,6 +844,10 @@
           }).join("")) +
       "<span class='pbl-sep'></span>" +
       "<span class='pbl'><i class='pbl-l'></i>花费（右轴）</span>" +
+      // 用户 m20864 图2：花费右侧补两枚色块，说明柱子后面那层底色是什么意思。
+      "<span class='pbl-sep'></span>" +
+      "<span class='pbl'><i class='pbl-s wk'></i>周末</span>" +
+      "<span class='pbl'><i class='pbl-s hd'></i>节假日</span>" +
       "</div>";
     // 用户 m29947：翻窗口改成整块平移——坐标轴和网格不动，只有柱子和横轴日期滑。
     // 用户 m18000：只平移一层。上一帧有、这一帧没有的那几天已经垫在裁切框外（见上面的 pad 天），
@@ -726,33 +859,46 @@
     var panPx = pricingAnimDir ? (pricingPanFrom || 0) - panShift : 0;
     pricingPanPx = panPx;
     // 用户 m18000：滚得越远走得越久（可以比单格快一点，但不能一瞬就到）。
-    // 主时长按「这一批走了几天」算，再按实际位移补一点：一天约 190ms，四天约 480ms。
+    // 用户 m20864 图5：每格固定 130ms 匀速滑。原来按「走了几天＋实际位移」算时长，
+    // 每段都先快后慢，连着滚几格就是一顿一顿的；现在每段等速，首尾相接整体也就匀速了。
     var panDays = Math.max(1, Math.abs(pricingPanDays || 1));
-    var panDur = pricingAnimDir
-      ? Math.round(Math.min(560, 190 + 80 * (panDays - 1) + 0.35 * Math.max(0, Math.abs(panPx) - 190)))
-      : 0;
+    var panDur = pricingAnimDir ? Math.round(Math.min(560, 130 * panDays)) : 0;
     pricingPanDurMs = panDur;
     var panStyle = pricingAnimDir ? " style='--pdx:" + panPx.toFixed(1) + "px;--pdur:" + panDur + "ms'" : "";
     var plotCls = pricingAnimDir ? "pplot pan" : "pplot";
     // 用户 m18000：pad 天是「离开窗口」的那几天，滑完要整组推出裁切框，不然边上会留半根柱子。
     var padExit = 0;
-    if(pricingPadNext.length) padExit = Math.max(0, (W - padR) - (contentLeft + contentW + DAY_GAP));
-    else if(pricingPadPrev.length) padExit = -Math.max(0, (contentLeft - DAY_GAP) - padL);
+    if(pricingPadNext.length) padExit = Math.max(0, (W - padR) - (contentLeft + contentW + gapW));
+    else if(pricingPadPrev.length) padExit = -Math.max(0, (contentLeft - gapW) - padL);
     var padGroup = (padBars || padDots || padLabels || padLineDots)
       ? "<g class='ppad' style='--pdx:" + padExit.toFixed(1) + "px;--pdur:" + panDur + "ms'>" +
-        padBars + padLineDots + padDots + padLabels + "</g>"
+        padBands + padBars + padLineDots + padDots + padLabels + "</g>"
       : "";
     // 滚轮只在这块里翻图（左右两根轴之间），轴外面滚的是整页。
     pricingGeom = { W: W, padL: padL, padR: padR, padT: padT, plotH: plotH, slot: slot, n: pts.length };
     // 用户 m30335：平移时把绘图区左右裁掉，滑出去的柱子不会压到两侧刻度上。
     // 裁切放在不动的外层 <g> 上，内层平移时裁切框跟着走就白裁了。
+    // 用户 m19461 第 4 条：左右两侧淡出——滚到边上的柱子直接消失太突兀，用一层遮罩把
+    // 绘图区两端各 46px 渐隐掉。遮罩只盖绘图内容，两根轴和刻度在裁切框外面，不受影响。
+    // 用户 m20864 图5：渐隐带从 46px 加宽到 72px，柱子滑到边上有一段看得见的淡出，而不是到边就没了。
+    var fadeF = Math.min(0.2, 72 / Math.max(1, plotW));
     var clip = "<defs><clipPath id='pclip'><rect x='" + padL + "' y='0' width='" + (W - padL - padR) +
-               "' height='" + H + "'/></clipPath></defs>";
+               "' height='" + H + "'/></clipPath>" +
+               "<linearGradient id='pfadeg' x1='0' y1='0' x2='1' y2='0'>" +
+               "<stop offset='0' stop-color='#fff' stop-opacity='0'/>" +
+               "<stop offset='" + fadeF.toFixed(4) + "' stop-color='#fff' stop-opacity='1'/>" +
+               "<stop offset='" + (1 - fadeF).toFixed(4) + "' stop-color='#fff' stop-opacity='1'/>" +
+               "<stop offset='1' stop-color='#fff' stop-opacity='0'/>" +
+               "</linearGradient>" +
+               "<mask id='pfade' maskUnits='userSpaceOnUse' x='" + padL + "' y='0' width='" + (W - padL - padR) +
+               "' height='" + H + "'>" +
+               "<rect x='" + padL + "' y='0' width='" + (W - padL - padR) + "' height='" + H +
+               "' fill='url(#pfadeg)'/></mask></defs>";
     return "<svg class='pchart-svg' viewBox='0 0 " + W + " " + H + "' role='img' aria-label='按天的 token 与花费'>" +
       clip +
       "<g class='pax'>" + grid + "</g>" +
-      "<g class='pclipwrap' clip-path='url(#pclip)'>" +
-      "<g class='" + plotCls + "'" + panStyle + ">" + padGroup + bars + "<g class='plinewrap'>" + line + lineDots + "</g>" + dots + labels + "</g>" +
+      "<g class='pclipwrap' clip-path='url(#pclip)' mask='url(#pfade)'>" +
+      "<g class='" + plotCls + "'" + panStyle + ">" + padGroup + bands + bars + "<g class='plinewrap'>" + line + lineDots + "</g>" + dots + labels + "</g>" +
       "</g>" +
       // 用户 m22781：左上角除峰值再给这段的 token 总量，右上角除峰值再给这段的花费总价，跟着区间一起变。
       // 用户 m29947：这两行改成记分牌翻字，只滚变了的字。
@@ -782,6 +928,9 @@
   // 132 的框两边各空 8px，两个框之间还有 6px，视觉上缝有 22px；框收到 124、缝收到 2px 以后是 10px。
   var PIE_BOX = 124;
   var PIE_R = 58, PIE_IR = 37;
+  // 用户 m19461 图6：点饼心把这张卡放大——饼跟着放大，右侧模型图例不再封顶。
+  var PIE_ZOOM_BOX = 200;
+  var PIE_ZOOM_R = 96, PIE_ZOOM_IR = 62;
   var PIE_MAX_ROWS = 8;
   var PIE_ROW_H = 17;
   // 模型色要跟功能色（蓝 / 紫 / 绿）分开，不然两张饼分不清谁是谁。
@@ -830,6 +979,8 @@
     var pr = pie.getBoundingClientRect();
     var cx = pr.left - wr.left + pr.width / 2;
     var cy = pr.top - wr.top + pr.height / 2;
+    // 用户 m19461 图6：放大档的饼半径不一样，引线半径从 svg 的 data-r 读，别写死 PIE_R。
+    var rad = parseFloat(pie.getAttribute("data-r")) || PIE_R;
     var spans = String(pie.getAttribute("data-spans") || "").split(";");
     var rows = wrap.querySelectorAll(".pleg-right .pleg");
     var n = Math.min(rows.length, spans.length);
@@ -866,7 +1017,7 @@
       if(k > 5) k = 5;
       (used[k] = used[k] || []).push([lo, hi]);
       kPrev = k;
-      d += pieLeadPath(cx, cy, PIE_R, ang, PIE_R + 5 + k * 3, tx, ty);
+      d += pieLeadPath(cx, cy, rad, ang, rad + 5 + k * 3, tx, ty);
     }
     svg.setAttribute("viewBox", "0 0 " + wr.width + " " + wr.height);
     svg.setAttribute("width", wr.width);
@@ -903,7 +1054,8 @@
 
   function drawPieLeadsAll(){
     fitPieLegendCols();
-    var ws = document.querySelectorAll("#p-charts .ppie-wrap");
+    // 用户 m20864 图5：弹出的饼图窗口里的引线也要画，不然放大后线全挤在圈上。
+    var ws = document.querySelectorAll("#p-charts .ppie-wrap, #p-pie-modal .ppie-wrap");
     for(var i = 0; i < ws.length; i++) drawPieLeads(ws[i]);
   }
 
@@ -919,19 +1071,24 @@
   }
 
   // 饼心文字：一行时基线压在圆心下方，两行时上下各让半行。
-  function pieCenterSvg(lines, cls1, cls2){
+  function pieCenterSvg(lines, cls1, cls2, box){
     var n = lines ? lines.length : 0;
     if(!n) return "";
-    var y0 = n > 1 ? (PIE_BOX / 2 - 2.5) : (PIE_BOX / 2 + 4);
+    var B = box || PIE_BOX;
+    var y0 = n > 1 ? (B / 2 - 2.5) : (B / 2 + 4);
     var out = "";
     for(var i = 0; i < n; i++){
-      out += "<text x='" + (PIE_BOX / 2) + "' y='" + (y0 + i * 13).toFixed(1) + "' text-anchor='middle' class='" +
+      out += "<text x='" + (B / 2) + "' y='" + (y0 + i * 13).toFixed(1) + "' text-anchor='middle' class='" +
         (i ? (cls2 || cls1) : cls1) + "'>" + esc(lines[i]) + "</text>";
     }
     return out;
   }
 
-  function pieSvgHtml(inner, outer, note, aria, anim, titleLines, totalLines){
+  function pieSvgHtml(inner, outer, note, aria, anim, titleLines, totalLines, zoom, bare){
+    // 用户 m19461 图6：放大档把饼框、外半径、内半径一起放大，引线半径跟着 data-r 走。
+    var box = zoom ? PIE_ZOOM_BOX : PIE_BOX;
+    var rad = zoom ? PIE_ZOOM_R : PIE_R;
+    var irad = zoom ? PIE_ZOOM_IR : PIE_IR;
     var sumIn = 0, sumOut = 0;
     inner.forEach(function(p){ sumIn += p.value; });
     outer.forEach(function(p){ sumOut += p.value; });
@@ -939,8 +1096,8 @@
     // 用户 m06997：小扇区全落在右边、紧挨模型图例，引线不用绕大半圈。
     var startIn = -Math.PI / 2 - (sumIn > 0 ? (inner[0].value / sumIn) * Math.PI : 0);
     var startOut = Math.PI - (sumOut > 0 ? (outer[0].value / sumOut) * Math.PI : 0);
-    var ringIn = pieRingSlices(inner, sumIn, PIE_BOX / 2, PIE_BOX / 2, PIE_R, PIE_IR, startIn, PIE_MODEL_COLORS);
-    var ringOut = pieRingSlices(outer, sumOut, PIE_BOX / 2, PIE_BOX / 2, PIE_R, PIE_IR, startOut, PIE_MODEL_COLORS);
+    var ringIn = pieRingSlices(inner, sumIn, box / 2, box / 2, rad, irad, startIn, PIE_MODEL_COLORS);
+    var ringOut = pieRingSlices(outer, sumOut, box / 2, box / 2, rad, irad, startOut, PIE_MODEL_COLORS);
     // 外圈每块的起止角，画引线用（引线出口取「扇区里离这行最近的角度」）。
     var spans = [], a = startOut;
     outer.forEach(function(p){
@@ -962,7 +1119,7 @@
     }).join("");
     // 用户 m06710：模型那行要把百分比写回来；名字放不下由 CSS 省略。
     // 一列不能高过饼：行数超过六行就把行高压到饼高以内，引线按行心重算。
-    var rowH = Math.min(PIE_ROW_H, Math.floor(PIE_BOX / Math.max(1, outer.length)));
+    var rowH = Math.min(PIE_ROW_H, Math.floor(box / Math.max(1, outer.length)));
     var rightLegend = outer.map(function(p, i){
       var pct = sumOut > 0 ? p.value / sumOut * 100 : 0;
       return "<div class='pleg' style='height:" + rowH + "px'>" +
@@ -971,17 +1128,23 @@
         "<span class='pleg-v'>" + esc(p.valueText) + "</span>" +
         "<span class='pleg-p'>" + pct.toFixed(1) + "%</span></div>";
     }).join("");
-    var pieStyle = "width:" + PIE_BOX + "px;height:" + PIE_BOX + "px;";
-    return "<div class='ppie-wrap'>" +
-      "<svg class='ppie-leads' aria-hidden='true'></svg>" +
-      "<div class='plegend pleg-left'>" + leftLegend + "</div>" +
-      "<svg class='ppie-svg' style='" + pieStyle + "' viewBox='0 0 " + PIE_BOX + " " + PIE_BOX + "' role='img' aria-label='" + esc(aria) + "'>" +
-      ringIn + pieCenterSvg(titleLines, "ppie-t1", "ppie-t1") + "</svg>" +
-      "<svg class='ppie-svg' data-outer='1' data-spans='" + spans.join(";") + "' style='" + pieStyle + "' viewBox='0 0 " + PIE_BOX + " " + PIE_BOX + "' role='img' aria-label='" + esc(aria) + "'>" +
-      ringOut + pieCenterSvg(totalLines, "ppie-t1", "ppie-t2") + "</svg>" +
-      "<div class='plegend pleg-right'>" + rightLegend + "</div>" +
+    var pieStyle = "width:" + box + "px;height:" + box + "px;";
+    // 用户 m19461 图6：饼心那块（内圈）是放大/还原的点击区，透明圆盖在文字上面。
+    var hitCircle = "<circle class='ppie-hit' cx='" + (box / 2) + "' cy='" + (box / 2) +
+      "' r='" + irad + "' fill='transparent'/>";
+    // 用户 m20864 图5：弹窗里只要两个饼和饼心文字，图例与引线由下面两张明细表接手（bare=true），
+    // 免得图例、引线、明细表三套东西在同一个框里互相压字。
+    return "<div class='ppie-wrap" + (bare ? " ppie-bare" : "") + "'>" +
+      (bare ? "" : "<svg class='ppie-leads' aria-hidden='true'></svg>" +
+        "<div class='plegend pleg-left'>" + leftLegend + "</div>") +
+      "<svg class='ppie-svg' style='" + pieStyle + "' viewBox='0 0 " + box + " " + box + "' role='img' aria-label='" + esc(aria) + "'>" +
+      ringIn + pieCenterSvg(titleLines, "ppie-t1", "ppie-t1", box) + hitCircle + "</svg>" +
+      "<svg class='ppie-svg' data-outer='1' data-spans='" + spans.join(";") + "' data-r='" + rad + "' data-ir='" + irad +
+        "' style='" + pieStyle + "' viewBox='0 0 " + box + " " + box + "' role='img' aria-label='" + esc(aria) + "'>" +
+      ringOut + pieCenterSvg(totalLines, "ppie-t1", "ppie-t2", box) + hitCircle + "</svg>" +
+      (bare ? "" : "<div class='plegend pleg-right'>" + rightLegend + "</div>") +
       "</div>" +
-      (note ? "<div class='pleg-note'>" + esc(note) + "</div>" : "");
+      (bare || !note ? "" : "<div class='pleg-note'>" + esc(note) + "</div>");
   }
 
   function pricingPieById(id){
@@ -1056,8 +1219,9 @@
     return true;
   }
 
-  function pieCapItems(list, fmt){
-    if(list.length <= PIE_MAX_ROWS) return list;
+  function pieCapItems(list, fmt, zoom){
+    // 用户 m19461 图6：放大以后右侧图例要「全部展开」，不再并成「其他 N 个」。
+    if(zoom || list.length <= PIE_MAX_ROWS) return list;
     var keep = list.slice(0, PIE_MAX_ROWS - 1), rest = list.slice(PIE_MAX_ROWS - 1);
     var sum = 0;
     rest.forEach(function(p){ sum += p.value; });
@@ -1106,7 +1270,7 @@
         if(rest > 0) out.push({ name: "未记录模型", value: rest, valueText: fmt(rest), color: "#94a3b8" });
       }
       out.sort(function(a, b){ return b.value - a.value; });
-      return pieCapItems(out, fmt);
+      return pieCapItems(out, fmt, !!(pie && pie.zoom));
     };
     if(pie.id === "calls"){
       return { inner: fnItems("rounds", function(v){ return v + " 轮"; }),
@@ -1153,6 +1317,7 @@
 
   function pricingPieCardHtml(pie){
     var span = (pie.start && pie.end) ? pdSpanText(pie.start, pie.end) : "本月";
+    var zoom = !!pie.zoom;
     var built = (pie.data && !pie.data.error) ? pricingPieItems(pie) : null;
     // 用户 m06997：标题挪进左饼中间（两行），总数挪进右饼中间，卡头只留右上角的区间按钮。
     var head = "<span class='prange pchart-range'><button type='button' class='prb pdp-btn" + (pie.open ? " on" : "") +
@@ -1165,9 +1330,9 @@
     }else{
       body = pieSvgHtml(built.inner, built.outer, built.note, pie.title, pie.anim,
         pieTitleLines(pie.title),
-        [built.center, built.centerSub].filter(function(s){ return !!s; }));
+        [built.center, built.centerSub].filter(function(s){ return !!s; }), zoom);
     }
-    return "<div class='pchart pchart-pie'>" + head +
+    return "<div class='pchart pchart-pie" + (zoom ? " zoomed" : "") + "' data-pie='" + esc(pie.id) + "'>" + head +
       "<div class='pchart-body" + (pie.anim ? " pchart-anim" : "") + "'>" + body + "</div>" +
       (pie.open ? pricingPiePopHtml(pie) : "") + "</div>";
   }
@@ -1194,6 +1359,8 @@
     }
     // 用户 m08100：弹层先同步摆好再画，别等下一帧——否则会先出现在卡片下面再跳上去，看着闪。
     settlePiePops();
+    // 用户 m20864 图5：详情窗口开着的时候，区间一变就跟着重画。
+    if(pricingPieModalId) paintPricingPieModal();
     // 引线要量完布局才画得准，等这一帧排完再补。
     requestAnimationFrame(drawPieLeadsAll);
   }
@@ -1229,6 +1396,97 @@
     }
     settlePiePops();
   }
+
+  // 用户 m20864 图5：点饼心改成弹一个居中的详情窗口——以前是把这张卡撑满一行，
+  // 把下面的卡挤下去，看着像整页重排。窗口里饼放大一档，右侧按「功能 / 模型」列数值和占比。
+  var pricingPieModalId = "";
+  function pricingPieModalPie(){
+    if(!pricingPieModalId) return null;
+    if(!document.getElementById("p-charts")) return null;
+    return pricingPieById(pricingPieModalId);
+  }
+  function pieModalRowsHtml(items, sum, title){
+    if(!items || !items.length) return "";
+    var rows = items.map(function(p){
+      var pct = sum > 0 ? p.value / sum * 100 : 0;
+      var nm = String(p.full || p.name || "");
+      return "<div class='ppie-mrow'><i style='background:" + (p.color || "#94a3b8") + "'></i>" +
+        "<span class='ppie-mn' title='" + esc(String(p.title || nm)) + "'>" + esc(nm) + "</span>" +
+        "<span class='ppie-mv'>" + esc(String(p.valueText || "")) + "</span>" +
+        "<span class='ppie-mp'>" + pct.toFixed(1) + "%</span></div>";
+    }).join("");
+    return "<div class='ppie-mlist'><div class='ppie-mlt'>" + esc(title) + "</div>" + rows + "</div>";
+  }
+  function pricingPieModalHtml(pie){
+    var built = (pie.data && !pie.data.error) ? pricingPieItems(pie) : null;
+    var span = (pie.start && pie.end) ? pdSpanText(pie.start, pie.end) : "本月";
+    var sumIn = 0, sumOut = 0;
+    if(built){
+      (built.inner || []).forEach(function(p){ sumIn += p.value; });
+      (built.outer || []).forEach(function(p){ sumOut += p.value; });
+    }
+    var body;
+    if(!pie.data) body = "<div class='pchart-empty'>正在统计…</div>";
+    else if(pie.data.error) body = "<div class='pchart-empty'>图表读取失败：" + esc(pie.data.error) + "</div>";
+    else if(!built || (!built.inner.length && !built.outer.length)){
+      body = "<div class='pchart-empty'>" + esc((built && built.empty) || "这段时间还没有数据。") + "</div>";
+    }else{
+      body = "<div class='ppie-mwrap'>" + pieSvgHtml(built.inner, built.outer, built.note, pie.title, false,
+        pieTitleLines(pie.title), [built.center, built.centerSub].filter(function(s){ return !!s; }), true, true) + "</div>";
+    }
+    return "<div class='ppie-mask'>" +
+      "<div class='ppie-modal' role='dialog' aria-modal='true' aria-label='" + esc(pie.title || "占比") + "'>" +
+      "<div class='ppie-mhead'><span class='ppie-mtitle'>" + esc(pie.title || "") + "</span>" +
+      "<span class='ppie-mspan'>" + esc(span) + "</span>" +
+      "<button type='button' class='ppie-mx' title='关闭（Esc）'>×</button></div>" +
+      "<div class='ppie-mbody'><div class='ppie-mpie'>" + body + "</div>" +
+      "<div class='ppie-mlists'>" +
+        (built ? pieModalRowsHtml(built.inner, sumIn, "按功能") + pieModalRowsHtml(built.outer, sumOut, "按模型") : "") +
+      "</div></div></div></div>";
+  }
+  function pricingPieModalHost(){
+    var host = document.getElementById("p-pie-modal");
+    if(host) return host;
+    host = document.createElement("div");
+    host.id = "p-pie-modal";
+    host.addEventListener("click", function(ev){
+      var t = ev.target;
+      if(!t || !t.closest) return;
+      if((t.classList && t.classList.contains("ppie-mask")) || t.closest(".ppie-mx")) closePricingPieModal();
+    });
+    // 窗口开着的时候滚轮只滚窗口里的内容，别把后面的设置页带着滚。
+    host.addEventListener("wheel", function(ev){
+      var t = ev.target;
+      if(t && t.closest && t.closest(".ppie-modal")) return;
+      ev.preventDefault();
+    }, { passive: false });
+    document.body.appendChild(host);
+    return host;
+  }
+  function paintPricingPieModal(){
+    var host = document.getElementById("p-pie-modal");
+    var pie = pricingPieModalPie();
+    if(!pie){
+      if(host) host.innerHTML = "";
+      return;
+    }
+    host = pricingPieModalHost();
+    host.innerHTML = pricingPieModalHtml(pie);
+    requestAnimationFrame(drawPieLeadsAll);
+  }
+  function openPricingPieModal(id){
+    if(!pricingPieById(id)) return;
+    pricingPieModalId = id;
+    paintPricingPieModal();
+  }
+  function closePricingPieModal(){
+    if(!pricingPieModalId) return;
+    pricingPieModalId = "";
+    paintPricingPieModal();
+  }
+  document.addEventListener("keydown", function(ev){
+    if(ev.key === "Escape" && pricingPieModalId) closePricingPieModal();
+  });
 
   // 窗口宽度变了，饼和图例的位置跟着变，引线重画一次（防抖）。
   var pieLeadTimer = 0;
@@ -1301,10 +1559,14 @@
     // 用户 m09408：弹层要跟着按钮走，所以放进按钮所在的 span 里——span 是 position:relative，弹层以它为定位祖先。
     // 用户第 ⑦ 条：区间按钮右边加「简化模式」开关——简化时所有柱子合成一根。
     var simpleOn = barSimpleOn();
-    var simpleBtn = "<button type='button' class='prb pchart-simple" + (simpleOn ? " on" : "") +
+    // 用户 m20864 图4：整月区间自动简化的时候不挂这个开关——手动切回分项也还是合计柱，
+    // 按钮点了没反应更让人糊涂，卡头留着「已自动简化」那枚标记就够。
+    var simpleBtn = pricingBarAutoSimple ? "" : "<button type='button' class='prb pchart-simple" + (simpleOn ? " on" : "") +
       "' data-barsimple='1' title='" + (simpleOn ? "恢复按功能分项的柱子" : "把所有柱子合成一根") + "'>" +
       (simpleOn ? "分项模式" : "简化模式") + "</button>";
-    return "<div class='pchart-h'><b>用量与花费</b><span class='pchart-sub'>" + spanHtml + "</span>" +
+    var autoBadge = pricingBarAutoSimple
+      ? "<span class='pchart-auto' title='这段天数太多，柱子自动合成一天一根合计柱'>已自动简化</span>" : "";
+    return "<div class='pchart-h'><b>用量与花费</b><span class='pchart-sub'>" + spanHtml + autoBadge + "</span>" +
       "<span class='prange pchart-range' id='p-trend-range'>" + pricingTrendRangeHtml() +
       (pricingCal.open ? pricingTrendPopHtml() : "") + "</span>" + simpleBtn + "</div>" +
       "<div class='pchart-body'>" + chartHtml + "</div>";
@@ -1353,6 +1615,31 @@
     pricingChartRO.observe(el);
   }
 
+  // 用户 m20864 图5：换量程时让曲线（和它的价格标签）从旧高度缓缓升降到新高度，
+  // 而不是「啪」一下整条换位置。只动 .plinewrap，柱子和坐标轴是新的高度、静态不动。
+  function animatePricingSettle(before){
+    var g = document.querySelector("#p-charts .pchart:not(.pchart-pie) .plinewrap");
+    var now = pricingLineYPrev;
+    var dy = 0;
+    if(before && now && before.ys && now.ys && before.labels){
+      var old = {};
+      for(var i = 0; i < before.labels.length; i++){ if(before.labels[i]) old[before.labels[i]] = before.ys[i]; }
+      var sum = 0, cnt = 0;
+      for(var j = 0; j < now.labels.length; j++){
+        var a = old[now.labels[j]], b = now.ys[j];
+        if(a === undefined || !isFinite(a) || !isFinite(b)) continue;
+        sum += (a - b); cnt++;
+      }
+      if(cnt >= 3) dy = Math.max(-14, Math.min(14, sum / cnt));
+    }
+    if(!g) return;
+    // 量程没变（相邻两天差不多高）就不动，顺手把上一次留下的类清掉，免得一直挂着。
+    if(Math.abs(dy) < 1.5){ g.classList.remove("settle"); return; }
+    g.style.setProperty("--pdy", dy.toFixed(1) + "px");
+    g.classList.remove("settle");
+    void g.getBoundingClientRect();
+    g.classList.add("settle");
+  }
   function paintPricingTrend(){
     var el = document.getElementById("p-charts");
     if(!el) return;
@@ -1399,9 +1686,13 @@
       });
     }
     pricingPrevPoints = null;
+    var beforeLine = pricingLineYPrev;
     var barCard = el.querySelector(".pchart:not(.pchart-pie)");
     if(barCard){
       barCard.innerHTML = pricingBarCardInner(w);
+      // 用户 m20864 图5：这一帧如果换了纵轴量程（高峰那天滑出/滑进窗口），曲线和它的价格
+      // 标签就从上一帧的位置慢慢升降到新位置，不再「啪」一下整条挪位。
+      animatePricingSettle(beforeLine);
     }else{
       el.innerHTML = pricingChartsInner(w);
       pricingPies.forEach(function(p){ p.anim = 0; });

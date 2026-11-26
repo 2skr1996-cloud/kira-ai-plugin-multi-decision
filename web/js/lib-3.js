@@ -1499,6 +1499,21 @@
       .replace(/`([^`\n]+)`/g, "<code>$1</code>");
   }
 
+  // 用户 m19461 图3：插件常把一条记录写成「序号|类型|日期|…|正文」，以前整行当纯文本铺开，
+  // 现在拆成一行小格子：序号、类型、时间各占一个小 chip，最后一段当正文。
+  function segPipeRow(cells){
+    var h = "<div class='segrow'>";
+    cells.forEach(function(c, i){
+      var cls = "segcell";
+      if(i === 0 && /^\d{1,3}$/.test(c)) cls += " idx";
+      else if(i === 1 && /^[A-Za-z0-9_\-]{1,12}$/.test(c)) cls += " tag";
+      else if(/^\d{2}-\d{2}(?:\s+\d{2}:\d{2})?$/.test(c)) cls += " ts";
+      else if(i === cells.length - 1) cls += " body";
+      h += "<span class='" + cls + "'>" + segInline(c) + "</span>";
+    });
+    return h + "</div>";
+  }
+
   // JSON 叶子值按类型上色：字符串 / 数字 / 布尔 / 空。
   function segJsonVal(v){
     if(v === null || v === undefined) return "<span class='v z'>null</span>";
@@ -1573,6 +1588,21 @@
     return n;
   }
   // 最近记录里的 assistant 正文是整串 JSON，抽成「正文 + 工具名」再画，别把 JSON 糊在卡上。
+  // 用户 m20864 第 7 条：最近记录里塞着宿主原始封装（[message_id: uuid]、
+  // [user_nickname: 我, user_id: admin]、[@你]），对看记录的人是噪音；
+  // 抽成「正文 + 昵称 + 是否 @」三样，封装不画。
+  function segAlifeMsgMeta(s){
+    var t = String(s == null ? "" : s);
+    var nm = "", at = false;
+    var mt = t.match(/^\[(\d{1,2}:\d{2})\]\s*/);
+    if(mt) t = t.slice(mt[0].length);
+    t = t.replace(/\[message_id:[^\]]*\]\s*/g, "");
+    var um = t.match(/\[user_nickname:\s*([^,\]]+)(?:,\s*user_id:\s*[^\]]*)?\]\s*/);
+    if(um){ nm = String(um[1]).trim(); t = t.replace(um[0], ""); }
+    if(/\[@[^\]]*\]/.test(t)){ at = true; t = t.replace(/\[@[^\]]*\]\s*/g, ""); }
+    t = t.replace(/^[｜|]\s*/, "").replace(/\s+/g, " ").trim();
+    return {text: t, name: nm, at: at};
+  }
   function segAlifeRecent(body){
     var s = String(body == null ? "" : body).trim();
     if(s.charAt(0) !== "{") return {text: s, tools: []};
@@ -1586,7 +1616,8 @@
       var tl = [], re = /"name"\s*:\s*"([^"]+)"/g, mm;
       while((mm = re.exec(s))) tl.push(mm[1]);
       if(!t2 && !tl.length) return {text: s, tools: []};
-      return {text: t2, tools: tl};
+      var meta2 = segAlifeMsgMeta(t2);
+      return {text: meta2.text, tools: tl, name: meta2.name, at: meta2.at};
     }
     var txt = typeof v.content === "string" ? v.content : "";
     txt = txt.replace(/<\/?text>/g, "").replace(/\s+/g, " ").trim();
@@ -1596,7 +1627,8 @@
       if(n) tools.push(String(n));
     });
     if(!txt && !tools.length) return {text: s, tools: []};
-    return {text: txt, tools: tools};
+    var meta3 = segAlifeMsgMeta(txt);
+    return {text: meta3.text, tools: tools, name: meta3.name, at: meta3.at};
   }
   function segAlifeTools(list){
     if(!list || !list.length) return "";
@@ -1669,17 +1701,19 @@
     var scopeName = (alias && alias.scope) ? alias.scope : "";
     var sess = (alias && alias.session) ? alias.session : scopeSession;
     var h = "<div class='segbox segalife'>";
-    // 用户 m18331 图1：开头原来是三颗灰 chip + 一颗飘到最右的蓝 chip + 一行裸 `会话=…`，
-    // 现在并成一条汇总带：左边作用域、中间三项计数、右边会话串。
+    // 用户 m19461 图2：顶上原来是「作用域 + 三项计数 + 一大段空白 + 会话串」挤在一行，
+    // 屏幕一宽会话串就甩到最右边、层级也糊。现在拆成两行、全部靠左：
+    // 第一行作用域与会话（这一段是谁的），第二行三项计数（这一段有多少）。
     h += "<div class='segalife-top'>" +
+         "<div class='segalife-head'>" +
          (scopeName ? "<span class='segalife-scopebadge'>" + esc(scopeName) + "</span>" : "") +
-         "<span class='segalife-metrics'>" +
+         (sess ? "<span class='segalife-sess' title='" + esc(sess) + "'>" + esc(sess) + "</span>" : "") +
+         "</div>" +
+         "<div class='segalife-metrics'>" +
          "<span class='segalife-metric'><b>" + mems.length + "</b> 条记忆</span>" +
          "<span class='segalife-metric'><b>" + facts.length + "</b> 条事实</span>" +
          "<span class='segalife-metric'><b>" + text.length + "</b> 字</span>" +
-         "</span>" +
-         "<span class='grow'></span>" +
-         (sess ? "<span class='segalife-sess' title='" + esc(sess) + "'>" + esc(sess) + "</span>" : "") +
+         "</div>" +
          "</div>";
     if(alias && alias.list.length){
       h += "<details class='segalife-alias'><summary class='segalife-aliassum'>" +
@@ -1701,7 +1735,7 @@
       h += "<div class='segalife-sec'>记忆<span class='k'>" + mems.length + "</span></div>";
       mems.forEach(function(it){
         h += "<div class='segalife-item'>" +
-             "<span class='segalife-tag'>" + esc(it.tag || "记忆") + "</span>" +
+             "<span class='segalife-lead'><span class='segalife-tag'>" + esc(it.tag || "记忆") + "</span></span>" +
              "<span class='segalife-body'>" + segInline(it.body) + "</span>" +
              (it.ts ? "<span class='segalife-ts'>" + esc(it.ts) + "</span>" : "") +
              "</div>";
@@ -1711,8 +1745,10 @@
       h += "<div class='segalife-sec'>事实<span class='k'>" + facts.length + "</span></div>";
       facts.forEach(function(it){
         h += "<div class='segalife-item fact'>" +
+             "<span class='segalife-lead'>" +
              "<span class='segalife-tag' title='" + esc(it.uid) + "'>" + esc(segAlifeName(amap, it.uid)) + "</span>" +
              "<span class='segalife-kind k-" + esc(it.kind) + "'>" + esc(SEG_ALIFE_KIND[it.kind] || it.kind) + "</span>" +
+             "</span>" +
              "<span class='segalife-body'>" + segInline(it.body) + "</span>" +
              (it.chain ? "<span class='segalife-chain'>" + esc(it.chain) + "</span>" : "") +
              (it.star ? "<span class='segalife-star'>★" + esc(it.star) + "</span>" : "") +
@@ -1724,16 +1760,21 @@
       h += "<div class='segalife-sec'>最近<span class='k'>" + recents.length + "</span></div>";
       recents.forEach(function(it){
         var rb = segAlifeRecent(it.body);
+        var body = segInline(rb.text) + segAlifeTools(rb.tools) +
+                   (rb.at ? "<span class='segalife-rat'>@你</span>" : "");
         if(!it.date){
-          h += "<div class='segalife-recent'><span class='segalife-rbody'>" + segInline(rb.text) + segAlifeTools(rb.tools) + "</span></div>";
+          h += "<div class='segalife-recent'><div class='segalife-rbody'>" + body + "</div></div>";
           return;
         }
         var nm = it.from ? segAlifeName(amap, it.from) : "";
+        if(!nm && rb.name) nm = rb.name;
         h += "<div class='segalife-recent'>" +
+             "<div class='segalife-rhead'>" +
              "<span class='segalife-rt'>" + esc(it.date + " " + it.time) + "</span>" +
              "<span class='segalife-rrole " + (it.role === "A" ? "a" : "u") + "'>" + esc(it.role) + "</span>" +
              (nm ? "<span class='segalife-rname'>" + esc(nm) + "</span>" : "") +
-             "<span class='segalife-rbody'>" + segInline(rb.text) + segAlifeTools(rb.tools) + "</span>" +
+             "</div>" +
+             "<div class='segalife-rbody'>" + body + "</div>" +
              "</div>";
       });
     }
@@ -1742,8 +1783,10 @@
       // 后半句是给模型看的指令，对看记录的人没意义；改成一条带分隔线的尾注。
       var nm = String(s).match(/^[（(]\s*另有\s*(\d+)\s*条未展示/);
       if(nm){
+        // 用户 m19461 图2：尾部从「一条通栏虚线」改成居左的小胶囊，跟上面的条目分开
         h += "<div class='segalife-foot' title='这一段还有 " + esc(nm[1]) + " 条没塞进本轮'>" +
-             "<span class='segalife-footmark'>\u22ef</span>还有 " + esc(nm[1]) + " 条未展示</div>";
+             "<span class='segalife-footmark'>\u22ef</span>" +
+             "<span class='segalife-foottxt'>还有 <b>" + esc(nm[1]) + "</b> 条未展示</span></div>";
         return;
       }
       h += "<div class='segalife-note'>" + esc(s) + "</div>";
@@ -1785,12 +1828,19 @@
       pendingGap = false;
       // 超长行多半是插件把整段 JSON 塞进来了，折起来，点开看全文
       if(s.length > 220){
-        out.push("<details class='segln long'><summary>" + esc(s.slice(0, 160)) + "…</summary>" +
+        out.push("<details class='segln long'><summary>" +
+                 "<span class='seglongtag'>长文本</span>" +
+                 "<span class='seglongtxt'>" + esc(s.slice(0, 120)) + "…</span>" +
+                 "<span class='seglongnum'>" + s.length + " 字</span></summary>" +
                  "<pre class='rawtxt'>" + esc(s) + "</pre></details>");
         return;
       }
       var hm = s.match(/^\s{0,3}#{1,6}\s+(.+)$/);
       if(hm){ out.push("<div class='segh'>" + segInline(hm[1].trim()) + "</div>"); return; }
+      // 用户 m20864 第 8 条：缩进过的标签行（<msg …>）以前靠 pre-wrap 留前导空格，
+      // 比别的行多缩一截，看着像没对齐；这里单独画成代码块。
+      var cdm = s.match(/^(?: {2,}|\t+)([<{\[].*)$/);
+      if(cdm){ out.push("<div class='segcode'>" + esc(cdm[1]) + "</div>"); return; }
       // 用户 m15963 第 4 条：通用美化不要 1.2.3.4 这种编号徽章——编号是宿主自己加的，
       // 换个插件就不通用，统一按项目符号排。
       var om = s.match(/^\s*\d{1,3}[.)]\s+(.+)$/);
@@ -1800,6 +1850,34 @@
       // 用户本轮第 ① 条：> 引用单独一块，左边一条竖线。
       var qm = s.match(/^\s*>\s?(.*)$/);
       if(qm){ out.push("<div class='segquote'>" + segInline(qm[1]) + "</div>"); return; }
+      // 用户 m19461 图3：通用美化再往前走一步——插件常用「【小节】」「k=v」「a|b|c」这几种写法，
+      // 以前一律按纯文本铺开，看着像调试输出。
+      var sm3 = s.match(/^\s*【([^】]{1,24})】\s*(.*)$/);
+      if(sm3){
+        out.push("<div class='segh'>" + segInline(sm3[1].trim()) + "</div>");
+        if(sm3[2].trim()) out.push("<div class='segln'>" + segInline(sm3[2].trim()) + "</div>");
+        return;
+      }
+      var em = s.match(/^\s*([^\s=＝{}\[\]"',]{1,24})\s*[=＝]\s*(.+)$/);
+      if(em){
+        out.push("<div class='segkv'><span class='k'>" + esc(em[1]) + "</span>" +
+                 "<span class='v'>" + segInline(em[2]) + "</span></div>");
+        return;
+      }
+      var pm = s.match(/^\s*([^|\n]{1,16})\|([^|\n]{1,16})\|(.+)$/);
+      if(pm && s.length <= 240){
+        var cells = s.split("|").map(function(x){ return x.trim(); });
+        if(cells.length >= 3 && cells.length <= 8){
+          out.push(segPipeRow(cells));
+          return;
+        }
+      }
+      var fm2 = s.match(/^[（(]\s*另有\s*(\d+)\s*条/);
+      if(fm2){
+        out.push("<div class='segfoot'><span class='segfootmark'>\u22ef</span>还有 <b>" +
+                 esc(fm2[1]) + "</b> 条未展示</div>");
+        return;
+      }
       // key: value —— key 不含空格、不超过 24 字；「https://…」这种地址不算键值，
       // 「{"a":1}」这种 JSON 片段也不算（key 里带括号引号逗号的一律跳过）
       var km = s.match(/^\s*([^\s:：{}\[\]"',]{1,24})\s*[:：]\s*(.+)$/);
@@ -1847,7 +1925,8 @@
     var h = "";
     parts.forEach(function(p, i){
       var m = {seg: "dynamic_tail", segname: p.name, head: p.head,
-               text: p.text, raw: p.text, chars: p.text.length};
+               text: p.text, raw: p.text, chars: p.text.length,
+               dynNote: (i === parts.length - 1)};
       h += "<div class='mgrp seg'>" +
            segCardHtml(m, base === null ? "" : (base + i), mode === "mixed" ? "raw" : mode, "", true) +
            "</div>";
@@ -1857,6 +1936,12 @@
 
   // 用户 m18331 图1：卡头把「Alife_memory」和「alife_memory」并排写了两遍，看着像没做完。
   // 段名只是标题的蛇形/大小写变体时不再重复挂小 chip。
+  // 用户 m20864 第 9 条：卡头已经写了段名，正文里再来一行同名的「## 段名」/「【段名】」
+  // 就是重复标题；比对时把 # 和【】去掉再看。
+  function segHeadKey(x){
+    return String(x == null ? "" : x).replace(/^\s*#+\s*/, "").replace(/^【/, "").replace(/】\s*$/, "")
+      .replace(/\s+/g, "").toLowerCase();
+  }
   function segKeyRedundant(head, label){
     function norm(s){ return String(s == null ? "" : s).toLowerCase().replace(/[\s_\-.]+/g, ""); }
     var a = norm(head), b = norm(label);
@@ -1878,7 +1963,7 @@
     if(m.head){
       var nl = raw.indexOf("\n");
       var first = (nl < 0 ? raw : raw.slice(0, nl)).replace(/\s+$/, "");
-      if(first === String(m.head).replace(/\s+$/, "")) bodyRaw = nl < 0 ? "" : raw.slice(nl + 1);
+      if(first === String(m.head).replace(/\s+$/, "") || segHeadKey(first) === segHeadKey(m.head)) bodyRaw = nl < 0 ? "" : raw.slice(nl + 1);
     }
     // 用户 m12780 第 ② 条：动态段自己就是一张注入卡，序号接着 ③ 里的真实消息往下排。
     var no = (idx === "" || idx === null || idx === undefined) ? "" : (idx + " · ");
@@ -1891,7 +1976,8 @@
                : "<span class='segname'>" + esc(label) + "</span>") +
              (name === "alife_memory" ? segStylePill() : "") +
              "<span class='k'>" + raw.length + " 字</span><span class='grow'></span>" +
-             (mode === "raw" ? "<span>原文</span>" : "<span class='k weak'>" + (isDyn ? "宿主挪到本轮末尾的动态段" : "别的插件塞进本轮消息") + "</span>");
+             (mode === "raw" ? "<span>原文</span>"
+               : (m.dynNote === false ? "" : "<span class='k weak'>" + (isDyn ? "宿主挪到本轮末尾的动态段" : "别的插件塞进本轮消息") + "</span>"));
     var body = (mode === "raw")
       ? "<pre class='rawtxt'>" + esc(bodyRaw) + "</pre>"
       : ((name === "alife_memory" && segStylePref() === "alife")
@@ -2048,7 +2134,8 @@
                (reason === "blacklist"
                  ? "<span class='chb'>拉黑</span>"
                  : (kind ? "<span class='chb'>" + esc(MEDIA_LABEL[kind] || kind) + "</span>" : ""));
-    var h = mcHtml(vm, idx, mode, grp ? "" : tags, null, grp ? full : full.slice(6, 11), grp, grp ? tags : "");
+    // 用户 m19461 图1：小标签跟着卡片走（分享卡塞进页脚、紧挨「打开」左边）
+    var h = mcHtml(vm, idx, mode, grp ? "" : tags, null, grp ? full : full.slice(6, 11), grp, grp ? tags : "", true);
     return h.replace(/^<div class='mc /, "<div class='mc skip ");
   }
 
